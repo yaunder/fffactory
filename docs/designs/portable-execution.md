@@ -182,8 +182,8 @@ portability; issue tracking is also distinct from code hosting and PR creation.
 
 The upstream links describe the sources examined for this discussion. The
 factory's shipped FFFlow version is governed by
-[plugins.json](../../assets/steps/plugins.json), currently 0.4.1 at revision
-`0760cf6d5d513bd603534305f0973657c8aa6234`; upstream changes do not update a
+[plugins.json](../../assets/steps/plugins.json), currently 0.4.2 at revision
+`9e231e2a610bdef2ae30ebca9c3814cc59121e26`; upstream changes do not update a
 worker automatically.
 
 The existing [executor-cartridge discussion](../../SDLC.md#relationship-to-upstream-ffflow)

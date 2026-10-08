@@ -226,11 +226,8 @@ def dispatch(args):
                 env = os.environ.copy()
                 env.pop("PASEO_AGENT_ID", None)
                 env.pop("PASEO_WORKSPACE_ID", None)
-                # The pinned 0.4.1 work-epic example uses an obsolete label.
-                # Its GitHub capture cartridge defines the actual task labels.
+                # work-epic branches from origin/main; the declared branch may differ.
                 prompt = (f"/fff:work-epic {number}\n\n"
-                          f"For GitHub task resolution, use the pinned capture cartridge's "
-                          f"ffflow-task and epic-{number} labels. Its epic:<id> example is stale. "
                           f"This fresh Paseo worktree starts on a dispatch branch; create "
                           f"epic/{number} from {remote_ref} here as work-epic requires.")
                 response = command_json(PASEO, "run", "--background", "--json",
