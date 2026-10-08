@@ -1,0 +1,100 @@
+{
+  "schema_version": 1,
+  "release": "0.3.0",
+  "status": "not_ready",
+  "factory": {
+    "factory_id": "example",
+    "account_id": "123456789012",
+    "region": "us-east-1",
+    "release": "0.1.0"
+  },
+  "inventories": [
+    {
+      "id": "ec2_instances",
+      "title": "EC2 instances",
+      "status": "ready",
+      "summary": "2 instances carry the factory ID",
+      "details": [],
+      "next_action": null
+    },
+    {
+      "id": "tailscale",
+      "title": "Tailscale client",
+      "status": "ready",
+      "summary": "Logged in and running; 2 devices visible",
+      "details": [],
+      "next_action": null
+    }
+  ],
+  "workers": [
+    {
+      "key": "builder-1",
+      "hostname": "example-builder-1",
+      "status": "not_ready",
+      "summary": "Offline in the tailnet",
+      "details": [],
+      "next_action": "Check that the instance is running and that Tailscale is up on it, then rerun `fffactory status`.",
+      "machine": {
+        "state": "running",
+        "instance_id": "i-0000000000000000a"
+      },
+      "tailnet": "offline",
+      "release": "unknown",
+      "configuration": "unknown",
+      "installation": "unknown",
+      "repositories": {
+        "state": "unknown",
+        "unmanaged": null
+      },
+      "dispatch": {
+        "state": "unknown",
+        "blockers": null
+      },
+      "enrollment": null
+    },
+    {
+      "key": "builder-2",
+      "hostname": "example-builder-2",
+      "status": "ready",
+      "summary": "Ready on release 0.1.0",
+      "details": [],
+      "next_action": null,
+      "machine": {
+        "state": "running",
+        "instance_id": "i-0000000000000000b"
+      },
+      "tailnet": "online",
+      "release": "0.1.0",
+      "configuration": "f0f35301ffd56598c3347edca536177225848b2fa8d1778e16cb096336a67255",
+      "installation": "succeeded",
+      "repositories": {
+        "state": "synchronized",
+        "unmanaged": []
+      },
+      "dispatch": {
+        "state": "not_requested",
+        "blockers": []
+      },
+      "enrollment": [
+        {
+          "id": "github",
+          "title": "GitHub",
+          "state": "enrolled",
+          "next_action": null
+        },
+        {
+          "id": "openai",
+          "title": "OpenAI Codex",
+          "state": "enrolled",
+          "next_action": null
+        },
+        {
+          "id": "anthropic",
+          "title": "Claude Code",
+          "state": "enrolled",
+          "next_action": null
+        }
+      ]
+    }
+  ]
+}

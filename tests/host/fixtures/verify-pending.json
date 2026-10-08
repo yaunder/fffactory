@@ -1,0 +1,51 @@
+{
+  "protocol_version": 1,
+  "hostname": "fff-aaaa1111-builder-1",
+  "verified_at": "2026-09-30T12:09:00.000Z",
+  "checks": [
+    {
+      "id": "factory_account",
+      "status": "passed",
+      "summary": "The factory account exists"
+    },
+    {
+      "id": "toolchain",
+      "status": "passed",
+      "summary": "Every development tool runs, with Node 22 by default"
+    },
+    {
+      "id": "workspace",
+      "status": "passed",
+      "summary": "/workspace/repos and /workspace/cache belong to factory"
+    },
+    {
+      "id": "agents",
+      "status": "passed",
+      "summary": "Codex and Claude Code match their pins"
+    },
+    {
+      "id": "plugins",
+      "status": "passed",
+      "summary": "The agent plugins match their pins"
+    },
+    {
+      "id": "tailscaled",
+      "status": "passed",
+      "summary": "tailscaled is active"
+    }
+  ],
+  "enrollment": [
+    {
+      "id": "github",
+      "state": "enrolled"
+    },
+    {
+      "id": "openai",
+      "state": "pending"
+    },
+    {
+      "id": "anthropic",
+      "state": "pending"
+    }
+  ]
+}

@@ -1,0 +1,191 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/yaunder/factory/schemas/status-report.schema.json",
+  "title": "fffactory status --json report, schema version 1",
+  "description": "Consumers must ignore inventory check IDs, and fields, they do not know.",
+  "type": "object",
+  "required": ["schema_version", "release", "status", "factory", "inventories", "workers"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "release": { "$ref": "#/$defs/release" },
+    "status": { "$ref": "#/$defs/status" },
+    "factory": {
+      "type": "object",
+      "required": ["factory_id", "account_id", "region", "release"],
+      "properties": {
+        "factory_id": { "type": "string", "pattern": "^[a-z][a-z0-9-]{2,19}$" },
+        "account_id": { "type": "string", "pattern": "^\\d{12}$" },
+        "region": { "type": "string", "minLength": 1 },
+        "release": { "$ref": "#/$defs/release" }
+      }
+    },
+    "inventories": { "type": "array", "items": { "$ref": "#/$defs/check" } },
+    "workers": { "type": "array", "items": { "$ref": "#/$defs/worker" } }
+  },
+  "$defs": {
+    "status": { "enum": ["ready", "not_ready", "error"] },
+    "release": { "type": "string", "pattern": "^\\d+\\.\\d+\\.\\d+(-[0-9A-Za-z.-]+)?$" },
+    "verdict": {
+      "type": "object",
+      "if": { "properties": { "status": { "const": "ready" } } },
+      "then": { "properties": { "next_action": { "type": "null" } } },
+      "else": { "properties": { "next_action": { "type": "string", "minLength": 1 } } }
+    },
+    "check": {
+      "type": "object",
+      "required": ["id", "title", "status", "summary", "details", "next_action"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
+        "title": { "type": "string", "minLength": 1 },
+        "status": { "$ref": "#/$defs/status" },
+        "summary": { "type": "string", "minLength": 1 },
+        "details": { "type": "array", "items": { "type": "string" } },
+        "next_action": { "type": ["string", "null"] }
+      },
+      "$ref": "#/$defs/verdict"
+    },
+    "worker": {
+      "type": "object",
+      "required": [
+        "key",
+        "hostname",
+        "status",
+        "summary",
+        "details",
+        "next_action",
+        "machine",
+        "tailnet",
+        "release",
+        "configuration",
+        "installation",
+        "enrollment",
+        "repositories",
+        "dispatch"
+      ],
+      "properties": {
+        "key": { "type": "string", "pattern": "^[a-z][a-z0-9-]*$" },
+        "hostname": { "type": "string", "minLength": 1 },
+        "status": { "$ref": "#/$defs/status" },
+        "summary": { "type": "string", "minLength": 1 },
+        "details": { "type": "array", "items": { "type": "string" } },
+        "next_action": { "type": ["string", "null"] },
+        "machine": {
+          "type": "object",
+          "required": ["state", "instance_id"],
+          "properties": {
+            "state": {
+              "enum": [
+                "pending",
+                "running",
+                "stopping",
+                "stopped",
+                "shutting-down",
+                "absent",
+                "duplicate",
+                "unknown"
+              ]
+            },
+            "instance_id": { "type": ["string", "null"], "pattern": "^i-[0-9a-f]+$" }
+          }
+        },
+        "tailnet": {
+          "enum": [
+            "online",
+            "offline",
+            "missing",
+            "duplicate",
+            "untagged",
+            "no_ssh",
+            "unknown",
+            "not_checked"
+          ]
+        },
+        "release": {
+          "description": "The active release's version, or none, broken or unknown.",
+          "anyOf": [{ "$ref": "#/$defs/release" }, { "enum": ["none", "broken", "unknown"] }]
+        },
+        "configuration": {
+          "description": "The host configuration's SHA-256, or none, unreadable or unknown.",
+          "type": "string",
+          "pattern": "^([0-9a-f]{64}|none|unreadable|unknown)$"
+        },
+        "installation": {
+          "description": "The last install's state as the worker recorded it, or none, unreadable or unknown (not inspected).",
+          "enum": ["running", "succeeded", "failed", "none", "unreadable", "unknown"]
+        },
+        "repositories": {
+          "type": "object",
+          "required": ["state", "unmanaged"],
+          "properties": {
+            "state": {
+              "enum": ["synchronized", "unresolved", "none", "unreadable", "unknown"]
+            },
+            "unmanaged": {
+              "type": ["array", "null"],
+              "items": { "type": "string", "minLength": 1 }
+            }
+          }
+        },
+        "dispatch": {
+          "type": "object",
+          "required": ["state", "blockers"],
+          "properties": {
+            "state": {
+              "enum": [
+                "active",
+                "pending",
+                "not_requested",
+                "failed",
+                "none",
+                "unreadable",
+                "unknown"
+              ]
+            },
+            "blockers": {
+              "type": ["array", "null"],
+              "items": {
+                "enum": [
+                  "worker_release",
+                  "github_credential",
+                  "repository_sync",
+                  "ffflow_adoption",
+                  "paseo_health"
+                ]
+              }
+            }
+          }
+        },
+        "enrollment": {
+          "description": "Each account's enrollment as the last install's verification found it, with the steps fffactory names for it; null when there is none. Paseo clients are not listed until Paseo runs on workers.",
+          "type": ["array", "null"],
+          "items": { "$ref": "#/$defs/enrollment" }
+        }
+      },
+      "$ref": "#/$defs/verdict"
+    },
+    "enrollment": {
+      "type": "object",
+      "required": ["id", "title", "state", "next_action"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
+        "title": { "type": "string", "minLength": 1 },
+        "state": { "enum": ["enrolled", "pending", "unknown"] },
+        "next_action": {
+          "description": "The exact steps; null exactly when enrolled.",
+          "oneOf": [
+            { "type": "null" },
+            {
+              "type": "object",
+              "required": ["summary", "login", "commands"],
+              "properties": {
+                "summary": { "type": "string", "minLength": 1 },
+                "login": { "type": "string", "minLength": 1 },
+                "commands": { "type": "array", "items": { "type": "string", "minLength": 1 } }
+              }
+            }
+          ]
+        }
+      }
+    }
+  }
+}

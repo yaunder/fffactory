@@ -1,0 +1,28 @@
+{
+  "protocol_version": 1,
+  "hostname": "fff-aaaa1111-builder-1",
+  "release": {
+    "state": "none"
+  },
+  "configuration": {
+    "state": "none"
+  },
+  "installation": {
+    "state": "none"
+  },
+  "services": [
+    {
+      "name": "tailscaled",
+      "state": "active"
+    }
+  ],
+  "evidence": {
+    "bootstrap_complete": true,
+    "os": {
+      "id": "amzn",
+      "version_id": "2023"
+    },
+    "architecture": "x86_64",
+    "available_bytes": 21474836480
+  }
+}

@@ -1,0 +1,24 @@
+.DS_Store
+
+# Terraform
+**/.terraform/*
+*.tfstate
+*.tfstate.*
+*.tfplan
+crash.log
+crash.*.log
+
+# Local secrets and environment files
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Machine-local factory instance
+.fffactory/
+
+# Bun dependencies, coverage output, and built executables and asset bundles
+node_modules/
+coverage/
+dist/

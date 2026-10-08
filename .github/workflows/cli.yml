@@ -1,0 +1,108 @@
+name: fffactory CLI
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cli-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  cli:
+    name: fffactory CLI
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.2
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Check formatting
+        run: bun run format:check
+
+      - name: Lint
+        run: bun run lint:check
+
+      - name: Type check
+        run: bun run typecheck
+
+      - name: Test with coverage
+        run: bun test --coverage
+
+      - name: Validate example instance
+        run: bun run fffactory validate --instance examples/factory.json
+
+  terraform:
+    name: Terraform modules
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.2
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      # The managed Terraform, never a system one: fmt, validate against the shipped
+      # lockfiles, and plans for two factory IDs against a local stand-in, not AWS.
+      - name: Format, validate and namespacing plans
+        run: bun scripts/terraform-check.ts
+
+  bootstrap:
+    name: Worker bootstrap on Amazon Linux 2023
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.2
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      # The rendered user data, not its template: Terraform interpolation is not shell.
+      - name: Shellcheck the bootstrap scripts, the install steps and the repository-skills gate
+        run: |
+          rendered="$(mktemp -d)"
+          bun tests/support/bootstrap-fixtures-main.ts "$rendered"
+          shellcheck assets/terraform/bootstrap/fffactory-activate "$rendered/user-data.sh" \
+            scripts/bootstrap-test.sh scripts/repository-skills.sh tests/bootstrap/*.sh tests/bootstrap/stand-in-steps/*.sh \
+            assets/steps/*.sh
+
+      # Each case in a fresh amazonlinux:2023 container with no network and no AWS; host
+      # apply's cases run the real linux-x64 worker executable over stand-in install steps.
+      - name: Activator, user data and host apply in Amazon Linux 2023 containers
+        run: ./scripts/bootstrap-test.sh

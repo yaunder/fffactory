@@ -1,0 +1,23 @@
+[Unit]
+Description=Paseo daemon for the software factory
+After=network-online.target tailscaled.service
+Wants=network-online.target tailscaled.service
+
+[Service]
+Type=simple
+User=factory
+Group=factory
+WorkingDirectory=/home/factory
+Environment=HOME=/home/factory
+Environment=PASEO_HOME=/home/factory/.paseo
+Environment=PATH=/home/factory/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/opt/fffactory/current/steps/control-plane/paseo-auth.sh daemon run --home /home/factory/.paseo
+Restart=always
+RestartSec=5
+KillMode=control-group
+KillSignal=SIGTERM
+TimeoutStopSec=20
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

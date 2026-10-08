@@ -1,0 +1,7 @@
+[test]
+root = "tests"
+# Seals the test process off from real AWS credentials, IMDS and endpoints.
+preload = ["./tests/support/aws-isolation-preload.ts"]
+coverageThreshold = { lines = 0.95, functions = 0.95 }
+coverageSkipTestFiles = true
+coveragePathIgnorePatterns = ["tests/**"]

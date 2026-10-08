@@ -1,0 +1,189 @@
+#!/bin/bash
+# The fixed, root-owned activation and reconciliation protocol. See worker-bootstrap.md.
+set -Eeuo pipefail
+umask 022
+export LC_ALL=C
+export PATH=/usr/sbin:/usr/bin
+
+readonly RELEASES=/opt/fffactory/releases
+readonly LOCK=/run/fffactory-activate.lock
+readonly MARKER=.fffactory-assets.json
+readonly RELEASE_JSON='^\{[[:space:]]*"release"[[:space:]]*:[[:space:]]*"([0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?)"[[:space:]]*\}$'
+
+staging=""
+
+cleanup() {
+  if [[ -n "$staging" ]]; then
+    rm -rf -- "$staging"
+    staging=""
+  fi
+}
+trap cleanup EXIT
+
+say() {
+  printf 'fffactory-activate: %s\n' "$*" >&2
+}
+
+refuse() {
+  local code="$1"
+  shift
+  say "$*"
+  exit "$code"
+}
+
+usage() {
+  refuse 64 "usage: fffactory-activate TARBALL SHA256 | repositories | control-plane ACTION | dispatch ACTION"
+}
+
+dispatch() {
+  (($# == 1)) || usage
+  case "$1" in adoption | reconcile | inspect) ;; *) usage ;; esac
+  local executable=/opt/fffactory/current/bin/fffactory
+  [[ -f "$executable" && ! -L "$executable" && -x "$executable" ]] ||
+    refuse 65 "the active release has no executable dispatch endpoint"
+  exec 9>"$LOCK"
+  flock -n 9 || refuse 75 "another activation or host reconciliation is running"
+  cd /
+  exec env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin HOME=/root LANG=C.UTF-8 \
+    "$executable" host dispatch "$1"
+}
+
+repositories() {
+  local executable=/opt/fffactory/current/bin/fffactory
+  [[ -f "$executable" && ! -L "$executable" && -x "$executable" ]] ||
+    refuse 65 "the active release has no executable repository endpoint"
+  exec 9>"$LOCK"
+  flock -n 9 || refuse 75 "another activation or repository synchronization is running"
+  cd /
+  exec env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin HOME=/root LANG=C.UTF-8 \
+    "$executable" host repositories --apply
+}
+
+control_plane() {
+  (($# == 1)) || usage
+  case "$1" in activity | install | reload | restart) ;; *) usage ;; esac
+  local executable=/opt/fffactory/current/bin/fffactory
+  [[ -f "$executable" && ! -L "$executable" && -x "$executable" ]] ||
+    refuse 65 "the active release has no executable control-plane endpoint"
+  exec 9>"$LOCK"
+  flock -n 9 || refuse 75 "another activation or host reconciliation is running"
+  cd /
+  exec env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin HOME=/root LANG=C.UTF-8 \
+    "$executable" host control-plane "$1"
+}
+
+# Why an entry path is unsafe, or nothing: printable ASCII without backslashes, relative,
+# with no empty, "." or ".." segment, and not the marker this activator writes.
+path_problem() {
+  local path="$1"
+  if [[ -z "$path" || "$path" == *[![:print:]]* || "$path" == *\\* ]]; then
+    echo "is not printable ASCII without backslashes"
+  elif [[ "$path" == /* || "/$path/" == *//* || "/$path/" == */./* || "/$path/" == */../* ]]; then
+    echo "is not a safe relative path"
+  elif [[ "$path" == "$MARKER" ]]; then
+    echo "is reserved for the activator's marker"
+  fi
+}
+
+# check_entries ARCHIVE: every entry is a regular file with mode 0644 or 0755 at a safe,
+# unique path, and release.json is among them. Reads the archive only.
+check_entries() {
+  local archive="$1" listing names index problem
+  local -a verbose paths
+  listing="$(tar -tzPf "$archive" 2>/dev/null)" || refuse 65 "the tarball is not a gzipped tar archive"
+  mapfile -t paths <<<"$listing"
+  names="$(tar -tvzPf "$archive" --numeric-owner 2>/dev/null)" ||
+    refuse 65 "the tarball is not a gzipped tar archive"
+  mapfile -t verbose <<<"$names"
+  if [[ -z "$listing" || "${#paths[@]}" -ne "${#verbose[@]}" ]]; then
+    refuse 65 "the tarball holds no entries tar can list"
+  fi
+  for index in "${!paths[@]}"; do
+    case "${verbose[index]:0:11}" in
+      "-rw-r--r-- " | "-rwxr-xr-x ") ;;
+      *) refuse 65 "a tarball entry is not a regular file with mode 0644 or 0755" ;;
+    esac
+    problem="$(path_problem "${paths[index]}")"
+    [[ -z "$problem" ]] || refuse 65 "a tarball entry $problem"
+  done
+  if [[ -n "$(printf '%s\n' "${paths[@]}" | sort | uniq -d)" ]]; then
+    refuse 65 "a tarball entry appears twice"
+  fi
+  printf '%s\n' "${paths[@]}" | grep -Fqx release.json ||
+    refuse 65 "the tarball has no release.json"
+}
+
+# release_version ARCHIVE: the release its release.json names.
+release_version() {
+  local metadata
+  metadata="$(tar -xzOf "$1" release.json)"
+  [[ "$metadata" =~ $RELEASE_JSON ]] || refuse 65 "release.json does not name a release version"
+  printf '%s\n' "${BASH_REMATCH[1]}"
+}
+
+marker_for() {
+  printf '{\n  "release": "%s",\n  "sha256": "%s"\n}\n' "$1" "$2"
+}
+
+main() {
+  ((EUID == 0)) || refuse 77 "must run as root: sudo /usr/local/libexec/fffactory-activate"
+  if (($# == 1)) && [[ $1 == repositories ]]; then
+    repositories
+  fi
+  if (($# == 2)) && [[ $1 == control-plane ]]; then
+    control_plane "$2"
+  fi
+  if (($# == 2)) && [[ $1 == dispatch ]]; then
+    dispatch "$2"
+  fi
+  (($# == 2)) || usage
+  local tarball="$1" expected="$2"
+  [[ "$expected" =~ ^[0-9a-f]{64}$ && "$tarball" == /* ]] || usage
+  [[ -f "$tarball" && ! -L "$tarball" ]] || refuse 65 "$tarball is not a regular file"
+
+  install -d -o root -g root -m 0755 "$RELEASES"
+  exec 9>"$LOCK"
+  flock -n 9 || refuse 75 "another activation is running"
+  # No other activation runs now, so any staging directory is a killed one's leftover.
+  rm -rf -- "$RELEASES"/.activate.*
+
+  # Digest and unpack a private copy, so the caller cannot change the file in between.
+  staging="$(mktemp -d "$RELEASES/.activate.XXXXXXXX")"
+  local archive="$staging/release.tar.gz" actual
+  cp -- "$tarball" "$archive" || refuse 65 "$tarball could not be copied; nothing was unpacked"
+  actual="$(sha256sum "$archive")"
+  [[ "${actual%% *}" == "$expected" ]] ||
+    refuse 65 "$tarball does not match the expected SHA-256; nothing was unpacked"
+
+  check_entries "$archive"
+  local version target marker
+  version="$(release_version "$archive")"
+  target="$RELEASES/$version"
+  marker="$(marker_for "$version" "$expected")"
+
+  if [[ -d "$target" && ! -L "$target" && -f "$target/$MARKER" &&
+    "$(cat "$target/$MARKER")" == "$marker" ]]; then
+    say "release $version is already unpacked in $target"
+  else
+    local tree="$staging/release"
+    mkdir -m 0755 "$tree"
+    tar -xzf "$archive" -C "$tree" --no-same-owner --no-same-permissions ||
+      refuse 65 "release $version could not be unpacked; nothing was unpacked"
+    [[ -f "$tree/bin/fffactory" && -x "$tree/bin/fffactory" ]] ||
+      refuse 65 "release $version has no executable bin/fffactory"
+    printf '%s\n' "$marker" >"$tree/$MARKER"
+    if [[ -e "$target" || -L "$target" ]]; then
+      mv -T -- "$target" "$staging/replaced"
+    fi
+    mv -T -- "$tree" "$target"
+    say "unpacked release $version into $target"
+  fi
+
+  cleanup
+  exec 9>&-
+  cd /
+  exec env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin HOME=/root LANG=C.UTF-8 \
+    "$target/bin/fffactory" host apply
+}
+
+main "$@"

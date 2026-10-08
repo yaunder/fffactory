@@ -1,0 +1,88 @@
+{
+  "protocol_version": 1,
+  "hostname": "fff-aaaa1111-builder-1",
+  "state": "succeeded",
+  "release": "0.3.0",
+  "configuration_sha256": "ccdb230958f50d92a2a4e6d78269d2ad19f497226569f8fba095890825c7d857",
+  "started_at": "2026-09-30T12:09:00.000Z",
+  "finished_at": "2026-09-30T12:09:00.000Z",
+  "steps": [
+    {
+      "name": "packages",
+      "status": "succeeded",
+      "reason": null
+    },
+    {
+      "name": "user",
+      "status": "succeeded",
+      "reason": null
+    },
+    {
+      "name": "systemd",
+      "status": "succeeded",
+      "reason": null
+    },
+    {
+      "name": "harness",
+      "status": "succeeded",
+      "reason": null
+    },
+    {
+      "name": "plugins",
+      "status": "succeeded",
+      "reason": null
+    }
+  ],
+  "verification": {
+    "protocol_version": 1,
+    "hostname": "fff-aaaa1111-builder-1",
+    "verified_at": "2026-09-30T12:09:00.000Z",
+    "checks": [
+      {
+        "id": "factory_account",
+        "status": "passed",
+        "summary": "The factory account exists"
+      },
+      {
+        "id": "toolchain",
+        "status": "passed",
+        "summary": "Every development tool runs, with Node 22 by default"
+      },
+      {
+        "id": "workspace",
+        "status": "passed",
+        "summary": "/workspace/repos and /workspace/cache belong to factory"
+      },
+      {
+        "id": "agents",
+        "status": "passed",
+        "summary": "Codex and Claude Code match their pins"
+      },
+      {
+        "id": "plugins",
+        "status": "passed",
+        "summary": "The agent plugins match their pins"
+      },
+      {
+        "id": "tailscaled",
+        "status": "passed",
+        "summary": "tailscaled is active"
+      }
+    ],
+    "enrollment": [
+      {
+        "id": "github",
+        "state": "enrolled"
+      },
+      {
+        "id": "openai",
+        "state": "pending"
+      },
+      {
+        "id": "anthropic",
+        "state": "pending"
+      }
+    ]
+  },
+  "failure": null
+}

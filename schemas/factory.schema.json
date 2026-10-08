@@ -1,0 +1,116 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/yaunder/factory/schemas/factory.schema.json",
+  "title": "FFFactory instance (factory.json) schema version 1",
+  "description": "Structural rules for .fffactory/factory.json. Every field but schema_version may be absent; fffactory validate reports completeness separately and also rejects duplicate host keys, duplicate repositories and undeclared repository placement.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version"],
+  "properties": {
+    "$schema": { "$ref": "#/$defs/nonEmptyText" },
+    "schema_version": { "const": 1 },
+    "release": { "type": "string", "pattern": "^\\d+\\.\\d+\\.\\d+(-[0-9A-Za-z.-]+)?$" },
+    "factory_id": {
+      "description": "Permanent ID that namespaces AWS resources and Tailscale hostnames.",
+      "type": "string",
+      "pattern": "^(?=.{3,20}$)[a-z][a-z0-9]*(-[a-z0-9]+)*$"
+    },
+    "name": { "$ref": "#/$defs/nonEmptyText" },
+    "aws": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "account_id": { "type": "string", "pattern": "^\\d{12}$" },
+        "region": { "type": "string", "pattern": "^[a-z]{2}(-[a-z]+)+-\\d+$" }
+      }
+    },
+    "state_backend": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "bucket": { "type": "string", "pattern": "^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$" }
+      }
+    },
+    "network": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "vpc_cidr": { "$ref": "#/$defs/ipv4Cidr" },
+        "public_subnet_cidr": { "$ref": "#/$defs/ipv4Cidr" },
+        "availability_zone": { "type": "string", "pattern": "^[a-z]{2}(-[a-z]+)+-\\d+[a-z]$" }
+      }
+    },
+    "tailscale": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "tag": { "type": "string", "pattern": "^tag:[A-Za-z][A-Za-z0-9-]*$" },
+        "auth_key_secret": { "$ref": "#/$defs/secretReference" }
+      }
+    },
+    "repositories": { "type": "array", "items": { "$ref": "#/$defs/repository" } },
+    "hosts": { "type": "array", "items": { "$ref": "#/$defs/host" } }
+  },
+  "$defs": {
+    "nonEmptyText": { "type": "string", "pattern": "\\S" },
+    "ipv4Cidr": {
+      "type": "string",
+      "pattern": "^((25[0-5]|2[0-4]\\d|1\\d\\d|0?\\d?\\d)\\.){3}(25[0-5]|2[0-4]\\d|1\\d\\d|0?\\d?\\d)/(3[0-2]|[12]?\\d)$"
+    },
+    "secretReference": {
+      "description": "A Secrets Manager secret ARN. Secret values never belong in factory.json.",
+      "type": "string",
+      "pattern": "^arn:aws[a-z-]*:secretsmanager:[a-z0-9-]+:\\d{12}:secret:[A-Za-z0-9/_+=.@-]+$"
+    },
+    "repositoryKey": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$" },
+    "repository": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["key", "remote", "path", "branch"],
+      "properties": {
+        "key": { "$ref": "#/$defs/repositoryKey" },
+        "remote": {
+          "type": "string",
+          "pattern": "^https://github\\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
+        },
+        "path": {
+          "type": "string",
+          "pattern": "^(?!\\.\\.?(/|$))(?!.*/\\.\\.?(/|$))[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$"
+        },
+        "branch": { "$ref": "#/$defs/nonEmptyText" }
+      }
+    },
+    "host": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["key"],
+      "properties": {
+        "key": {
+          "description": "Stable host key. Renaming it means declaring a new host.",
+          "type": "string",
+          "pattern": "^(?=.{1,32}$)[a-z][a-z0-9]*(-[a-z0-9]+)*$"
+        },
+        "instance_type": { "type": "string", "pattern": "^[a-z0-9-]+\\.[a-z0-9]+$" },
+        "root_volume_gib": { "type": "integer", "minimum": 8, "maximum": 16384 },
+        "paseo_password_secret": { "$ref": "#/$defs/secretReference" },
+        "repositories": { "type": "array", "items": { "$ref": "#/$defs/repositoryKey" } },
+        "dispatch": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "cron": { "$ref": "#/$defs/nonEmptyText" },
+            "timezone": { "$ref": "#/$defs/nonEmptyText" },
+            "provider": { "$ref": "#/$defs/nonEmptyText" },
+            "model": { "$ref": "#/$defs/nonEmptyText" },
+            "mode": { "$ref": "#/$defs/nonEmptyText" },
+            "cwd": {
+              "type": "string",
+              "pattern": "^/[^\\u0000\\r\\n]*$"
+            }
+          }
+        }
+      }
+    }
+  }
+}

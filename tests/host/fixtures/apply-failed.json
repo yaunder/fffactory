@@ -1,0 +1,38 @@
+{
+  "protocol_version": 1,
+  "hostname": "fff-aaaa1111-builder-1",
+  "state": "failed",
+  "release": "0.3.0",
+  "configuration_sha256": "ccdb230958f50d92a2a4e6d78269d2ad19f497226569f8fba095890825c7d857",
+  "started_at": "2026-09-30T12:09:00.000Z",
+  "finished_at": "2026-09-30T12:09:00.000Z",
+  "steps": [
+    {
+      "name": "packages",
+      "status": "succeeded",
+      "reason": null
+    },
+    {
+      "name": "user",
+      "status": "succeeded",
+      "reason": null
+    },
+    {
+      "name": "systemd",
+      "status": "succeeded",
+      "reason": null
+    },
+    {
+      "name": "harness",
+      "status": "failed",
+      "reason": "exited with status 1"
+    },
+    {
+      "name": "plugins",
+      "status": "not_run",
+      "reason": null
+    }
+  ],
+  "verification": null,
+  "failure": null
+}

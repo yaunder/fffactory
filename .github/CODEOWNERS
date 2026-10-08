@@ -1,0 +1,10 @@
+# Add another trusted owner before enabling required code-owner reviews:
+# the author cannot approve their own pull request.
+/.github/ @ngallardo
+/scripts/ @ngallardo
+/tests/scripts/ @ngallardo
+/install.sh @ngallardo
+/package.json @ngallardo
+/bun.lock @ngallardo
+/docs/specs/release.md @ngallardo
+/LICENSE @ngallardo

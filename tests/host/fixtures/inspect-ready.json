@@ -1,0 +1,68 @@
+{
+  "protocol_version": 1,
+  "hostname": "fff-aaaa1111-builder-1",
+  "release": {
+    "state": "active",
+    "version": "0.3.0",
+    "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+  },
+  "configuration": {
+    "state": "present",
+    "sha256": "ccdb230958f50d92a2a4e6d78269d2ad19f497226569f8fba095890825c7d857"
+  },
+  "installation": {
+    "state": "succeeded",
+    "release": "0.3.0",
+    "configuration_sha256": "ccdb230958f50d92a2a4e6d78269d2ad19f497226569f8fba095890825c7d857",
+    "failed_step": null,
+    "started_at": "2026-09-30T12:00:00.000Z",
+    "finished_at": "2026-09-30T12:09:00.000Z",
+    "verification": {
+      "protocol_version": 1,
+      "hostname": "fff-aaaa1111-builder-1",
+      "verified_at": "2026-09-30T12:09:00.000Z",
+      "checks": [
+        {
+          "id": "toolchain",
+          "status": "passed",
+          "summary": "Every development tool runs"
+        },
+        {
+          "id": "agents",
+          "status": "passed",
+          "summary": "Codex and Claude Code match their pins"
+        }
+      ],
+      "enrollment": [
+        {
+          "id": "github",
+          "state": "pending"
+        },
+        {
+          "id": "openai",
+          "state": "pending"
+        },
+        {
+          "id": "anthropic",
+          "state": "pending"
+        }
+      ]
+    },
+    "failure": null
+  },
+  "services": [
+    {
+      "name": "tailscaled",
+      "state": "active"
+    }
+  ],
+  "evidence": {
+    "bootstrap_complete": true,
+    "os": {
+      "id": "amzn",
+      "version_id": "2023"
+    },
+    "architecture": "x86_64",
+    "available_bytes": 21474836480
+  }
+}

@@ -1,0 +1,160 @@
+#!/bin/bash
+# fffactory worker bootstrap: cloud-init runs this once, as root, at a host's first boot.
+# Rendered by the hosts module with Terraform's templatefile; docs/specs/worker-bootstrap.md.
+# It builds only the stable base the operator's fffactory needs to take over over Tailscale
+# SSH: the two accounts, Tailscale, the root activator and its sudoers entry, and the release
+# directories. Everything else arrives with a release, through the activator.
+set -Eeuo pipefail
+umask 022
+
+readonly HOST_NAME='${hostname}'
+readonly REGION='${region}'
+readonly TAILSCALE_AUTH_KEY_SECRET_ARN='${tailscale_auth_key_secret_arn}'
+readonly TAILSCALE_TAG='${tailscale_tag}'
+readonly ACTIVATOR_BASE64='${activator_base64}'
+
+readonly ACTIVATOR=/usr/local/libexec/fffactory-activate
+readonly SUDOERS=/etc/sudoers.d/fffactory-admin
+readonly STATE=/var/lib/fffactory
+readonly COMPLETE="$STATE/bootstrap-complete"
+readonly TAILSCALE_REPO=https://pkgs.tailscale.com/stable/amazon-linux/2023/tailscale.repo
+readonly DNF_ATTEMPTS=5
+readonly DNF_FIRST_DELAY=5
+readonly TAILSCALE_READY_ATTEMPTS=30
+
+log() {
+  printf '%s fffactory-bootstrap: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" >&2
+}
+
+trap 'log "failed at line $LINENO"' ERR
+
+# dnf ARGS...: runs dnf, retrying only when another process holds the RPM database lock (#17),
+# with doubling delays, at most DNF_ATTEMPTS times. Any other failure fails at once.
+dnf_retrying() {
+  local attempt=1 delay="$DNF_FIRST_DELAY" output status
+  output="$(mktemp)"
+  while :; do
+    status=0
+    dnf "$@" >"$output" 2>&1 || status=$?
+    cat "$output" >&2
+    if ((status == 0)); then
+      rm -f "$output"
+      return 0
+    fi
+    if ! grep -Eq 'rpm\.lock|transaction lock' "$output"; then
+      rm -f "$output"
+      log "dnf $1 failed (exit $status)"
+      return "$status"
+    fi
+    if ((attempt >= DNF_ATTEMPTS)); then
+      rm -f "$output"
+      log "dnf $1 failed: the RPM database was still locked after $attempt attempts"
+      return "$status"
+    fi
+    log "dnf $1: the RPM database is locked; retrying in $delay seconds (attempt $attempt of $DNF_ATTEMPTS)"
+    sleep "$delay"
+    attempt=$((attempt + 1))
+    delay=$((delay * 2))
+  done
+}
+
+ensure_account() {
+  if ! id -u "$1" >/dev/null 2>&1; then
+    useradd --create-home --user-group --shell /bin/bash --comment "$2" "$1"
+  fi
+}
+
+install_activator() {
+  local staged
+  staged="$(mktemp)"
+  printf '%s' "$ACTIVATOR_BASE64" | base64 --decode >"$staged"
+  install -d -o root -g root -m 0755 /usr/local/libexec
+  install -o root -g root -m 0755 "$staged" "$ACTIVATOR"
+  rm -f "$staged"
+}
+
+# The only sudo rule fffactory-admin has: the activator, as root, without a password.
+install_sudoers() {
+  local staged
+  staged="$(mktemp)"
+  cat >"$staged" <<'SUDOERS'
+# Installed by the fffactory bootstrap. fffactory-admin may run only the activator as root.
+Defaults:fffactory-admin !requiretty
+fffactory-admin ALL=(root) NOPASSWD: /usr/local/libexec/fffactory-activate
+SUDOERS
+  visudo -c -q -f "$staged"
+  install -o root -g root -m 0440 "$staged" "$SUDOERS"
+  rm -f "$staged"
+  visudo -c -q
+}
+
+tailscale_ready() {
+  tailscale ip -4 >/dev/null 2>&1
+}
+
+# Enrolls with the factory's key from Secrets Manager. The key goes only to a root-only file
+# that tailscale reads, never to an argument, the environment or a log.
+enroll_tailscale() {
+  local key_directory status=0
+  key_directory="$(mktemp -d /run/fffactory-tailscale.XXXXXX)"
+  (
+    umask 077
+    aws secretsmanager get-secret-value --region "$REGION" \
+      --secret-id "$TAILSCALE_AUTH_KEY_SECRET_ARN" \
+      --query SecretString --output text >"$key_directory/auth-key"
+  ) && tailscale up --auth-key="file:$key_directory/auth-key" --hostname="$HOST_NAME" \
+    --advertise-tags="$TAILSCALE_TAG" --ssh || status=$?
+  rm -rf "$key_directory"
+  return "$status"
+}
+
+# TODO(re-evaluate when base migrations land in M3): pin or record the Tailscale version
+# as part of the base generation.
+install_tailscale() {
+  if [[ ! -f /etc/yum.repos.d/tailscale.repo ]]; then
+    dnf_retrying config-manager --add-repo "$TAILSCALE_REPO"
+  fi
+  dnf_retrying install -y tailscale
+  systemctl enable --now tailscaled
+  if tailscale_ready; then
+    log "Tailscale is already enrolled"
+  else
+    log "enrolling in Tailscale as $HOST_NAME"
+    enroll_tailscale
+  fi
+  local attempt
+  for ((attempt = 1; ; attempt++)); do
+    if tailscale_ready; then
+      return 0
+    fi
+    if ((attempt >= TAILSCALE_READY_ATTEMPTS)); then
+      log "Tailscale did not come up"
+      return 1
+    fi
+    sleep 2
+  done
+}
+
+main() {
+  log "bootstrapping $HOST_NAME"
+  rm -f "$COMPLETE"
+
+  hostnamectl set-hostname "$HOST_NAME"
+  # Keep that hostname across reboots.
+  mkdir -p /etc/cloud/cloud.cfg.d
+  printf 'preserve_hostname: true\n' >/etc/cloud/cloud.cfg.d/99-fffactory-hostname.cfg
+
+  ensure_account fffactory-admin "fffactory operator"
+  ensure_account factory "fffactory runtime"
+
+  install -d -o root -g root -m 0755 /opt/fffactory /opt/fffactory/releases "$STATE"
+  install_activator
+  install_sudoers
+
+  install_tailscale
+
+  touch "$COMPLETE"
+  log "bootstrap of $HOST_NAME complete"
+}
+
+main "$@"

@@ -1,0 +1,116 @@
+{
+  "schema_version": 1,
+  "release": "0.3.0",
+  "status": "not_ready",
+  "capabilities": [
+    {
+      "id": "local_tooling",
+      "title": "Local tooling",
+      "status": "not_ready",
+      "checks": [
+        {
+          "id": "openssh",
+          "title": "OpenSSH client",
+          "status": "ready",
+          "summary": "OpenSSH_9.9p1",
+          "details": [],
+          "next_action": null
+        },
+        {
+          "id": "tailscale",
+          "title": "Tailscale client",
+          "status": "not_ready",
+          "summary": "Logged out",
+          "details": [],
+          "next_action": "Log in with `tailscale login`, then rerun `fffactory doctor`."
+        }
+      ]
+    },
+    {
+      "id": "configuration",
+      "title": "Configuration",
+      "status": "not_ready",
+      "checks": [
+        {
+          "id": "instance",
+          "title": "factory.json",
+          "status": "not_ready",
+          "summary": "/work/repo/.fffactory/factory.json (nearest .fffactory/factory.json) is missing 12 fields",
+          "details": [
+            "release",
+            "factory_id",
+            "name",
+            "aws.account_id",
+            "aws.region",
+            "state_backend.bucket",
+            "network.vpc_cidr",
+            "network.public_subnet_cidr",
+            "network.availability_zone",
+            "tailscale.tag",
+            "tailscale.auth_key_secret",
+            "hosts"
+          ],
+          "next_action": "Fill in each field listed, check the result with `fffactory validate`, then rerun `fffactory doctor`."
+        }
+      ]
+    },
+    {
+      "id": "aws",
+      "title": "AWS",
+      "status": "not_ready",
+      "checks": [
+        {
+          "id": "aws_account",
+          "title": "AWS account",
+          "status": "not_ready",
+          "summary": "Caller is in account 123456789012; factory.json sets no aws.account_id to compare it with",
+          "details": [
+            "Principal: arn:aws:sts::123456789012:assumed-role/FactoryAdmin/operator",
+            "Region: us-east-1 (no factory Region available; used for STS)",
+            "Credentials: standard AWS credential chain"
+          ],
+          "next_action": "Set aws.account_id in factory.json to the factory's 12-digit AWS account ID, check the result with `fffactory validate`, then rerun `fffactory doctor`."
+        },
+        {
+          "id": "vpc_quota",
+          "title": "VPC quota",
+          "status": "not_ready",
+          "summary": "Not inspected: doctor reads the VPC quota only in the factory's own AWS account",
+          "details": [],
+          "next_action": "Make the aws_account check ready, then rerun `fffactory doctor`."
+        }
+      ]
+    },
+    {
+      "id": "cache",
+      "title": "Cache",
+      "status": "ready",
+      "checks": [
+        {
+          "id": "cache_directory",
+          "title": "FFFactory cache directory",
+          "status": "ready",
+          "summary": "/home/operator/.cache/fffactory does not exist yet; FFFactory creates it when first needed",
+          "details": [],
+          "next_action": null
+        },
+        {
+          "id": "release_assets",
+          "title": "Release assets",
+          "status": "ready",
+          "summary": "Release 0.3.0 assets are not materialized yet; FFFactory materializes them into /home/operator/.cache/fffactory/releases/0.3.0 when first needed",
+          "details": [],
+          "next_action": null
+        },
+        {
+          "id": "terraform",
+          "title": "Managed Terraform",
+          "status": "ready",
+          "summary": "Terraform 1.16.4 is not downloaded yet; FFFactory downloads it into /home/operator/.cache/fffactory/terraform/1.16.4/terraform from releases.hashicorp.com when first needed",
+          "details": [],
+          "next_action": null
+        }
+      ]
+    }
+  ]
+}

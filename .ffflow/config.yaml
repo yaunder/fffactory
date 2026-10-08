@@ -1,0 +1,15 @@
+version: 1
+ffflow_version: 0.4.1
+ffflow_upgraded: 2026-09-29
+level: L1
+stack: typescript
+capture: github-issues
+spec_location: docs/specs
+test_location: tests
+audit_state_file: .ffflow/audit.yaml
+
+features:
+  property_based_testing: false
+  mutation_testing: false
+  rid_traceability: false
+  four_quality_gates: false

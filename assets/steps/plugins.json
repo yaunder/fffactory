@@ -1,0 +1,23 @@
+{
+  "schema": 1,
+  "providers": {
+    "claude": {
+      "plugins": [
+        {
+          "id": "fff@ffflow",
+          "version": "0.4.1",
+          "marketplace": "ffflow",
+          "path": "plugin",
+          "source": {
+            "type": "github",
+            "repository": "bryonjacob/ffflow",
+            "revision": "0760cf6d5d513bd603534305f0973657c8aa6234"
+          }
+        }
+      ]
+    },
+    "codex": {
+      "plugins": []
+    }
+  }
+}

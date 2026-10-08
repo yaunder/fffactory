@@ -1,0 +1,11 @@
+{
+  "resource": {
+    "aws_iam_role_policy": {
+      "json": {
+        "name": "${var.factory_id}-json",
+        "role": "host",
+        "policy": "{\"Statement\": [{\"Effect\": \"Allow\", \"Action\": \"*\", \"Resource\": \"*\"}]}"
+      }
+    }
+  }
+}

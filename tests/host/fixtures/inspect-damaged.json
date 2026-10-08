@@ -1,0 +1,25 @@
+{
+  "protocol_version": 1,
+  "hostname": "fff-aaaa1111-builder-1",
+  "release": {
+    "state": "broken"
+  },
+  "configuration": {
+    "state": "unreadable"
+  },
+  "installation": {
+    "state": "unreadable"
+  },
+  "services": [
+    {
+      "name": "tailscaled",
+      "state": "failed"
+    }
+  ],
+  "evidence": {
+    "bootstrap_complete": false,
+    "os": null,
+    "architecture": "x86_64",
+    "available_bytes": null
+  }
+}

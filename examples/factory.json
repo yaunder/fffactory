@@ -1,0 +1,49 @@
+{
+  "$schema": "../schemas/factory.schema.json",
+  "schema_version": 1,
+  "release": "0.1.0",
+  "factory_id": "example",
+  "name": "Example factory",
+  "aws": {
+    "account_id": "123456789012",
+    "region": "us-east-1"
+  },
+  "state_backend": {
+    "bucket": "example-fffactory-state-123456789012"
+  },
+  "network": {
+    "vpc_cidr": "10.78.0.0/16",
+    "public_subnet_cidr": "10.78.1.0/24",
+    "availability_zone": "us-east-1a"
+  },
+  "tailscale": {
+    "tag": "tag:software-factory",
+    "auth_key_secret": "arn:aws:secretsmanager:us-east-1:123456789012:secret:example/tailscale-auth-key-AbCdEf"
+  },
+  "repositories": [
+    {
+      "key": "factory",
+      "remote": "https://github.com/example/factory.git",
+      "path": "factory",
+      "branch": "main"
+    }
+  ],
+  "hosts": [
+    {
+      "key": "builder-1",
+      "instance_type": "m7i.xlarge",
+      "root_volume_gib": 200,
+      "paseo_password_secret": "arn:aws:secretsmanager:us-east-1:123456789012:secret:example/builder-1/paseo-password-AbCdEf",
+      "repositories": ["factory"],
+      "dispatch": {
+        "enabled": false,
+        "cron": "*/15 * * * *",
+        "timezone": "UTC",
+        "provider": "claude",
+        "model": "claude-sonnet-5",
+        "mode": "default",
+        "cwd": "/home/factory"
+      }
+    }
+  ]
+}

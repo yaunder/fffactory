@@ -1,0 +1,7 @@
+{
+  "protocol_version": 1,
+  "hostname": "fff-aaaa1111-builder-1",
+  "state": "refused",
+  "reason": "busy",
+  "message": "Another host apply is installing on this worker; wait for it to finish"
+}

@@ -1,0 +1,273 @@
+#!/usr/bin/env python3
+"""Pull ready FFFlow epics into top-level Paseo worktree agents."""
+
+import argparse
+import fcntl
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+from datetime import datetime, timezone
+
+DEFAULT_MANIFEST = Path("/var/lib/fffactory/repositories.json")
+DEFAULT_PROJECTION = Path("/var/lib/fffactory/dispatch.json")
+DEFAULT_ROOT = Path("/workspace/repos")
+ACTIVE_STEPS = Path("/opt/fffactory/current/steps")
+ADOPTION_CHECK = Path(os.environ.get("FACTORY_FFFLOW_CHECK_BIN",
+                                     str(ACTIVE_STEPS / "repositories" / "check-ffflow-adoption.sh")))
+SYNC_REPOSITORIES = Path(os.environ.get("FACTORY_REPOSITORY_SYNC_BIN",
+                                        str(ACTIVE_STEPS / "repositories" / "sync-repositories.sh")))
+PASEO = Path(os.environ.get("FACTORY_PASEO_BIN",
+                            str(ACTIVE_STEPS / "control-plane" / "paseo-auth.sh")))
+CAP = 1
+
+
+class DispatchError(Exception):
+    pass
+
+
+def run(*args, cwd=None, env=None):
+    result = subprocess.run(args, cwd=cwd, env=env, text=True, capture_output=True)
+    if result.returncode:
+        raise DispatchError(f"{' '.join(map(str, args[:3]))}: {result.stderr.strip() or result.stdout.strip()}")
+    return result.stdout.strip()
+
+
+def command_json(*args, cwd=None, env=None):
+    try:
+        return json.loads(run(*args, cwd=cwd, env=env))
+    except json.JSONDecodeError as error:
+        raise DispatchError(f"invalid JSON from {args[0]}: {error}") from error
+
+
+def slug(remote):
+    match = re.fullmatch(
+        r"(?:https?://github\.com/|git@github\.com:|ssh://git@github\.com/|git://github\.com/)"
+        r"([\w.-]+/[\w.-]+?)(?:\.git)?/?", remote, re.I)
+    if not match:
+        raise DispatchError(f"unsupported GitHub remote: {remote}")
+    return match.group(1).lower()
+
+
+def placed_repositories(manifest, host):
+    host_config = manifest.get("hosts", {}).get(host)
+    if host_config is None:
+        raise DispatchError(f"host {host} is absent from the deployed manifest")
+    aliases = set()
+    for repository_set in host_config["repository_sets"]:
+        aliases.update(manifest["repository_sets"][repository_set])
+    return sorted(aliases)
+
+
+def primary_checkout(path, declared_remote, branch, require_clean=True):
+    if path.is_symlink() or not (path / ".git").is_dir():
+        raise DispatchError(f"{path}: not a primary checkout")
+    if Path(run("git", "rev-parse", "--show-toplevel", cwd=path)).resolve() != path.resolve():
+        raise DispatchError(f"{path}: checkout root differs from declared path")
+    if slug(run("git", "config", "--get", "remote.origin.url", cwd=path)) != slug(declared_remote):
+        raise DispatchError(f"{path}: wrong origin remote")
+    if run("git", "symbolic-ref", "--quiet", "--short", "HEAD", cwd=path) != branch:
+        raise DispatchError(f"{path}: wrong branch; expected {branch}")
+    if require_clean and run("git", "status", "--porcelain=v1", "--untracked-files=all", cwd=path):
+        raise DispatchError(f"{path}: checkout is dirty")
+
+
+def dependency_numbers(task):
+    text = task.get("body") or ""
+    for comment in task.get("comments") or []:
+        text += "\n" + (comment.get("body") or "")
+    return {int(number) for number in re.findall(r"(?im)^\s*(?:[-*]\s*)?Depends on:?\s*#(\d+)\b", text)}
+
+
+def ready_epic(repo, epic, remote, prs, issue_cache):
+    number = epic["number"]
+    tasks = command_json("gh", "issue", "list", "--repo", repo, "--state", "all",
+                         "--label", "ffflow-task", "--label", f"epic-{number}",
+                         "--limit", "1000", "--json", "number,title,state,body")
+    if not tasks:
+        return "no captured tasks"
+    task_numbers = {task["number"] for task in tasks}
+    for task in tasks:
+        if task["state"].upper() != "OPEN":
+            return f"task #{task['number']} is not open"
+        issue = command_json("gh", "issue", "view", str(task["number"]), "--repo", repo,
+                             "--json", "number,state,body,comments")
+        for dependency in sorted(dependency_numbers(issue) - task_numbers):
+            if dependency not in issue_cache:
+                issue_cache[dependency] = command_json("gh", "issue", "view", str(dependency),
+                                                       "--repo", repo, "--json", "number,state")
+            if issue_cache[dependency]["state"].upper() != "CLOSED":
+                return f"task #{task['number']} has open external dependency #{dependency}"
+        marker = re.compile(rf"(?<!\d)#{task['number']}(?!\d)")
+        for pr in prs:
+            if marker.search((pr.get("title") or "") + "\n" + (pr.get("body") or "")):
+                return f"task #{task['number']} has open PR #{pr['number']}"
+    branch = f"epic/{number}"
+    if run("git", "ls-remote", "--heads", remote, f"refs/heads/{branch}"):
+        return f"remote branch {branch} already exists"
+    return None
+
+
+def active_agents():
+    # The CLI applies the label filter on the daemon before producing rows.
+    rows = command_json(PASEO, "ls", "--global", "--label", "factory-dispatch=true", "--json")
+    if not isinstance(rows, list):
+        raise DispatchError("Paseo returned an invalid agent list")
+    return [row for row in rows if row.get("status") in ("running", "permission")]
+
+
+def previously_dispatched(alias, number):
+    rows = command_json(PASEO, "ls", "--global", "--label", "factory-dispatch=true",
+                        "--label", f"factory-repository={alias}",
+                        "--label", f"factory-epic={number}", "--json")
+    if not isinstance(rows, list):
+        raise DispatchError("Paseo returned an invalid agent list")
+    return bool(rows)
+
+
+def adoption(manifest, host):
+    failed = []
+    for alias in placed_repositories(manifest, host):
+        repository = manifest["repositories"][alias]
+        try:
+            run(ADOPTION_CHECK, repository["remote"], repository["branch"])
+        except DispatchError:
+            failed.append(alias)
+    print(json.dumps({"adoption": "passed" if not failed else "failed",
+                      "failed_repositories": failed}, indent=2))
+    return not failed
+
+
+def dispatch(args):
+    manifest = json.loads(args.manifest.read_text())
+    host_config = manifest["hosts"].get(args.host)
+    if host_config is None:
+        raise DispatchError(f"host {args.host} is absent from the deployed manifest")
+    projection = json.loads(args.projection.read_text())
+    if projection.get("hostname") != args.host or projection.get("requested") is not True \
+            or projection.get("active") is not True:
+        raise DispatchError("dispatch is not active for this host")
+    schedule = projection.get("schedule")
+    if not isinstance(schedule, dict):
+        raise DispatchError("dispatch schedule settings are missing")
+    declared_cwd = Path(schedule["cwd"])
+    if Path.cwd().resolve() != declared_cwd.resolve():
+        raise DispatchError(f"run from the declared dispatch directory: {declared_cwd}")
+
+    lock_path = Path(os.environ.get("PASEO_HOME", str(Path.home() / ".paseo"))) / "factory-dispatch.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        running = active_agents()
+        summary = {"host": args.host, "cap": CAP, "running": len(running),
+                   "considered": [], "skipped": [], "started": []}
+        for alias in placed_repositories(manifest, args.host):
+            repository = manifest["repositories"][alias]
+            try:
+                run(ADOPTION_CHECK, repository["remote"], repository["branch"])
+            except DispatchError as error:
+                summary["skipped"].append({"repository": alias, "reason": f"FFFlow adoption check failed: {error}"})
+                continue
+            checkout = args.repository_root / repository["path"]
+            repo = slug(repository["remote"])
+            epics = command_json("gh", "issue", "list", "--repo", repo, "--state", "open",
+                                 "--label", "ready", "--label", "ffflow-epic", "--limit", "1000",
+                                 "--json", "number,title,state")
+            if not epics:
+                continue
+            if checkout.exists():
+                try:
+                    primary_checkout(checkout, repository["remote"], repository["branch"])
+                except DispatchError as error:
+                    for epic in epics:
+                        summary["considered"].append({"repository": alias, "epic": epic["number"]})
+                        summary["skipped"].append({"repository": alias, "epic": epic["number"], "reason": str(error)})
+                    continue
+            prs = command_json("gh", "pr", "list", "--repo", repo, "--state", "open",
+                               "--limit", "1000", "--json", "number,title,body,headRefName")
+            issue_cache = {}
+            for epic in sorted(epics, key=lambda item: item["number"]):
+                number = epic["number"]
+                summary["considered"].append({"repository": alias, "epic": number})
+                reason = ready_epic(repo, epic, repository["remote"], prs, issue_cache)
+                if reason:
+                    summary["skipped"].append({"repository": alias, "epic": number, "reason": reason})
+                    continue
+                if len(running) >= CAP:
+                    summary["skipped"].append({"repository": alias, "epic": number, "reason": "host cap reached"})
+                    continue
+                if previously_dispatched(alias, number):
+                    summary["skipped"].append({"repository": alias, "epic": number,
+                                               "reason": "existing dispatched agent"})
+                    continue
+                # Sync is the deployed Layer 2 program. It refuses dirty,
+                # diverged, wrong-branch, and wrong-remote primary checkouts.
+                try:
+                    sync_env = os.environ.copy()
+                    sync_env["FACTORY_REPOSITORY_ROOT"] = str(args.repository_root)
+                    run(SYNC_REPOSITORIES, "--plan", "--host", args.host,
+                        "--manifest", args.manifest, env=sync_env)
+                    # The synchronization tool reports every placed checkout.
+                    # An unrelated error must not cause us to modify the target.
+                    run(SYNC_REPOSITORIES, "--apply", "--host", args.host,
+                        "--manifest", args.manifest, env=sync_env)
+                    primary_checkout(checkout, repository["remote"], repository["branch"])
+                    run("git", "fetch", "--no-tags", "origin", repository["branch"], cwd=checkout)
+                    remote_ref = f"origin/{repository['branch']}"
+                    if run("git", "rev-parse", "HEAD", cwd=checkout) != run("git", "rev-parse", remote_ref, cwd=checkout):
+                        raise DispatchError(f"checkout is not at {remote_ref}")
+                except DispatchError as error:
+                    summary["skipped"].append({"repository": alias, "epic": number, "reason": str(error)})
+                    continue
+                stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+                branch = f"dispatch/epic-{number}-{stamp}"
+                env = os.environ.copy()
+                env.pop("PASEO_AGENT_ID", None)
+                env.pop("PASEO_WORKSPACE_ID", None)
+                # The pinned 0.4.1 work-epic example uses an obsolete label.
+                # Its GitHub capture cartridge defines the actual task labels.
+                prompt = (f"/fff:work-epic {number}\n\n"
+                          f"For GitHub task resolution, use the pinned capture cartridge's "
+                          f"ffflow-task and epic-{number} labels. Its epic:<id> example is stale. "
+                          f"This fresh Paseo worktree starts on a dispatch branch; create "
+                          f"epic/{number} from {remote_ref} here as work-epic requires.")
+                response = command_json(PASEO, "run", "--background", "--json",
+                                        "--provider", f"{schedule['provider']}/{schedule['model']}",
+                                        "--mode", schedule["mode"],
+                                        "--new-workspace", "worktree", "--worktree-mode", "branch-off",
+                                        "--new-branch", branch, "--base", remote_ref,
+                                        "--cwd", str(checkout), "--label", "factory-dispatch=true",
+                                        "--label", f"factory-repository={alias}",
+                                        "--label", f"factory-epic={number}",
+                                        "--label", f"factory-dispatched-at={stamp}",
+                                        prompt, cwd=checkout, env=env)
+                summary["started"].append({"repository": alias, "epic": number,
+                                           "agent_id": response["agentId"]})
+                running.append(response)
+        summary["running_after"] = len(running)
+        print(json.dumps(summary, indent=2))
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
+    parser.add_argument("--projection", type=Path, default=DEFAULT_PROJECTION)
+    parser.add_argument("--repository-root", type=Path, default=DEFAULT_ROOT)
+    parser.add_argument("--host", default=os.uname().nodename.split(".")[0])
+    parser.add_argument("--adoption-only", action="store_true")
+    args = parser.parse_args()
+    try:
+        if args.adoption_only:
+            manifest = json.loads(args.manifest.read_text())
+            return 0 if adoption(manifest, args.host) else 2
+        dispatch(args)
+    except (DispatchError, OSError, KeyError, ValueError, BlockingIOError) as error:
+        print(f"factory dispatch: {error}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
