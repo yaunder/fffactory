@@ -8,6 +8,11 @@ the private tracker and may be inaccessible to public readers. Schema `$id`
 values retain their original identifiers for compatibility; they are not
 installer or runtime fetch URLs.
 
+The initial public source commit is
+[`d0793ff`](https://github.com/yaunder/fffactory/commit/d0793ff7de670e95159148e1df732ecfd37f3c44),
+created on 2026-10-08 with no parent commits. No old release tags or binaries
+were imported. The first public binary release is a separate maintainer action.
+
 Create a new repository from a reviewed source snapshot. Do not mirror or fork
 the private repository: the public repository starts with one new root commit,
 and inherits no old tags, releases, issues, Actions runs, logs, or artifacts.
@@ -18,8 +23,16 @@ Tracking: [release protection #154](https://github.com/yaunder/factory/issues/15
 [access and Actions #156](https://github.com/yaunder/factory/issues/156),
 [license #157](https://github.com/yaunder/factory/issues/157), and
 [snapshot #158](https://github.com/yaunder/factory/issues/158).
-GitHub settings described here are pending until applied and read back on the
-destination repository. Adding the JSON files to Git does not activate them.
+The main-branch protections, both release-tag rulesets, read-only workflow
+token defaults, approval for all external fork contributors, secret scanning
+and push protection were applied and read back on 2026-10-08. Main requires
+all six checks and zero reviewer approvals, including for administrators.
+Adding or editing JSON files in Git does not update these live settings;
+maintainers must apply and verify later policy changes explicitly.
+
+An actual fork-approval test still needs a contributor outside the organization:
+the owner is exempt from that approval policy. API read-back verifies the
+configured policy, not an external user's end-to-end experience.
 
 ## Prepare the source
 
