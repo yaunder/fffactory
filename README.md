@@ -60,7 +60,7 @@ Have these ready:
   Paseo desktop or iOS client on the same tailnet.
 - **A GitHub repository** the worker's GitHub account can read and write, plus
   Claude Code and [GitHub CLI](https://cli.github.com) on your laptop for
-  preparing it with FFFlow and capturing issues.
+  planning work and capturing issues.
 
 You pay for the AWS resources and agent usage in your accounts. Running the
 factory needs no checkout of this repository, Node, Bun or local Terraform;
@@ -208,30 +208,11 @@ for how to find that name. You should see the worker in the client.
 
 ## Add your first repository
 
-### 1. Prepare the repository with FFFlow
+The factory assumes each target repository has already adopted
+[FFFlow](https://github.com/bryonjacob/ffflow), with GitHub issue capture enabled
+on its configured branch. See the FFFlow repository for adoption instructions.
 
-On your laptop, open **your product repository** in Claude Code. Install the
-[FFFlow plugin](https://github.com/bryonjacob/ffflow#install) if needed using
-these commands inside Claude Code:
-
-```text
-/plugin marketplace add bryonjacob/ffflow
-/plugin install fff@ffflow
-```
-
-Then run:
-
-```text
-/fff:adopt-ffflow
-```
-
-Follow its setup for your project's level, stack and workflow, choosing
-`github-issues` for capture. Review and merge the generated configuration,
-including `.ffflow/config.yaml`, onto `main` before adding the repository to
-the factory. The factory checks the remote branch and leaves repositories
-without a valid FFFlow configuration untouched.
-
-### 2. Assign it to the worker
+### 1. Assign it to the worker
 
 Back in your factory directory, add this top-level field to
 `.fffactory/factory.json`, replacing `OWNER/NAME` with your repository:
@@ -282,7 +263,7 @@ agent work. If dispatch is pending, follow the reported next action and apply
 again. See [repository placement](MACHINE_ONBOARDING.md#11-place-repositories-and-request-dispatch)
 for troubleshooting.
 
-### 3. Send the first piece of work
+### 2. Send the first piece of work
 
 In Claude Code on your laptop, use FFFlow to plan a small change, break it into
 tasks and capture the issues in GitHub. Run each step after completing the
