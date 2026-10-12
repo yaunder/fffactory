@@ -53,10 +53,12 @@ export type OperationStatus =
  * Where a stage is. The infrastructure stage goes `planning`, then `awaiting_approval`,
  * then `applying`, and ends `applied`, `unchanged`, `declined`, `refused` or `failed`. The
  * workers stage goes `installing` and ends `installed`, `partial` (some workers skipped) or
- * `failed`. A worker power operation's one stage, named for its action, goes `locating`, then
- * `inspecting` (stop), `awaiting_approval`, `stopping` or `starting`, and `waiting` (start, for
- * the tailnet), and ends `stopped`, `started`, `unchanged`, `declined`, `refused` or `failed`
- * (`docs/specs/worker-lifecycle.md` §Operation record).
+ * `failed`. A worker lifecycle operation's one stage, named for its action, goes `locating`,
+ * then `inspecting` (stop and terminate), `authorizing` (terminate's Tailscale admin client),
+ * `awaiting_approval`, `stopping`, `starting` or `terminating`, then `waiting` (start, for the
+ * tailnet) or `removing_devices` (terminate), and ends `stopped`, `started`, `terminated`,
+ * `unchanged`, `partial` (terminate left tailnet devices behind), `declined`, `refused` or
+ * `failed` (`docs/specs/worker-lifecycle.md` §Operation record).
  */
 export type StageStatus =
   | "pending"
@@ -81,6 +83,10 @@ export type StageStatus =
   | "stopped"
   | "starting"
   | "started"
+  | "authorizing"
+  | "terminating"
+  | "terminated"
+  | "removing_devices"
   | "waiting"
   | "partial"
   | "declined"

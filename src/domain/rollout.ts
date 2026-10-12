@@ -271,8 +271,9 @@ export function firstBootTimedOut(worker: WorkerIdentity, lastSeen: string): Wor
       worker,
       `Its first boot did not finish within ${FIRST_BOOT_DEADLINE_MS / 60_000} min (last seen: ${lastSeen})`,
       "Read the bootstrap in the instance's EC2 console output, and check that tailnet policy " +
-        "lets this device see the factory's tag. If the bootstrap failed, terminate the " +
-        "instance in the EC2 console and wait until it is terminated; if it is still running, " +
+        "lets this device see the factory's tag. If the console output shows the bootstrap " +
+        "failed, terminate it uninspected with " +
+        `\`fffactory worker terminate ${worker.key} --keep --force\`; if it is still running, ` +
         "wait for it to finish",
     ),
     beforeInstall: true,

@@ -195,6 +195,7 @@ describe("fffactory secret set", () => {
     let store: MemoryInstanceStore | undefined;
     const inner = fakeSecretStore().store;
     const secrets: SecretStore = {
+      read: inner.read,
       write: async (request) => {
         if (store) store.files[PATH] = '{"schema_version": 2}';
         return inner.write(request);

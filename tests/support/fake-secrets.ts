@@ -1,16 +1,36 @@
 import type { OperatorPrompt } from "../../src/application/operator-prompt";
-import type { SecretStore, SecretWrite } from "../../src/application/secret-store";
+import type { SecretLookup, SecretStore, SecretWrite } from "../../src/application/secret-store";
 import type { SecretReference } from "../../src/domain/instance";
+import { SecretMaterial } from "../../src/domain/secrets";
 
 /**
  * SecretStore keeping secrets in memory by name, as Secrets Manager would: the first write
  * creates the secret and its ARN, later writes add a value to it. Records each write with
  * the revealed value, so tests can prove the material reached the store and nowhere else.
+ * `read` answers a reference with its value in `values`, and rejects for any other, or with
+ * `readFailsWith`; each read is recorded.
  */
-export function fakeSecretStore(options: { failWith?: Error } = {}) {
+export function fakeSecretStore(
+  options: {
+    failWith?: Error;
+    values?: Readonly<Record<string, string>>;
+    readFailsWith?: Error;
+  } = {},
+) {
   const writes: (Omit<SecretWrite, "material"> & { value: string })[] = [];
+  const reads: SecretLookup[] = [];
   const arns = new Map<string, SecretReference>();
   const store: SecretStore = {
+    read: async (request) => {
+      reads.push(request);
+      if (options.readFailsWith) throw options.readFailsWith;
+      const value = options.values?.[request.reference];
+      if (value === undefined)
+        throw new Error(
+          "Reading the secret from Secrets Manager failed: ResourceNotFoundException",
+        );
+      return new SecretMaterial(value);
+    },
     write: async ({ material, ...request }) => {
       if (options.failWith) throw options.failWith;
       writes.push({ ...request, value: material.reveal() });
@@ -22,7 +42,7 @@ export function fakeSecretStore(options: { failWith?: Error } = {}) {
       return { arn, created: true };
     },
   };
-  return { store, writes, arns };
+  return { store, writes, reads, arns };
 }
 
 /**

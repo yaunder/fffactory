@@ -69,7 +69,10 @@ function dnsLabel(dnsName: string): string {
  * A stale device keeps its reported hostname when Tailscale renames its DNS label, so both
  * copies still match and the name is a duplicate.
  */
-export function carriesHostname(peer: TailnetPeer, hostname: string): boolean {
+export function carriesHostname(
+  peer: Pick<TailnetPeer, "hostName" | "dnsName">,
+  hostname: string,
+): boolean {
   const wanted = hostname.toLowerCase();
   return peer.hostName.toLowerCase() === wanted || dnsLabel(peer.dnsName) === wanted;
 }
@@ -107,4 +110,46 @@ export function resolveWorker(
  */
 export function knownHostsFor(worker: WorkerAddress): string {
   return worker.hostKeys.map((key) => `${worker.hostname} ${key}\n`).join("");
+}
+
+/**
+ * One device of the tailnet as the Tailscale API lists it to the factory's admin client
+ * (`application/tailnet-admin.ts`): the whole tailnet, not only what this machine sees.
+ */
+export interface TailnetDevice {
+  /** The ID the API deletes it by: its node ID. */
+  readonly id: string;
+  readonly hostName: string;
+  /** Its MagicDNS name, such as `fff-a-b-1.example.ts.net`. */
+  readonly dnsName: string;
+  readonly tags: readonly string[];
+}
+
+/** The devices carrying a worker's hostname, split by whether they carry the factory's tag. */
+export interface WorkerDevices {
+  /** The worker's, which terminate deletes. */
+  readonly tagged: readonly TailnetDevice[];
+  /** Any tailnet member can take a name: these are reported, never deleted. */
+  readonly untagged: readonly TailnetDevice[];
+}
+
+/**
+ * The devices terminate deletes: every one whose reported hostname is `hostname`, ignoring
+ * case, that carries the factory's `tag`, compared exactly. A stale copy keeps its reported
+ * hostname, so it is included. The MagicDNS label never selects a device for deletion: host
+ * keys may end in `-N`, so Tailscale can rename another worker's second device (`builder`'s)
+ * to this one's label (`builder-1`). A device with the hostname but without the tag is never
+ * deleted, only reported.
+ */
+export function selectWorkerDevices(
+  devices: readonly TailnetDevice[],
+  hostname: string,
+  tag: string,
+): WorkerDevices {
+  const wanted = hostname.toLowerCase();
+  const named = devices.filter((device) => device.hostName.toLowerCase() === wanted);
+  return {
+    tagged: named.filter((device) => device.tags.includes(tag)),
+    untagged: named.filter((device) => !device.tags.includes(tag)),
+  };
 }

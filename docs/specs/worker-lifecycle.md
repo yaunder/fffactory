@@ -1,16 +1,17 @@
 # Worker lifecycle
 
-`fffactory worker` powers one declared worker's EC2 instance off and on. It is
-the operator's side of a worker's lifecycle; `fffactory host` stays the worker
-side of the [host protocol](host-protocol.md). EC2's state is the truth: no
-factory.json field records whether a worker is stopped. Epic:
-[#5](https://github.com/yaunder/fffactory/issues/5).
+`fffactory worker` powers one declared worker's EC2 instance off and on, or
+terminates it. It is the operator's side of a worker's lifecycle; `fffactory
+host` stays the worker side of the [host protocol](host-protocol.md). EC2's
+state is the truth: no factory.json field records whether a worker is stopped.
+Epic: [#5](https://github.com/yaunder/fffactory/issues/5).
 
 ## Commands
 
 ```text
 fffactory worker stop KEY [--force] [--yes] [--instance PATH] [--profile NAME]
 fffactory worker start KEY [--yes] [--instance PATH] [--profile NAME]
+fffactory worker terminate KEY --keep [--force] [--confirm KEY] [--instance PATH] [--profile NAME]
 ```
 
 - `stop` stops compute billing. The instance, its root volume (whose storage is
@@ -18,6 +19,9 @@ fffactory worker start KEY [--yes] [--instance PATH] [--profile NAME]
   non-ephemeral key) and its factory.json entry all stay.
 - `start` brings the same worker back, with the same identity, and reports its
   readiness as [status](status.md) would.
+- `terminate --keep` destroys the instance and its root volume and deletes the
+  worker's Tailscale devices; the host stays in factory.json, so the next
+  `fffactory apply` creates it afresh ([Terminate (keep)](#terminate-keep)).
 
 A stopped worker is a first-class state, not a fault:
 [status](status.md#workers) reports it `stopped`, with `fffactory worker start
@@ -27,52 +31,72 @@ and are not partial for it, and refuse to change its instance type, which would
 start it.
 
 `KEY` is a host key factory.json declares (`hosts[].key`). `--force` is stop's
-alone ([Gates](#gates)); `--yes` confirms in advance
-([Confirmation](#confirmation)); `--instance` and `--profile` select the
-instance and the AWS credentials as for every command. Anything else, a missing
-subcommand, or not exactly one `KEY` is refused, exit 1, before anything is
-read.
+and terminate's ([Gates](#gates), [Gates (terminate)](#gates-terminate));
+`--yes` confirms stop and start in advance ([Confirmation](#confirmation)), and
+`--confirm KEY` a terminate ([Confirmation (typed
+key)](#confirmation-typed-key)); `--keep` is terminate's, and required;
+`--instance` and `--profile` select the instance and the AWS credentials as for
+every command. Anything else, an option of another subcommand (`unknown option
+--yes`), a missing subcommand, or not exactly one `KEY` is refused, exit 1,
+before anything is read.
 
 ## Order
 
-Both commands go in this order, and stop at the first refusal:
+Every command goes in this order, and stops at the first refusal:
 
 1. Select, read and validate factory.json, printing `Instance: PATH (SOURCE)`
-   ([instance configuration](instance-configuration.md)).
-2. Refuse without a terminal and without `--yes`: the command could never be
-   confirmed ([Confirmation](#confirmation)).
+   ([instance configuration](instance-configuration.md)). `terminate` without
+   `--keep` is refused before, at its arguments ([Terminate (keep)](#terminate-keep)).
+2. Refuse without a terminal and without `--yes` (terminate: `--confirm KEY`):
+   the command could never be confirmed ([Confirmation](#confirmation)).
 3. Refuse a `KEY` factory.json does not declare, naming the declared keys. An
    argument that is not a well-formed host key is refused without being echoed:
-   it could be a pasted secret.
+   it could be a pasted secret. Terminate then refuses a `--confirm` that does
+   not name `KEY`, never echoing it either.
 4. Refuse unless factory.json is complete, listing each missing field as
-   `<path>: is required to stop a worker` (or `start`).
+   `<path>: is required to stop a worker` (or `start`, `terminate`). Terminate
+   then refuses without `tailscale.admin_client_secret`, the admin client it
+   deletes the worker's tailnet devices with: `factory.json has no Tailscale
+   admin client (tailscale.admin_client_secret): terminate deletes the worker's
+   tailnet device with it`, next action `fffactory secret set
+   tailscale-admin-client` ([secrets](secrets.md#the-tailscale-admin-client)).
 5. The account check: the caller must be in `aws.account_id`, resolved in the
    factory Region ([doctor §AWS account](doctor.md#aws-account)).
 6. The [CLI/pin match guard](plan-apply.md#clipin-match-guard): only the
-   release factory.json pins may stop or start a worker.
-7. Take the factory-wide lock as operation `worker-stop` or `worker-start`, and
-   open its [operation record](#operation-record). A held lock refuses the
-   command and shows its holder ([provisioning §Lock](provisioning.md#lock)).
+   release factory.json pins may stop, start or terminate a worker.
+7. Take the factory-wide lock as operation `worker-stop`, `worker-start` or
+   `worker-terminate`, and open its [operation record](#operation-record). A
+   held lock refuses the command and shows its holder ([provisioning §Lock](provisioning.md#lock)).
 8. Locate the one EC2 instance carrying the tags `fffactory:factory-id` = the
    factory ID and `fffactory:host-key` = `KEY`, in every state but
    `terminated` (`DescribeInstances`, as [status](status.md#inventories) lists
    them). None, several (each listed) or an inventory that could not be read is
    refused: fffactory never guesses.
-9. Stop's [gates](#gates).
-10. The [confirmation](#confirmation).
-11. Act: `StopInstances` or `StartInstances` for exactly that instance.
-12. Wait for the target state ([Stop](#stop), [Start](#start)).
-13. Release the lock (`settleFactoryLock`): unless interrupted
+9. The gates: stop's ([Gates](#gates)) or terminate's ([Gates
+   (terminate)](#gates-terminate)).
+10. Terminate: read the admin client from Secrets Manager and exchange it for a
+    token ([Tailnet device removal](#tailnet-device-removal)), so a client that
+    cannot delete the worker's devices refuses the terminate rather than leaving
+    them behind.
+11. The [confirmation](#confirmation).
+12. Act: `StopInstances`, `StartInstances` or `TerminateInstances` for exactly
+    that instance.
+13. Wait for the target state ([Stop](#stop), [Start](#start), [Terminate
+    (keep)](#terminate-keep)).
+14. Terminate: delete the worker's tailnet devices.
+15. Release the lock (`settleFactoryLock`): unless interrupted
     ([Interruption](#interruption)).
 
 Steps 2 to 6 reach nothing that could change: refusals there take no lock and
 write no record. From step 7 every refusal, decline and failure is recorded and
-releases the lock. No step before 11 calls EC2's mutating API.
+releases the lock. No step before 12 calls EC2's mutating API or deletes a
+device.
 
 ## Tiers
 
 Stop and start are operator-tier: non-destructive, and runnable by a narrow
-role. Terminate, a later task of the epic, is admin-tier. These are the
+role. Terminate is admin-tier: it destroys a machine and its volume, and its
+Tailscale admin client can delete any device in the tailnet. These are the
 permissions each command needs; fffactory provisions no IAM role or policy for
 them.
 
@@ -82,12 +106,18 @@ them.
 | `ec2:DescribeInstances` | `*` (EC2 does not scope it to resources) | Locating the instance and reading its state while waiting. |
 | `ec2:StopInstances` | `arn:aws:ec2:REGION:ACCOUNT:instance/*`, condition `StringEquals` `ec2:ResourceTag/fffactory:factory-id` = the factory ID | `worker stop`. |
 | `ec2:StartInstances` | The same resource and condition | `worker start`. |
+| `ec2:TerminateInstances` | The same resource and condition | `worker terminate`. |
+| `secretsmanager:GetSecretValue` | The secret `tailscale.admin_client_secret` refers to | `worker terminate`: the Tailscale admin client. |
 | `s3:PutObject`, `s3:GetObject`, `s3:DeleteObject`, `s3:DeleteObjectVersion` | `arn:aws:s3:::BUCKET/<factory ID>-lock.json` | The factory-wide lock ([provisioning §Lock](provisioning.md#lock)). |
 | `s3:PutObject` | `arn:aws:s3:::BUCKET/<factory ID>-operations/*` | The operation record. |
 
-Stop's inspection and start's readiness report go over the operator's tailnet
-and Tailscale SSH as `fffactory-admin`, as [status](status.md) does; they need
-no AWS permission.
+Stop's and terminate's inspection and start's readiness report go over the
+operator's tailnet and Tailscale SSH as `fffactory-admin`, as
+[status](status.md) does; they need no AWS permission. Terminate also needs
+the factory's Tailscale admin client, an OAuth client with the `devices:core`
+scope ([machine onboarding §5](../../MACHINE_ONBOARDING.md#5-prepare-the-tailnet)),
+which can delete any device of the tailnet: admin-tier, like the AWS
+credentials that can terminate a worker.
 
 ## Stop
 
@@ -163,6 +193,128 @@ Status:
   Next: Install release 0.3.0 with `fffactory apply`, then rerun `fffactory status`.
 ```
 
+## Terminate (keep)
+
+What terminate does depends on the instance's state when it is located:
+
+| State | Terminate |
+| --- | --- |
+| `running` | Runs the [gates](#gates-terminate), opens the [admin client](#tailnet-device-removal), asks for [confirmation](#confirmation-typed-key), calls `TerminateInstances`, waits for `terminated`, then deletes the worker's tailnet devices. |
+| `stopped` | The same, but passes the gates uninspected ([Gates (terminate)](#gates-terminate)). |
+| `shutting-down` | Already on its way: no gates and no question; opens the admin client, waits for `terminated`, then deletes the devices, and says so as stop does (`is now terminated: it was already on its way, ...`). |
+| `pending` | Refused: wait until it is running, then rerun. |
+| `stopping` | Refused: wait until it has stopped, then rerun. |
+
+The wait is stop's ([Stop](#stop)): every 5 s for at most 10 min, through the
+injected sleep. It ends once a read finds the instance `terminated`, or EC2 no
+longer lists it with the factory's tag (`absent`); every other state, and a
+read that failed, is waited through, and the deadline fails with the last
+state seen. `TerminateInstances` refused fails, naming `ec2:TerminateInstances`;
+one EC2 did not answer within 15 s may have reached it: `instance ID may be
+shutting down`.
+
+With `--keep`, the host stays in factory.json. Terraform is not run, and its
+state still holds the instance until the next plan refreshes it: refresh drops
+the terminated instance, and the next `fffactory apply` plans the host as a
+plain create, which the D11 refusals allow
+([plan-apply §Refusals](plan-apply.md#refusals-until-lifecycle-work-lands-d11)),
+and waits for its first boot (D3b). Until then [status](status.md#workers)
+reports the host `Not provisioned`, since EC2 lists no instance carrying its
+key. This is the recovery for a [failed first boot](worker-bootstrap.md#failed-first-boot),
+with `--force`: a worker that never joined the tailnet cannot be inspected.
+
+Terminate without `--keep` is refused before anything is read: `fffactory
+worker terminate: removal arrives in a later release; use --keep`. Removing the
+host from factory.json is a later task of the epic
+([#10](https://github.com/yaunder/fffactory/issues/10)), marked
+`TODO(re-evaluate when terminate removal lands)` in `src/cli/commands/worker.ts`.
+
+```text
+Instance: /work/.fffactory/factory.json (nearest .fffactory/factory.json)
+Worker builder-1 (fff-abcd1234-builder-1): EC2 instance i-0123456789abcdef0 is running.
+Terminating EC2 instance i-0123456789abcdef0; waiting for it to be terminated (up to 10 min).
+Deleting the Tailscale devices named fff-abcd1234-builder-1.
+Terminated worker builder-1 (fff-abcd1234-builder-1): its EC2 instance and root volume are gone. factory.json keeps the host, so `fffactory apply` creates it afresh.
+Deleted Tailscale device nAbCdEf1CNTRL (fff-abcd1234-builder-1).
+Operation record: s3://fff-abcd1234-state/fff-abcd1234-operations/2026-10-12T12:00:00.000Z-aaaaaaaa.json
+```
+
+No device left to delete prints `No Tailscale device named HOSTNAME remained to
+delete.` A stopped machine prints `The machine is stopped: the worker is not
+inspected, and unpushed work on its disk is not reported.` before acting.
+
+## Tailnet device removal
+
+A terminated worker's device would otherwise stay in the tailnet, offline, with
+the worker's hostname: the next apply's new device would then share the name,
+which the hostname-match rule refuses as a duplicate
+([host protocol §Finding the worker](host-protocol.md#finding-the-worker)).
+Terminate deletes it through the Tailscale API, as the factory's admin client
+(`tailscale.admin_client_secret`, [secrets](secrets.md#the-tailscale-admin-client)):
+
+1. Under the lock and before the confirmation, read the client secret from
+   Secrets Manager by its ARN, in the factory Region (`GetSecretValue`, within
+   30 s). It is a `SecretMaterial` from then on, and the Tailscale API adapter
+   alone reveals it, for each token request. A secret that cannot be read
+   refuses the terminate, named by error (`Reading the secret from Secrets
+   Manager failed: AccessDeniedException`), next action the
+   `secretsmanager:GetSecretValue` permission.
+2. Exchange it for a short-lived access token: `POST
+   https://api.tailscale.com/api/v2/oauth/token`, form-encoded
+   `grant_type=client_credentials`, `client_id=fffactory` and
+   `client_secret=SECRET`. factory.json keeps only the client secret, not its
+   client ID: like Tailscale's own CLI exchanging a `tskey-client-…` secret, the
+   adapter sends a placeholder client ID, which Tailscale ignores. **This relies
+   on undocumented behavior**: Tailscale's API reference sends both the client
+   ID and the secret. A secret that does not begin `tskey-client-` is refused
+   without a request. Tailscale refusing the client (HTTP 400, 401 or 403), any
+   other status, an answer without a token, a network failure or the deadline
+   refuses the terminate, `The Tailscale admin client could not be used:
+   REASON`, next action the OAuth client at the admin console's trust
+   credentials and `fffactory secret set tailscale-admin-client`.
+3. Once the instance is terminated, list the tailnet's devices (`GET
+   /api/v2/tailnet/-/devices`) and select every device whose reported
+   hostname is the worker's namespaced hostname, ignoring case (`name-1` is not
+   `name`), stale copies included: a stale copy keeps its reported hostname
+   (`selectWorkerDevices`, `src/domain/tailnet.ts`). Unlike the hostname-match
+   rule, the MagicDNS label never selects a device: host keys may end in `-N`,
+   so Tailscale can give a second `builder` device the label of `builder-1`,
+   and terminating `builder-1` must not delete it.
+4. Delete each selected device that carries the factory's tag (`tailscale.tag`,
+   compared exactly), one at a time, by its node ID (`DELETE
+   /api/v2/device/ID`); a device already gone (HTTP 404) counts as deleted. An
+   ID that is not a plain token is never put in a URL. A matching device
+   without the tag is never deleted: any tailnet member can take a name. It is
+   reported by its ID, never its tags.
+
+Every request has a 15 s deadline (`TAILSCALE_API_TIMEOUT_MS`) and follows no
+redirect: a redirect fails the request as unreachable (`Tailscale could not be
+reached (UnexpectedRedirect)`), and its target receives nothing. A failure is
+named by HTTP status or network error code (`Tailscale answered HTTP 500`); no
+API answer body, token or secret is ever printed, recorded or put in a command
+argument, and the token and the secret live only for the operation, in memory.
+
+A token lasts about an hour, and the session opens before the confirmation,
+which waits on the operator, and the wait for `terminated`. So a listing or
+deletion that Tailscale refuses with HTTP 401 exchanges the secret for a fresh
+token once, as in step 2, and is retried with it. A renewal that fails, or a
+retry refused again, fails that call, named as above.
+
+The instance is terminated by then, and that is not undone. A listing that
+failed, a device that could not be deleted, or an untagged device with the
+worker's hostname leaves the terminate partial: exit 2, the operation record
+`partial`, and on standard error
+
+```text
+Deleting the worker's tailnet devices was not complete: Not every Tailscale device named fff-abcd1234-builder-1 was deleted
+  Deleting device nAbCdEf1CNTRL failed: Tailscale answered HTTP 500
+  Device nZyXwVu1CNTRL does not carry the factory's tag (tailscale.tag in factory.json): not deleted
+Next: Remove the remaining devices named fff-abcd1234-builder-1 at https://login.tailscale.com/admin/machines yourself (one without the factory's tag only if it was this worker), then run `fffactory apply`, which creates the worker afresh.
+```
+
+fffactory does not check the token's scope before terminating: a client
+without write access to devices (`devices:core`) is found only here.
+
 ## Gates
 
 Before stopping a running worker, stop inspects it over the host protocol:
@@ -172,7 +324,12 @@ Before stopping a running worker, stop inspects it over the host protocol:
    A worker that cannot be located (offline, missing, no Tailscale SSH host
    key, a duplicate name, an untagged device, no peer view) cannot be
    inspected: refused, `HOSTNAME could not be inspected: SUMMARY`, with the
-   tailnet's next action and `--force stops it uninspected.`
+   tailnet's next action and `--force stops it uninspected.` A missing worker
+   has stop's own next action instead: ``Check the worker with `fffactory
+   status`, then rerun `fffactory worker stop KEY`. --force stops it
+   uninspected.`` Status's next action for a missing worker is the
+   [failed-first-boot](worker-bootstrap.md#failed-first-boot) recovery
+   (terminating it), which stop leaves to status.
 2. Read its agent activity (`host control-plane activity`, the
    [control plane](control-plane.md)'s `activeAgents`). Active agents refuse
    the stop: `N agents are active on HOSTNAME: stopping it would end them`.
@@ -187,6 +344,46 @@ stopping worker runs no gates.
 Accepted race (D5): dispatch may start an agent between the activity check and
 the stop, which then ends it. It is marked in `application/worker-lifecycle.ts`
 until dispatch gains a pause.
+
+## Gates (terminate)
+
+Before terminating a running worker, terminate inspects it as stop does, and
+also reads its last repository result (`host repositories inspect`, as
+[status](status.md#readiness) reads it):
+
+1. Locate it in the operator's peer view. A worker that cannot be located is
+   refused, `HOSTNAME could not be inspected: SUMMARY`, with terminate's own
+   next action, not the tailnet's: ``Check the worker with `fffactory status`,
+   then rerun `fffactory worker terminate KEY --keep`. If the instance's EC2
+   console output shows its bootstrap failed, it never joined the tailnet:
+   rerun with --force, which terminates it uninspected.`` Status's recovery for
+   a missing worker is terminating it, so its words here would send the
+   operator back to the command refused. The gate stays, though a worker whose
+   [bootstrap failed](worker-bootstrap.md#failed-first-boot) is always refused
+   by it: a missing device can also be tailnet policy hiding a live worker.
+2. Its agent activity: active agents refuse it, `N agents are active on
+   HOSTNAME: terminating it would end them`; activity that could not be read,
+   or no control plane, refuses it too.
+3. Its repository result: placed checkouts left unresolved (a dirty tree,
+   divergence, a wrong or unadopted branch) refuse it, `Placed repositories on
+   HOSTNAME are unresolved: terminating it would lose their work`, listing any
+   unmanaged checkouts; unmanaged checkouts alone (present on the worker, no
+   longer placed there, never removed) refuse it, `HOSTNAME holds unmanaged
+   checkouts: terminating it would lose them`, each listed, next action
+   `--force`; a result that could not be read refuses it, `HOSTNAME could not be
+   inspected for checkouts: REASON`. A worker that has never synchronized
+   repositories (`none`) passes.
+
+The repository result is the last synchronization's: a checkout dirtied since
+then is not seen. `--force` skips the inspection: `--force: the worker is not
+inspected for active agents or checkouts.` It never skips the account check, the
+pin guard, the lock, the admin client or the confirmation.
+
+A worker whose machine is `stopped` passes uninspected, without `--force`: no
+agent runs on it, and it cannot be reached. **Accepted risk:** unpushed work on
+a stopped worker's disk is not reported, and is destroyed with it. A machine
+already `shutting-down` runs no gates. The race stop accepts (D5) applies to
+terminate too, marked in the same place.
 
 ## Confirmation
 
@@ -203,20 +400,43 @@ Acting on the instance needs the operator's confirmation:
 
 A no-op, or an instance already on its way, is never asked about.
 
+## Confirmation (typed key)
+
+Terminate destroys the machine, so it is confirmed by naming the worker, never
+by y/N or `--yes`:
+
+- At a terminal, without `--confirm`, terminate asks `Terminate worker KEY
+  (HOSTNAME), EC2 instance ID? Its machine and root volume are destroyed. Type
+  the host key to confirm: `. Only the host key itself, exactly (blank space
+  around it aside), confirms; `y`, `yes`, another key, or no answer declines:
+  `Not confirmed: the worker was not terminated.`, exit 1, recorded `declined`.
+- `--confirm KEY` confirms without asking, for use without a terminal. Any
+  other value refuses before anything reaches AWS, never echoed: `--confirm
+  does not name the host KEY`.
+- Without a terminal and without `--confirm`: `Terminating a worker needs your
+  confirmation: rerun at a terminal, or pass --confirm KEY.`
+
+The question comes after the gates and the admin client: a terminate that would
+be refused is never asked about. A machine already shutting down is not asked
+about either.
+
 ## Operation record
 
 The lock's [operation record](plan-apply.md#operation-records) is written when
-the lock is taken and again at each step. Its `operation` is `worker-stop` or
-`worker-start`, and it has one stage, named `stop` or `start`, which goes
-`locating`, then `inspecting` (stop's gates), `awaiting_approval` (only when
-asked), `stopping` or `starting` (the request and the wait), and `waiting`
-(start's tailnet wait), and ends:
+the lock is taken and again at each step. Its `operation` is `worker-stop`,
+`worker-start` or `worker-terminate`, and it has one stage, named `stop`,
+`start` or `terminate`, which goes `locating`, then `inspecting` (the gates of
+stop and terminate), `authorizing` (terminate's admin client),
+`awaiting_approval` (only when asked), `stopping`, `starting` or `terminating`
+(the request and the wait), then `waiting` (start's tailnet wait) or
+`removing_devices` (terminate), and ends:
 
 | Stage ends | Operation `status` | When |
 | --- | --- | --- |
-| `stopped`, `started` | `succeeded` | This command changed the machine's state. |
+| `stopped`, `started`, `terminated` | `succeeded` | This command changed the machine's state. |
 | `unchanged` | `succeeded` | The machine was already in, or on its way to, the target state. |
-| `refused` | `refused` | No single instance, a state it refuses, or a gate. |
+| `partial` | `partial` | Terminate: the machine is terminated, but a tailnet device remains ([Tailnet device removal](#tailnet-device-removal)); `failure` holds the summary. |
+| `refused` | `refused` | No single instance, a state it refuses, a gate, or terminate's admin client. |
 | `declined` | `declined` | The question was not confirmed. |
 | `failed` | `failed` | EC2 refused the request or did not answer it in time, the machine vanished, the deadline passed, or a step failed. |
 
@@ -249,14 +469,20 @@ interrupted, whatever it reached, since the lock stays.
 
 Interrupted once EC2 was asked, it first says `EC2 was asked to change the
 instance and may still be doing so.`: the instance goes on stopping or
-starting. At the confirmation question, an interrupt wins over the answer.
+starting. Terminate says instead `EC2 was asked to terminate the instance and
+may still be doing so; its tailnet devices may remain: check them at
+https://login.tailscale.com/admin/machines.`, and deletes no more devices; its
+rerun is `fffactory worker terminate KEY --keep`, which waits for a machine
+still shutting down, then deletes the devices. At the confirmation question, an
+interrupt wins over the answer.
 
 ## Exit codes
 
 | Exit | When |
 | --- | --- |
-| 0 | The worker is stopped or started, including a no-op, and a started worker that is not ready or not online in time. |
+| 0 | The worker is stopped, started or terminated, including a no-op, and a started worker that is not ready or not online in time. |
 | 1 | Refused, declined or failed. |
+| 2 | Terminated, but a tailnet device remains ([Tailnet device removal](#tailnet-device-removal)). |
 | 128 + N | Interrupted by signal N. |
 
 ## What it never prints
@@ -265,23 +491,33 @@ AWS or SDK messages, credentials, or configuration values other than the
 factory ID, a host key that passed its format check, `aws.account_id` and
 `aws.region`; EC2 failures are named by error name or network code (`EC2
 StopInstances failed: UnauthorizedOperation`). A `KEY` argument that is not a
-well-formed host key is never echoed. It prints the hostnames it derived,
-instance IDs, EC2 states, and what status prints of a worker.
+well-formed host key, or a `--confirm` value that is not `KEY`, is never echoed.
+Nor the Tailscale admin client's secret, its access token, any Tailscale API
+answer body, or a device's tags (`tailscale.tag` could hold a pasted secret);
+the secret and the token reach no record, progress line or argument. It prints
+the hostnames it derived, instance IDs, EC2 states, Tailscale device IDs, and
+what status prints of a worker.
 
 ## Layer mapping
 
 | Layer | Module | Responsibility |
 | --- | --- | --- |
-| Domain | `src/domain/worker-lifecycle.ts` | The host key check, the one target machine, what each EC2 state means for an action (`powerStep`), stop's gates (`stopGate`), the confirmation rule, the waits' bounds and steps, the words of every refusal and next action. Pure. |
-| Domain | `src/domain/operation.ts` | `startStageOperation`, `withMachine` and the power stage's statuses. |
-| Domain | `src/domain/status.ts` | The `stopped` machine's verdict, `stopped`, and its next action, `fffactory worker start KEY`. |
-| Application | `src/application/machine-control.ts` | The `MachineControl` port: `stop`, `start`, `state`. |
-| Application | `src/application/worker-lifecycle.ts` | `stopWorker`, `startWorker`: the order above, under the lock and its record. |
-| Infrastructure | `src/infrastructure/ec2-machine-control.ts` | `ec2MachineControl` over `StopInstances`, `StartInstances` and `DescribeInstances` (AWS SDK for JavaScript v3, imported on first use), each call within 15 s (`EC2_CONTROL_TIMEOUT_MS`), failures by error name, a request past its deadline `unanswered`. |
-| CLI adapter | `src/cli/commands/worker.ts` | Arguments, progress, the reports, the exit code; `waitsOnInterrupt`. |
+| Domain | `src/domain/worker-lifecycle.ts` | The host key check, the one target machine, what each EC2 state means for an action (`powerStep`), the gates of stop and terminate (`stopGate`, `terminateGate`, the stopped pass and the repository result), the confirmation rules (y/N, the typed key, `--confirm`), the admin client's refusals, the device removal's outcome (`deviceRemovalRefusal`), the waits' bounds and steps, the words of every refusal and next action. Pure. |
+| Domain | `src/domain/tailnet.ts` | `selectWorkerDevices`: the devices terminate deletes (the reported hostname, never the MagicDNS label, and the factory's tag) and the untagged ones it reports. |
+| Domain | `src/domain/operation.ts` | `startStageOperation`, `withMachine` and the lifecycle stage's statuses. |
+| Domain | `src/domain/status.ts`, `src/domain/rollout.ts` | The `stopped` machine's verdict, `stopped`, and its next action, `fffactory worker start KEY`; a failed first boot's next action, `fffactory worker terminate KEY --keep --force`. |
+| Application | `src/application/machine-control.ts` | The `MachineControl` port: `stop`, `start`, `terminate`, `state`. |
+| Application | `src/application/tailnet-admin.ts` | The `TailnetAdmin` port: `open` (the client secret for a session), the session's `devices` and `remove`. |
+| Application | `src/application/secret-store.ts` | `SecretStore.read`: the admin client's secret, as `SecretMaterial`. |
+| Application | `src/application/worker-lifecycle.ts` | `stopWorker`, `startWorker`, `terminateWorker`: the order above, under the lock and its record; terminate's inspection reuses `inspectRepositories`. |
+| Infrastructure | `src/infrastructure/ec2-machine-control.ts` | `ec2MachineControl` over `StopInstances`, `StartInstances`, `TerminateInstances` and `DescribeInstances` (AWS SDK for JavaScript v3, imported on first use), each call within 15 s (`EC2_CONTROL_TIMEOUT_MS`), failures by error name, a request past its deadline `unanswered`. |
+| Infrastructure | `src/infrastructure/aws-secrets-manager-store.ts` | `GetSecretValue` by ARN, within 30 s. |
+| Infrastructure | `src/infrastructure/tailscale-api-admin.ts` | `tailscaleApiAdmin`: the token exchange, the device list and deletion over HTTPS with `fetch`, each within 15 s, no redirects, failures by HTTP status or network code. |
+| CLI adapter | `src/cli/commands/worker.ts` | Arguments, progress, the reports, the exit code; `waitsOnInterrupt`; the refusal without `--keep`. |
 
 Tests: `tests/domain/worker-lifecycle.test.ts` (the host key check, an argument
-never echoed, the one machine, every state for each action, each gate, the
+never echoed, the one machine, every state for each action, each gate, a
+worker missing from the tailnet refused with stop's own next action, the
 confirmation rule and question, the waits' steps and failures, a request
 refused or unanswered),
 `tests/application/worker-lifecycle.test.ts` (a stop recorded step by step;
@@ -295,10 +531,39 @@ tailnet refusal reported at once; a request unanswered in time; the record's
 last state at the deadline or a vanished machine; confirmation asked, declined
 and refused without a terminal; an interrupt before the lock, during each
 wait, at the question, right after the lock, while the request's stage is
-written and while the final record is written), `tests/infrastructure/ec2-machine-control.test.ts`
+written and while the final record is written),
+`tests/infrastructure/ec2-machine-control.test.ts`
 (stubbed calls, deadlines, unknown and absent states, and the real SDK against
 `tests/support/stub-ec2-instances.ts`), and `tests/cli/worker.test.ts` (the
 reports and exit codes, AWS's message never printed, an argument that is not a
-key never echoed, the arguments and help).
+key never echoed, a missing worker's stop refusal, the arguments and help).
 
-Introduced by [#6](https://github.com/yaunder/fffactory/issues/6).
+Terminate: `tests/domain/worker-lifecycle.test.ts` (each state, the wait for
+`terminated` or `absent`, each gate and the stopped pass, the typed key and
+`--confirm`, the admin client's refusals, the device removal's outcome) and
+`tests/domain/tailnet.test.ts` (tagged devices with the hostname selected,
+untagged ones reported, the tag compared exactly);
+`tests/application/worker-lifecycle.test.ts` (a terminate recorded step by step;
+the admin client missing, an undeclared key, another account, a pin mismatch, a
+held lock, a wrong `--confirm`, a wrong typed key, an unreadable secret and a
+refused client, all before any mutation; each gate refused and `--force`
+overriding it; a stopped worker passing uninspected; a machine already
+shutting down waited for; only tagged devices deleted, an untagged one
+reported, a deletion or listing failure leaving the terminate partial; the
+secret in no record, progress or result; status reporting the host not
+provisioned afterwards; an interrupt during the wait and between deletions),
+`tests/infrastructure/tailscale-api-admin.test.ts` (against
+`tests/support/stub-tailscale-api.ts`: the token request with its placeholder
+client ID, the listing and deletion, 404 as deleted, an unusable ID never in a
+URL, a non-client secret refused without a request, failures by status with no
+body, secret or token, the deadline, an expired token renewed once (only on
+HTTP 401) and the call retried, a redirect refused with its target never
+asked), the Secrets Manager read in
+`tests/infrastructure/aws-secrets-manager-store.test.ts`, and the terminate
+reports, exit 2, the refusal without `--keep` and an unechoed `--confirm` in
+`tests/cli/worker.test.ts`. That the next plan creates a terminated worker
+afresh is `tests/domain/plan.test.ts` (`a worker terminated outside fffactory
+plans as a create`).
+
+Introduced by [#6](https://github.com/yaunder/fffactory/issues/6); terminate
+`--keep` by [#9](https://github.com/yaunder/fffactory/issues/9).

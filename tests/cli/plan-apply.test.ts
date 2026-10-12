@@ -704,9 +704,10 @@ describe("fffactory apply (plan-apply §Apply)", () => {
     expect(err).toEqual([
       `  failed     builder-1 (${B1}): Its first boot did not finish within 15 min (last seen: ${missing})`,
       "             Next: Read the bootstrap in the instance's EC2 console output, and check that " +
-        "tailnet policy lets this device see the factory's tag. If the bootstrap failed, " +
-        "terminate the instance in the EC2 console and wait until it is terminated; if it is " +
-        "still running, wait for it to finish, then rerun `fffactory apply`.",
+        "tailnet policy lets this device see the factory's tag. If the console output shows " +
+        "the bootstrap failed, terminate it uninspected with " +
+        "`fffactory worker terminate builder-1 --keep --force`; if it is still running, " +
+        "wait for it to finish, then rerun `fffactory apply`.",
     ]);
   });
 

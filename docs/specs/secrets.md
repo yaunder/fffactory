@@ -33,10 +33,11 @@ the Tailscale key by its ARN ([worker bootstrap](worker-bootstrap.md)).
 ### The Tailscale admin client
 
 `tailscale-admin-client` is the client secret of an operator-side Tailscale
-OAuth client with the `devices:core` scope, for deleting a terminated worker's
-Tailscale device from the operator's workstation, which `fffactory worker
-terminate` is to do ([#5](https://github.com/yaunder/fffactory/issues/5)). It
-is admin-tier: `devices:core` can remove any device in the tailnet
+OAuth client with the `devices:core` scope, with which `fffactory worker
+terminate` deletes a terminated worker's Tailscale devices from the operator's
+workstation ([worker lifecycle §Tailnet device
+removal](worker-lifecycle.md#tailnet-device-removal)). It is admin-tier:
+`devices:core` can remove any device in the tailnet
 ([machine onboarding §5](../../MACHINE_ONBOARDING.md#5-prepare-the-tailnet)).
 Workers keep only their join-only auth key and never receive the admin client:
 `tailscale.admin_client_secret` is in neither the host projection
@@ -44,7 +45,13 @@ Workers keep only their join-only auth key and never receive the admin client:
 ([provisioning §Inputs](provisioning.md#terraform-inputs)), so the hosts' IAM policy
 never allows reading it. It is optional: factory.json is complete without it
 ([instance configuration §Completeness](instance-configuration.md#completeness)),
-and no command reads it yet.
+and only `worker terminate` reads it, refusing without it. Terminate reads it
+by its ARN (`GetSecretValue`, within the same 30 s deadline) under the factory
+lock, and hands it, a `SecretMaterial`, to the Tailscale API adapter, which
+alone reveals it, for each token request (the first, and one renewal per call
+refused for an expired token); it is never printed, recorded or kept beyond
+the operation. That needs `secretsmanager:GetSecretValue` on this secret, in the
+operator's credentials, never the hosts'.
 
 Refusals, each exiting 1 with `fffactory secret set: MESSAGE` and before any
 AWS call:
@@ -145,7 +152,8 @@ The material reaches Secrets Manager's request and nothing else:
   message includes it. In memory it is a `SecretMaterial`
   (`src/domain/secrets.ts`), which shows as `[secret]` when printed,
   interpolated, inspected or serialized; only the Secrets Manager adapter
-  calls `reveal`.
+  calls `reveal` to store it, and only the Tailscale API adapter to use the
+  admin client.
 - **factory.json.** Only the ARN is written.
 - **Error messages.** Secrets Manager failures are reported as `Storing the
   secret in Secrets Manager failed: REASON`, where the reason is the error
@@ -162,7 +170,7 @@ The write has a 30-second deadline (`SECRETS_MANAGER_TIMEOUT_MS`).
 | Domain | `src/domain/secrets.ts` | `SecretMaterial`, reading material from a prompt or standard input, the names and their targets (the factory-wide ones under `tailscale`, a host's under its entry), setting a reference in factory.json, the secrets' tags. Pure. |
 | Application | `src/application/set-secret.ts` | `setSecret`: the order above. |
 | Application | `src/application/secret-store.ts`, `src/application/operator-prompt.ts` | The `SecretStore` and `OperatorPrompt` ports. |
-| Infrastructure | `src/infrastructure/aws-secrets-manager-store.ts` | `secretsManagerStore`: CreateSecret, then PutSecretValue for an existing secret. |
+| Infrastructure | `src/infrastructure/aws-secrets-manager-store.ts` | `secretsManagerStore`: CreateSecret, then PutSecretValue for an existing secret; GetSecretValue for `worker terminate`'s admin client. |
 | Infrastructure | `src/infrastructure/aws-session.ts` | The deadline and failure descriptions shared with the lock store. |
 | Infrastructure | `src/infrastructure/terminal-prompt.ts` | `terminalPrompt`: the hidden prompt in raw mode, and standard input with its limit. |
 | CLI adapter | `src/cli/commands/secret.ts` | `fffactory secret set`: arguments, output and exit codes. |
@@ -193,4 +201,5 @@ That the admin client reaches no worker is asserted in
 `tests/application/project-terraform-inputs.test.ts`.
 
 Introduced by [#98](https://github.com/yaunder/factory/issues/98); the admin
-client by [#8](https://github.com/yaunder/fffactory/issues/8).
+client by [#8](https://github.com/yaunder/fffactory/issues/8), and its read by
+[#9](https://github.com/yaunder/fffactory/issues/9).

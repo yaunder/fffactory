@@ -100,7 +100,7 @@ async function workerStatus(
   };
   const blocked = machineVerdict(machine, host.key);
   if (blocked) return { ...identity, ...facts, tailnet: "not_checked", ...unknown, ...blocked };
-  const location = locateWorker(observed.view, hostname, observed.tag);
+  const location = locateWorker(observed.view, identity, observed.tag);
   if (location.kind === "blocked")
     return { ...identity, ...facts, ...unknown, tailnet: location.tailnet, ...location.verdict };
   const inspection = await inspectWorker(transport, location.worker);

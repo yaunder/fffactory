@@ -35,6 +35,8 @@ export interface MachineControl {
   stop(target: MachineTarget): Promise<MachineRequest>;
   /** Asks EC2 to start the instance (StartInstances). */
   start(target: MachineTarget): Promise<MachineRequest>;
+  /** Asks EC2 to terminate the instance (TerminateInstances): its root volume goes with it. */
+  terminate(target: MachineTarget): Promise<MachineRequest>;
   /** The instance's state now, `absent` once EC2 no longer lists it with the factory's tag. */
   state(target: MachineTarget): Promise<MachineStateRead>;
 }

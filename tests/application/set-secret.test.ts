@@ -256,6 +256,7 @@ describe("setSecret", () => {
     const racing = {
       ...deps,
       secrets: {
+        ...deps.secrets,
         write: async (...args: Parameters<typeof write>) => {
           store.files[PATH] = invalid;
           return write(...args);
@@ -273,6 +274,7 @@ describe("setSecret", () => {
     const racing = {
       ...deps,
       secrets: {
+        ...deps.secrets,
         write: async (...args: Parameters<typeof write>) => {
           store.files[PATH] = `${JSON.stringify({ ...DOCUMENT, hosts: [] })}\n`;
           return write(...args);

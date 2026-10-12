@@ -3,7 +3,7 @@ import type { AgentActivity } from "../../src/application/control-plane";
 import type { MachineControl } from "../../src/application/machine-control";
 import { run, waitsOnInterrupt } from "../../src/cli/run";
 import { newLockRecord } from "../../src/domain/factory-lock";
-import type { FactoryInstance, Release } from "../../src/domain/instance";
+import type { FactoryInstance, Release, SecretReference } from "../../src/domain/instance";
 import type { Machine } from "../../src/domain/status";
 import type { PeerView } from "../../src/domain/tailnet";
 import type { AwsSession } from "../../src/infrastructure/aws-session";
@@ -14,17 +14,19 @@ import {
 import { harness, TEST_NOW } from "../support/cli-harness";
 import { FAKE_CALLER, fakeCallerIdentity } from "../support/doctor-fakes";
 import { fakeControlPlane } from "../support/fake-control-plane";
-import { fakePrompt } from "../support/fake-secrets";
+import { fakePrompt, fakeSecretStore } from "../support/fake-secrets";
 import {
-  answers,
   fakeMachineControl,
   fakeMachineInventory,
   fakeTailnet,
+  fakeTailnetAdmin,
   fakeTransport,
   machine,
   peer,
   peers,
   readyWorker,
+  statusAnswers,
+  tailnetDevice,
 } from "../support/fake-workers";
 import { BUCKET, declaring, FACTORY, RELEASE, WORKER_TAG } from "../support/factory-world";
 import { MemoryInstanceStore } from "../support/memory-instance-store";
@@ -39,7 +41,14 @@ const ONLINE = peers(peer(HOSTNAME, { tags: [WORKER_TAG] }));
 interface Setup {
   readonly instance?: FactoryInstance;
   readonly state?: Machine["state"];
-  readonly states?: readonly ("stopping" | "stopped" | "pending" | "running")[];
+  readonly states?: readonly (
+    | "stopping"
+    | "stopped"
+    | "pending"
+    | "running"
+    | "shutting-down"
+    | "terminated"
+  )[];
   readonly activity?: AgentActivity;
   readonly view?: PeerView;
   readonly control?: MachineControl;
@@ -47,6 +56,35 @@ interface Setup {
   readonly prompt?: ReturnType<typeof fakePrompt>;
   readonly interruptOnSleep?: boolean;
   readonly worker?: ReturnType<typeof readyWorker>;
+  readonly repositories?: "synchronized" | "unresolved";
+  readonly admin?: Parameters<typeof fakeTailnetAdmin>[0];
+}
+
+const ADMIN_ARN =
+  "arn:aws:secretsmanager:eu-west-2:123456789012:secret:fff-abcd1234/tailscale-admin-client-AbCdEf" as SecretReference;
+const ADMIN_SECRET = "tskey-client-kExample1CNTRL-0123456789abcdef";
+
+/** factory.json declaring builder-1 and builder-2, with the Tailscale admin client. */
+function withAdmin(): FactoryInstance {
+  const instance = declaring(KEY, "builder-2");
+  return {
+    ...instance,
+    tailscale: {
+      tag: WORKER_TAG,
+      auth_key_secret: instance.tailscale?.auth_key_secret as SecretReference,
+      admin_client_secret: ADMIN_ARN,
+    },
+  };
+}
+
+/** builder-1 answering its inspection, its repository result and its dispatch state. */
+function workerTransport(options: Setup) {
+  return fakeTransport({
+    [HOSTNAME]: statusAnswers(
+      options.worker ?? readyWorker(FACTORY, KEY, RELEASE),
+      options.repositories ?? "synchronized",
+    ),
+  });
 }
 
 function setup(options: Setup = {}) {
@@ -57,9 +95,10 @@ function setup(options: Setup = {}) {
   const control = fakeMachineControl({ states: options.states ?? ["stopped"] });
   const controlPlane = fakeControlPlane("healthy", options.activity ?? { kind: "idle" });
   const identity = options.identity ?? fakeCallerIdentity();
-  const transport = fakeTransport({
-    [HOSTNAME]: answers(options.worker ?? readyWorker(FACTORY, KEY, RELEASE)),
-  });
+  const transport = workerTransport(options);
+  const admin = fakeTailnetAdmin(
+    options.admin ?? { devices: [tailnetDevice("nWorker1CNTRL", HOSTNAME, [WORKER_TAG])] },
+  );
   let interrupted = false;
   const cli = harness(
     store,
@@ -76,13 +115,15 @@ function setup(options: Setup = {}) {
       tailnet: fakeTailnet(options.view ?? ONLINE).tailnet,
       transport: transport.transport,
       prompt: (options.prompt ?? fakePrompt()).prompt,
+      secrets: fakeSecretStore({ values: { [ADMIN_ARN]: ADMIN_SECRET } }).store,
+      tailnetAdmin: admin.admin,
       interrupted: () => interrupted,
       sleep: async () => {
         if (options.interruptOnSleep) interrupted = true;
       },
     },
   );
-  return { ...cli, lockStore, control, controlPlane, identity, transport };
+  return { ...cli, lockStore, control, controlPlane, identity, transport, admin };
 }
 
 const all = (cli: { out: string[]; err: string[] }) => [...cli.out, ...cli.err].join("\n");
@@ -128,6 +169,16 @@ describe("fffactory worker stop (worker-lifecycle §Stop)", () => {
     expect(cli.err[0]).toBe(
       `Refusing to stop the worker: ${HOSTNAME} could not be inspected: Offline in the tailnet`,
     );
+  });
+
+  test("refuses a running worker missing from the tailnet, naming status, never terminate", async () => {
+    const cli = setup({ view: peers() });
+    expect(await run(["worker", "stop", KEY, "--yes"], cli.context)).toBe(1);
+    expect(cli.err).toEqual([
+      `Refusing to stop the worker: ${HOSTNAME} could not be inspected: No Tailscale device named ${HOSTNAME} is visible from this machine`,
+      `Next: Check the worker with \`fffactory status\`, then rerun \`fffactory worker stop ${KEY}\`. --force stops it uninspected.`,
+    ]);
+    expect(cli.control.mutations()).toEqual([]);
   });
 
   test("an already stopped worker is a no-op success", async () => {
@@ -178,6 +229,9 @@ describe("fffactory worker stop (worker-lifecycle §Stop)", () => {
         throw denied;
       },
       startInstances: async () => {
+        throw denied;
+      },
+      terminateInstances: async () => {
         throw denied;
       },
       describeInstances: async () => {
@@ -385,7 +439,7 @@ describe("fffactory worker arguments", () => {
   test("needs a subcommand", async () => {
     const cli = setup();
     expect(await run(["worker"], cli.context)).toBe(1);
-    expect(cli.err[0]).toBe("fffactory worker: expected a subcommand: stop, start");
+    expect(cli.err[0]).toBe("fffactory worker: expected a subcommand: stop, start, terminate");
   });
 
   test("needs exactly one KEY", async () => {
@@ -420,5 +474,197 @@ describe("fffactory worker arguments", () => {
     );
     expect(await run(["worker", "stop", KEY, "--yes"], cli.context)).toBe(1);
     expect(cli.err[0]).toBe("Invalid factory.json:");
+  });
+});
+
+/** `worker terminate KEY --keep`, confirmed with `--confirm KEY`, plus `more`. */
+const TERMINATE = (...more: string[]) => [
+  "worker",
+  "terminate",
+  KEY,
+  "--keep",
+  "--confirm",
+  KEY,
+  ...more,
+];
+const TERMINATING = { instance: withAdmin(), states: ["shutting-down", "terminated"] } as const;
+
+describe("fffactory worker terminate --keep (worker-lifecycle §Terminate (keep))", () => {
+  test("terminates the worker, deletes its tailnet device and keeps the host", async () => {
+    const cli = setup(TERMINATING);
+    expect(await run(TERMINATE(), cli.context)).toBe(0);
+    expect(cli.err).toEqual([]);
+    expect(cli.out).toEqual([
+      `Instance: ${PATH} (nearest .fffactory/factory.json)`,
+      `Worker ${KEY} (${HOSTNAME}): EC2 instance ${ID} is running.`,
+      `Terminating EC2 instance ${ID}; waiting for it to be terminated (up to 10 min).`,
+      `Deleting the Tailscale devices named ${HOSTNAME}.`,
+      `Terminated worker ${KEY} (${HOSTNAME}): its EC2 instance and root volume are gone. ` +
+        "factory.json keeps the host, so `fffactory apply` creates it afresh.",
+      `Deleted Tailscale device nWorker1CNTRL (${HOSTNAME}).`,
+      expect.stringMatching(/^Operation record: s3:\/\/fff-abcd1234-state\/.+\.json$/),
+    ]);
+    expect(cli.control.mutations()).toEqual([`terminate ${ID}`]);
+    expect(cli.admin.calls).toEqual(["open", "devices", "remove nWorker1CNTRL"]);
+    expect(all(cli)).not.toContain(ADMIN_SECRET);
+    expect(cli.lockStore.locks.size).toBe(0);
+  });
+
+  test("a running worker that never joined the tailnet is refused, naming --force for a failed bootstrap", async () => {
+    const missing = setup({ ...TERMINATING, view: peers(), admin: { devices: [] } });
+    expect(await run(TERMINATE(), missing.context)).toBe(1);
+    expect(missing.err).toEqual([
+      `Refusing to terminate the worker: ${HOSTNAME} could not be inspected: No Tailscale device named ${HOSTNAME} is visible from this machine`,
+      `Next: Check the worker with \`fffactory status\`, then rerun \`fffactory worker terminate ${KEY} --keep\`. ` +
+        "If the instance's EC2 console output shows its bootstrap failed, it never joined the " +
+        "tailnet: rerun with --force, which terminates it uninspected.",
+    ]);
+    expect(missing.control.mutations()).toEqual([]);
+    const forced = setup({ ...TERMINATING, view: peers(), admin: { devices: [] } });
+    expect(await run(TERMINATE("--force"), forced.context)).toBe(0);
+    expect(forced.control.mutations()).toEqual([`terminate ${ID}`]);
+  });
+
+  test("a stopped worker is terminated uninspected, and says what that leaves unreported", async () => {
+    const cli = setup({ ...TERMINATING, state: "stopped" });
+    expect(await run(TERMINATE(), cli.context)).toBe(0);
+    expect(cli.out).toContain(
+      "The machine is stopped: the worker is not inspected, and unpushed work on its disk is not reported.",
+    );
+    expect(cli.transport.calls).toEqual([]);
+  });
+
+  test("no device left to delete says so", async () => {
+    const cli = setup({ ...TERMINATING, admin: { devices: [] } });
+    expect(await run(TERMINATE(), cli.context)).toBe(0);
+    expect(cli.out).toContain(`No Tailscale device named ${HOSTNAME} remained to delete.`);
+  });
+
+  test("a device-deletion failure exits 2, naming the admin console; the terminate stands", async () => {
+    const cli = setup({
+      ...TERMINATING,
+      admin: {
+        devices: [
+          tailnetDevice("nWorker1CNTRL", HOSTNAME, [WORKER_TAG]),
+          tailnetDevice("nIntruder1CNTRL", HOSTNAME, ["tag:other"]),
+        ],
+        failing: { nWorker1CNTRL: "Tailscale answered HTTP 500" },
+      },
+    });
+    expect(await run(TERMINATE(), cli.context)).toBe(2);
+    expect(cli.out).toContain(
+      `Terminated worker ${KEY} (${HOSTNAME}): its EC2 instance and root volume are gone. ` +
+        "factory.json keeps the host, so `fffactory apply` creates it afresh.",
+    );
+    expect(cli.err).toEqual([
+      `Deleting the worker's tailnet devices was not complete: Not every Tailscale device named ${HOSTNAME} was deleted`,
+      "  Deleting device nWorker1CNTRL failed: Tailscale answered HTTP 500",
+      "  Device nIntruder1CNTRL does not carry the factory's tag (tailscale.tag in factory.json): not deleted",
+      `Next: Remove the remaining devices named ${HOSTNAME} at https://login.tailscale.com/admin/machines ` +
+        "yourself (one without the factory's tag only if it was this worker), then run " +
+        "`fffactory apply`, which creates the worker afresh.",
+    ]);
+    expect(all(cli)).not.toContain("tag:other");
+    expect(cli.out.at(-1)).toStartWith("Operation record: s3://");
+  });
+
+  test("active agents or unresolved checkouts refuse it; --force overrides", async () => {
+    const busy = setup({ ...TERMINATING, activity: { kind: "active", count: 1 } });
+    expect(await run(TERMINATE(), busy.context)).toBe(1);
+    expect(busy.err).toEqual([
+      `Refusing to terminate the worker: 1 agent is active on ${HOSTNAME}: terminating it would end it`,
+      `Next: Wait until no agent is active there, then rerun \`fffactory worker terminate ${KEY} --keep\`, or pass --force to terminate it anyway.`,
+    ]);
+    const dirty = setup({ ...TERMINATING, repositories: "unresolved" });
+    expect(await run(TERMINATE(), dirty.context)).toBe(1);
+    expect(dirty.err[0]).toBe(
+      `Refusing to terminate the worker: Placed repositories on ${HOSTNAME} are unresolved: terminating it would lose their work`,
+    );
+    for (const cli of [busy, dirty]) expect(cli.control.mutations()).toEqual([]);
+    const forced = setup({ ...TERMINATING, activity: { kind: "active", count: 1 } });
+    expect(await run(TERMINATE("--force"), forced.context)).toBe(0);
+    expect(forced.out).toContain(
+      "--force: the worker is not inspected for active agents or checkouts.",
+    );
+    expect(forced.control.mutations()).toEqual([`terminate ${ID}`]);
+  });
+
+  test("at a terminal, the host key is typed; anything else declines", async () => {
+    const asked = fakePrompt({ interactive: true, answers: ["yes"] });
+    const cli = setup({ ...TERMINATING, prompt: asked });
+    expect(await run(["worker", "terminate", KEY, "--keep"], cli.context)).toBe(1);
+    expect(asked.asked).toEqual([
+      `Terminate worker ${KEY} (${HOSTNAME}), EC2 instance ${ID}? Its machine and root volume ` +
+        "are destroyed. Type the host key to confirm: ",
+    ]);
+    expect(cli.err).toEqual(["Not confirmed: the worker was not terminated."]);
+    expect(cli.control.mutations()).toEqual([]);
+  });
+});
+
+describe("fffactory worker terminate's refusals (worker-lifecycle §Terminate (keep))", () => {
+  test("without --keep: removal arrives later", async () => {
+    const cli = setup(TERMINATING);
+    expect(await run(["worker", "terminate", KEY, "--confirm", KEY], cli.context)).toBe(1);
+    expect(cli.err).toEqual([
+      "fffactory worker terminate: removal arrives in a later release; use --keep",
+    ]);
+    expect(cli.identity.requests).toEqual([]);
+  });
+
+  test("without the admin client, naming how to store it", async () => {
+    const cli = setup({ states: ["terminated"] });
+    expect(await run(TERMINATE(), cli.context)).toBe(1);
+    expect(cli.err).toEqual([
+      "Refusing to terminate the worker: factory.json has no Tailscale admin client " +
+        "(tailscale.admin_client_secret): terminate deletes the worker's tailnet device with it",
+      "Next: Store it with `fffactory secret set tailscale-admin-client`, then rerun " +
+        `\`fffactory worker terminate ${KEY} --keep\`.`,
+    ]);
+    expect(cli.identity.requests).toEqual([]);
+  });
+
+  test("--confirm naming another key, never echoed; no terminal and no --confirm", async () => {
+    const pasted = "tskey-auth-kExample1CNTRL-secretvalue";
+    const cli = setup(TERMINATING);
+    expect(
+      await run(["worker", "terminate", KEY, "--keep", "--confirm", pasted], cli.context),
+    ).toBe(1);
+    expect(cli.err[0]).toBe(
+      `Refusing to terminate the worker: --confirm does not name the host ${KEY}`,
+    );
+    expect(all(cli)).not.toContain(pasted);
+    expect(await run(["worker", "terminate", KEY, "--keep"], cli.context)).toBe(1);
+    expect(cli.err.at(-1)).toBe(
+      "Terminating a worker needs your confirmation: rerun at a terminal, or pass --confirm KEY.",
+    );
+    expect(cli.identity.requests).toEqual([]);
+  });
+
+  test("takes no --yes", async () => {
+    const cli = setup(TERMINATING);
+    expect(await run(["worker", "terminate", KEY, "--keep", "--yes"], cli.context)).toBe(1);
+    expect(cli.err.at(-1)).toContain("--yes");
+    expect(cli.control.calls).toEqual([]);
+  });
+
+  test("interrupted once EC2 was asked: the lock stays, and the device may remain", async () => {
+    const cli = setup({ ...TERMINATING, states: ["shutting-down"], interruptOnSleep: true });
+    expect(await run(TERMINATE(), cli.context)).toBe(1);
+    expect(cli.err).toEqual([
+      "EC2 was asked to terminate the instance and may still be doing so; its tailnet devices " +
+        "may remain: check them at https://login.tailscale.com/admin/machines.",
+      "Interrupted: the factory stays locked, with a record of this operation. Once fffactory " +
+        "has exited, break the lock with `fffactory lock break`, then rerun " +
+        `\`fffactory worker terminate ${KEY} --keep\`.`,
+    ]);
+  });
+
+  test("its usage is printed with the others", async () => {
+    const cli = setup();
+    expect(await run(["worker", "--help"], cli.context)).toBe(0);
+    expect(cli.out).toContain(
+      "       fffactory worker terminate KEY --keep [--force] [--confirm KEY] [--instance PATH] [--profile NAME]",
+    );
   });
 });

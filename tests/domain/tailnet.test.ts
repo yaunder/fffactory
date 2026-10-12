@@ -1,5 +1,11 @@
 import { describe, expect, test } from "bun:test";
-import { carriesHostname, knownHostsFor, resolveWorker } from "../../src/domain/tailnet";
+import {
+  carriesHostname,
+  knownHostsFor,
+  resolveWorker,
+  selectWorkerDevices,
+  type TailnetDevice,
+} from "../../src/domain/tailnet";
 import { HOST_KEY, peer, TAG } from "../support/fake-workers";
 
 const NAME = "fff-aaaa1111-builder-1";
@@ -109,5 +115,65 @@ describe("the hostname-match rule", () => {
     expect(knownHostsFor(resolution.worker)).toBe(
       `${NAME} ${HOST_KEY}\n${NAME} ssh-rsa AAAAB3NzaC1yc2E=\n`,
     );
+  });
+});
+
+describe("the worker's devices to delete (worker-lifecycle §Tailnet device removal)", () => {
+  function device(
+    id: string,
+    hostName: string,
+    tags: readonly string[],
+    dnsName = "",
+  ): TailnetDevice {
+    return { id, hostName, dnsName, tags };
+  }
+
+  test("every device reporting the hostname and carrying the factory's tag is deleted", () => {
+    const worker = device("nAAA1CNTRL", NAME, [TAG], `${NAME}.example-tailnet.ts.net`);
+    const stale = device("nBBB2CNTRL", NAME, [TAG], `${NAME}-1.example-tailnet.ts.net`);
+    const shouted = device("nCCC3CNTRL", NAME.toUpperCase(), [TAG, "tag:x"]);
+    const others = [
+      device("nDDD4CNTRL", `${NAME}-1`, [TAG]),
+      device("nEEE5CNTRL", "fff-aaaa1111-builder", [TAG]),
+      device("nFFF6CNTRL", "laptop", []),
+    ];
+    expect(selectWorkerDevices([worker, ...others, stale, shouted], NAME, TAG)).toEqual({
+      tagged: [worker, stale, shouted],
+      untagged: [],
+    });
+  });
+
+  test("a device whose MagicDNS label alone is the hostname is another worker's, never deleted", () => {
+    // Host keys may end in -N: builder's second device can be renamed to builder-1's label.
+    const builder = "fff-aaaa1111-builder";
+    const builders = device("nAAA1CNTRL", builder, [TAG], `${NAME}.example-tailnet.ts.net`);
+    const intruder = device("nBBB2CNTRL", "laptop", [], `${NAME}.example-tailnet.ts.net`);
+    expect(selectWorkerDevices([builders, intruder], NAME, TAG)).toEqual({
+      tagged: [],
+      untagged: [],
+    });
+    expect(selectWorkerDevices([builders], builder, TAG).tagged).toEqual([builders]);
+  });
+
+  test("a device with the hostname but without the tag is never deleted, only reported", () => {
+    const tagged = device("nAAA1CNTRL", NAME, [TAG]);
+    const intruder = device("nBBB2CNTRL", NAME.toUpperCase(), ["tag:other"]);
+    const untagged = device("nCCC3CNTRL", NAME, []);
+    expect(selectWorkerDevices([tagged, intruder, untagged], NAME, TAG)).toEqual({
+      tagged: [tagged],
+      untagged: [intruder, untagged],
+    });
+  });
+
+  test("the tag is compared exactly", () => {
+    for (const tags of [[`${TAG}-x`], [TAG.toUpperCase()]])
+      expect(selectWorkerDevices([device("nA", NAME, tags)], NAME, TAG).tagged).toEqual([]);
+  });
+
+  test("no device with the name selects nothing", () => {
+    expect(selectWorkerDevices([device("nA", "laptop", [TAG])], NAME, TAG)).toEqual({
+      tagged: [],
+      untagged: [],
+    });
   });
 });

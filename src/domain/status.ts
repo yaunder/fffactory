@@ -323,10 +323,11 @@ function unavailableView(
  */
 export function locateWorker(
   view: PeerView,
-  hostname: string,
+  worker: { readonly key: HostKey; readonly hostname: string },
   tag: string,
   then: Then = thenRerunStatus,
 ): TailnetLocation {
+  const { hostname } = worker;
   if (view.kind !== "peers") return unavailableView(view, then);
   const verdict = (summary: string, action: string) => notReadyAfter(summary, action, then);
   const resolution = resolveWorker(view.peers, hostname, tag);
@@ -334,18 +335,19 @@ export function locateWorker(
     case "found":
       return resolution;
     case "missing":
-      // TODO(re-evaluate when host replacement lands in M3): offer guided replacement of a
-      // worker whose bootstrap failed.
       // Bootstrap runs once, at first boot, so a failed one is recovered by terminating the
-      // instance: refresh drops it from state and the next plan creates it, which D11 allows.
+      // instance, keeping the host: refresh drops it from state and the next plan creates it,
+      // which D11 allows (docs/specs/worker-bootstrap.md §Failed first boot). A worker that
+      // never joined cannot be inspected, so only --force terminates it.
       return blocked(
         "missing",
         verdict(
           `No Tailscale device named ${hostname} is visible from this machine`,
           "If the worker has just started, wait for it to join the tailnet. Otherwise check " +
             "that tailnet policy lets this device see the factory's tag, and the bootstrap in " +
-            "the instance's EC2 console output: if it failed, terminate the instance in the " +
-            "EC2 console; once it is terminated, the next `fffactory apply` creates it again",
+            "the instance's EC2 console output: if it shows the bootstrap failed, terminate it " +
+            `uninspected with \`fffactory worker terminate ${worker.key} --keep --force\`, and ` +
+            "`fffactory apply` then creates it again",
         ),
       );
     case "duplicate":

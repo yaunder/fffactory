@@ -342,7 +342,7 @@ describe("factory status", () => {
     expect(worker).toMatchObject({ status: "not_ready", tailnet: "missing", release: "unknown" });
     expect(worker?.nextAction).toContain("wait for it to join the tailnet");
     expect(worker?.nextAction).toContain(
-      "if it failed, terminate the instance in the EC2 console; once it is terminated, the next `fffactory apply` creates it again",
+      "if it shows the bootstrap failed, terminate it uninspected with `fffactory worker terminate builder-1 --keep --force`, and `fffactory apply` then creates it again",
     );
     expect(transport.calls.map((call) => call.worker.hostname)).toEqual([B2, B2, B2]);
   });

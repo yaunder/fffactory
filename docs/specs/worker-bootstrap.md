@@ -143,14 +143,21 @@ User data runs once, and nothing reruns it: a bootstrap that fails, even
 transiently, leaves an instance that may never join the tailnet, or never
 write its marker. That apply then fails the worker at its deadline, and
 `fffactory status` names the same recovery for a worker missing from the
-tailnet ([status §Workers](status.md#workers)): read the bootstrap in the instance's EC2 console
-output and, if it failed, terminate the instance in the EC2 console. Once it
-is terminated, Terraform's refresh drops it from state and the next `fffactory
-apply` plans the host as a plain create, which the D11 refusals allow
-([plan-apply §Refusals](plan-apply.md#refusals-until-lifecycle-work-lands-d11)),
-and the new instance boots afresh, its first boot waited for by that apply. Guided replacement arrives with host
-replacement in milestone M3 (`TODO(re-evaluate when host replacement lands
-in M3)` in `src/domain/status.ts`).
+tailnet ([status §Workers](status.md#workers)): read the bootstrap in the
+instance's EC2 console output and, if it shows the bootstrap failed, terminate
+it with `fffactory worker terminate KEY --keep --force`, then run `fffactory
+apply` ([worker lifecycle §Terminate (keep)](worker-lifecycle.md#terminate-keep)).
+Terminate destroys the instance, deletes any tailnet device it left, and keeps
+the host in factory.json. `--force` is required: a worker that never joined the
+tailnet cannot be inspected, and terminate refuses it without `--force`, which
+says the console output was read
+([Gates (terminate)](worker-lifecycle.md#gates-terminate)). Terminate's refusal
+names that too, rather than status's recovery, so it never sends the operator
+back to the command it refused. Terraform's
+refresh then drops the terminated instance from state, and that apply plans the
+host as a plain create, which the D11 refusals allow
+([plan-apply §Refusals](plan-apply.md#refusals-until-lifecycle-work-lands-d11)):
+the new instance boots afresh, its first boot waited for by that apply.
 
 ### No SSM
 

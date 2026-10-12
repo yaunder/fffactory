@@ -1,6 +1,7 @@
 /**
- * Secret material and where factory.json refers to it. Material comes from a hidden prompt
- * or standard input, goes straight to Secrets Manager, and is never shown or stored:
+ * Secret material and where factory.json refers to it. Material comes from a hidden prompt,
+ * standard input or Secrets Manager (`SecretStore.read`), goes only to Secrets Manager or, for
+ * the Tailscale admin client, to Tailscale's token exchange, and is never shown or stored:
  * factory.json keeps only the secret's ARN.
  */
 import {
@@ -21,7 +22,8 @@ const REDACTED = "[secret]";
 
 /**
  * A secret value that shows as `[secret]` wherever it is printed, interpolated, inspected
- * or serialized. Only `reveal` returns the value, for the one call that stores it.
+ * or serialized. Only `reveal` returns the value, and only adapters call it: a `SecretStore`
+ * adapter, to store or read it, and the Tailscale API adapter, for its token requests.
  */
 export class SecretMaterial {
   readonly #value: string;

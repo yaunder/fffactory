@@ -294,6 +294,7 @@ is skipped, see [Mark an epic ready](MACHINE_ONBOARDING.md#12-mark-an-epic-ready
 | `fffactory apply` | Review and apply a plan under the factory-wide lock. |
 | `fffactory status` | Read worker readiness and dispatch state. |
 | `fffactory worker stop\|start KEY` | Stop an idle worker's instance to save compute, or start it again. |
+| `fffactory worker terminate KEY --keep` | Destroy a worker's instance and delete its Tailscale devices, keeping the host so the next `fffactory apply` creates it afresh. Needs the Tailscale admin client (`fffactory secret set tailscale-admin-client`). |
 | `fffactory upgrade` | Use a newer release to review and apply a release-pin change. |
 
 Operate with the release factory.json pins; change that pin only through

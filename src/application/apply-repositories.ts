@@ -162,7 +162,7 @@ export async function applyRepositories(
       outcomes.push({ ...worker, kind: "stopped" });
       continue;
     }
-    const location = locateWorker(view, worker.hostname, request.tag, thenRerunApply);
+    const location = locateWorker(view, worker, request.tag, thenRerunApply);
     if (location.kind === "blocked") {
       outcomes.push(skip(worker, location.verdict));
       continue;

@@ -2,9 +2,11 @@ import { describe, expect, test } from "bun:test";
 import type { AgentActivity } from "../../src/application/control-plane";
 import { INSPECT_TIMEOUT_MS } from "../../src/application/inspect-worker";
 import type { MachineRequest } from "../../src/application/machine-control";
+import { factoryStatus } from "../../src/application/status";
 import {
   startWorker,
   stopWorker,
+  terminateWorker,
   type WorkerLifecycleDependencies,
   type WorkerLifecycleRequest,
 } from "../../src/application/worker-lifecycle";
@@ -24,21 +26,25 @@ import {
 import { sha256Text } from "../../src/infrastructure/release-tarball";
 import { FAKE_CALLER, fakeCallerIdentity } from "../support/doctor-fakes";
 import { fakeControlPlane } from "../support/fake-control-plane";
-import { fakePrompt } from "../support/fake-secrets";
+import { fakePrompt, fakeSecretStore } from "../support/fake-secrets";
 import {
   type Answer,
   answers,
   fakeMachineControl,
   fakeMachineInventory,
   fakeTailnet,
+  fakeTailnetAdmin,
   fakeTime,
   fakeTransport,
   machine,
   peer,
   peers,
   readyWorker,
+  statusAnswers,
+  tailnetDevice,
 } from "../support/fake-workers";
 import { BUCKET, declaring, FACTORY, NOW, RELEASE, WORKER_TAG } from "../support/factory-world";
+import type { SecretReference } from "../../src/domain/instance";
 import { MemoryLockStore } from "../support/memory-lock-store";
 
 const KEY = "builder-1";
@@ -58,7 +64,14 @@ interface WorldOptions {
   readonly caller?: CallerObservation;
   readonly prompt?: ReturnType<typeof fakePrompt>;
   readonly onSleep?: (slept: number) => void;
+  readonly admin?: Parameters<typeof fakeTailnetAdmin>[0];
+  readonly secretReadFails?: Error;
 }
+
+/** The admin client's reference, and the client secret Secrets Manager holds for it. */
+const ADMIN_ARN =
+  "arn:aws:secretsmanager:eu-west-2:123456789012:secret:fff-abcd1234/tailscale-admin-client-AbCdEf" as SecretReference;
+const ADMIN_SECRET = "tskey-client-kExample1CNTRL-0123456789abcdef";
 
 /** One declared worker, `builder-1`, its machine and the ports a power command reaches. */
 function world(options: WorldOptions = {}) {
@@ -77,6 +90,13 @@ function world(options: WorldOptions = {}) {
     [HOSTNAME]: options.worker ?? answers(readyWorker(FACTORY, KEY, RELEASE)),
   });
   const prompt = options.prompt ?? fakePrompt();
+  const secrets = fakeSecretStore({
+    values: { [ADMIN_ARN]: ADMIN_SECRET },
+    ...(options.secretReadFails ? { readFailsWith: options.secretReadFails } : {}),
+  });
+  const admin = fakeTailnetAdmin(
+    options.admin ?? { devices: [tailnetDevice("nWorker1CNTRL", HOSTNAME, [WORKER_TAG])] },
+  );
   const progress: unknown[] = [];
   let interrupted = false;
   const time = fakeTime(NOW, (slept) => options.onSleep?.(slept));
@@ -89,6 +109,8 @@ function world(options: WorldOptions = {}) {
     transport: transport.transport,
     controlPlane: options.noControlPlane ? undefined : controlPlane.controlPlane,
     prompt: prompt.prompt,
+    secrets: secrets.store,
+    tailnetAdmin: admin.admin,
     interrupted: () => interrupted,
     sleep: time.sleep,
     sha256: sha256Text,
@@ -104,6 +126,8 @@ function world(options: WorldOptions = {}) {
     tailnet,
     transport,
     prompt,
+    secrets,
+    admin,
     progress,
     time,
     interrupt: () => {
@@ -237,7 +261,7 @@ describe("fffactory worker stop (worker-lifecycle §Stop)", () => {
       expect(w.control.mutations()).toEqual([`stop ${ID}`]);
       expect(w.identity.requests).toHaveLength(1);
       expect(stages(w)).not.toContain("inspecting");
-      expect(w.progress).toContainEqual({ kind: "forced" });
+      expect(w.progress).toContainEqual({ kind: "forced", action: "stop" });
     }
   });
 
@@ -735,5 +759,541 @@ describe("interruption (worker-lifecycle §Interruption)", () => {
     });
     expect(w.lockStore.locks.size).toBe(1);
     expect(w.lockStore.operationWrites).toEqual([]);
+  });
+});
+
+/** factory.json declaring builder-1 and builder-2, with the Tailscale admin client. */
+function withAdmin(): FactoryInstance {
+  const instance = declaring(KEY, "builder-2");
+  return {
+    ...instance,
+    tailscale: {
+      tag: WORKER_TAG,
+      auth_key_secret: instance.tailscale?.auth_key_secret as SecretReference,
+      admin_client_secret: ADMIN_ARN,
+    },
+  };
+}
+
+/** A terminate request: keep mode, confirmed in advance with `--confirm builder-1`. */
+function terminating(
+  w: World,
+  overrides: Partial<Omit<WorkerLifecycleRequest, "action">> = {},
+): Omit<WorkerLifecycleRequest, "action"> {
+  return request(w, { instance: withAdmin(), yes: false, confirm: KEY, ...overrides });
+}
+
+/** The worker answering its inspection, its repository result and its dispatch state. */
+const CLEAN = statusAnswers(readyWorker(FACTORY, KEY, RELEASE));
+const TERMINATING = { states: ["shutting-down", "terminated"] as const, worker: CLEAN };
+
+describe("fffactory worker terminate --keep (worker-lifecycle §Terminate (keep))", () => {
+  test("terminates an idle running worker, waits for terminated, then deletes its tailnet device", async () => {
+    const w = world({
+      ...TERMINATING,
+      admin: {
+        devices: [
+          tailnetDevice("nWorker1CNTRL", HOSTNAME, [WORKER_TAG]),
+          tailnetDevice("nOther1CNTRL", `${FACTORY}-builder-2`, [WORKER_TAG]),
+        ],
+      },
+    });
+    const result = await terminateWorker(w.deps, terminating(w));
+    expect(result).toMatchObject({
+      kind: "done",
+      action: "terminate",
+      worker: { key: KEY, hostname: HOSTNAME },
+      instanceId: ID,
+      changed: true,
+      devices: { kind: "listed", removed: ["nWorker1CNTRL"], failed: [], untagged: [] },
+      leftover: undefined,
+    });
+    expect(w.controlPlane.calls).toEqual(["activeAgents"]);
+    expect(w.transport.calls.map(({ command }) => command.join(" "))).toEqual([
+      expect.stringContaining("repositories"),
+    ]);
+    expect(w.control.calls).toEqual([`terminate ${ID}`, `state ${ID}`, `state ${ID}`]);
+    expect(w.secrets.reads).toEqual([
+      {
+        reference: ADMIN_ARN,
+        region: "eu-west-2",
+        credentials: { source: "--profile", profile: "factory" },
+      },
+    ]);
+    expect(w.admin.secrets).toEqual([ADMIN_SECRET]);
+    expect(w.admin.calls).toEqual(["open", "devices", "remove nWorker1CNTRL"]);
+    expect(w.admin.devices().map((device) => device.id)).toEqual(["nOther1CNTRL"]);
+    expect(w.lockStore.locks.size).toBe(0);
+    expect(records(w)[0]).toMatchObject({
+      operation: "worker-terminate",
+      status: "succeeded",
+      stages: [{ name: "terminate", status: "terminated" }],
+      machine: { key: KEY, hostname: HOSTNAME, instance_id: ID, state: "terminated" },
+      failure: null,
+    });
+    expect(stages(w)).toEqual([
+      "locating",
+      "locating",
+      "inspecting",
+      "authorizing",
+      "terminating",
+      "terminating",
+      "removing_devices",
+      "terminated",
+    ]);
+    expect(w.progress).toEqual([
+      { kind: "located", key: KEY, hostname: HOSTNAME, instanceId: ID, state: "running" },
+      { kind: "requested", action: "terminate", instanceId: ID },
+      { kind: "removing_devices", hostname: HOSTNAME },
+    ]);
+  });
+
+  test("the secret reaches nothing but the admin client: no record, progress or result", async () => {
+    const w = world(TERMINATING);
+    const result = await terminateWorker(w.deps, terminating(w));
+    for (const text of [
+      JSON.stringify(result),
+      JSON.stringify(w.progress),
+      ...w.lockStore.operationWrites.map((record) => JSON.stringify(record)),
+    ])
+      expect(text).not.toContain(ADMIN_SECRET);
+  });
+
+  test("a stopped worker passes the gates uninspected, without --force", async () => {
+    const w = world({
+      ...TERMINATING,
+      inventory: { kind: "machines", machines: [machine(KEY, "stopped", ID)] },
+      view: OFFLINE,
+    });
+    expect(await terminateWorker(w.deps, terminating(w))).toMatchObject({
+      kind: "done",
+      changed: true,
+    });
+    expect(w.controlPlane.calls).toEqual([]);
+    expect(w.transport.calls).toEqual([]);
+    expect(w.tailnet.reads()).toBe(0);
+    expect(stages(w)).not.toContain("inspecting");
+    expect(w.progress).toContainEqual({ kind: "uninspected_stopped" });
+    expect(w.control.mutations()).toEqual([`terminate ${ID}`]);
+  });
+
+  test("a machine already being terminated is only waited for, then its devices deleted", async () => {
+    const w = world({
+      ...TERMINATING,
+      inventory: { kind: "machines", machines: [machine(KEY, "shutting-down", ID)] },
+      states: ["absent"],
+      prompt: fakePrompt({ interactive: true }),
+    });
+    expect(await terminateWorker(w.deps, terminating(w, { confirm: undefined }))).toMatchObject({
+      kind: "done",
+      changed: false,
+      awaited: true,
+      devices: { removed: ["nWorker1CNTRL"] },
+    });
+    expect(w.control.mutations()).toEqual([]);
+    expect(w.controlPlane.calls).toEqual([]);
+    expect(w.prompt.asked).toEqual([]);
+    expect(records(w)[0]).toMatchObject({
+      status: "succeeded",
+      stages: [{ name: "terminate", status: "unchanged" }],
+    });
+  });
+
+  test("a pending or stopping machine is refused before EC2 is asked anything", async () => {
+    for (const state of ["pending", "stopping"] as const) {
+      const w = world({ inventory: { kind: "machines", machines: [machine(KEY, state, ID)] } });
+      expect(await terminateWorker(w.deps, terminating(w))).toMatchObject({
+        kind: "refused",
+        refusal: { summary: `EC2 instance ${ID} is ${state}` },
+      });
+      expect(w.control.mutations()).toEqual([]);
+      expect(w.admin.calls).toEqual([]);
+    }
+  });
+
+  test("a failed TerminateInstances fails by error name, and no device is deleted", async () => {
+    const w = world({
+      ...TERMINATING,
+      request: { kind: "failed", reason: "EC2 TerminateInstances failed: UnauthorizedOperation" },
+    });
+    expect(await terminateWorker(w.deps, terminating(w))).toMatchObject({
+      kind: "failed",
+      refusal: {
+        summary: "EC2 TerminateInstances failed: UnauthorizedOperation",
+        nextAction: expect.stringContaining("ec2:TerminateInstances"),
+      },
+    });
+    expect(w.admin.calls).toEqual(["open"]);
+    expect(w.lockStore.locks.size).toBe(0);
+  });
+});
+
+describe("refusals before any mutation (worker-lifecycle §Terminate (keep))", () => {
+  test("without the admin client, before anything reaches AWS", async () => {
+    const w = world();
+    expect(await terminateWorker(w.deps, terminating(w, { instance: declaring(KEY) }))).toEqual({
+      kind: "refused",
+      refusal: expect.objectContaining({
+        summary: expect.stringContaining("tailscale.admin_client_secret"),
+        nextAction: expect.stringContaining("`fffactory secret set tailscale-admin-client`"),
+      }),
+      operation: undefined,
+    });
+    expect(w.identity.requests).toEqual([]);
+    expect(w.lockStore.calls).toEqual([]);
+  });
+
+  test("an undeclared key, another account, a pin mismatch and a held lock", async () => {
+    const undeclared = world();
+    expect(
+      await terminateWorker(undeclared.deps, terminating(undeclared, { key: "builder-9" })),
+    ).toMatchObject({ kind: "refused", operation: undefined });
+    const other = world({
+      caller: { kind: "caller", caller: { ...FAKE_CALLER, account: "999999999999" } },
+    });
+    expect(await terminateWorker(other.deps, terminating(other))).toMatchObject({
+      kind: "account_refused",
+    });
+    const pinned = world();
+    expect(
+      await terminateWorker(pinned.deps, terminating(pinned, { release: "0.4.0" as Release })),
+    ).toMatchObject({ kind: "release_mismatch" });
+    const locked = world();
+    const held = locked.lockStore.hold(
+      BUCKET,
+      newLockRecord({
+        factoryId: FACTORY,
+        operation: "apply",
+        holder: { principal: "arn:aws:iam::123456789012:user/other", host: "desk" },
+        now: NOW,
+        release: RELEASE,
+        randomBytes: (count) => new Uint8Array(count).fill(5),
+      }),
+    );
+    expect(await terminateWorker(locked.deps, terminating(locked))).toEqual({
+      kind: "locked",
+      held,
+    });
+    for (const w of [undeclared, other, pinned, locked]) {
+      expect(w.control.mutations()).toEqual([]);
+      expect(w.admin.calls).toEqual([]);
+      expect(w.secrets.reads).toEqual([]);
+    }
+  });
+
+  test("--confirm naming another key is refused before AWS, never echoing it", async () => {
+    const w = world();
+    const result = await terminateWorker(
+      w.deps,
+      terminating(w, { confirm: "AKIAIOSFODNN7EXAMPLE" }),
+    );
+    expect(result).toMatchObject({
+      kind: "refused",
+      refusal: { summary: `--confirm does not name the host ${KEY}` },
+      operation: undefined,
+    });
+    expect(JSON.stringify(result)).not.toContain("AKIAIOSFODNN7EXAMPLE");
+    expect(w.identity.requests).toEqual([]);
+  });
+
+  test("--yes does not confirm a terminate: without a terminal it needs --confirm", async () => {
+    const w = world();
+    expect(
+      await terminateWorker(w.deps, terminating(w, { confirm: undefined, yes: true })),
+    ).toEqual({ kind: "unconfirmable" });
+    expect(w.identity.requests).toEqual([]);
+  });
+
+  test("at a terminal the host key must be typed: anything else declines, changing nothing", async () => {
+    for (const answer of ["y", "yes", "builder-2", ""]) {
+      const w = world({
+        ...TERMINATING,
+        prompt: fakePrompt({ interactive: true, answers: [answer] }),
+      });
+      expect(await terminateWorker(w.deps, terminating(w, { confirm: undefined }))).toMatchObject({
+        kind: "declined",
+      });
+      expect(w.prompt.asked).toEqual([
+        `Terminate worker ${KEY} (${HOSTNAME}), EC2 instance ${ID}? Its machine and root ` +
+          "volume are destroyed. Type the host key to confirm: ",
+      ]);
+      expect(w.control.mutations()).toEqual([]);
+      expect(w.admin.calls).toEqual(["open"]);
+      expect(records(w)[0]).toMatchObject({ status: "declined" });
+    }
+    const typed = world({
+      ...TERMINATING,
+      prompt: fakePrompt({ interactive: true, answers: [KEY] }),
+    });
+    expect(
+      await terminateWorker(typed.deps, terminating(typed, { confirm: undefined })),
+    ).toMatchObject({
+      kind: "done",
+    });
+    expect(typed.control.mutations()).toEqual([`terminate ${ID}`]);
+  });
+
+  test("an admin client secret that cannot be read, or that Tailscale refuses, refuses the terminate", async () => {
+    const unreadable = world({
+      ...TERMINATING,
+      secretReadFails: new Error(
+        "Reading the secret from Secrets Manager failed: AccessDeniedException",
+      ),
+    });
+    expect(await terminateWorker(unreadable.deps, terminating(unreadable))).toMatchObject({
+      kind: "refused",
+      refusal: {
+        summary: "Reading the secret from Secrets Manager failed: AccessDeniedException",
+        nextAction: expect.stringContaining("secretsmanager:GetSecretValue"),
+      },
+    });
+    const refused = world({
+      ...TERMINATING,
+      admin: { open: { kind: "failed", reason: "Tailscale refused the admin client (HTTP 401)" } },
+    });
+    expect(await terminateWorker(refused.deps, terminating(refused))).toMatchObject({
+      kind: "refused",
+      refusal: {
+        summary:
+          "The Tailscale admin client could not be used: Tailscale refused the admin client (HTTP 401)",
+      },
+    });
+    for (const w of [unreadable, refused]) {
+      expect(w.control.mutations()).toEqual([]);
+      expect(records(w)[0]).toMatchObject({ status: "refused" });
+      expect(w.lockStore.locks.size).toBe(0);
+    }
+  });
+});
+
+describe("terminate's gates (worker-lifecycle §Gates (terminate))", () => {
+  test("active agents, unresolved or unmanaged checkouts, or a worker it cannot inspect refuse it", async () => {
+    const cases: WorldOptions[] = [
+      { activity: { kind: "active", count: 1 }, worker: CLEAN },
+      { worker: statusAnswers(readyWorker(FACTORY, KEY, RELEASE), "unresolved") },
+      { worker: statusAnswers(readyWorker(FACTORY, KEY, RELEASE), "synchronized", ["acme/old"]) },
+      { worker: statusAnswers(readyWorker(FACTORY, KEY, RELEASE), "unreadable") },
+      { worker: { kind: "unreachable", reason: "the connection timed out" } },
+      { view: OFFLINE },
+      { noControlPlane: true, worker: CLEAN },
+    ];
+    for (const options of cases) {
+      const w = world({ ...TERMINATING, ...options });
+      const result = await terminateWorker(w.deps, terminating(w));
+      expect(result).toMatchObject({ kind: "refused" });
+      expect(w.control.mutations()).toEqual([]);
+      expect(w.admin.calls).toEqual([]);
+      expect(records(w)[0]).toMatchObject({
+        status: "refused",
+        stages: [{ name: "terminate", status: "refused" }],
+      });
+    }
+  });
+
+  test("--force overrides them, never the confirmation, the lock or the record", async () => {
+    for (const options of [
+      { activity: { kind: "active", count: 3 } as const },
+      { view: OFFLINE },
+      { worker: statusAnswers(readyWorker(FACTORY, KEY, RELEASE), "unresolved") },
+    ]) {
+      const w = world({ ...TERMINATING, ...options });
+      expect(await terminateWorker(w.deps, terminating(w, { force: true }))).toMatchObject({
+        kind: "done",
+        changed: true,
+      });
+      expect(w.controlPlane.calls).toEqual([]);
+      expect(w.transport.calls).toEqual([]);
+      expect(w.progress).toContainEqual({ kind: "forced", action: "terminate" });
+      expect(records(w)[0]).toMatchObject({ status: "succeeded" });
+    }
+  });
+});
+
+describe("tailnet device removal (worker-lifecycle §Tailnet device removal)", () => {
+  test("only tagged devices with the worker's hostname are deleted; an untagged one is reported", async () => {
+    const w = world({
+      ...TERMINATING,
+      admin: {
+        devices: [
+          tailnetDevice("nWorker1CNTRL", HOSTNAME, [WORKER_TAG]),
+          tailnetDevice(
+            "nStale1CNTRL",
+            HOSTNAME,
+            [WORKER_TAG],
+            `${HOSTNAME}-1.example-tailnet.ts.net`,
+          ),
+          tailnetDevice("nIntruder1CNTRL", HOSTNAME, ["tag:other"]),
+          tailnetDevice("nSuffix1CNTRL", `${HOSTNAME}-1`, [WORKER_TAG]),
+        ],
+      },
+    });
+    const result = await terminateWorker(w.deps, terminating(w));
+    expect(result).toMatchObject({
+      kind: "done",
+      devices: {
+        kind: "listed",
+        removed: ["nWorker1CNTRL", "nStale1CNTRL"],
+        failed: [],
+        untagged: ["nIntruder1CNTRL"],
+      },
+      leftover: { summary: `Not every Tailscale device named ${HOSTNAME} was deleted` },
+    });
+    expect(w.admin.calls).toEqual([
+      "open",
+      "devices",
+      "remove nWorker1CNTRL",
+      "remove nStale1CNTRL",
+    ]);
+    expect(JSON.stringify(result)).not.toContain("tag:other");
+    expect(records(w)[0]).toMatchObject({
+      status: "partial",
+      stages: [{ name: "terminate", status: "partial" }],
+      failure: `Not every Tailscale device named ${HOSTNAME} was deleted`,
+    });
+  });
+
+  test("a device that could not be deleted, or a listing that failed, leaves the terminate partial", async () => {
+    const failing = world({
+      ...TERMINATING,
+      admin: {
+        devices: [tailnetDevice("nWorker1CNTRL", HOSTNAME, [WORKER_TAG])],
+        failing: { nWorker1CNTRL: "Tailscale answered HTTP 500" },
+      },
+    });
+    expect(await terminateWorker(failing.deps, terminating(failing))).toMatchObject({
+      kind: "done",
+      changed: true,
+      devices: { failed: [{ id: "nWorker1CNTRL", reason: "Tailscale answered HTTP 500" }] },
+      leftover: { details: ["Deleting device nWorker1CNTRL failed: Tailscale answered HTTP 500"] },
+    });
+    const unlisted = world({
+      ...TERMINATING,
+      admin: { listing: { kind: "failed", reason: "Tailscale answered HTTP 503" } },
+    });
+    expect(await terminateWorker(unlisted.deps, terminating(unlisted))).toMatchObject({
+      kind: "done",
+      devices: { kind: "unlisted" },
+      leftover: {
+        summary: "The tailnet's devices could not be listed: Tailscale answered HTTP 503",
+      },
+    });
+    for (const w of [failing, unlisted]) {
+      expect(w.control.mutations()).toEqual([`terminate ${ID}`]);
+      expect(records(w)[0]).toMatchObject({ status: "partial" });
+      expect(w.lockStore.locks.size).toBe(0);
+    }
+  });
+
+  test("no device with the name is nothing to delete, and complete", async () => {
+    const w = world({ ...TERMINATING, admin: { devices: [] } });
+    expect(await terminateWorker(w.deps, terminating(w))).toMatchObject({
+      kind: "done",
+      devices: { kind: "listed", removed: [], failed: [], untagged: [] },
+      leftover: undefined,
+    });
+  });
+});
+
+describe("after terminate --keep (worker-lifecycle §Terminate (keep))", () => {
+  test("status reports the host not provisioned, and factory.json still declares it", async () => {
+    let terminated = false;
+    const w = world(TERMINATING);
+    const instance = withAdmin();
+    const machines = {
+      list: async () =>
+        ({
+          kind: "machines",
+          machines: terminated ? [] : [machine(KEY, "running", ID)],
+        }) as const,
+    };
+    const deps: WorkerLifecycleDependencies = {
+      ...w.deps,
+      machines,
+      control: {
+        ...w.deps.control,
+        terminate: async (target) => {
+          terminated = true;
+          return w.deps.control.terminate(target);
+        },
+      },
+    };
+    expect(await terminateWorker(deps, terminating(w, { instance }))).toMatchObject({
+      kind: "done",
+    });
+    expect(instance.hosts?.map((host): string => host.key)).toEqual([KEY, "builder-2"]);
+    const status = await factoryStatus(
+      {
+        identity: w.deps.identity,
+        machines,
+        peers: w.deps.peers,
+        transport: w.deps.transport,
+        sha256: sha256Text,
+      },
+      { instance, credentials: { source: "chain" } },
+    );
+    expect(status.kind === "report" && status.report.workers[0]).toMatchObject({
+      key: KEY,
+      status: "not_ready",
+      summary: "Not provisioned: no EC2 instance carries this host key",
+    });
+  });
+});
+
+describe("terminate's interruption (worker-lifecycle §Interruption)", () => {
+  test("during the wait for terminated: the lock and the record stay, and no device is deleted", async () => {
+    let w: World | undefined;
+    w = world({ ...TERMINATING, states: ["shutting-down"], onSleep: () => w?.interrupt() });
+    expect(await terminateWorker(w.deps, terminating(w))).toMatchObject({
+      kind: "interrupted",
+      locked: true,
+      requested: true,
+    });
+    expect(w.admin.calls).toEqual(["open"]);
+    expect(w.lockStore.locks.size).toBe(1);
+    expect(records(w)[0]).toMatchObject({
+      status: "running",
+      stages: [{ name: "terminate", status: "terminating" }],
+    });
+  });
+
+  test("between two device deletions: nothing more is deleted", async () => {
+    let w: World | undefined;
+    w = world({
+      ...TERMINATING,
+      admin: {
+        devices: [
+          tailnetDevice("nWorker1CNTRL", HOSTNAME, [WORKER_TAG]),
+          tailnetDevice("nStale1CNTRL", HOSTNAME, [WORKER_TAG]),
+        ],
+      },
+    });
+    const remove = w.deps.tailnetAdmin.open;
+    w.deps = {
+      ...w.deps,
+      tailnetAdmin: {
+        open: async (secret) => {
+          const opening = await remove(secret);
+          if (opening.kind !== "open") return opening;
+          return {
+            kind: "open",
+            session: {
+              ...opening.session,
+              remove: async (id) => {
+                const removed = await opening.session.remove(id);
+                w?.interrupt();
+                return removed;
+              },
+            },
+          };
+        },
+      },
+    };
+    expect(await terminateWorker(w.deps, terminating(w))).toMatchObject({
+      kind: "interrupted",
+      locked: true,
+    });
+    expect(w.admin.calls.filter((call) => call.startsWith("remove"))).toEqual([
+      "remove nWorker1CNTRL",
+    ]);
   });
 });

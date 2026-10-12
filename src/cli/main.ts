@@ -30,6 +30,7 @@ import { filesystemPlanStore } from "../infrastructure/plan-store";
 import { sshTransport } from "../infrastructure/ssh-transport";
 import { paseoControlPlane } from "../infrastructure/paseo-control-plane";
 import { ffflowGithubWorkflowQueue } from "../infrastructure/ffflow-github-workflow-queue";
+import { tailscaleApiAdmin } from "../infrastructure/tailscale-api-admin";
 import { tailscalePeers } from "../infrastructure/tailscale-peers";
 import { terminalPrompt } from "../infrastructure/terminal-prompt";
 import { managedTerraform } from "../infrastructure/terraform/installer";
@@ -95,6 +96,7 @@ await interrupts.run(
       machines: ec2MachineInventory(),
       machineControl: ec2MachineControl(),
       tailnet: tailscalePeers(),
+      tailnetAdmin: tailscaleApiAdmin(),
       transport,
       controlPlane: paseoControlPlane(transport),
       workflowQueue: ffflowGithubWorkflowQueue(transport),

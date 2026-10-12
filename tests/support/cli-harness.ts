@@ -17,6 +17,7 @@ import {
   fakeMachineControl,
   fakeMachineInventory,
   fakeTailnet,
+  fakeTailnetAdmin,
   fakeTransport,
   fakeWorker,
   inspection,
@@ -36,7 +37,7 @@ export const zeroBytes: RandomBytes = (count) => new Uint8Array(count);
  * the cache directory, the asset bundle, the AWS caller, the VPC quota, managed Terraform,
  * the lock store, Secrets Manager, the prompt, Terraform, the plan store, the EC2 inventory and
  * machine control,
- * the tailnet, SSH and this machine as a worker are fakes unless overridden, and nothing is interrupted; the clock is fixed and sleeping returns at once. Nothing touches the host or AWS.
+ * the tailnet and its admin API, SSH and this machine as a worker are fakes unless overridden, and nothing is interrupted; the clock is fixed and sleeping returns at once. Nothing touches the host or AWS.
  */
 export function harness(
   store: InstanceStore,
@@ -58,6 +59,7 @@ export function harness(
       | "machines"
       | "machineControl"
       | "tailnet"
+      | "tailnetAdmin"
       | "transport"
       | "controlPlane"
       | "workflowQueue"
@@ -90,6 +92,7 @@ export function harness(
     machines: fakeMachineInventory().machines,
     machineControl: fakeMachineControl().control,
     tailnet: fakeTailnet().tailnet,
+    tailnetAdmin: fakeTailnetAdmin().admin,
     transport: fakeTransport().transport,
     worker: fakeWorker(inspection("fff-aaaaaaaa-builder-1")),
     interrupted: () => false,

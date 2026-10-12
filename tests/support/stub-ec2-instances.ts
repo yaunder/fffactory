@@ -1,7 +1,8 @@
 /**
- * A local stand-in for EC2 `DescribeInstances`, `StopInstances` and `StartInstances`, so tests
- * exercise the real AWS SDK without reaching AWS. Point a client at `endpoint`, or a spawned CLI
- * at it with `AWS_ENDPOINT_URL_EC2`. A stop or start changes nothing: its answer is empty.
+ * A local stand-in for EC2 `DescribeInstances`, `StopInstances`, `StartInstances` and
+ * `TerminateInstances`, so tests exercise the real AWS SDK without reaching AWS. Point a client
+ * at `endpoint`, or a spawned CLI at it with `AWS_ENDPOINT_URL_EC2`. A stop, start or
+ * terminate changes nothing: its answer is empty.
  */
 
 const EC2_NAMESPACE = "http://ec2.amazonaws.com/doc/2016-11-15/";
@@ -58,8 +59,8 @@ function describeInstances(answers: StubEc2InstancesAnswers, body: string): Resp
 }
 
 /**
- * Starts a stub on a free local port answering DescribeInstances with `answers`, and stops and
- * starts with an empty success, or every request with `answers.error`.
+ * Starts a stub on a free local port answering DescribeInstances with `answers`, and stops,
+ * starts and terminations with an empty success, or every request with `answers.error`.
  */
 export function stubEc2Instances(answers: StubEc2InstancesAnswers = {}): StubEc2Instances {
   const requests: string[] = [];
@@ -70,7 +71,12 @@ export function stubEc2Instances(answers: StubEc2InstancesAnswers = {}): StubEc2
       const body = await request.text();
       requests.push(body);
       const action = new URLSearchParams(body).get("Action");
-      if (!answers.error && (action === "StopInstances" || action === "StartInstances"))
+      if (
+        !answers.error &&
+        (action === "StopInstances" ||
+          action === "StartInstances" ||
+          action === "TerminateInstances")
+      )
         return new Response(
           `<${action}Response xmlns="${EC2_NAMESPACE}"><requestId>stub</requestId>` +
             `<instancesSet/></${action}Response>`,

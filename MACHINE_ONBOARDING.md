@@ -263,8 +263,9 @@ first boot ([step 7](#7-bootstrap-and-provision)). Keep its value only until ste
 never put it in a file in a repository or in factory.json.
 
 Optionally, create the factory's **admin client**, a Tailscale OAuth client
-that only the operator's `fffactory` uses, never a worker. No command reads
-it yet: it is for deleting a terminated worker's Tailscale device. On the
+that only the operator's `fffactory` uses, never a worker. `fffactory worker
+terminate` deletes a terminated worker's Tailscale devices with it, and refuses
+without it, so create it before you need to replace a worker. On the
 admin console's **Trust credentials** page, create an OAuth credential with
 the **`devices:core`** scope (read and write) and only that scope, and select
 factory.json's tag as its tag. Copy its client secret (`tskey-client-…`):
@@ -310,8 +311,9 @@ without a terminal it is read from standard input, such as `fffactory secret
 set tailscale-auth-key < key.txt`.
 
 The admin client's value is its client secret alone, and factory.json is
-complete without it. Workers' IAM role cannot read it: fffactory never gives
-it to a worker ([secrets §The Tailscale admin client](docs/specs/secrets.md#the-tailscale-admin-client)).
+complete without it; only `fffactory worker terminate` reads it, with your
+credentials. Workers' IAM role cannot read it: fffactory never gives it to a
+worker ([secrets §The Tailscale admin client](docs/specs/secrets.md#the-tailscale-admin-client)).
 
 The Paseo password is the one every Paseo client of that worker types in
 [step 10](#10-enroll-paseo-clients): choose a strong, unique one and keep it in
@@ -372,11 +374,15 @@ Pending enrollment is expected here: fffactory never enrolls an account.
 
 - Exit 1 with `Its first boot did not finish within 15 min`: read the bootstrap
   in the instance's EC2 console output, and check that the tailnet policy lets
-  this device see the factory's tag. If the bootstrap failed, terminate the
-  instance in the EC2 console, wait until it is terminated, remove its stale
-  device in the Tailscale admin console if one remains (a second device with
-  the same hostname is refused as `duplicate`), and rerun `fffactory apply`,
-  which creates it afresh ([worker bootstrap §Failed first boot](docs/specs/worker-bootstrap.md#failed-first-boot)).
+  this device see the factory's tag. If the console output shows the bootstrap
+  failed, terminate the worker with `fffactory worker terminate KEY --keep
+  --force`. `--force` is needed: a worker that never joined the tailnet cannot
+  be inspected, and it says you read the console output. It destroys the instance,
+  deletes any stale device with the worker's hostname (a second device with
+  that name is refused as `duplicate`) and keeps the host in factory.json; it
+  needs the admin client ([step 5](#5-prepare-the-tailnet)). Then rerun
+  `fffactory apply`, which creates the worker afresh
+  ([worker bootstrap §Failed first boot](docs/specs/worker-bootstrap.md#failed-first-boot)).
 - An install or verification failure leaves the worker on the new release,
   unhealthy: its next action names the failed step's log; rerun `fffactory
   apply` once the cause is fixed.

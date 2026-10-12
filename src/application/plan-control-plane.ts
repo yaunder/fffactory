@@ -51,7 +51,7 @@ export async function planControlPlane(
       continue;
     }
     view ??= await deps.peers.view();
-    const location = locateWorker(view, hostname, tag);
+    const location = locateWorker(view, { key: host.key, hostname }, tag);
     if (location.kind !== "found") {
       planned.push({
         key: host.key,

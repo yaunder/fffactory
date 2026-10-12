@@ -328,7 +328,7 @@ async function nextLocation(
   if (deps.interrupted()) return undefined;
   const view = await deps.peers.view();
   if (deps.interrupted()) return undefined;
-  return locateWorker(view, worker.hostname, request.tag, thenRerunApply);
+  return locateWorker(view, worker, request.tag, thenRerunApply);
 }
 
 /**
@@ -373,7 +373,7 @@ async function attempt(
   request: WorkersStageRequest,
 ): Promise<WorkerOutcome | Interruption> {
   if (request.stopped.includes(worker.key)) return stoppedOutcome(worker);
-  const location = locateWorker(view, worker.hostname, request.tag, thenRerunApply);
+  const location = locateWorker(view, worker, request.tag, thenRerunApply);
   if (request.deferred?.has(worker.key) === true)
     return skipped(worker, preActivationDeferral(worker.hostname));
   if (request.created.includes(worker.key))

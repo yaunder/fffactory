@@ -39,6 +39,7 @@ function stubbed(answer: InstancePage | Error = page("running")) {
     return {
       stopInstances: (input) => respond({ stop: input }, {}),
       startInstances: (input) => respond({ start: input }, {}),
+      terminateInstances: (input) => respond({ terminate: input }, {}),
       describeInstances: (input) => respond({ describe: input }, answer as InstancePage),
       close: () => events.push("close"),
     };
@@ -52,17 +53,23 @@ const DENIED = Object.assign(new Error("AWS message about wJalrXUtnFEMI"), {
 });
 
 describe("EC2 machine control over stubbed calls", () => {
-  test("stops and starts exactly the target instance, in the factory Region and profile", async () => {
+  test("stops, starts and terminates exactly the target instance, in the factory Region and profile", async () => {
     const stub = stubbed();
     const control = ec2MachineControl(stub.open);
     expect(await control.stop(TARGET)).toEqual({ kind: "requested" });
     expect(await control.start(TARGET)).toEqual({ kind: "requested" });
-    expect(stub.calls).toEqual([{ stop: { InstanceIds: [ID] } }, { start: { InstanceIds: [ID] } }]);
+    expect(await control.terminate(TARGET)).toEqual({ kind: "requested" });
+    expect(stub.calls).toEqual([
+      { stop: { InstanceIds: [ID] } },
+      { start: { InstanceIds: [ID] } },
+      { terminate: { InstanceIds: [ID] } },
+    ]);
     expect(stub.sessions.map(({ region, profile }) => ({ region, profile }))).toEqual([
       { region: "eu-west-2", profile: "factory" },
       { region: "eu-west-2", profile: "factory" },
+      { region: "eu-west-2", profile: "factory" },
     ]);
-    expect(stub.events).toEqual(["close", "close"]);
+    expect(stub.events).toEqual(["close", "close", "close"]);
   });
 
   test("reads the instance's state by its ID and the factory ID tag, terminated included", async () => {
@@ -112,6 +119,10 @@ describe("EC2 machine control over stubbed calls", () => {
       kind: "failed",
       reason: "EC2 StartInstances failed: UnauthorizedOperation",
     });
+    expect(await control.terminate(TARGET)).toEqual({
+      kind: "failed",
+      reason: "EC2 TerminateInstances failed: UnauthorizedOperation",
+    });
     expect(await control.state(TARGET)).toEqual({
       kind: "unavailable",
       reason: "EC2 DescribeInstances failed: UnauthorizedOperation",
@@ -122,6 +133,7 @@ describe("EC2 machine control over stubbed calls", () => {
     const open = async (): Promise<Ec2ControlCalls> => ({
       stopInstances: () => new Promise(() => {}),
       startInstances: () => new Promise(() => {}),
+      terminateInstances: () => new Promise(() => {}),
       describeInstances: () => new Promise(() => {}),
       close: () => {},
     });
@@ -133,6 +145,10 @@ describe("EC2 machine control over stubbed calls", () => {
     expect(await control.start(TARGET)).toEqual({
       kind: "unanswered",
       reason: "EC2 StartInstances failed: timed out after 0.02 s",
+    });
+    expect(await control.terminate(TARGET)).toEqual({
+      kind: "unanswered",
+      reason: "EC2 TerminateInstances failed: timed out after 0.02 s",
     });
     expect(await control.state(TARGET)).toEqual({
       kind: "unavailable",
@@ -149,7 +165,7 @@ describe("EC2 machine control over the real SDK", () => {
     return ec2MachineControl(sdkEc2ControlCalls({ endpoint, credentials: EXAMPLE_CREDENTIALS }));
   }
 
-  test("sends StopInstances, StartInstances and DescribeInstances to a local stub", async () => {
+  test("sends StopInstances, StartInstances, TerminateInstances and DescribeInstances to a local stub", async () => {
     stub = stubEc2Instances({
       pages: [[{ id: ID, state: "stopped", tags: { "fffactory:factory-id": FACTORY } }]],
     });
@@ -160,11 +176,18 @@ describe("EC2 machine control over the real SDK", () => {
     expect(await ec2.start({ ...TARGET, credentials: { source: "chain" } })).toEqual({
       kind: "requested",
     });
+    expect(await ec2.terminate({ ...TARGET, credentials: { source: "chain" } })).toEqual({
+      kind: "requested",
+    });
     expect(await ec2.state({ ...TARGET, credentials: { source: "chain" } })).toEqual({
       kind: "state",
       state: "stopped",
     });
-    const [stop, start, describe] = stub.requests.map((body) => new URLSearchParams(body));
+    const [stop, start, terminate, describe] = stub.requests.map(
+      (body) => new URLSearchParams(body),
+    );
+    expect(terminate?.get("Action")).toBe("TerminateInstances");
+    expect(terminate?.get("InstanceId.1")).toBe(ID);
     expect(stop?.get("Action")).toBe("StopInstances");
     expect(stop?.get("InstanceId.1")).toBe(ID);
     expect(start?.get("Action")).toBe("StartInstances");

@@ -1,10 +1,17 @@
 import { describe, expect, test } from "bun:test";
 import type { FactoryInstance, HostKey } from "../../src/domain/instance";
+import type { RepositoryObservation } from "../../src/domain/repository-placement";
 import type { Machine } from "../../src/domain/status";
+import { HOST_PROTOCOL_VERSION } from "../../src/domain/host-protocol";
 import {
+  adminClientMissing,
+  adminClientUnusable,
+  adminSecretUnreadable,
   confirmationQuestion,
+  confirmMismatch,
   confirmationRule,
   confirms,
+  deviceRemovalRefusal,
   hostKeyRefusal,
   machineGone,
   ONLINE_DEADLINE_MS,
@@ -15,7 +22,9 @@ import {
   requestUnanswered,
   selectMachine,
   stopGate,
+  terminateGate,
   thenRerunWorker,
+  typedKeyConfirms,
   unconfirmable,
   waitStep,
   WORKER_OPERATIONS,
@@ -38,12 +47,19 @@ function declaring(...keys: string[]): FactoryInstance {
 
 describe("the worker lifecycle commands (worker-lifecycle §Commands)", () => {
   test("hold the lock as operations named for the action", () => {
-    expect(WORKER_OPERATIONS).toEqual({ stop: "worker-stop", start: "worker-start" });
+    expect(WORKER_OPERATIONS).toEqual({
+      stop: "worker-stop",
+      start: "worker-start",
+      terminate: "worker-terminate",
+    });
   });
 
   test("complete every next action by rerunning the same command", () => {
     expect(thenRerunWorker("stop", KEY)("Wait")).toBe(
       "Wait, then rerun `fffactory worker stop builder-1`.",
+    );
+    expect(thenRerunWorker("terminate", KEY)("Wait")).toBe(
+      "Wait, then rerun `fffactory worker terminate builder-1 --keep`.",
     );
   });
 });
@@ -223,11 +239,32 @@ describe("stop's gates (worker-lifecycle §Gates)", () => {
       details: ["a detail"],
       nextAction: "Check that Tailscale is up on it, then rerun `fffactory worker stop builder-1`.",
     };
-    expect(stopGate({ kind: "unlocated", verdict }, WORKER)).toEqual({
+    expect(stopGate({ kind: "unlocated", tailnet: "offline", verdict }, WORKER)).toEqual({
       summary: "fff-abcd1234-builder-1 could not be inspected: Offline in the tailnet",
       details: ["a detail"],
       nextAction:
         "Check that Tailscale is up on it, then rerun `fffactory worker stop builder-1`. " +
+        "--force stops it uninspected.",
+    });
+  });
+
+  test("refuse a worker missing from the tailnet with stop's own next action, never terminate's", () => {
+    // Status's next action for a missing worker is the failed first boot's recovery,
+    // terminating it: no way on from a refused stop.
+    const verdict = {
+      status: "not_ready" as const,
+      summary: "No Tailscale device named fff-abcd1234-builder-1 is visible from this machine",
+      details: [],
+      nextAction:
+        "If it failed, terminate it uninspected with `fffactory worker terminate builder-1 " +
+        "--keep --force`, then rerun `fffactory worker stop builder-1`.",
+    };
+    expect(stopGate({ kind: "unlocated", tailnet: "missing", verdict }, WORKER)).toEqual({
+      summary:
+        "fff-abcd1234-builder-1 could not be inspected: No Tailscale device named fff-abcd1234-builder-1 is visible from this machine",
+      details: [],
+      nextAction:
+        "Check the worker with `fffactory status`, then rerun `fffactory worker stop builder-1`. " +
         "--force stops it uninspected.",
     });
   });
@@ -321,6 +358,294 @@ describe("waiting for the target state (worker-lifecycle §Stop, §Start)", () =
       details: [`The request may have reached EC2: instance ${ID} may be starting.`],
       nextAction:
         "Check the worker with `fffactory status`, then rerun `fffactory worker start builder-1`.",
+    });
+  });
+});
+
+const TERMINATE_RERUN = "`fffactory worker terminate builder-1 --keep`";
+
+describe("what each EC2 state means for terminate (worker-lifecycle §Terminate (keep))", () => {
+  test("acts on a running or a stopped worker, and only waits for one being terminated", () => {
+    expect(powerStep("terminate", machine("running"), KEY)).toEqual({ kind: "act" });
+    expect(powerStep("terminate", machine("stopped"), KEY)).toEqual({ kind: "act" });
+    expect(powerStep("terminate", machine("shutting-down"), KEY)).toEqual({ kind: "await" });
+  });
+
+  test("refuses a machine on its way up or down until it gets there", () => {
+    expect(powerStep("terminate", machine("pending"), KEY)).toEqual({
+      kind: "refused",
+      refusal: {
+        summary: `EC2 instance ${ID} is pending`,
+        details: [],
+        nextAction: `Wait until it is running, then rerun ${TERMINATE_RERUN}.`,
+      },
+    });
+    expect(powerStep("terminate", machine("stopping"), KEY)).toMatchObject({
+      kind: "refused",
+      refusal: { nextAction: `Wait until it has stopped, then rerun ${TERMINATE_RERUN}.` },
+    });
+  });
+
+  test("waits for terminated, or for EC2 to stop listing the instance", () => {
+    expect(waitStep("terminate", "terminated")).toBe("reached");
+    expect(waitStep("terminate", "absent")).toBe("reached");
+    for (const state of ["running", "stopped", "shutting-down", undefined] as const)
+      expect(waitStep("terminate", state)).toBe("waiting");
+  });
+
+  test("words its request's failures with TerminateInstances", () => {
+    expect(requestFailed("terminate", WORKER, ID, "EC2 TerminateInstances failed: X")).toEqual({
+      summary: "EC2 TerminateInstances failed: X",
+      details: [],
+      nextAction:
+        `Check that the credentials may call ec2:TerminateInstances on instance ${ID}, then ` +
+        `rerun ${TERMINATE_RERUN}.`,
+    });
+    expect(requestUnanswered("terminate", WORKER, ID, "timed out").details).toEqual([
+      `The request may have reached EC2: instance ${ID} may be shutting down.`,
+    ]);
+    expect(powerTimedOut("terminate", WORKER, ID, "shutting-down").summary).toBe(
+      `EC2 instance ${ID} did not reach terminated within 10 min (last seen: shutting-down)`,
+    );
+  });
+});
+
+describe("terminate's gates (worker-lifecycle §Gates (terminate))", () => {
+  const IDLE = { kind: "idle" } as const;
+  const synchronized = (unmanaged: readonly string[] = []): RepositoryObservation => ({
+    protocol_version: HOST_PROTOCOL_VERSION,
+    state: "synchronized",
+    unmanaged,
+  });
+
+  test("pass an idle worker whose checkouts are all resolved, or that has none", () => {
+    for (const repositories of [
+      synchronized(),
+      { protocol_version: HOST_PROTOCOL_VERSION, state: "none" },
+    ] satisfies RepositoryObservation[])
+      expect(
+        terminateGate({ kind: "inspected", activity: IDLE, repositories }, WORKER),
+      ).toBeUndefined();
+  });
+
+  test("pass a stopped worker uninspected, and anything --force skipped", () => {
+    expect(terminateGate({ kind: "stopped" }, WORKER)).toBeUndefined();
+    expect(terminateGate({ kind: "forced" }, WORKER)).toBeUndefined();
+  });
+
+  test("refuse while agents are active: terminating would end them", () => {
+    expect(
+      terminateGate(
+        {
+          kind: "inspected",
+          activity: { kind: "active", count: 2 },
+          repositories: synchronized(),
+        },
+        WORKER,
+      ),
+    ).toEqual({
+      summary: "2 agents are active on fff-abcd1234-builder-1: terminating it would end them",
+      details: [],
+      nextAction:
+        `Wait until no agent is active there, then rerun ${TERMINATE_RERUN}, ` +
+        "or pass --force to terminate it anyway.",
+    });
+  });
+
+  test("refuse unresolved or unmanaged checkouts, listing the unmanaged ones", () => {
+    expect(
+      terminateGate(
+        {
+          kind: "inspected",
+          activity: IDLE,
+          repositories: {
+            protocol_version: HOST_PROTOCOL_VERSION,
+            state: "unresolved",
+            unmanaged: ["acme/old"],
+          },
+        },
+        WORKER,
+      ),
+    ).toEqual({
+      summary:
+        "Placed repositories on fff-abcd1234-builder-1 are unresolved: terminating it would lose their work",
+      details: ["Unmanaged repository: acme/old"],
+      nextAction:
+        `Resolve the checkouts \`fffactory status\` reports, then rerun ${TERMINATE_RERUN}, ` +
+        "or pass --force to terminate it anyway.",
+    });
+    expect(
+      terminateGate(
+        { kind: "inspected", activity: IDLE, repositories: synchronized(["acme/a", "acme/b"]) },
+        WORKER,
+      ),
+    ).toEqual({
+      summary: "fff-abcd1234-builder-1 holds unmanaged checkouts: terminating it would lose them",
+      details: ["Unmanaged repository: acme/a", "Unmanaged repository: acme/b"],
+      nextAction:
+        "Copy what you need off them, then terminate it with --force: " +
+        "`fffactory worker terminate builder-1 --keep --force`.",
+    });
+  });
+
+  test("refuse a worker whose activity or repository result could not be read", () => {
+    expect(
+      terminateGate(
+        {
+          kind: "inspected",
+          activity: { kind: "unknown", reason: "Paseo activity could not be read" },
+          repositories: synchronized(),
+        },
+        WORKER,
+      ),
+    ).toEqual({
+      summary:
+        "fff-abcd1234-builder-1 could not be inspected for active agents: Paseo activity could not be read",
+      details: [],
+      nextAction:
+        `Check the worker with \`fffactory status\`, then rerun ${TERMINATE_RERUN}, ` +
+        "or pass --force to terminate it uninspected.",
+    });
+    for (const repositories of [
+      { protocol_version: HOST_PROTOCOL_VERSION, state: "unreadable" },
+      { state: "unknown", reason: "the worker's repository result could not be read" },
+    ] satisfies RepositoryObservation[])
+      expect(
+        terminateGate({ kind: "inspected", activity: IDLE, repositories }, WORKER),
+      ).toMatchObject({
+        summary: expect.stringMatching(
+          /^fff-abcd1234-builder-1 could not be inspected for checkouts: /,
+        ),
+        nextAction: expect.stringContaining("or pass --force to terminate it uninspected."),
+      });
+  });
+
+  test("refuse a running worker the tailnet cannot locate, naming --force for a failed bootstrap", () => {
+    // Its own next action, never status's verdict: a worker whose bootstrap failed never
+    // joins the tailnet, so rerunning without --force would only be refused again.
+    const verdict = {
+      status: "not_ready" as const,
+      summary: "No Tailscale device named fff-abcd1234-builder-1 is visible from this machine",
+      details: ["See the Tailscale client check."],
+      nextAction: `If it failed, terminate it with ${TERMINATE_RERUN}, then rerun ${TERMINATE_RERUN}.`,
+    };
+    expect(terminateGate({ kind: "unlocated", verdict }, WORKER)).toEqual({
+      summary:
+        "fff-abcd1234-builder-1 could not be inspected: No Tailscale device named fff-abcd1234-builder-1 is visible from this machine",
+      details: ["See the Tailscale client check."],
+      nextAction:
+        `Check the worker with \`fffactory status\`, then rerun ${TERMINATE_RERUN}. If the ` +
+        "instance's EC2 console output shows its bootstrap failed, it never joined the " +
+        "tailnet: rerun with --force, which terminates it uninspected.",
+    });
+  });
+});
+
+describe("terminate's confirmation (worker-lifecycle §Confirmation (typed key))", () => {
+  test("only the host key itself, typed, confirms", () => {
+    for (const answer of ["builder-1", " builder-1\n"])
+      expect(typedKeyConfirms(answer, KEY)).toBe(true);
+    for (const answer of ["y", "yes", "BUILDER-1", "builder-2", "", undefined])
+      expect(typedKeyConfirms(answer, KEY)).toBe(false);
+  });
+
+  test("the question names the worker, its instance and what is destroyed", () => {
+    expect(confirmationQuestion("terminate", WORKER, ID)).toBe(
+      `Terminate worker builder-1 (fff-abcd1234-builder-1), EC2 instance ${ID}? ` +
+        "Its machine and root volume are destroyed. Type the host key to confirm: ",
+    );
+  });
+
+  test("--confirm naming another key refuses, never echoing it", () => {
+    const refusal = confirmMismatch(KEY);
+    expect(refusal).toEqual({
+      summary: "--confirm does not name the host builder-1",
+      details: [],
+      nextAction:
+        "Pass --confirm builder-1 to terminate it, or type the host key when asked at a terminal.",
+    });
+  });
+
+  test("without a terminal or --confirm, the command says how to confirm", () => {
+    expect(unconfirmable("terminate")).toBe(
+      "Terminating a worker needs your confirmation: rerun at a terminal, or pass --confirm KEY.",
+    );
+  });
+});
+
+describe("the Tailscale admin client (worker-lifecycle §Tailnet device removal)", () => {
+  test("is required before anything reaches AWS", () => {
+    expect(adminClientMissing(KEY)).toEqual({
+      summary:
+        "factory.json has no Tailscale admin client (tailscale.admin_client_secret): terminate deletes the worker's tailnet device with it",
+      details: [],
+      nextAction: `Store it with \`fffactory secret set tailscale-admin-client\`, then rerun ${TERMINATE_RERUN}.`,
+    });
+  });
+
+  test("a secret that cannot be read, or a client Tailscale refuses, is refused", () => {
+    expect(adminSecretUnreadable(KEY, "Reading the secret failed: AccessDeniedException")).toEqual({
+      summary: "Reading the secret failed: AccessDeniedException",
+      details: [],
+      nextAction:
+        "Check that the credentials may call secretsmanager:GetSecretValue on the secret " +
+        `tailscale.admin_client_secret refers to, then rerun ${TERMINATE_RERUN}.`,
+    });
+    expect(adminClientUnusable(KEY, "Tailscale refused the admin client (HTTP 401)")).toEqual({
+      summary:
+        "The Tailscale admin client could not be used: Tailscale refused the admin client (HTTP 401)",
+      details: [],
+      nextAction:
+        "Check the OAuth client at https://login.tailscale.com/admin/settings/trust-credentials " +
+        "(scope devices:core) and store its secret with `fffactory secret set " +
+        `tailscale-admin-client\`, then rerun ${TERMINATE_RERUN}.`,
+    });
+  });
+});
+
+describe("the tailnet device removal's outcome (worker-lifecycle §Tailnet device removal)", () => {
+  const LEFT =
+    "Remove the remaining devices named fff-abcd1234-builder-1 at " +
+    "https://login.tailscale.com/admin/machines yourself (one without the factory's tag only " +
+    "if it was this worker), then run `fffactory apply`, which creates the worker afresh.";
+
+  test("is complete when every tagged device was deleted and no untagged one remains", () => {
+    expect(
+      deviceRemovalRefusal({ kind: "listed", removed: ["nA"], failed: [], untagged: [] }, WORKER),
+    ).toBeUndefined();
+    expect(
+      deviceRemovalRefusal({ kind: "listed", removed: [], failed: [], untagged: [] }, WORKER),
+    ).toBeUndefined();
+  });
+
+  test("names each device it could not delete, and each untagged one, never the tag", () => {
+    expect(
+      deviceRemovalRefusal(
+        {
+          kind: "listed",
+          removed: ["nA"],
+          failed: [{ id: "nB", reason: "Tailscale answered HTTP 500" }],
+          untagged: ["nC"],
+        },
+        WORKER,
+      ),
+    ).toEqual({
+      summary: "Not every Tailscale device named fff-abcd1234-builder-1 was deleted",
+      details: [
+        "Deleting device nB failed: Tailscale answered HTTP 500",
+        "Device nC does not carry the factory's tag (tailscale.tag in factory.json): not deleted",
+      ],
+      nextAction: LEFT,
+    });
+  });
+
+  test("a listing that failed deleted nothing", () => {
+    expect(
+      deviceRemovalRefusal({ kind: "unlisted", reason: "Tailscale answered HTTP 503" }, WORKER),
+    ).toEqual({
+      summary: "The tailnet's devices could not be listed: Tailscale answered HTTP 503",
+      details: [],
+      nextAction: LEFT,
     });
   });
 });

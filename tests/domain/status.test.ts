@@ -31,6 +31,7 @@ import {
 
 const HOSTNAME = "fff-aaaa1111-builder-1";
 const KEY = "builder-1" as HostKey;
+const WORKER = { key: KEY, hostname: HOSTNAME };
 const EXPECTED = {
   hostname: HOSTNAME,
   release: "0.3.0",
@@ -380,7 +381,7 @@ describe("the tailnet", () => {
   });
 
   test("refuses a missing or duplicate hostname with the next action, never guessing", () => {
-    const missing = locateWorker(peers(peer(`${HOSTNAME}-1`)), HOSTNAME, TAG);
+    const missing = locateWorker(peers(peer(`${HOSTNAME}-1`)), WORKER, TAG);
     expect(missing).toMatchObject({ kind: "blocked", tailnet: "missing" });
     expect(missing.kind === "blocked" && missing.verdict.summary).toBe(
       `No Tailscale device named ${HOSTNAME} is visible from this machine`,
@@ -388,10 +389,11 @@ describe("the tailnet", () => {
     expect(missing.kind === "blocked" && missing.verdict.nextAction).toBe(
       "If the worker has just started, wait for it to join the tailnet. Otherwise check that " +
         "tailnet policy lets this device see the factory's tag, and the bootstrap in the " +
-        "instance's EC2 console output: if it failed, terminate the instance in the EC2 console; " +
-        `once it is terminated, the next \`fffactory apply\` creates it again${RERUN}`,
+        "instance's EC2 console output: if it shows the bootstrap failed, terminate it " +
+        "uninspected with `fffactory worker terminate builder-1 --keep --force`, and " +
+        `\`fffactory apply\` then creates it again${RERUN}`,
     );
-    const duplicate = locateWorker(peers(peer(HOSTNAME), peer(HOSTNAME)), HOSTNAME, TAG);
+    const duplicate = locateWorker(peers(peer(HOSTNAME), peer(HOSTNAME)), WORKER, TAG);
     expect(duplicate).toMatchObject({ kind: "blocked", tailnet: "duplicate" });
     expect(duplicate.kind === "blocked" && duplicate.verdict.nextAction).toBe(
       `Remove the stale devices named ${HOSTNAME} at https://login.tailscale.com/admin/machines, keeping the worker's${RERUN}`,
@@ -399,7 +401,7 @@ describe("the tailnet", () => {
   });
 
   test("refuses the one device with the name when it lacks the factory's tag, never echoing the tag", () => {
-    const untagged = locateWorker(peers(peer(HOSTNAME, { tags: ["tag:intruder"] })), HOSTNAME, TAG);
+    const untagged = locateWorker(peers(peer(HOSTNAME, { tags: ["tag:intruder"] })), WORKER, TAG);
     expect(untagged).toMatchObject({
       kind: "blocked",
       tailnet: "untagged",
@@ -413,29 +415,29 @@ describe("the tailnet", () => {
   });
 
   test("an offline worker or one without Tailscale SSH is not ready", () => {
-    expect(locateWorker(peers(peer(HOSTNAME, { online: false })), HOSTNAME, TAG)).toMatchObject({
+    expect(locateWorker(peers(peer(HOSTNAME, { online: false })), WORKER, TAG)).toMatchObject({
       tailnet: "offline",
       verdict: { status: "not_ready", summary: "Offline in the tailnet" },
     });
-    expect(locateWorker(peers(peer(HOSTNAME, { sshHostKeys: [] })), HOSTNAME, TAG)).toMatchObject({
+    expect(locateWorker(peers(peer(HOSTNAME, { sshHostKeys: [] })), WORKER, TAG)).toMatchObject({
       tailnet: "no_ssh",
       verdict: { status: "not_ready" },
     });
   });
 
   test("an unavailable view leaves every worker unknown", () => {
-    expect(locateWorker({ kind: "daemon_unreachable" }, HOSTNAME, TAG)).toMatchObject({
+    expect(locateWorker({ kind: "daemon_unreachable" }, WORKER, TAG)).toMatchObject({
       tailnet: "unknown",
       verdict: { status: "not_ready", details: ["See the Tailscale client check."] },
     });
-    expect(locateWorker({ kind: "unusable", reason: "x" }, HOSTNAME, TAG)).toMatchObject({
+    expect(locateWorker({ kind: "unusable", reason: "x" }, WORKER, TAG)).toMatchObject({
       tailnet: "unknown",
       verdict: { status: "error" },
     });
   });
 
   test("the one match is found", () => {
-    expect(locateWorker(peers(peer(HOSTNAME)), HOSTNAME, TAG).kind).toBe("found");
+    expect(locateWorker(peers(peer(HOSTNAME)), WORKER, TAG).kind).toBe("found");
   });
 });
 

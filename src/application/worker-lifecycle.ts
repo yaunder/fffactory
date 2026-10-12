@@ -1,16 +1,20 @@
 /**
- * `fffactory worker stop|start` (`docs/specs/worker-lifecycle.md`): power one declared worker's
- * EC2 instance off or on, under the factory-wide lock and an operation record. EC2's state is
- * the truth: factory.json keeps no power field, and the instance, its volume, its Terraform
- * state and its tailnet device all stay.
+ * `fffactory worker stop|start|terminate --keep` (`docs/specs/worker-lifecycle.md`): power one
+ * declared worker's EC2 instance off or on, or terminate it, under the factory-wide lock and an
+ * operation record. EC2's state is the truth: factory.json keeps no power field. Stop and start
+ * keep the instance, its volume, its Terraform state and its tailnet device; terminate destroys
+ * the instance and its volume and deletes its tailnet devices, and with `--keep` the host stays
+ * in factory.json, so the next apply creates it afresh. Terraform is never run.
  *
  * Before anything reaches AWS: a confirmation must be possible, the key must be declared, and
- * factory.json complete. Then the account check, the CLI/pin match guard and the lock; under
- * it, the one instance carrying the factory ID and host key tags, stop's gates, the operator's
+ * factory.json complete (for terminate, with its Tailscale admin client). Then the account
+ * check, the CLI/pin match guard and the lock; under it, the one instance carrying the factory
+ * ID and host key tags, the gates, for terminate the admin client's token, the operator's
  * confirmation, the request, and a bounded wait for the target state. Start then waits for the
- * worker's tailnet device and reports its readiness as status would. Every wait goes through
- * the injected `sleep` and checks `interrupted` after it: an interrupted operation starts
- * nothing more, writes no more of its record and keeps the lock.
+ * worker's tailnet device and reports its readiness as status would; terminate deletes the
+ * worker's tailnet devices. Every wait goes through the injected `sleep` and checks
+ * `interrupted` after it: an interrupted operation starts nothing more, writes no more of its
+ * record and keeps the lock.
  */
 import {
   type AccountExpectation,
@@ -28,6 +32,7 @@ import {
   type HostKey,
   parseRelease,
   type Release,
+  type SecretReference,
 } from "../domain/instance";
 import {
   finishOperation,
@@ -40,13 +45,21 @@ import {
   withStage,
 } from "../domain/operation";
 import { pinRefusal } from "../domain/plan";
+import type { SecretMaterial } from "../domain/secrets";
 import { hostName } from "../domain/resource-naming";
 import { joiningTailnet, type WorkerIdentity } from "../domain/rollout";
 import { inspectionVerdict, locateWorker, type Machine, type Verdict } from "../domain/status";
+import { selectWorkerDevices } from "../domain/tailnet";
 import {
+  adminClientMissing,
+  adminClientUnusable,
+  adminSecretUnreadable,
   confirmationQuestion,
   confirmationRule,
+  confirmMismatch,
   confirms,
+  type DeviceRemoval,
+  deviceRemovalRefusal,
   hostKeyRefusal,
   machineGone,
   type ObservedMachineState,
@@ -64,7 +77,10 @@ import {
   type StopInspection,
   stopGate,
   TARGET_STATE,
+  type TerminateInspection,
+  terminateGate,
   thenRerunWorker,
+  typedKeyConfirms,
   waitStep,
   WORKER_OPERATIONS,
 } from "../domain/worker-lifecycle";
@@ -80,12 +96,15 @@ import {
   stateBucketOf,
 } from "./factory-lock";
 import type { HostTransport } from "./host-transport";
+import { inspectRepositories } from "./inspect-repositories";
 import { inspectWorker } from "./inspect-worker";
 import type { LockStore, StateBucket } from "./lock-store";
-import type { MachineControl, MachineTarget } from "./machine-control";
+import type { MachineControl, MachineRequest, MachineTarget } from "./machine-control";
 import type { MachineInventorySource } from "./machine-inventory";
 import type { OperatorPrompt } from "./operator-prompt";
 import { type AccountRequirement, requireExpectedAccount } from "./require-expected-account";
+import type { SecretStore } from "./secret-store";
+import type { TailnetAdmin, TailnetAdminSession } from "./tailnet-admin";
 import type { TailnetPeers } from "./tailnet-peers";
 
 export interface WorkerLifecycleDependencies {
@@ -98,6 +117,10 @@ export interface WorkerLifecycleDependencies {
   /** Reads stop's agent activity; without one, a running worker cannot be inspected. */
   readonly controlPlane: ControlPlane | undefined;
   readonly prompt: OperatorPrompt;
+  /** Reads terminate's Tailscale admin client secret. */
+  readonly secrets: SecretStore;
+  /** Deletes a terminated worker's tailnet devices. */
+  readonly tailnetAdmin: TailnetAdmin;
   readonly interrupted: Interrupted;
   /** Waits `ms`, or less once interrupted: the use case checks `interrupted` after it. */
   readonly sleep: (ms: number) => Promise<void>;
@@ -114,10 +137,15 @@ export interface WorkerLifecycleRequest {
   readonly credentials: CredentialSelection;
   /** The running fffactory's release, which must be the one factory.json pins. */
   readonly release: Release;
-  /** Stop only: skip the gates. Never the account check, pin guard, lock or confirmation. */
+  /** Stop and terminate: skip the gates. Never the account check, pin guard, lock or confirmation. */
   readonly force: boolean;
-  /** Confirmed in advance, for use without a terminal. */
+  /** Stop and start: confirmed in advance, for use without a terminal. */
   readonly yes: boolean;
+  /**
+   * Terminate: `--confirm`, the host key typed in advance, for use without a terminal. Any
+   * other value refuses; `yes` never confirms a terminate.
+   */
+  readonly confirm?: string | undefined;
   /** This machine's name, recorded as the lock holder's host. */
   readonly host: string;
   readonly clock: () => Date;
@@ -134,13 +162,17 @@ export type PowerProgress =
       readonly state: Machine["state"];
     }
   /** `--force`: the gates were skipped. */
-  | { readonly kind: "forced" }
+  | { readonly kind: "forced"; readonly action: PowerAction }
+  /** Terminate: the machine is stopped, so the worker is not inspected. */
+  | { readonly kind: "uninspected_stopped" }
   /** EC2 was asked to change the machine; the command now waits for the target state. */
   | { readonly kind: "requested"; readonly action: PowerAction; readonly instanceId: string }
   /** The change was already under way; the command only waits for the target state. */
   | { readonly kind: "awaiting"; readonly action: PowerAction; readonly instanceId: string }
   /** Start waits for the worker's tailnet device to come online. */
-  | { readonly kind: "waiting_online"; readonly hostname: string };
+  | { readonly kind: "waiting_online"; readonly hostname: string }
+  /** Terminate deletes the terminated worker's tailnet devices. */
+  | { readonly kind: "removing_devices"; readonly hostname: string };
 
 export type WorkerPower =
   /** No terminal to confirm at, and no `--yes`. */
@@ -187,7 +219,9 @@ export type WorkerPower =
   /**
    * The machine is in the target state: `changed` when this command asked EC2 for it, `awaited`
    * when it was already on its way and this command only waited for it. Start adds the worker's
-   * `verdict`, as status words it; a worker not ready is not start's failure.
+   * `verdict`, as status words it; a worker not ready is not start's failure. Terminate adds how
+   * deleting the worker's tailnet devices went, and `leftover`, what it left behind, when it did:
+   * the terminate stands, and is partial.
    */
   | {
       readonly kind: "done";
@@ -197,6 +231,8 @@ export type WorkerPower =
       readonly changed: boolean;
       readonly awaited: boolean;
       readonly verdict?: Verdict;
+      readonly devices?: DeviceRemoval;
+      readonly leftover?: Refusal | undefined;
       readonly operation: OperationLocation;
       readonly recordFailure: string | undefined;
     };
@@ -217,6 +253,17 @@ export function startWorker(
   return powerWorker(deps, { ...request, action: "start" });
 }
 
+/**
+ * Terminates a declared worker's machine and deletes its tailnet devices, keeping the host in
+ * factory.json (§Terminate (keep)).
+ */
+export function terminateWorker(
+  deps: WorkerLifecycleDependencies,
+  request: Omit<WorkerLifecycleRequest, "action">,
+): Promise<WorkerPower> {
+  return powerWorker(deps, { ...request, action: "terminate" });
+}
+
 /** Everything a power operation works with once the checks before the lock passed. */
 interface Power {
   readonly request: WorkerLifecycleRequest;
@@ -230,17 +277,35 @@ interface Power {
   readonly tag: string;
   /** The release factory.json pins. */
   readonly pinned: Release;
+  /** Terminate's Tailscale admin client (`tailscale.admin_client_secret`). */
+  readonly adminClient: SecretReference | undefined;
 }
 
 type Checked = { readonly kind: "checked"; readonly power: Power } | WorkerPower;
 
-/** The checks that need no AWS: confirmation possible, the key declared, factory.json complete. */
+/** Whether the operator confirmed in advance: `--confirm` for terminate, `--yes` otherwise. */
+function confirmedInAdvance(request: WorkerLifecycleRequest): boolean {
+  return request.action === "terminate" ? request.confirm !== undefined : request.yes;
+}
+
+/**
+ * The checks that need no AWS: confirmation possible, the key declared, terminate's
+ * `--confirm` naming it, factory.json complete, and terminate's admin client declared.
+ */
 function localChecks(deps: WorkerLifecycleDependencies, request: WorkerLifecycleRequest): Checked {
-  if (confirmationRule(request.yes, deps.prompt.interactive) === "unavailable")
+  if (confirmationRule(confirmedInAdvance(request), deps.prompt.interactive) === "unavailable")
     return { kind: "unconfirmable" };
   const { instance } = request;
   const unknown = hostKeyRefusal(request.key, instance);
   if (unknown !== undefined) return { kind: "refused", refusal: unknown, operation: undefined };
+  const terminating = request.action === "terminate";
+  // The key is declared: a `--confirm` that differs is never echoed, it could be a secret.
+  if (terminating && request.confirm !== undefined && request.confirm !== request.key)
+    return {
+      kind: "refused",
+      refusal: confirmMismatch(request.key as HostKey),
+      operation: undefined,
+    };
   const { missing } = assessCompleteness(instance);
   const factoryId = instance.factory_id;
   const region = instance.aws?.region;
@@ -251,6 +316,9 @@ function localChecks(deps: WorkerLifecycleDependencies, request: WorkerLifecycle
   const location = stateBucketOf(instance, request.credentials);
   if (missing.length > 0 || !factoryId || !region || !tag || !pinned.ok || !host || !location.ok)
     return { kind: "incomplete", missing };
+  const adminClient = instance.tailscale?.admin_client_secret;
+  if (terminating && adminClient === undefined)
+    return { kind: "refused", refusal: adminClientMissing(host.key), operation: undefined };
   return {
     kind: "checked",
     power: {
@@ -263,6 +331,7 @@ function localChecks(deps: WorkerLifecycleDependencies, request: WorkerLifecycle
       region,
       tag,
       pinned: pinned.value,
+      adminClient,
     },
   };
 }
@@ -438,15 +507,78 @@ async function operate(
       return refusedUnder(log, step.refusal);
     case "done":
       return reached(deps, power, log, progress, { machine, changed: false, awaited: false });
-    case "await":
+    case "await": {
+      const admin = await adminFor(deps, power, log);
+      if (deps.interrupted()) return interruptedUnder(log, progress);
+      if (admin.kind === "refused") return refusedUnder(log, admin.refusal);
       deps.progress({ kind: "awaiting", action: power.action, instanceId: machine.instanceId });
-      return awaitTarget(deps, power, log, progress, { machine, changed: false, awaited: true });
+      return awaitTarget(deps, power, log, progress, {
+        machine,
+        changed: false,
+        awaited: true,
+        admin: admin.session,
+      });
+    }
     case "act":
       return act(deps, power, log, progress, machine);
   }
 }
 
-/** Stop's gates, the confirmation, then the request to EC2 and the wait for its outcome. */
+/**
+ * Terminate's tailnet admin session, opened before EC2 is asked anything so a client that
+ * cannot delete the worker's devices refuses the terminate instead of leaving them behind.
+ * The client secret is read here, given to the admin client, and kept nowhere.
+ */
+async function adminFor(
+  deps: WorkerLifecycleDependencies,
+  power: Power,
+  log: PowerLog,
+): Promise<
+  | { readonly kind: "open"; readonly session: TailnetAdminSession | undefined }
+  | { readonly kind: "refused"; readonly refusal: Refusal }
+> {
+  if (power.action !== "terminate" || power.adminClient === undefined)
+    return { kind: "open", session: undefined };
+  await log.stage("authorizing");
+  const { key } = power.worker;
+  let secret: SecretMaterial;
+  try {
+    secret = await deps.secrets.read({
+      reference: power.adminClient,
+      region: power.region,
+      credentials: power.request.credentials,
+    });
+  } catch (error) {
+    return { kind: "refused", refusal: adminSecretUnreadable(key, reasonOf(error)) };
+  }
+  if (deps.interrupted()) return { kind: "open", session: undefined };
+  const opening = await deps.tailnetAdmin.open(secret);
+  if (opening.kind === "failed")
+    return { kind: "refused", refusal: adminClientUnusable(key, opening.reason) };
+  return { kind: "open", session: opening.session };
+}
+
+/** The gates of stop and terminate, for a machine `act` found in `state`. */
+function gates(
+  deps: WorkerLifecycleDependencies,
+  power: Power,
+  log: PowerLog,
+  machine: Machine,
+): Promise<Refusal | undefined> {
+  switch (power.action) {
+    case "stop":
+      return stopGates(deps, power, log);
+    case "terminate":
+      return terminateGates(deps, power, log, machine);
+    case "start":
+      return Promise.resolve(undefined);
+  }
+}
+
+/**
+ * The gates, terminate's admin session, the confirmation, then the request to EC2 and the
+ * wait for its outcome.
+ */
 async function act(
   deps: WorkerLifecycleDependencies,
   power: Power,
@@ -454,19 +586,35 @@ async function act(
   progress: Progress,
   machine: Machine,
 ): Promise<WorkerPower> {
-  if (power.action === "stop") {
-    const refusal = await stopGates(deps, power, log);
-    if (deps.interrupted()) return interruptedUnder(log, progress);
-    if (refusal !== undefined) return refusedUnder(log, refusal);
-  }
+  const refusal = await gates(deps, power, log, machine);
+  if (deps.interrupted()) return interruptedUnder(log, progress);
+  if (refusal !== undefined) return refusedUnder(log, refusal);
+  const admin = await adminFor(deps, power, log);
+  if (deps.interrupted()) return interruptedUnder(log, progress);
+  if (admin.kind === "refused") return refusedUnder(log, admin.refusal);
   const confirmed = await confirmation(deps, power, log, machine);
   if (deps.interrupted()) return interruptedUnder(log, progress);
   if (!confirmed) {
     const recordFailure = await log.finish("declined", "declined");
     return { kind: "declined", operation: log.location, recordFailure };
   }
-  return requestTarget(deps, power, log, progress, machine);
+  return requestTarget(deps, power, log, progress, machine, admin.session);
 }
+
+/** The stage each action's request and wait are recorded as, and the call that asks EC2. */
+const REQUESTS: Readonly<
+  Record<
+    PowerAction,
+    {
+      readonly stage: StageStatus;
+      readonly call: (control: MachineControl, target: MachineTarget) => Promise<MachineRequest>;
+    }
+  >
+> = {
+  stop: { stage: "stopping", call: (control, target) => control.stop(target) },
+  start: { stage: "starting", call: (control, target) => control.start(target) },
+  terminate: { stage: "terminating", call: (control, target) => control.terminate(target) },
+};
 
 /** Asks EC2 for the action's target state, then waits for it. */
 async function requestTarget(
@@ -475,14 +623,14 @@ async function requestTarget(
   log: PowerLog,
   progress: Progress,
   machine: Machine,
+  admin: TailnetAdminSession | undefined,
 ): Promise<WorkerPower> {
-  await log.stage(power.action === "stop" ? "stopping" : "starting");
+  const { stage, call } = REQUESTS[power.action];
+  await log.stage(stage);
   if (deps.interrupted()) return interruptedUnder(log, progress);
   const target = targetOf(power, machine);
   progress.requested = true;
-  const requested = await (power.action === "stop"
-    ? deps.control.stop(target)
-    : deps.control.start(target));
+  const requested = await call(deps.control, target);
   if (deps.interrupted()) return interruptedUnder(log, progress);
   const { action, worker } = power;
   switch (requested.kind) {
@@ -495,7 +643,12 @@ async function requestTarget(
       );
     case "requested":
       deps.progress({ kind: "requested", action, instanceId: machine.instanceId });
-      return awaitTarget(deps, power, log, progress, { machine, changed: true, awaited: false });
+      return awaitTarget(deps, power, log, progress, {
+        machine,
+        changed: true,
+        awaited: false,
+        admin,
+      });
   }
 }
 
@@ -509,7 +662,7 @@ async function stopGates(
   log: PowerLog,
 ): Promise<Refusal | undefined> {
   if (power.request.force) {
-    deps.progress({ kind: "forced" });
+    deps.progress({ kind: "forced", action: "stop" });
     return stopGate({ kind: "forced" }, power.worker);
   }
   await log.stage("inspecting");
@@ -524,8 +677,9 @@ async function stopInspection(
   power: Power,
 ): Promise<StopInspection> {
   const then = thenRerunWorker("stop", power.worker.key);
-  const location = locateWorker(await deps.peers.view(), power.worker.hostname, power.tag, then);
-  if (location.kind === "blocked") return { kind: "unlocated", verdict: location.verdict };
+  const location = locateWorker(await deps.peers.view(), power.worker, power.tag, then);
+  if (location.kind === "blocked")
+    return { kind: "unlocated", tailnet: location.tailnet, verdict: location.verdict };
   if (deps.controlPlane === undefined)
     return {
       kind: "activity",
@@ -537,17 +691,71 @@ async function stopInspection(
   return { kind: "activity", activity: await deps.controlPlane.activeAgents(location.worker) };
 }
 
-/** Confirmed by `--yes`, or asked y/N at the terminal; the rule already refused anything else. */
+/**
+ * Terminate's gates (`docs/specs/worker-lifecycle.md` §Gates (terminate)): a stopped machine
+ * passes uninspected; a running worker is located in the tailnet, and its agent activity and
+ * last repository result read, unless `--force` skips them. Undefined when terminate may go on.
+ */
+async function terminateGates(
+  deps: WorkerLifecycleDependencies,
+  power: Power,
+  log: PowerLog,
+  machine: Machine,
+): Promise<Refusal | undefined> {
+  if (machine.state === "stopped") {
+    // Accepted risk: unpushed work on a stopped worker's disk goes unreported.
+    deps.progress({ kind: "uninspected_stopped" });
+    return terminateGate({ kind: "stopped" }, power.worker);
+  }
+  if (power.request.force) {
+    deps.progress({ kind: "forced", action: "terminate" });
+    return terminateGate({ kind: "forced" }, power.worker);
+  }
+  await log.stage("inspecting");
+  // TODO(re-evaluate when dispatch gains a pause): pause dispatch on the worker before this
+  // inspection, as for stop: until then an agent dispatch starts between the check and the
+  // terminate ends with the machine (accepted race, D5).
+  return terminateGate(await terminateInspection(deps, power), power.worker);
+}
+
+async function terminateInspection(
+  deps: WorkerLifecycleDependencies,
+  power: Power,
+): Promise<TerminateInspection> {
+  const then = thenRerunWorker("terminate", power.worker.key);
+  const location = locateWorker(await deps.peers.view(), power.worker, power.tag, then);
+  if (location.kind === "blocked") return { kind: "unlocated", verdict: location.verdict };
+  const [activity, repositories] = await Promise.all([
+    deps.controlPlane === undefined
+      ? {
+          kind: "unknown" as const,
+          reason: "this fffactory cannot reach the worker's control plane",
+        }
+      : deps.controlPlane.activeAgents(location.worker),
+    inspectRepositories(deps.transport, location.worker),
+  ]);
+  return { kind: "inspected", activity, repositories };
+}
+
+/**
+ * Confirmed in advance (`--yes`, or terminate's matching `--confirm`), or asked at the terminal:
+ * y/N, or for terminate the host key typed. The rule already refused anything else.
+ */
 async function confirmation(
   deps: WorkerLifecycleDependencies,
   power: Power,
   log: PowerLog,
   machine: Machine,
 ): Promise<boolean> {
-  if (confirmationRule(power.request.yes, deps.prompt.interactive) === "confirmed") return true;
+  const { request } = power;
+  if (confirmationRule(confirmedInAdvance(request), deps.prompt.interactive) === "confirmed")
+    return true;
   await log.stage("awaiting_approval");
   const question = confirmationQuestion(power.action, power.worker, machine.instanceId);
-  return confirms(await deps.prompt.ask(question));
+  const answer = await deps.prompt.ask(question);
+  return power.action === "terminate"
+    ? typedKeyConfirms(answer, power.worker.key)
+    : confirms(answer);
 }
 
 interface Reaching {
@@ -556,6 +764,8 @@ interface Reaching {
   readonly changed: boolean;
   /** Whether the change was already under way, and this command only waited for it. */
   readonly awaited: boolean;
+  /** Terminate's tailnet admin session, opened before EC2 was asked. */
+  readonly admin?: TailnetAdminSession | undefined;
 }
 
 /**
@@ -637,13 +847,23 @@ async function timedOut(
   return failedUnder(log, powerTimedOut(power.action, power.worker, machine.instanceId, lastSeen));
 }
 
-/** The machine is in the target state: stop is done; start goes on to the worker's readiness. */
+/** The stage status each action ends with once it changed the machine. */
+const ENDED: Readonly<Record<PowerAction, StageStatus>> = {
+  stop: "stopped",
+  start: "started",
+  terminate: "terminated",
+};
+
+/**
+ * The machine is in the target state: stop is done; start goes on to the worker's readiness,
+ * terminate to deleting its tailnet devices, which, left incomplete, make it partial.
+ */
 async function reached(
   deps: WorkerLifecycleDependencies,
   power: Power,
   log: PowerLog,
   progress: Progress,
-  { machine, changed, awaited }: Reaching,
+  { machine, changed, awaited, admin }: Reaching,
 ): Promise<WorkerPower> {
   let verdict: Verdict | undefined;
   if (power.action === "start") {
@@ -651,8 +871,13 @@ async function reached(
     verdict = await awaitOnline(deps, power);
     if (verdict === undefined) return interruptedUnder(log, progress);
   }
-  const ended = power.action === "stop" ? "stopped" : "started";
-  const recordFailure = await log.finish(changed ? ended : "unchanged", "succeeded");
+  const removal = admin === undefined ? undefined : await tailnetCleanup(deps, power, log, admin);
+  if (deps.interrupted()) return interruptedUnder(log, progress);
+  const leftover = removal?.leftover;
+  const recordFailure =
+    leftover === undefined
+      ? await log.finish(changed ? ENDED[power.action] : "unchanged", "succeeded")
+      : await log.finish("partial", "partial", leftover.summary);
   return {
     kind: "done",
     action: power.action,
@@ -661,9 +886,50 @@ async function reached(
     changed,
     awaited,
     ...(verdict === undefined ? {} : { verdict }),
+    ...(removal ?? {}),
     operation: log.location,
     recordFailure,
   };
+}
+
+/** Terminate's last step: deleting the worker's tailnet devices, and what that left behind. */
+async function tailnetCleanup(
+  deps: WorkerLifecycleDependencies,
+  power: Power,
+  log: PowerLog,
+  admin: TailnetAdminSession,
+): Promise<{ readonly devices: DeviceRemoval; readonly leftover: Refusal | undefined }> {
+  await log.stage("removing_devices");
+  deps.progress({ kind: "removing_devices", hostname: power.worker.hostname });
+  const devices = await removeDevices(deps, power, admin);
+  return { devices, leftover: deviceRemovalRefusal(devices, power.worker) };
+}
+
+/**
+ * Deletes, one at a time, every tailnet device carrying the worker's hostname and the factory's
+ * tag (`selectWorkerDevices`); one without the tag is only reported. Stops at an interrupt.
+ */
+async function removeDevices(
+  deps: WorkerLifecycleDependencies,
+  power: Power,
+  admin: TailnetAdminSession,
+): Promise<DeviceRemoval> {
+  const listing = await admin.devices();
+  if (listing.kind === "failed") return { kind: "unlisted", reason: listing.reason };
+  const { tagged, untagged } = selectWorkerDevices(
+    listing.devices,
+    power.worker.hostname,
+    power.tag,
+  );
+  const removed: string[] = [];
+  const failed: { readonly id: string; readonly reason: string }[] = [];
+  for (const device of tagged) {
+    if (deps.interrupted()) break;
+    const deletion = await admin.remove(device.id);
+    if (deletion.kind === "removed") removed.push(device.id);
+    else failed.push({ id: device.id, reason: deletion.reason });
+  }
+  return { kind: "listed", removed, failed, untagged: untagged.map((device) => device.id) };
 }
 
 /**
@@ -699,7 +965,7 @@ async function lookOnline(
 ): Promise<{ readonly kind: "verdict" | "joining"; readonly verdict: Verdict | undefined }> {
   const view = await deps.peers.view();
   if (deps.interrupted()) return { kind: "verdict", verdict: undefined };
-  const location = locateWorker(view, power.worker.hostname, power.tag);
+  const location = locateWorker(view, power.worker, power.tag);
   if (location.kind === "found")
     return { kind: "verdict", verdict: await readiness(deps, power, location.worker) };
   return { kind: joiningTailnet(location) ? "joining" : "verdict", verdict: location.verdict };

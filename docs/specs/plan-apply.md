@@ -53,7 +53,7 @@ completeness check. Moving the pin is [`fffactory upgrade`](#upgrade)'s.
 | `plan`, `apply` | Yes | They plan and change the factory. |
 | `secret set` | Yes, before reaching AWS: `Refusing to store the secret: ...` | It writes Secrets Manager and factory.json ([secrets](secrets.md)). |
 | `upgrade` | By its own rules ([below](#upgrade)) | Moving the pin to the running release is what it does. |
-| `worker stop`, `worker start` | Yes, after the account check and before the lock: `Refusing to stop the worker: ...` | They change a worker's machine under the lock ([worker lifecycle](worker-lifecycle.md)). |
+| `worker stop`, `worker start`, `worker terminate` | Yes, after the account check and before the lock: `Refusing to stop the worker: ...` | They change a worker's machine under the lock ([worker lifecycle](worker-lifecycle.md)). |
 | `init` | No | It changes no factory: it pins the running release in a new document and keeps an existing pin. |
 | `lock break` | No | It changes no factory state, and an upgrade interrupted before it moved the pin leaves a lock only its later release is at hand to break; confirming the lock ID guards it ([provisioning §Lock](provisioning.md#lock)). |
 | `doctor`, `status`, `validate`, `assets`, `host` | No | They read, or act only on this machine or worker: a mismatched CLI may still diagnose. |
@@ -258,9 +258,10 @@ looks. At the deadline the worker fails, `Its first boot did not finish within
 15 min (last seen: WHAT IT SHOWED LAST)`, with the
 [failed first boot's](worker-bootstrap.md#failed-first-boot) recovery as its
 next action: read the bootstrap in the instance's EC2 console output and check
-that tailnet policy lets this device see the factory's tag; if the bootstrap
-failed, terminate the instance and wait until it is terminated, or if it is
-still running wait for it, then rerun apply. A failure, not a skip, because
+that tailnet policy lets this device see the factory's tag; if the console
+output shows the bootstrap failed, terminate it uninspected with `fffactory
+worker terminate KEY --keep --force`, or if it is still running wait for it,
+then rerun apply. A failure, not a skip, because
 apply's exit 0 must mean every worker is ready, and a machine that never came
 up needs the operator; it does not stop the rollout, because no install step
 ran on it (the release may have been uploaded and unpacked there, but `host
@@ -310,8 +311,8 @@ refused while the inventory cannot be read
 `plan` reads the inventory once, after the lock check and before Terraform
 plans. `apply` reads it once under the lock, before it plans or reads back a
 saved plan: the plan, its refusals and every stage go by that one look, and
-`worker stop|start` take the same lock, so fffactory changes no worker's power
-while apply runs.
+`worker stop|start|terminate` take the same lock, so fffactory changes no
+worker's power while apply runs.
 
 - The plan shows a stopped worker's install, and its control-plane, repository
   and dispatch changes, skipped. It is never inspected for its Paseo state:

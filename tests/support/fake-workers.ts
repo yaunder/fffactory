@@ -11,6 +11,7 @@ import type {
   MachineTarget,
 } from "../../src/application/machine-control";
 import type { ObservedMachineState } from "../../src/domain/worker-lifecycle";
+import type { TailnetAdmin, TailnetDeviceList } from "../../src/application/tailnet-admin";
 import type { TailnetPeers } from "../../src/application/tailnet-peers";
 import type { CredentialSelection } from "../../src/domain/aws-account";
 import { hostProjection, hostProjectionJson } from "../../src/domain/host-projection";
@@ -36,7 +37,7 @@ import {
 } from "../../src/domain/dispatch-projection";
 import { ENROLLMENTS, type EnrollmentState, type Verification } from "../../src/domain/readiness";
 import type { Machine, MachineInventory } from "../../src/domain/status";
-import type { PeerView, TailnetPeer, WorkerAddress } from "../../src/domain/tailnet";
+import type { PeerView, TailnetDevice, TailnetPeer, WorkerAddress } from "../../src/domain/tailnet";
 import type { WorkerEndpoint } from "../../src/host/endpoint";
 import { sha256Text } from "../../src/infrastructure/release-tarball";
 
@@ -122,7 +123,7 @@ export function fakeMachineInventory(
 /**
  * MachineControl answering every request with `request` (by default `requested`), and each state
  * read with the next of `states`, the last one repeated; an `undefined` entry is a read that
- * failed. Records every call, as `stop`, `start` or `state` with the instance ID, and each
+ * failed. Records every call, as `stop`, `start`, `terminate` or `state` with the instance ID, and each
  * target, so a test can tell that EC2 was never asked to change anything.
  */
 export function fakeMachineControl(
@@ -142,6 +143,7 @@ export function fakeMachineControl(
   const control: MachineControl = {
     stop: ask("stop"),
     start: ask("start"),
+    terminate: ask("terminate"),
     state: async (target) => {
       calls.push(`state ${target.instanceId}`);
       const state = states.length > 1 ? states.shift() : states[0];
@@ -479,4 +481,57 @@ export function fakeWorker(
     isRoot: () => false,
     ...overrides,
   };
+}
+
+/**
+ * The Tailscale API as the admin client sees it: a tailnet of `devices`, from which `remove`
+ * deletes one unless `failing` names it. `open` fails when `open` says so, and the listing
+ * when `listing` does. Records every call (`open`, `devices`, `remove ID`) and the secret each
+ * `open` was given, so a test can tell what reached the API and that nothing was deleted.
+ */
+export function fakeTailnetAdmin(
+  options: {
+    readonly devices?: readonly TailnetDevice[];
+    readonly open?: { readonly kind: "failed"; readonly reason: string };
+    readonly listing?: Extract<TailnetDeviceList, { readonly kind: "failed" }>;
+    readonly failing?: Readonly<Record<string, string>>;
+  } = {},
+) {
+  const calls: string[] = [];
+  const secrets: string[] = [];
+  let devices = [...(options.devices ?? [])];
+  const admin: TailnetAdmin = {
+    open: async (secret) => {
+      calls.push("open");
+      secrets.push(secret.reveal());
+      if (options.open) return options.open;
+      return {
+        kind: "open",
+        session: {
+          devices: async () => {
+            calls.push("devices");
+            return options.listing ?? { kind: "devices", devices: [...devices] };
+          },
+          remove: async (id) => {
+            calls.push(`remove ${id}`);
+            const reason = options.failing?.[id];
+            if (reason !== undefined) return { kind: "failed", reason };
+            devices = devices.filter((device) => device.id !== id);
+            return { kind: "removed" };
+          },
+        },
+      };
+    },
+  };
+  return { admin, calls, secrets, devices: () => devices };
+}
+
+/** A tailnet device as the Tailscale API lists it. */
+export function tailnetDevice(
+  id: string,
+  hostName: string,
+  tags: readonly string[],
+  dnsName = `${hostName}.example-tailnet.ts.net`,
+): TailnetDevice {
+  return { id, hostName, dnsName, tags };
 }

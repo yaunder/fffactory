@@ -14,6 +14,7 @@ import type { OperatorPrompt } from "../application/operator-prompt";
 import type { PlanStore } from "../application/plan-store";
 import type { Provisioner } from "../application/provisioner";
 import type { SecretStore } from "../application/secret-store";
+import type { TailnetAdmin } from "../application/tailnet-admin";
 import type { TailnetPeers } from "../application/tailnet-peers";
 import type { ToolProbe } from "../application/tool-probe";
 import type { VpcQuotaProbe } from "../application/vpc-quota-probe";
@@ -39,16 +40,21 @@ export interface CliContext {
   readonly vpcQuota: VpcQuotaProbe;
   /** The factory-wide lock, in the state bucket; reached only after an account match. */
   readonly lockStore: LockStore;
-  /** Secrets Manager; written only after an account match. */
+  /** Secrets Manager; written or read only after an account match. */
   readonly secrets: SecretStore;
   /** Managed Terraform, run only after an account match. */
   readonly provisioner: Provisioner;
   /** The factory's EC2 instances, listed only after an account match. */
   readonly machines: MachineInventorySource;
-  /** Stops and starts one factory EC2 instance, only after an account match, under the lock. */
+  /**
+   * Stops, starts and terminates one factory EC2 instance, only after an account match, under
+   * the lock.
+   */
   readonly machineControl: MachineControl;
   /** The devices the local Tailscale client sees. */
   readonly tailnet: TailnetPeers;
+  /** The Tailscale API as the factory's admin client, which deletes a terminated worker's devices. */
+  readonly tailnetAdmin: TailnetAdmin;
   /** SSH to workers the hostname-match rule found. */
   readonly transport: HostTransport;
   /**

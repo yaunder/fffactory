@@ -30,7 +30,7 @@ way, which can replace a host or change its instance type in place (`resize`), a
 or the real SDK pointed at `support/stub-sts.ts`, `support/stub-vpc-quota.ts` (EC2 and
 Service Quotas), `support/stub-s3.ts` (a versioned, never-versioned or suspended bucket
 with conditional writes and bootstrap's settings, some of them lackable,
-`forcePathStyle`) or `support/stub-secrets-manager.ts`, with AWS's documentation example
+`forcePathStyle`) or `support/stub-secrets-manager.ts` (which also answers `GetSecretValue`), with AWS's documentation example
 keys and account `123456789012`. The terminal prompt runs over a `PassThrough` stand-in
 terminal, never the test's own. A secret-handling test searches every output line, file
 and argument for the value it used. Spawn a CLI that talks to a stub in the test process
@@ -42,10 +42,18 @@ fakes in `support/doctor-fakes.ts` and `support/fake-workers.ts` (the EC2 invent
 peer view, an SSH transport scripted per worker hostname, this machine as a worker), an
 injected `ProcessRunner`, or stand-in scripts on a private `PATH` holding only the real
 tools they need (`cli/main.test.ts`, `cli/status-executable.test.ts`, which also points
-EC2 at `support/stub-ec2-instances.ts`, which also answers `StopInstances` and
-`StartInstances`). `worker stop|start` run against `fake-workers.ts`'s
-`fakeMachineControl`, whose state reads follow a script and which records every call, so
-a test can assert EC2 was never asked to change anything (`mutations`). The workers stage
+EC2 at `support/stub-ec2-instances.ts`, which also answers `StopInstances`,
+`StartInstances` and `TerminateInstances`). `worker stop|start|terminate` run against
+`fake-workers.ts`'s `fakeMachineControl`, whose state reads follow a script and which
+records every call, so a test can assert EC2 was never asked to change anything
+(`mutations`), and terminate against its `fakeTailnetAdmin`, a tailnet of `tailnetDevice`s
+recording every call and the secret each `open` got, and `fake-secrets.ts`'s
+`fakeSecretStore` reading the admin client by its ARN. Tests never reach Tailscale's API:
+`infrastructure/tailscale-api-admin.test.ts` sends real HTTP to
+`support/stub-tailscale-api.ts`, a local stand-in for the token exchange, the device list
+and deletion that echoes refused requests back, so a test can assert no body, token or
+secret reaches a reason; its `expireTokens` expires the tokens granted so far, and
+`redirectTo` answers every request with a redirect. The workers stage
 runs against `support/fake-workers.ts`'s scripted transport, whose `installableWorker`
 answers the upload and the activator, and `support/factory-world.ts`'s `workerFleet`,
 whose EC2 inventory lists no machine until a test sets `machines.inventory` (a stopped

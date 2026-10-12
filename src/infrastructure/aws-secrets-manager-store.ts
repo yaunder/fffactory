@@ -1,6 +1,7 @@
 import type { SecretsManagerClientConfig } from "@aws-sdk/client-secrets-manager";
 import type { SecretStore } from "../application/secret-store";
 import { parseSecretReference, type SecretReference } from "../domain/instance";
+import { SecretMaterial } from "../domain/secrets";
 import {
   AdapterRefusal,
   type AwsCalls,
@@ -10,7 +11,7 @@ import {
   withAwsSession,
 } from "./aws-session";
 
-/** Each write's deadline, whether it creates the secret or adds a value to it. */
+/** Each call's deadline: a write, whether it creates the secret or adds a value to it, or a read. */
 export const SECRETS_MANAGER_TIMEOUT_MS = 30_000;
 
 export interface CreateSecretInput {
@@ -25,14 +26,24 @@ export interface PutSecretValueInput {
   readonly SecretString: string;
 }
 
+export interface GetSecretValueInput {
+  readonly SecretId: string;
+}
+
 /** The fields of a CreateSecret or PutSecretValue answer the adapter reads. */
 export interface SecretAnswer {
   readonly ARN?: string | undefined;
 }
 
+/** The field of a GetSecretValue answer the adapter reads. */
+export interface SecretValueAnswer extends SecretAnswer {
+  readonly SecretString?: string | undefined;
+}
+
 export interface SecretsManagerCalls extends AwsCalls {
   createSecret(input: CreateSecretInput): Promise<SecretAnswer>;
   putSecretValue(input: PutSecretValueInput): Promise<SecretAnswer>;
+  getSecretValue(input: GetSecretValueInput): Promise<SecretValueAnswer>;
 }
 
 /**
@@ -50,6 +61,7 @@ export function sdkSecretsManagerCalls(
       createSecret: (input) =>
         client.send(new sm.CreateSecretCommand({ ...input, Tags: [...input.Tags] }), options),
       putSecretValue: (input) => client.send(new sm.PutSecretValueCommand(input), options),
+      getSecretValue: (input) => client.send(new sm.GetSecretValueCommand(input), options),
       close: () => client.destroy(),
     };
   };
@@ -63,8 +75,9 @@ function arnOf(answer: SecretAnswer): SecretReference {
 
 /**
  * Secrets Manager: creates the secret, tagged, or adds a new value to it when it already
- * exists. The material is only ever the `SecretString` of one request; failures are
- * described by error name, never by a message that could echo it.
+ * exists, and reads a secret's current value by its ARN. The material is only ever the
+ * `SecretString` of one request or answer, and leaves a read only as `SecretMaterial`;
+ * failures are described by error name, never by a message that could echo it.
  */
 export function secretsManagerStore(
   open: OpenCalls<SecretsManagerCalls> = sdkSecretsManagerCalls(),
@@ -92,6 +105,19 @@ export function secretsManagerStore(
           }
           const updated = await calls.putSecretValue({ SecretId: request.name, SecretString });
           return { arn: arnOf(updated), created: false };
+        },
+      ),
+    read: (request) =>
+      withAwsSession(
+        open,
+        request,
+        timeoutMs,
+        "Reading the secret from Secrets Manager",
+        async (calls) => {
+          const { SecretString } = await calls.getSecretValue({ SecretId: request.reference });
+          if (typeof SecretString !== "string" || SecretString === "")
+            throw new AdapterRefusal("Secrets Manager holds no text value for the secret");
+          return new SecretMaterial(SecretString);
         },
       ),
   };

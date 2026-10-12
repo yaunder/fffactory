@@ -616,7 +616,7 @@ async function workersStage(
     )
       continue;
     activityView ??= await deps.peers.view();
-    const location = locateWorker(activityView, plan.hostname, tag);
+    const location = locateWorker(activityView, plan, tag);
     const activity =
       location.kind === "found" && deps.controlPlane !== undefined
         ? await deps.controlPlane.activeAgents(location.worker)
@@ -962,7 +962,7 @@ async function reconcileWorkerControlPlane(
   observation: string | undefined,
 ): Promise<WorkerControlPlane> {
   const identity: WorkerIdentity = { key: worker.key, hostname: worker.hostname };
-  const location = locateWorker(view, worker.hostname, tag, thenRerunApply);
+  const location = locateWorker(view, identity, tag, thenRerunApply);
   if (location.kind !== "found") return { control: undefined, location, paseoHealth: "unknown" };
   const control = await applyControlPlane(
     { controlPlane },

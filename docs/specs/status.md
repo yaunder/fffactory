@@ -54,12 +54,12 @@ Status goes as far as it can and stops at the first thing that blocks it:
 
 | Stage | Observation | Status | Summary and next action |
 | --- | --- | --- | --- |
-| Machine | No instance carries the host key | not ready | Not provisioned; provision it with `fffactory apply`. |
+| Machine | No instance carries the host key | not ready | Not provisioned; provision it with `fffactory apply`. A worker terminated with `fffactory worker terminate KEY --keep` shows this until the next apply creates it ([worker lifecycle §Terminate (keep)](worker-lifecycle.md#terminate-keep)). |
 | Machine | More than one does | not ready | N instances, each listed; remove the one that is not the worker yourself. Status never guesses. |
 | Machine | `stopped` | stopped | `Stopped`; start it with `fffactory worker start KEY` ([worker lifecycle §Start](worker-lifecycle.md#start)). Never connected to. |
 | Machine | `stopping` or `shutting-down` | not ready | Check the named instance in the EC2 console. |
 | Tailnet | The peer view is unavailable | as the `tailscale` check | Fix the Tailscale client. |
-| Tailnet | `missing` | not ready | No device with that name is visible; wait for it to join, or check the tailnet policy and the bootstrap in the EC2 console output. A failed bootstrap never reruns: terminate the instance, and once it is terminated the next `fffactory apply` creates it again ([worker bootstrap §Failed first boot](worker-bootstrap.md#failed-first-boot)). |
+| Tailnet | `missing` | not ready | No device with that name is visible; wait for it to join, or check the tailnet policy and the bootstrap in the EC2 console output. A failed bootstrap never reruns: if the console output shows it failed, terminate it uninspected with `fffactory worker terminate KEY --keep --force` (a worker that never joined cannot be inspected), and `fffactory apply` then creates it again ([worker bootstrap §Failed first boot](worker-bootstrap.md#failed-first-boot)). |
 | Tailnet | `duplicate` | not ready | N devices share the name; remove the stale ones in the Tailscale admin console. Never connected to. |
 | Tailnet | `untagged` | not ready | The one device with the name does not carry the factory's tag (`tailscale.tag`); check in the admin console that it is the worker and carries the tag, and remove it if not. Never connected to. |
 | Tailnet | `offline` | not ready | Check that the instance runs and Tailscale is up. |

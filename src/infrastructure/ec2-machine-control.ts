@@ -30,6 +30,7 @@ export interface InstanceStateInput {
 export interface Ec2ControlCalls extends AwsCalls {
   stopInstances(input: InstanceIdsInput): Promise<unknown>;
   startInstances(input: InstanceIdsInput): Promise<unknown>;
+  terminateInstances(input: InstanceIdsInput): Promise<unknown>;
   describeInstances(input: InstanceStateInput): Promise<InstancePage>;
 }
 
@@ -49,6 +50,8 @@ export function sdkEc2ControlCalls(
         client.send(new ec2.StopInstancesCommand({ InstanceIds: [...InstanceIds] }), options),
       startInstances: ({ InstanceIds }) =>
         client.send(new ec2.StartInstancesCommand({ InstanceIds: [...InstanceIds] }), options),
+      terminateInstances: ({ InstanceIds }) =>
+        client.send(new ec2.TerminateInstancesCommand({ InstanceIds: [...InstanceIds] }), options),
       describeInstances: ({ Filters }) =>
         client.send(
           new ec2.DescribeInstancesCommand({
@@ -87,8 +90,8 @@ function stateOf(page: InstancePage, instanceId: string): MachineStateRead {
 }
 
 /**
- * The power of one factory instance over EC2 StopInstances, StartInstances and
- * DescribeInstances, each call within `timeoutMs`. A state is read only for the instance ID
+ * The power of one factory instance over EC2 StopInstances, StartInstances, TerminateInstances
+ * and DescribeInstances, each call within `timeoutMs`. A state is read only for the instance ID
  * that also carries the factory's ID tag. Failures are `failed`, `unanswered` or `unavailable`,
  * described by error name or network code only.
  */
@@ -120,6 +123,8 @@ export function ec2MachineControl(
       request(target, "EC2 StopInstances", (calls, input) => calls.stopInstances(input)),
     start: (target) =>
       request(target, "EC2 StartInstances", (calls, input) => calls.startInstances(input)),
+    terminate: (target) =>
+      request(target, "EC2 TerminateInstances", (calls, input) => calls.terminateInstances(input)),
     async state(target) {
       const Filters = [
         { Name: "instance-id", Values: [target.instanceId] },

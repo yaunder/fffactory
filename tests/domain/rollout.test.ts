@@ -260,7 +260,7 @@ describe("a worker's first boot (plan-apply §Waiting for a new worker)", () => 
 
   test("a worker not yet in the tailnet, offline or without Tailscale SSH is still joining", () => {
     const at = (...devices: Parameters<typeof peer>[]) =>
-      locateWorker(peers(...devices.map((args) => peer(...args))), HOST, TAG);
+      locateWorker(peers(...devices.map((args) => peer(...args))), WORKER, TAG);
     expect(joiningTailnet(at())).toBe(true);
     expect(joiningTailnet(at([HOST, { online: false }]))).toBe(true);
     expect(joiningTailnet(at([HOST, { sshHostKeys: [] }]))).toBe(true);
@@ -268,7 +268,7 @@ describe("a worker's first boot (plan-apply §Waiting for a new worker)", () => 
     // The match rule refuses these at once: waiting never makes a guess safe.
     expect(joiningTailnet(at([HOST], [HOST]))).toBe(false);
     expect(joiningTailnet(at([HOST, { tags: [] }]))).toBe(false);
-    expect(joiningTailnet(locateWorker({ kind: "daemon_unreachable" }, HOST, TAG))).toBe(false);
+    expect(joiningTailnet(locateWorker({ kind: "daemon_unreachable" }, WORKER, TAG))).toBe(false);
   });
 
   test("only this worker's refusal for an unfinished bootstrap is waited for", () => {
@@ -289,9 +289,10 @@ describe("a worker's first boot (plan-apply §Waiting for a new worker)", () => 
         "Its first boot did not finish within 15 min (last seen: Its bootstrap has not finished)",
       nextAction:
         "Read the bootstrap in the instance's EC2 console output, and check that tailnet policy " +
-        "lets this device see the factory's tag. If the bootstrap failed, terminate the instance " +
-        "in the EC2 console and wait until it is terminated; if it is still running, wait for it " +
-        `to finish${THEN}`,
+        "lets this device see the factory's tag. If the console output shows the bootstrap " +
+        "failed, terminate it uninspected with " +
+        "`fffactory worker terminate builder-1 --keep --force`; if it is still running, wait " +
+        `for it to finish${THEN}`,
       beforeInstall: true,
     });
     expect(rolloutResult([outcome])).toBe("failed");
