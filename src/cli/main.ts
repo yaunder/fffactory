@@ -17,6 +17,7 @@ import { secretsManagerStore } from "../infrastructure/aws-secrets-manager-store
 import { stsCallerIdentity } from "../infrastructure/aws-sts-caller-identity";
 import { awsVpcQuotaProbe } from "../infrastructure/aws-vpc-quota-probe";
 import { ec2MachineInventory } from "../infrastructure/ec2-inventory";
+import { ec2MachineControl } from "../infrastructure/ec2-machine-control";
 import { filesystemCacheDirectory } from "../infrastructure/filesystem-cache-directory";
 import { filesystemInstanceStore } from "../infrastructure/filesystem-instance-store";
 import {
@@ -92,6 +93,7 @@ await interrupts.run(
       }),
       planStore: filesystemPlanStore(planStoreDirectory(cacheDirectory)),
       machines: ec2MachineInventory(),
+      machineControl: ec2MachineControl(),
       tailnet: tailscalePeers(),
       transport,
       controlPlane: paseoControlPlane(transport),

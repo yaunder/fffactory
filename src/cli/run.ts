@@ -10,6 +10,7 @@ import { secretCommand } from "./commands/secret";
 import { statusCommand } from "./commands/status";
 import { upgradeCommand } from "./commands/upgrade";
 import { validateCommand } from "./commands/validate";
+import { workerCommand } from "./commands/worker";
 import type { CliContext, Command } from "./context";
 import { printDiagnostics } from "./diagnostics";
 
@@ -23,6 +24,7 @@ const COMMANDS: Readonly<Record<string, Command>> = {
   apply: applyCommand,
   status: statusCommand,
   upgrade: upgradeCommand,
+  worker: workerCommand,
   assets: assetsCommand,
   secret: secretCommand,
   lock: lockCommand,

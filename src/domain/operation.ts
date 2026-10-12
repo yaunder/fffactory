@@ -53,7 +53,10 @@ export type OperationStatus =
  * Where a stage is. The infrastructure stage goes `planning`, then `awaiting_approval`,
  * then `applying`, and ends `applied`, `unchanged`, `declined`, `refused` or `failed`. The
  * workers stage goes `installing` and ends `installed`, `partial` (some workers skipped) or
- * `failed`.
+ * `failed`. A worker power operation's one stage, named for its action, goes `locating`, then
+ * `inspecting` (stop), `awaiting_approval`, `stopping` or `starting`, and `waiting` (start, for
+ * the tailnet), and ends `stopped`, `started`, `unchanged`, `declined`, `refused` or `failed`
+ * (`docs/specs/worker-lifecycle.md` §Operation record).
  */
 export type StageStatus =
   | "pending"
@@ -72,6 +75,13 @@ export type StageStatus =
   | "active"
   | "verified"
   | "written"
+  | "locating"
+  | "inspecting"
+  | "stopping"
+  | "stopped"
+  | "starting"
+  | "started"
+  | "waiting"
   | "partial"
   | "declined"
   | "refused"
@@ -130,6 +140,14 @@ export interface OperationVerification {
   }[];
 }
 
+/** The worker a power operation acts on, and its machine's EC2 state as last read. */
+export interface MachineRecord {
+  readonly key: string;
+  readonly hostname: string;
+  readonly instance_id: string;
+  readonly state: string;
+}
+
 export interface OperationRecord {
   readonly schema_version: typeof OPERATION_SCHEMA_VERSION;
   /** The ID of the lock the operation holds: one lock, one operation. */
@@ -154,6 +172,8 @@ export interface OperationRecord {
   readonly finished_at: string | null;
   /** Why it failed, in fffactory's own words: never an AWS or Terraform message. */
   readonly failure: string | null;
+  /** A worker power operation's machine, once located; apply's records have none. */
+  readonly machine?: MachineRecord;
 }
 
 /**
@@ -173,6 +193,26 @@ export function startOperation(
   planId: string | undefined,
   pending: readonly string[] = [],
 ): OperationRecord {
+  return openOperation(lock, planId, [
+    ...pending.map((name) => ({ name, status: "pending" as const })),
+    { name: INFRASTRUCTURE_STAGE, status: "planning" },
+  ]);
+}
+
+/** The record of an operation that has just taken `lock` and runs one stage, `name`. */
+export function startStageOperation(
+  lock: LockRecord,
+  name: string,
+  status: StageStatus,
+): OperationRecord {
+  return openOperation(lock, undefined, [{ name, status }]);
+}
+
+function openOperation(
+  lock: LockRecord,
+  planId: string | undefined,
+  stages: readonly StageRecord[],
+): OperationRecord {
   return {
     schema_version: OPERATION_SCHEMA_VERSION,
     operation_id: lock.lock_id,
@@ -182,10 +222,7 @@ export function startOperation(
     release: lock.release,
     plan_id: planId ?? null,
     status: "running",
-    stages: [
-      ...pending.map((name) => ({ name, status: "pending" as const })),
-      { name: INFRASTRUCTURE_STAGE, status: "planning" },
-    ],
+    stages,
     workers: [],
     repositories: [],
     control_plane: [],
@@ -275,6 +312,15 @@ export function withRepositories(
     })),
     updated_at: now.toISOString(),
   };
+}
+
+/** The record with the worker power operation's machine as last read. */
+export function withMachine(
+  record: OperationRecord,
+  machine: MachineRecord,
+  now: Date,
+): OperationRecord {
+  return { ...record, machine, updated_at: now.toISOString() };
 }
 
 /** The record with stage `name` at `status`, added after the others when it is new. */

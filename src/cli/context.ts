@@ -7,6 +7,7 @@ import type { Interrupted } from "../application/factory-lock";
 import type { HostTransport } from "../application/host-transport";
 import type { InstanceStore } from "../application/instance-store";
 import type { LockStore } from "../application/lock-store";
+import type { MachineControl } from "../application/machine-control";
 import type { MachineInventorySource } from "../application/machine-inventory";
 import type { ManagedTerraformProbe } from "../application/managed-terraform";
 import type { OperatorPrompt } from "../application/operator-prompt";
@@ -44,6 +45,8 @@ export interface CliContext {
   readonly provisioner: Provisioner;
   /** The factory's EC2 instances, listed only after an account match. */
   readonly machines: MachineInventorySource;
+  /** Stops and starts one factory EC2 instance, only after an account match, under the lock. */
+  readonly machineControl: MachineControl;
   /** The devices the local Tailscale client sees. */
   readonly tailnet: TailnetPeers;
   /** SSH to workers the hostname-match rule found. */

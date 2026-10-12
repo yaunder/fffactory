@@ -5,6 +5,12 @@
  */
 import type { HostCommandOutcome, HostTransport } from "../../src/application/host-transport";
 import type { MachineInventorySource } from "../../src/application/machine-inventory";
+import type {
+  MachineControl,
+  MachineRequest,
+  MachineTarget,
+} from "../../src/application/machine-control";
+import type { ObservedMachineState } from "../../src/domain/worker-lifecycle";
 import type { TailnetPeers } from "../../src/application/tailnet-peers";
 import type { CredentialSelection } from "../../src/domain/aws-account";
 import { hostProjection, hostProjectionJson } from "../../src/domain/host-projection";
@@ -111,6 +117,42 @@ export function fakeMachineInventory(
     },
   };
   return { machines, requests };
+}
+
+/**
+ * MachineControl answering every request with `request` (by default `requested`), and each state
+ * read with the next of `states`, the last one repeated; an `undefined` entry is a read that
+ * failed. Records every call, as `stop`, `start` or `state` with the instance ID, and each
+ * target, so a test can tell that EC2 was never asked to change anything.
+ */
+export function fakeMachineControl(
+  options: {
+    readonly states?: readonly (ObservedMachineState | undefined)[];
+    readonly request?: MachineRequest;
+  } = {},
+) {
+  const calls: string[] = [];
+  const targets: MachineTarget[] = [];
+  const states = [...(options.states ?? [])];
+  const ask = (action: string) => async (target: MachineTarget) => {
+    calls.push(`${action} ${target.instanceId}`);
+    targets.push(target);
+    return options.request ?? ({ kind: "requested" } as const);
+  };
+  const control: MachineControl = {
+    stop: ask("stop"),
+    start: ask("start"),
+    state: async (target) => {
+      calls.push(`state ${target.instanceId}`);
+      const state = states.length > 1 ? states.shift() : states[0];
+      return state === undefined
+        ? { kind: "unavailable", reason: "EC2 DescribeInstances failed: timed out after 15 s" }
+        : { kind: "state", state };
+    },
+  };
+  /** The calls that ask EC2 to change something. */
+  const mutations = () => calls.filter((call) => !call.startsWith("state"));
+  return { control, calls, targets, mutations };
 }
 
 /** The host configuration's digest in `inspection`, and what `FAKE_SHA256` computes. */

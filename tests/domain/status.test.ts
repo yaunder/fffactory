@@ -290,7 +290,7 @@ describe("the EC2 inventory", () => {
 
   test("absent, duplicate, stopped and stopping machines are not inspected", () => {
     const verdict = (machines: ReturnType<typeof machine>[]) =>
-      machineVerdict(machineFacts({ kind: "machines", machines }, KEY));
+      machineVerdict(machineFacts({ kind: "machines", machines }, KEY), KEY);
     expect(verdict([])?.nextAction).toBe(`Provision it with \`fffactory apply\`${RERUN}`);
     const duplicate = verdict([machine(KEY), machine(KEY, "running", "i-0fedcba9876543210")]);
     expect(duplicate?.summary).toBe("2 EC2 instances carry this host key");
@@ -298,9 +298,10 @@ describe("the EC2 inventory", () => {
       "Instance: i-0123456789abcdef0",
       "Instance: i-0fedcba9876543210",
     ]);
-    expect(verdict([machine(KEY, "stopped")])?.nextAction).toBe(
-      `Start instance i-0123456789abcdef0 in the EC2 console${RERUN}`,
-    );
+    const stopped = verdict([machine(KEY, "stopped")]);
+    expect(stopped?.summary).toBe("EC2 instance i-0123456789abcdef0 is stopped");
+    expect(stopped?.status).toBe("not_ready");
+    expect(stopped?.nextAction).toBe(`Start it with \`fffactory worker start ${KEY}\`${RERUN}`);
     for (const state of ["stopping", "shutting-down"] as const)
       expect(verdict([machine(KEY, state)])?.summary).toBe(
         `EC2 instance i-0123456789abcdef0 is ${state}`,
@@ -312,7 +313,7 @@ describe("the EC2 inventory", () => {
   test("an unavailable inventory leaves the machine unknown and still inspects it", () => {
     const facts = machineFacts({ kind: "unavailable", reason: "x" }, KEY);
     expect(facts.machine).toBe("unknown");
-    expect(machineVerdict(facts)).toBeUndefined();
+    expect(machineVerdict(facts, KEY)).toBeUndefined();
   });
 
   test("is a check: ready with a count, or an error naming the failure", () => {

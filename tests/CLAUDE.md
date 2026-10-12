@@ -40,7 +40,10 @@ fakes in `support/doctor-fakes.ts` and `support/fake-workers.ts` (the EC2 invent
 peer view, an SSH transport scripted per worker hostname, this machine as a worker), an
 injected `ProcessRunner`, or stand-in scripts on a private `PATH` holding only the real
 tools they need (`cli/main.test.ts`, `cli/status-executable.test.ts`, which also points EC2
-at `support/stub-ec2-instances.ts`). The workers stage runs
+at `support/stub-ec2-instances.ts`, which also answers `StopInstances` and `StartInstances`).
+`worker stop|start` run against `fake-workers.ts`'s `fakeMachineControl`, whose state reads
+follow a script and which records every call, so a test can assert EC2 was never asked to
+change anything (`mutations`). The workers stage runs
 against `support/fake-workers.ts`'s scripted transport, whose `installableWorker` answers the
 upload and the activator, and `support/factory-world.ts`'s `workerFleet`. Digests there are
 real: the fleet digests projections as the CLI does, and an `installableWorker` keeps the

@@ -8,7 +8,9 @@ import {
   PIN_STAGE,
   serializeOperation,
   startOperation,
+  startStageOperation,
   withDispatch,
+  withMachine,
   withVerification,
   WORKERS_STAGE,
   withStage,
@@ -232,5 +234,33 @@ describe("operation records", () => {
     const record = startOperation(LOCK, undefined);
     expect(JSON.parse(serializeOperation(record))).toEqual(record);
     expect(serializeOperation(record).endsWith("}\n")).toBe(true);
+  });
+
+  test("of a worker power operation start running its one stage, and record the machine", () => {
+    const lock = { ...LOCK, operation: "worker-stop" };
+    const started = startStageOperation(lock, "stop", "locating");
+    expect(started).toEqual({
+      ...startOperation(lock, undefined),
+      stages: [{ name: "stop", status: "locating" }],
+    });
+    expect(started.machine).toBeUndefined();
+    const located = withMachine(
+      started,
+      {
+        key: "builder-1",
+        hostname: "fff-abcd1234-builder-1",
+        instance_id: "i-0123456789abcdef0",
+        state: "running",
+      },
+      LATER,
+    );
+    expect(located.machine).toEqual({
+      key: "builder-1",
+      hostname: "fff-abcd1234-builder-1",
+      instance_id: "i-0123456789abcdef0",
+      state: "running",
+    });
+    expect(located.updated_at).toBe(LATER.toISOString());
+    expect(JSON.parse(serializeOperation(located)).machine.state).toBe("running");
   });
 });

@@ -214,8 +214,11 @@ export function machineFacts(inventory: MachineInventory, key: HostKey): Machine
   return { machine: only.state, instanceId: only.instanceId, instanceIds };
 }
 
-/** Why the machine cannot be inspected, or undefined when status goes on to the tailnet. */
-export function machineVerdict(facts: MachineFacts): Verdict | undefined {
+/**
+ * Why the machine of host `key` cannot be inspected, or undefined when status goes on to the
+ * tailnet.
+ */
+export function machineVerdict(facts: MachineFacts, key: HostKey): Verdict | undefined {
   const { machine, instanceId, instanceIds } = facts;
   switch (machine) {
     case "absent":
@@ -233,7 +236,7 @@ export function machineVerdict(facts: MachineFacts): Verdict | undefined {
     case "stopped":
       return notReadyVerdict(
         `EC2 instance ${instanceId} is stopped`,
-        `Start instance ${instanceId} in the EC2 console`,
+        `Start it with \`fffactory worker start ${key}\``,
       );
     case "stopping":
     case "shutting-down":

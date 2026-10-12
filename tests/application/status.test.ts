@@ -420,7 +420,12 @@ describe("factory status", () => {
       release: "unknown",
       status: "not_ready",
     });
-    expect(workers["builder-2"]).toMatchObject({ machine: "stopped", tailnet: "not_checked" });
+    expect(workers["builder-2"]).toMatchObject({
+      machine: "stopped",
+      tailnet: "not_checked",
+      nextAction:
+        "Start it with `fffactory worker start builder-2`, then rerun `fffactory status`.",
+    });
     expect(transport.calls).toEqual([]);
   });
 

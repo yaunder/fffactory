@@ -56,7 +56,7 @@ Status goes as far as it can and stops at the first thing that blocks it:
 | --- | --- | --- | --- |
 | Machine | No instance carries the host key | not ready | Not provisioned; provision it with `fffactory apply`. |
 | Machine | More than one does | not ready | N instances, each listed; remove the one that is not the worker yourself. Status never guesses. |
-| Machine | `stopped` | not ready | Start the named instance in the EC2 console. |
+| Machine | `stopped` | not ready | The named instance is stopped; start it with `fffactory worker start KEY` ([worker lifecycle §Start](worker-lifecycle.md#start)). |
 | Machine | `stopping` or `shutting-down` | not ready | Check the named instance in the EC2 console. |
 | Tailnet | The peer view is unavailable | as the `tailscale` check | Fix the Tailscale client. |
 | Tailnet | `missing` | not ready | No device with that name is visible; wait for it to join, or check the tailnet policy and the bootstrap in the EC2 console output. A failed bootstrap never reruns: terminate the instance, and once it is terminated the next `fffactory apply` creates it again ([worker bootstrap §Failed first boot](worker-bootstrap.md#failed-first-boot)). |

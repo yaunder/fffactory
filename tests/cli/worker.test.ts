@@ -1,0 +1,424 @@
+import { describe, expect, test } from "bun:test";
+import type { AgentActivity } from "../../src/application/control-plane";
+import type { MachineControl } from "../../src/application/machine-control";
+import { run, waitsOnInterrupt } from "../../src/cli/run";
+import { newLockRecord } from "../../src/domain/factory-lock";
+import type { FactoryInstance, Release } from "../../src/domain/instance";
+import type { Machine } from "../../src/domain/status";
+import type { PeerView } from "../../src/domain/tailnet";
+import type { AwsSession } from "../../src/infrastructure/aws-session";
+import {
+  type Ec2ControlCalls,
+  ec2MachineControl,
+} from "../../src/infrastructure/ec2-machine-control";
+import { harness, TEST_NOW } from "../support/cli-harness";
+import { FAKE_CALLER, fakeCallerIdentity } from "../support/doctor-fakes";
+import { fakeControlPlane } from "../support/fake-control-plane";
+import { fakePrompt } from "../support/fake-secrets";
+import {
+  answers,
+  fakeMachineControl,
+  fakeMachineInventory,
+  fakeTailnet,
+  fakeTransport,
+  machine,
+  peer,
+  peers,
+  readyWorker,
+} from "../support/fake-workers";
+import { BUCKET, declaring, FACTORY, RELEASE, WORKER_TAG } from "../support/factory-world";
+import { MemoryInstanceStore } from "../support/memory-instance-store";
+import { MemoryLockStore } from "../support/memory-lock-store";
+
+const PATH = "/work/repo/.fffactory/factory.json";
+const KEY = "builder-1";
+const HOSTNAME = `${FACTORY}-${KEY}`;
+const ID = "i-0123456789abcdef0";
+const ONLINE = peers(peer(HOSTNAME, { tags: [WORKER_TAG] }));
+
+interface Setup {
+  readonly instance?: FactoryInstance;
+  readonly state?: Machine["state"];
+  readonly states?: readonly ("stopping" | "stopped" | "pending" | "running")[];
+  readonly activity?: AgentActivity;
+  readonly view?: PeerView;
+  readonly control?: MachineControl;
+  readonly identity?: ReturnType<typeof fakeCallerIdentity>;
+  readonly prompt?: ReturnType<typeof fakePrompt>;
+  readonly interruptOnSleep?: boolean;
+  readonly worker?: ReturnType<typeof readyWorker>;
+}
+
+function setup(options: Setup = {}) {
+  const store = new MemoryInstanceStore({
+    [PATH]: JSON.stringify(options.instance ?? declaring(KEY, "builder-2")),
+  });
+  const lockStore = new MemoryLockStore([BUCKET]);
+  const control = fakeMachineControl({ states: options.states ?? ["stopped"] });
+  const controlPlane = fakeControlPlane("healthy", options.activity ?? { kind: "idle" });
+  const identity = options.identity ?? fakeCallerIdentity();
+  const transport = fakeTransport({
+    [HOSTNAME]: answers(options.worker ?? readyWorker(FACTORY, KEY, RELEASE)),
+  });
+  let interrupted = false;
+  const cli = harness(
+    store,
+    {},
+    {
+      lockStore,
+      identity: identity.identity,
+      machines: fakeMachineInventory({
+        kind: "machines",
+        machines: [machine(KEY, options.state ?? "running", ID)],
+      }).machines,
+      machineControl: options.control ?? control.control,
+      controlPlane: controlPlane.controlPlane,
+      tailnet: fakeTailnet(options.view ?? ONLINE).tailnet,
+      transport: transport.transport,
+      prompt: (options.prompt ?? fakePrompt()).prompt,
+      interrupted: () => interrupted,
+      sleep: async () => {
+        if (options.interruptOnSleep) interrupted = true;
+      },
+    },
+  );
+  return { ...cli, lockStore, control, controlPlane, identity, transport };
+}
+
+const all = (cli: { out: string[]; err: string[] }) => [...cli.out, ...cli.err].join("\n");
+
+describe("fffactory worker stop (worker-lifecycle §Stop)", () => {
+  test("stops an idle worker with --yes, under the lock, and names its record", async () => {
+    const cli = setup({ states: ["stopping", "stopped"] });
+    expect(await run(["worker", "stop", KEY, "--yes"], cli.context)).toBe(0);
+    expect(cli.err).toEqual([]);
+    expect(cli.out[0]).toBe(`Instance: ${PATH} (nearest .fffactory/factory.json)`);
+    expect(cli.out).toContain(`Worker ${KEY} (${HOSTNAME}): EC2 instance ${ID} is running.`);
+    expect(cli.out).toContain(
+      `Stopping EC2 instance ${ID}; waiting for it to be stopped (up to 10 min).`,
+    );
+    expect(cli.out).toContain(
+      `Stopped worker ${KEY} (${HOSTNAME}). Its instance, volume, tailnet device and ` +
+        `factory.json entry stay; \`fffactory worker start ${KEY}\` brings it back.`,
+    );
+    expect(cli.out.at(-1)).toMatch(
+      new RegExp(`^Operation record: s3://${BUCKET}/fff-abcd1234-operations/.+\\.json$`),
+    );
+    expect(cli.control.mutations()).toEqual([`stop ${ID}`]);
+    expect(cli.lockStore.locks.size).toBe(0);
+  });
+
+  test("refuses with active agents, naming the way on; --force overrides", async () => {
+    const refused = setup({ activity: { kind: "active", count: 1 } });
+    expect(await run(["worker", "stop", KEY, "--yes"], refused.context)).toBe(1);
+    expect(refused.err).toEqual([
+      `Refusing to stop the worker: 1 agent is active on ${HOSTNAME}: stopping it would end it`,
+      `Next: Wait until no agent is active there, then rerun \`fffactory worker stop ${KEY}\`, or pass --force to stop it anyway.`,
+    ]);
+    expect(refused.control.mutations()).toEqual([]);
+    const forced = setup({ activity: { kind: "active", count: 1 } });
+    expect(await run(["worker", "stop", KEY, "--yes", "--force"], forced.context)).toBe(0);
+    expect(forced.out).toContain("--force: the worker is not inspected for active agents.");
+    expect(forced.control.mutations()).toEqual([`stop ${ID}`]);
+  });
+
+  test("refuses a running worker it cannot inspect", async () => {
+    const cli = setup({ view: peers(peer(HOSTNAME, { tags: [WORKER_TAG], online: false })) });
+    expect(await run(["worker", "stop", KEY, "--yes"], cli.context)).toBe(1);
+    expect(cli.err[0]).toBe(
+      `Refusing to stop the worker: ${HOSTNAME} could not be inspected: Offline in the tailnet`,
+    );
+  });
+
+  test("an already stopped worker is a no-op success", async () => {
+    const cli = setup({ state: "stopped" });
+    expect(await run(["worker", "stop", KEY, "--yes"], cli.context)).toBe(0);
+    expect(cli.out).toContain(`Worker ${KEY} (${HOSTNAME}) is already stopped: nothing to do.`);
+    expect(cli.control.calls).toEqual([]);
+  });
+
+  test("a stopping worker is waited for", async () => {
+    const cli = setup({ state: "stopping" });
+    expect(await run(["worker", "stop", KEY, "--yes"], cli.context)).toBe(0);
+    expect(cli.out).toContain(
+      `EC2 instance ${ID} is already on its way; waiting for it to be stopped (up to 10 min).`,
+    );
+    expect(cli.out).toContain(
+      `Worker ${KEY} (${HOSTNAME}) is now stopped: it was already on its way, and fffactory waited for it.`,
+    );
+    expect(all(cli)).not.toContain("nothing to do");
+    expect(cli.control.mutations()).toEqual([]);
+  });
+
+  test("asks y/N at a terminal; declining changes nothing", async () => {
+    const prompt = fakePrompt({ interactive: true, answers: ["n"] });
+    const cli = setup({ prompt });
+    expect(await run(["worker", "stop", KEY], cli.context)).toBe(1);
+    expect(prompt.asked).toEqual([`Stop worker ${KEY} (${HOSTNAME}), EC2 instance ${ID}? [y/N] `]);
+    expect(cli.err[0]).toBe("Not confirmed: the worker was not stopped.");
+    expect(cli.control.mutations()).toEqual([]);
+  });
+
+  test("without a terminal and without --yes, refuses before anything reaches AWS", async () => {
+    const cli = setup();
+    expect(await run(["worker", "stop", KEY], cli.context)).toBe(1);
+    expect(cli.err).toEqual([
+      "Stopping a worker needs your confirmation: rerun at a terminal, or pass --yes.",
+    ]);
+    expect(cli.identity.requests).toEqual([]);
+  });
+
+  test("a failed EC2 call is reported by error name, never AWS's message", async () => {
+    const denied = Object.assign(new Error("AWS says wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"), {
+      name: "UnauthorizedOperation",
+      $fault: "client",
+    });
+    const open = async (_session: AwsSession): Promise<Ec2ControlCalls> => ({
+      stopInstances: async () => {
+        throw denied;
+      },
+      startInstances: async () => {
+        throw denied;
+      },
+      describeInstances: async () => {
+        throw denied;
+      },
+      close: () => {},
+    });
+    const cli = setup({ control: ec2MachineControl(open) });
+    expect(await run(["worker", "stop", KEY, "--yes"], cli.context)).toBe(1);
+    expect(cli.err[0]).toBe(
+      "Stopping the worker failed: EC2 StopInstances failed: UnauthorizedOperation",
+    );
+    expect(all(cli)).not.toContain("wJalrXUtnFEMI");
+    expect(cli.lockStore.locks.size).toBe(0);
+  });
+});
+
+describe("refusals before any EC2 mutation (worker-lifecycle §Order)", () => {
+  test("an undeclared key, never reaching AWS", async () => {
+    const cli = setup();
+    expect(await run(["worker", "start", "builder-9", "--yes"], cli.context)).toBe(1);
+    expect(cli.err).toEqual([
+      "Refusing to start the worker: factory.json declares no host builder-9",
+      "  Declared hosts: builder-1, builder-2",
+      "Next: Name a host factory.json declares (hosts[].key)",
+    ]);
+    expect(cli.identity.requests).toEqual([]);
+  });
+
+  test("an argument that is not a host key is never echoed", async () => {
+    const cli = setup();
+    const pasted = "tskey-auth-kExample1CNTRL-secretvalue";
+    expect(await run(["worker", "stop", pasted, "--yes"], cli.context)).toBe(1);
+    expect(cli.err[0]).toBe("Refusing to stop the worker: The KEY argument is not a host key");
+    expect(all(cli)).not.toContain(pasted);
+  });
+
+  test("another account", async () => {
+    const identity = fakeCallerIdentity({
+      kind: "caller",
+      caller: { ...FAKE_CALLER, account: "999999999999" },
+    });
+    const cli = setup({ identity });
+    expect(await run(["worker", "stop", KEY, "--yes"], cli.context)).toBe(1);
+    expect(cli.err[0]).toStartWith("Refusing to stop the worker: ");
+    expect(cli.lockStore.calls).toEqual([]);
+    expect(cli.control.calls).toEqual([]);
+  });
+
+  test("a pin mismatch", async () => {
+    const cli = setup({ instance: { ...declaring(KEY), release: "0.2.0" as Release } });
+    expect(await run(["worker", "start", KEY, "--yes"], cli.context)).toBe(1);
+    expect(cli.err[0]).toStartWith(
+      "Refusing to start the worker: factory.json pins another fffactory release than this one",
+    );
+    expect(cli.lockStore.calls).toEqual([]);
+  });
+
+  test("an incomplete factory.json", async () => {
+    const cli = setup({ instance: { ...declaring(KEY), state_backend: undefined } });
+    expect(await run(["worker", "start", KEY, "--yes"], cli.context)).toBe(1);
+    expect(cli.err).toEqual([
+      "Refusing to start the worker: factory.json is not ready:",
+      "  state_backend.bucket: is required to start a worker",
+    ]);
+  });
+
+  test("a held lock, showing its holder", async () => {
+    const cli = setup();
+    cli.lockStore.hold(
+      BUCKET,
+      newLockRecord({
+        factoryId: FACTORY,
+        operation: "apply",
+        holder: { principal: "arn:aws:iam::123456789012:user/other", host: "desk" },
+        now: TEST_NOW,
+        release: RELEASE,
+        randomBytes: (count) => new Uint8Array(count).fill(5),
+      }),
+    );
+    expect(await run(["worker", "stop", KEY, "--yes"], cli.context)).toBe(1);
+    expect(cli.err[0]).toBe("The factory is locked by another operation:");
+    expect(cli.control.calls).toEqual([]);
+  });
+
+  test("no instance carrying the key, named with its record", async () => {
+    const cli = setup();
+    const context = {
+      ...cli.context,
+      machines: fakeMachineInventory({ kind: "machines", machines: [] }).machines,
+    };
+    expect(await run(["worker", "stop", KEY, "--yes"], context)).toBe(1);
+    expect(cli.err).toEqual([
+      `Refusing to stop the worker: No EC2 instance carries the host key ${KEY}`,
+      `Next: Provision it with \`fffactory apply\`, then rerun \`fffactory worker stop ${KEY}\`.`,
+    ]);
+    expect(cli.out.at(-1)).toStartWith("Operation record: s3://");
+  });
+});
+
+describe("fffactory worker start (worker-lifecycle §Start)", () => {
+  test("starts a stopped worker and reports its status verdict", async () => {
+    const cli = setup({ state: "stopped", states: ["running"] });
+    expect(await run(["worker", "start", KEY, "--yes"], cli.context)).toBe(0);
+    expect(cli.out).toContain(
+      `Starting EC2 instance ${ID}; waiting for it to be running (up to 10 min).`,
+    );
+    expect(cli.out).toContain(`Started worker ${KEY} (${HOSTNAME}).`);
+    expect(cli.out).toContain(`  ready  Ready on release ${RELEASE}`);
+    expect(cli.control.mutations()).toEqual([`start ${ID}`]);
+  });
+
+  test("a stale release names `fffactory apply`, and still exits 0", async () => {
+    const cli = setup({
+      state: "stopped",
+      states: ["running"],
+      worker: readyWorker(FACTORY, KEY, "0.2.0"),
+    });
+    expect(await run(["worker", "start", KEY, "--yes"], cli.context)).toBe(0);
+    expect(cli.out).toContain(`  not ready  It runs release 0.2.0; factory.json pins ${RELEASE}`);
+    expect(cli.out).toContain(
+      `  Next: Install release ${RELEASE} with \`fffactory apply\`, then rerun \`fffactory status\`.`,
+    );
+  });
+
+  test("a worker that does not come online names status's tailnet next action", async () => {
+    const cli = setup({
+      state: "stopped",
+      states: ["running"],
+      view: peers(peer(HOSTNAME, { tags: [WORKER_TAG], online: false })),
+    });
+    expect(await run(["worker", "start", KEY, "--yes"], cli.context)).toBe(0);
+    expect(cli.out).toContain(
+      `Waiting for ${HOSTNAME} to come online in the tailnet (up to 5 min).`,
+    );
+    expect(cli.out).toContain("  not ready  Offline in the tailnet");
+  });
+
+  test("an already running worker is a no-op success that reports its verdict", async () => {
+    const cli = setup();
+    expect(await run(["worker", "start", KEY, "--yes"], cli.context)).toBe(0);
+    expect(cli.out).toContain(`Worker ${KEY} (${HOSTNAME}) is already running.`);
+    expect(cli.out).toContain(`  ready  Ready on release ${RELEASE}`);
+    expect(cli.control.calls).toEqual([]);
+  });
+
+  test("a pending worker is waited for, and said to have been", async () => {
+    const cli = setup({ state: "pending", states: ["running"] });
+    expect(await run(["worker", "start", KEY, "--yes"], cli.context)).toBe(0);
+    expect(cli.out).toContain(
+      `Worker ${KEY} (${HOSTNAME}) is now running: it was already on its way, and fffactory waited for it.`,
+    );
+    expect(all(cli)).not.toContain("already running");
+    expect(cli.control.mutations()).toEqual([]);
+  });
+});
+
+describe("interruption (worker-lifecycle §Interruption)", () => {
+  test("during the wait: the lock stays, with the record, and the rerun is named", async () => {
+    const cli = setup({ states: ["stopping"], interruptOnSleep: true });
+    expect(await run(["worker", "stop", KEY, "--yes"], cli.context)).toBe(1);
+    expect(cli.err).toEqual([
+      "EC2 was asked to change the instance and may still be doing so.",
+      "Interrupted: the factory stays locked, with a record of this operation. Once fffactory " +
+        `has exited, break the lock with \`fffactory lock break\`, then rerun \`fffactory worker stop ${KEY}\`.`,
+    ]);
+    expect(cli.out.at(-1)).toStartWith("Operation record: s3://");
+    expect(cli.lockStore.locks.size).toBe(1);
+  });
+
+  test("with the lock but no record: says it may have none", async () => {
+    const cli = setup();
+    let interrupted = false;
+    const create = cli.lockStore.create.bind(cli.lockStore);
+    cli.lockStore.create = async (bucket, record) => {
+      const created = await create(bucket, record);
+      interrupted = true;
+      return created;
+    };
+    const context = { ...cli.context, interrupted: () => interrupted };
+    expect(await run(["worker", "stop", KEY, "--yes"], context)).toBe(1);
+    expect(cli.err).toEqual([
+      "Interrupted: the factory stays locked by this operation, which may have no operation " +
+        "record. Once fffactory has exited, break the lock with `fffactory lock break`, then " +
+        `rerun \`fffactory worker stop ${KEY}\`.`,
+    ]);
+    expect(all(cli)).not.toContain("Operation record:");
+  });
+
+  test("before the lock: nothing is locked", async () => {
+    const cli = setup();
+    const context = { ...cli.context, interrupted: () => true };
+    expect(await run(["worker", "stop", KEY, "--yes"], context)).toBe(1);
+    expect(cli.err).toEqual([
+      "Interrupted before the factory was locked: it is not locked, and nothing was asked of EC2.",
+    ]);
+  });
+
+  test("waits on an interrupt, since it reports what the interrupt left", () => {
+    expect(waitsOnInterrupt(["worker", "stop", KEY])).toBe(true);
+  });
+});
+
+describe("fffactory worker arguments", () => {
+  test("needs a subcommand", async () => {
+    const cli = setup();
+    expect(await run(["worker"], cli.context)).toBe(1);
+    expect(cli.err[0]).toBe("fffactory worker: expected a subcommand: stop, start");
+  });
+
+  test("needs exactly one KEY", async () => {
+    const cli = setup();
+    expect(await run(["worker", "stop", "--yes"], cli.context)).toBe(1);
+    expect(cli.err[0]).toBe("fffactory worker stop: expected one host KEY");
+    expect(await run(["worker", "start", "a", "b"], cli.context)).toBe(1);
+    expect(cli.err.at(-1)).toBe("fffactory worker start: expected one host KEY");
+  });
+
+  test("--profile needs a name; start takes no --force", async () => {
+    const cli = setup();
+    expect(await run(["worker", "stop", KEY, "--profile", ""], cli.context)).toBe(1);
+    expect(cli.err[0]).toBe("fffactory worker stop: --profile needs a profile name");
+    expect(await run(["worker", "start", KEY, "--force"], cli.context)).toBe(1);
+    expect(cli.err.at(-1)).toContain("--force");
+  });
+
+  test("is listed in help, and --help prints its usage", async () => {
+    const cli = setup();
+    expect(await run(["--help"], cli.context)).toBe(0);
+    expect(cli.out.some((line) => line.startsWith("  worker "))).toBe(true);
+    expect(await run(["worker", "--help"], cli.context)).toBe(0);
+    expect(cli.out).toContain(
+      "Usage: fffactory worker stop KEY [--force] [--yes] [--instance PATH] [--profile NAME]",
+    );
+  });
+
+  test("an invalid factory.json is refused", async () => {
+    const cli = harness(
+      new MemoryInstanceStore({ [PATH]: '{"schema_version": 1, "factory_id": "X"}' }),
+    );
+    expect(await run(["worker", "stop", KEY, "--yes"], cli.context)).toBe(1);
+    expect(cli.err[0]).toBe("Invalid factory.json:");
+  });
+});
