@@ -60,6 +60,7 @@ async function plan(args: readonly string[], context: CliContext): Promise<numbe
       lockStore: context.lockStore,
       provisioner: context.provisioner,
       planStore: context.planStore,
+      machines: context.machines,
       peers: context.tailnet,
       transport: context.transport,
       sha256: sha256Text,

@@ -111,6 +111,7 @@ const STATUS_LABELS: Readonly<Record<Verdict["status"], string>> = {
   ready: "ready",
   not_ready: "not ready",
   error: "error",
+  stopped: "stopped",
 };
 
 /** The started worker's readiness, in status's words. */

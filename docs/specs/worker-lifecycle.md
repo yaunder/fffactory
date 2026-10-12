@@ -19,6 +19,13 @@ fffactory worker start KEY [--yes] [--instance PATH] [--profile NAME]
 - `start` brings the same worker back, with the same identity, and reports its
   readiness as [status](status.md) would.
 
+A stopped worker is a first-class state, not a fault:
+[status](status.md#workers) reports it `stopped`, with `fffactory worker start
+KEY` as its next action, and exits 0; [plan and
+apply](plan-apply.md#stopped-workers) skip it, never start it, send it nothing
+and are not partial for it, and refuse to change its instance type, which would
+start it.
+
 `KEY` is a host key factory.json declares (`hosts[].key`). `--force` is stop's
 alone ([Gates](#gates)); `--yes` confirms in advance
 ([Confirmation](#confirmation)); `--instance` and `--profile` select the
@@ -267,7 +274,7 @@ instance IDs, EC2 states, and what status prints of a worker.
 | --- | --- | --- |
 | Domain | `src/domain/worker-lifecycle.ts` | The host key check, the one target machine, what each EC2 state means for an action (`powerStep`), stop's gates (`stopGate`), the confirmation rule, the waits' bounds and steps, the words of every refusal and next action. Pure. |
 | Domain | `src/domain/operation.ts` | `startStageOperation`, `withMachine` and the power stage's statuses. |
-| Domain | `src/domain/status.ts` | The `stopped` machine's next action, `fffactory worker start KEY`. |
+| Domain | `src/domain/status.ts` | The `stopped` machine's verdict, `stopped`, and its next action, `fffactory worker start KEY`. |
 | Application | `src/application/machine-control.ts` | The `MachineControl` port: `stop`, `start`, `state`. |
 | Application | `src/application/worker-lifecycle.ts` | `stopWorker`, `startWorker`: the order above, under the lock and its record. |
 | Infrastructure | `src/infrastructure/ec2-machine-control.ts` | `ec2MachineControl` over `StopInstances`, `StartInstances` and `DescribeInstances` (AWS SDK for JavaScript v3, imported on first use), each call within 15 s (`EC2_CONTROL_TIMEOUT_MS`), failures by error name, a request past its deadline `unanswered`. |

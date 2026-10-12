@@ -241,28 +241,43 @@ export function plannedDispatch(
   });
 }
 
-export function describeDispatch(plans: readonly PlannedDispatch[]): string[] {
+/** A later stage's line for a worker whose machine is stopped: it is sent nothing. */
+function skippedStopped({ key, hostname }: PlannedWorker): string {
+  return `  = ${key} (${hostname}): skipped: stopped`;
+}
+
+export function describeDispatch(
+  plans: readonly PlannedDispatch[],
+  stopped: readonly HostKey[] = [],
+): string[] {
   if (plans.length === 0) return [];
   return [
     "Dispatch changes, after every readiness gate:",
-    ...plans.map(({ key, hostname, requested, schedule }) =>
-      requested && schedule !== null
+    ...plans.map((plan) => {
+      const { key, hostname, requested, schedule } = plan;
+      if (stopped.includes(key)) return skippedStopped(plan);
+      return requested && schedule !== null
         ? `  ~ ${key} (${hostname}): install the dispatcher and skill, then reconcile ${schedule.cron} ${schedule.timezone} with ${schedule.provider}/${schedule.model}, mode ${schedule.mode}, cwd ${schedule.cwd}`
-        : `  ~ ${key} (${hostname}): remove the factory dispatch schedule if it exists`,
-    ),
+        : `  ~ ${key} (${hostname}): remove the factory dispatch schedule if it exists`;
+    }),
     "End-to-end verification: observe each worker's release, repositories, Paseo and actual dispatch schedule.",
   ];
 }
 
-export function describeControlPlane(plans: readonly PlannedControlPlane[]): string[] {
+export function describeControlPlane(
+  plans: readonly PlannedControlPlane[],
+  stopped: readonly HostKey[] = [],
+): string[] {
   if (plans.length === 0) return [];
   return [
     "Control-plane changes, before worker activation:",
-    ...plans.map(({ key, hostname, changes }) =>
-      changes.length === 0
+    ...plans.map((plan) => {
+      const { key, hostname, changes } = plan;
+      if (stopped.includes(key)) return skippedStopped(plan);
+      return changes.length === 0
         ? `  = ${key} (${hostname}): Paseo is unchanged`
-        : `  ~ ${key} (${hostname}): ${changes.join(", ")}`,
-    ),
+        : `  ~ ${key} (${hostname}): ${changes.join(", ")}`;
+    }),
   ];
 }
 
@@ -296,15 +311,21 @@ export function createdWorkers(
  * The workers stage's changes, as the operator approves them. Each worker gets the release
  * and its host configuration and is verified, whatever it runs now: every step is
  * idempotent, so the stage depends only on factory.json and the release, which a saved plan
- * is bound to. Rerunning apply converges what remains.
+ * is bound to. Rerunning apply converges what remains. A worker whose machine is `stopped`
+ * is skipped: apply never starts it.
  */
-export function describeWorkers(workers: readonly PlannedWorker[], release: Release): string[] {
+export function describeWorkers(
+  workers: readonly PlannedWorker[],
+  release: Release,
+  stopped: readonly HostKey[] = [],
+): string[] {
   if (workers.length === 0) return [];
   return [
     "Worker changes, one worker at a time:",
-    ...workers.map(
-      ({ key, hostname }) =>
-        `  ~ ${key} (${hostname}): install release ${release} and its host configuration, then verify it`,
+    ...workers.map(({ key, hostname }) =>
+      stopped.includes(key)
+        ? `  = ${key} (${hostname}): skipped: stopped; start it with \`fffactory worker start ${key}\`, then apply again to install it`
+        : `  ~ ${key} (${hostname}): install release ${release} and its host configuration, then verify it`,
     ),
   ];
 }
@@ -313,12 +334,15 @@ export function describeWorkers(workers: readonly PlannedWorker[], release: Rele
 export function describeRepositories(
   workers: readonly PlannedWorker[],
   instance: FactoryInstance,
+  stopped: readonly HostKey[] = [],
 ): string[] {
   if (workers.length === 0) return [];
   const byKey = new Map((instance.hosts ?? []).map((host) => [host.key, host]));
   return [
     "Repository changes, one worker at a time:",
-    ...workers.map(({ key, hostname }) => {
+    ...workers.map((worker) => {
+      const { key, hostname } = worker;
+      if (stopped.includes(key)) return skippedStopped(worker);
       const count = byKey.get(key)?.repositories?.length ?? 0;
       return `  ~ ${key} (${hostname}): reconcile ${count} placed ${count === 1 ? "repository" : "repositories"} as factory; preserve and report unmanaged checkouts`;
     }),
@@ -327,7 +351,7 @@ export function describeRepositories(
 
 /**
  * The whole plan an operator approves: its target, then its infrastructure changes, then
- * each worker's install.
+ * each worker's install and later stages, those of the `stopped` workers skipped.
  */
 export function describePlan(
   target: PlanTarget,
@@ -336,15 +360,16 @@ export function describePlan(
   instance?: FactoryInstance,
   controlPlane: readonly PlannedControlPlane[] = [],
   dispatch: readonly PlannedDispatch[] = [],
+  stopped: readonly HostKey[] = [],
 ): string[] {
   return [
     "Factory plan:",
     ...describeTarget(target),
     ...describeInfrastructure(changes),
-    ...describeWorkers(workers, target.release),
-    ...describeControlPlane(controlPlane),
-    ...(instance === undefined ? [] : describeRepositories(workers, instance)),
-    ...describeDispatch(dispatch),
+    ...describeWorkers(workers, target.release, stopped),
+    ...describeControlPlane(controlPlane, stopped),
+    ...(instance === undefined ? [] : describeRepositories(workers, instance, stopped)),
+    ...describeDispatch(dispatch, stopped),
   ];
 }
 
@@ -424,6 +449,96 @@ export function describeD11Refusal(refusal: D11Refusal): string[] {
 }
 
 /**
+ * Whether a JSON plan's change sets another instance type. One it cannot read, or whose new
+ * type is not known until apply, is taken as one, failing closed.
+ */
+function changesInstanceType(change: unknown): boolean {
+  if (!isRecord(change) || !isRecord(change.before) || !isRecord(change.after)) return true;
+  if (isRecord(change.after_unknown) && change.after_unknown.instance_type === true) return true;
+  return change.before.instance_type !== change.after.instance_type;
+}
+
+/**
+ * The workers among `guarded` whose host machine a JSON plan (`terraform show -json`) updates
+ * in place with another instance type, in their order.
+ */
+export function resizedStoppedWorkers<W extends PlannedWorker>(
+  plan: unknown,
+  guarded: readonly W[],
+): W[] {
+  if (!isRecord(plan) || !Array.isArray(plan.resource_changes)) return [];
+  const resized = new Set(
+    plan.resource_changes
+      .filter((raw) => {
+        const change = readChange(raw);
+        return (
+          change !== undefined &&
+          isHostMachine(change) &&
+          change.actions.includes("update") &&
+          changesInstanceType((raw as Record<string, unknown>).change)
+        );
+      })
+      .map((raw) => (raw as Record<string, unknown>).address),
+  );
+  return guarded.filter(({ key }) => resized.has(hostMachineAddress(key)));
+}
+
+/** A worker whose machine the EC2 inventory shows stopped or stopping. */
+export interface PoweredDownWorker extends PlannedWorker {
+  readonly machine: "stopped" | "stopping";
+}
+
+/**
+ * The workers whose instance type a plan may not change now. The pinned AWS provider changes
+ * an instance's type by stopping it (waiting for one stopping), modifying it and starting it
+ * again, whatever state it was in, so applying that change would start a worker that is
+ * stopped or stopping: it is refused until the operator starts the worker
+ * (`docs/specs/plan-apply.md` §Instance type of a stopped worker). With the EC2 inventory
+ * unreadable no worker is known not to be stopped, so every declared one is guarded, failing
+ * closed.
+ */
+export type ResizeGuard =
+  | { readonly inventory: "read"; readonly workers: readonly PoweredDownWorker[] }
+  | { readonly inventory: "unreadable"; readonly workers: readonly PlannedWorker[] };
+
+/** The guarded workers a JSON plan changes the instance type of, or undefined when none. */
+export function resizeRefusal(plan: unknown, guard: ResizeGuard): ResizeGuard | undefined {
+  const refused: ResizeGuard =
+    guard.inventory === "read"
+      ? { inventory: "read", workers: resizedStoppedWorkers(plan, guard.workers) }
+      : { inventory: "unreadable", workers: resizedStoppedWorkers(plan, guard.workers) };
+  return refused.workers.length === 0 ? undefined : refused;
+}
+
+/** Why `action` is refused for the resized guarded workers, and what to do first. */
+export function describeStoppedResizeRefusal(action: string, refusal: ResizeGuard): string[] {
+  const updated = ({ key, hostname }: PlannedWorker) =>
+    `  ${key} (${hostname}): ${hostMachineAddress(key)} would be updated in place`;
+  const starts = " a stopped instance to change its type:";
+  if (refusal.inventory === "unreadable")
+    return [
+      `Refusing to ${action}: the plan changes the instance type of a worker the EC2 ` +
+        `inventory could not be read to check is not stopped, and Terraform starts${starts}`,
+      ...refusal.workers.map(updated),
+      "Nothing was applied. Plan again once the EC2 inventory can be read.",
+    ];
+  const { workers } = refusal;
+  const commands = workers.map(({ key }) => `\`fffactory worker start ${key}\``).join(" and ");
+  const one = workers.length === 1;
+  const once = workers.some(({ machine }) => machine === "stopping")
+    ? ` once ${one ? "it has" : "they have"} stopped`
+    : "";
+  const stopping = (worker: PoweredDownWorker) =>
+    worker.machine === "stopping" ? ", and it is stopping" : "";
+  return [
+    `Refusing to ${action}: the plan changes the instance type of a stopped worker, and ` +
+      `Terraform starts${starts}`,
+    ...workers.map((worker) => `${updated(worker)}${stopping(worker)}`),
+    `Nothing was applied. Start ${one ? "it" : "each"} first with ${commands}${once}, then plan again.`,
+  ];
+}
+
+/**
  * A saved plan's record, kept beside its Terraform plan file in the local plan store. It
  * holds no configuration values: factory.json is bound by its SHA-256.
  */
@@ -451,6 +566,11 @@ export interface SavedPlan {
   readonly changes: readonly ResourceChange[];
   readonly control_plane?: readonly PlannedControlPlane[];
   readonly dispatch: readonly PlannedDispatch[];
+  /**
+   * The workers whose machine was stopped when it was planned: the plan skips them, so apply
+   * never installs them, even once they run again.
+   */
+  readonly stopped_workers: readonly HostKey[];
 }
 
 /** The circumstances a plan is made or applied in. */
@@ -470,6 +590,7 @@ export interface NewSavedPlan extends PlanCircumstances {
   readonly changes: readonly ResourceChange[];
   readonly controlPlane?: readonly PlannedControlPlane[];
   readonly dispatch?: readonly PlannedDispatch[];
+  readonly stopped?: readonly HostKey[];
 }
 
 export function newSavedPlan(plan: NewSavedPlan): SavedPlan {
@@ -503,6 +624,7 @@ export function newSavedPlan(plan: NewSavedPlan): SavedPlan {
       requested,
       schedule,
     })),
+    stopped_workers: [...(plan.stopped ?? [])],
   };
 }
 
@@ -597,6 +719,14 @@ function readDispatch(value: unknown, factoryId: FactoryId): PlannedDispatch[] |
   return new Set(keys).size === keys.length ? plans : undefined;
 }
 
+/** The stopped workers a record lists; none in a record made before they were planned. */
+function readStoppedWorkers(value: unknown): HostKey[] | undefined {
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) return undefined;
+  if (!value.every((key) => typeof key === "string" && parseHostKey(key).ok)) return undefined;
+  return new Set(value).size === value.length ? (value as HostKey[]) : undefined;
+}
+
 function hasPlanFields(document: Record<string, unknown>): boolean {
   const { instance_path, configuration_sha256, release, assets_sha256, account_id } = document;
   return (
@@ -632,10 +762,12 @@ export function parseSavedPlan(
   const changes = readChanges(document.changes);
   const controlPlane = readControlPlane(document.control_plane, factoryId);
   const dispatch = readDispatch(document.dispatch, factoryId);
+  const stopped = readStoppedWorkers(document.stopped_workers);
   if (
     changes === undefined ||
     controlPlane === undefined ||
     dispatch === undefined ||
+    stopped === undefined ||
     !hasPlanFields(document)
   )
     return undefined;
@@ -644,6 +776,7 @@ export function parseSavedPlan(
     changes,
     control_plane: controlPlane,
     dispatch,
+    stopped_workers: stopped,
   };
 }
 
@@ -686,6 +819,31 @@ export function planStaleness(plan: SavedPlan, current: PlanCircumstances): stri
 export function stateStaleness(plan: SavedPlan, revision: string | undefined): string | undefined {
   if ((revision ?? null) === plan.state_revision) return undefined;
   return "the factory's Terraform state changed after it was planned";
+}
+
+/**
+ * Why a saved plan may no longer be applied once the factory lock is held: a worker stopped or
+ * started since it was planned, `stopped` being the workers stopped now, or undefined when the
+ * EC2 inventory could not be read. A plan that skips no stopped worker needs no inventory, as
+ * before stopped workers were planned.
+ */
+export function stoppedStaleness(
+  plan: SavedPlan,
+  stopped: readonly HostKey[] | undefined,
+): string[] {
+  const planned = plan.stopped_workers;
+  if (stopped === undefined)
+    return planned.map(
+      (key) => `the EC2 inventory could not be read to check that worker ${key} is still stopped`,
+    );
+  return [
+    ...planned
+      .filter((key) => !stopped.includes(key))
+      .map((key) => `worker ${key} was stopped when it was planned, and is not now`),
+    ...stopped
+      .filter((key) => !planned.includes(key))
+      .map((key) => `worker ${key} is stopped now, and was not when it was planned`),
+  ];
 }
 
 export function staleRefusal(planId: string, reasons: readonly string[]): string[] {

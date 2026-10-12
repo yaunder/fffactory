@@ -2,7 +2,8 @@
  * The workers stage's outcomes (`docs/specs/plan-apply.md` §The workers stage): what an
  * install attempt means for one worker, and the rollout rule. A known skip, such as an
  * offline worker, leaves the others to be attempted; an unexpected install or verification
- * failure stops the rollout before later workers are touched. And the rules of the wait for
+ * failure stops the rollout before later workers are touched. A stopped worker is sent nothing
+ * and is not a skip: stopping it was the operator's choice. And the rules of the wait for
  * a worker whose machine apply just created (§Waiting for a new worker). Pure.
  */
 import {
@@ -47,7 +48,16 @@ export type WorkerOutcome =
       readonly beforeInstall?: true;
     })
   /** After a failure, never touched. */
-  | (WorkerIdentity & { readonly kind: "not_attempted" });
+  | (WorkerIdentity & { readonly kind: "not_attempted" })
+  /**
+   * Its machine is stopped (`fffactory worker stop`): sent nothing, which leaves the rollout
+   * neither stopped nor partial (`docs/specs/plan-apply.md` §Stopped workers).
+   */
+  | (WorkerIdentity & {
+      readonly kind: "stopped";
+      readonly summary: string;
+      readonly nextAction: string;
+    });
 
 export function skipped(worker: WorkerIdentity, verdict: Pick<Verdict, "summary" | "nextAction">) {
   return {
@@ -55,6 +65,21 @@ export function skipped(worker: WorkerIdentity, verdict: Pick<Verdict, "summary"
     kind: "skipped",
     summary: verdict.summary,
     nextAction: verdict.nextAction ?? thenRerunApply("Check the worker with `fffactory status`"),
+  } as const satisfies WorkerOutcome;
+}
+
+/**
+ * A worker whose machine is stopped: nothing is sent to it, and starting it is the operator's
+ * call.
+ */
+export function stoppedOutcome(worker: WorkerIdentity) {
+  return {
+    ...worker,
+    kind: "stopped",
+    summary: "Stopped: nothing was sent to it",
+    nextAction: thenRerunApply(
+      `To install it, start it with \`fffactory worker start ${worker.key}\``,
+    ),
   } as const satisfies WorkerOutcome;
 }
 
@@ -77,14 +102,16 @@ export function rolloutContinues(outcome: WorkerOutcome): boolean {
 }
 
 /**
- * How the rollout ended: `installed` when every worker was, `failed` when one failed, and
- * `partial` when some were skipped.
+ * How the rollout ended: `installed` when every worker was, but for stopped ones, `failed` when
+ * one failed, and `partial` when some were skipped.
  */
 export function rolloutResult(
   outcomes: readonly WorkerOutcome[],
 ): "installed" | "partial" | "failed" {
   if (outcomes.some((outcome) => outcome.kind === "failed")) return "failed";
-  return outcomes.every((outcome) => outcome.kind === "installed") ? "installed" : "partial";
+  return outcomes.every((outcome) => outcome.kind === "installed" || outcome.kind === "stopped")
+    ? "installed"
+    : "partial";
 }
 
 const CHECK_STATUS = "Check the worker with `fffactory status`";

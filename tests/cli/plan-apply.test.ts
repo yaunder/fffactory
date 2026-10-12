@@ -37,7 +37,14 @@ import { type Behavior, fakeTerraform } from "../support/fake-terraform";
 import { MemoryInstanceStore } from "../support/memory-instance-store";
 import { MemoryLockStore, READY_BUCKET } from "../support/memory-lock-store";
 import { MemoryPlanStore } from "../support/memory-plan-store";
-import { appliedRecord, inspection, installableWorker, peer, peers } from "../support/fake-workers";
+import {
+  appliedRecord,
+  inspection,
+  installableWorker,
+  machine,
+  peer,
+  peers,
+} from "../support/fake-workers";
 import { hostApplyJson, pendingSteps, withStep } from "../../src/domain/installation";
 
 const PATH = "/work/repo/.fffactory/factory.json";
@@ -128,6 +135,7 @@ function cli(
       assets: assets.bundle,
       identity: identity.identity,
       interrupted: () => signal.interrupted,
+      machines: fleet.deps.machines,
       tailnet: fleet.deps.peers,
       transport: fleet.deps.transport,
       sleep: fleet.deps.sleep,
@@ -281,6 +289,47 @@ describe("fffactory plan (plan-apply §Plan)", () => {
       "Nothing was applied. Change factory.json so the plan keeps every host machine, then " +
         "plan again.",
     ]);
+  });
+
+  test("a stopped worker's install is shown skipped (plan-apply §Stopped workers)", async () => {
+    const fleet = workerFleet(["builder-1"]);
+    fleet.machines.inventory = { kind: "machines", machines: [machine("builder-1", "stopped")] };
+    const { context, out } = cli({ hosts: ["builder-1"], fleet });
+    expect(await run(["plan"], context)).toBe(0);
+    expect(out).toContain(
+      `  = builder-1 (${B1}): skipped: stopped; start it with \`fffactory worker start builder-1\`, then apply again to install it`,
+    );
+  });
+
+  test("an instance type change on a stopped worker is refused, naming the start command", async () => {
+    const fleet = workerFleet(["builder-1"]);
+    fleet.machines.inventory = { kind: "machines", machines: [machine("builder-1", "stopped")] };
+    const { context, err, terraform, planStore } = cli({ hosts: ["builder-1"], fleet });
+    terraform.world.resize.add("builder-1");
+    expect(await run(["plan"], context)).toBe(1);
+    expect(err).toEqual([
+      "Refusing to plan: the plan changes the instance type of a stopped worker, and " +
+        "Terraform starts a stopped instance to change its type:",
+      `  builder-1 (${B1}): ${hostAddress("builder-1")} would be updated in place`,
+      "Nothing was applied. Start it first with `fffactory worker start builder-1`, then plan again.",
+    ]);
+    expect(planStore.saved.size).toBe(0);
+  });
+
+  test("with the EC2 inventory unreadable, an instance type change is refused", async () => {
+    const fleet = workerFleet(["builder-1"]);
+    fleet.machines.inventory = { kind: "unavailable", reason: "EC2 DescribeInstances failed: x" };
+    const { context, err, terraform, planStore } = cli({ hosts: ["builder-1"], fleet });
+    terraform.world.resize.add("builder-1");
+    expect(await run(["plan"], context)).toBe(1);
+    expect(err).toEqual([
+      "Refusing to plan: the plan changes the instance type of a worker the EC2 inventory " +
+        "could not be read to check is not stopped, and Terraform starts a stopped instance " +
+        "to change its type:",
+      `  builder-1 (${B1}): ${hostAddress("builder-1")} would be updated in place`,
+      "Nothing was applied. Plan again once the EC2 inventory can be read.",
+    ]);
+    expect(planStore.saved.size).toBe(0);
   });
 
   test("a state bucket bootstrap did not finish is refused with how to complete it", async () => {
@@ -515,6 +564,46 @@ describe("fffactory apply (plan-apply §Apply)", () => {
     );
     expect(out.find((line) => line.startsWith("             Next: "))).toEndWith(
       ", then rerun `fffactory apply`.",
+    );
+  });
+
+  test("a stopped worker is listed, sent nothing, and exits 0 (plan-apply §Stopped workers)", async () => {
+    const fleet = workerFleet(["builder-1"]);
+    fleet.machines.inventory = {
+      kind: "machines",
+      machines: [machine("builder-1"), machine("builder-2", "stopped")],
+    };
+    const { context, out, err } = cli({
+      declared: ["builder-1", "builder-2"],
+      hosts: ["builder-1", "builder-2"],
+      interactive: true,
+      answers: ["yes"],
+      fleet,
+    });
+    expect(await run(["apply"], context)).toBe(0);
+    const B2 = "fff-abcd1234-builder-2";
+    expect(out).toContain(`  stopped    builder-2 (${B2}): Stopped: nothing was sent to it`);
+    expect(out).toContain(
+      "             Next: To install it, start it with `fffactory worker start builder-2`, then rerun `fffactory apply`.",
+    );
+    expect(out).toContain(`  stopped  builder-2 (${B2})`);
+    expect(err).toEqual([]);
+    expect(fleet.transport.calls.map(({ worker }) => worker.hostname)).not.toContain(B2);
+  });
+
+  test("with the EC2 inventory unreadable, a stopped worker offline in the tailnet is skipped as before", async () => {
+    const fleet = workerFleet(["builder-1"]);
+    fleet.machines.inventory = { kind: "unavailable", reason: "EC2 DescribeInstances failed: x" };
+    const { context, out } = cli({
+      declared: ["builder-1", "builder-2"],
+      hosts: ["builder-1", "builder-2"],
+      interactive: true,
+      answers: ["yes"],
+      fleet,
+    });
+    expect(await run(["apply"], context)).toBe(2);
+    expect(out).toContain(
+      "  skipped    builder-2 (fff-abcd1234-builder-2): No Tailscale device named fff-abcd1234-builder-2 is visible from this machine",
     );
   });
 

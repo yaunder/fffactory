@@ -4,7 +4,7 @@ import type { Approval } from "../../src/application/approval";
 import { breakFactoryLock } from "../../src/application/factory-lock";
 import { planFactory } from "../../src/application/plan-factory";
 import { newLockRecord } from "../../src/domain/factory-lock";
-import type { Release } from "../../src/domain/instance";
+import type { HostKey, Release } from "../../src/domain/instance";
 import { pendingSteps, withStep } from "../../src/domain/installation";
 import { type OperationRecord, operationKey } from "../../src/domain/operation";
 import { PLAN_KEPT_MS, PLAN_TTL_MS, type SavedPlan } from "../../src/domain/plan";
@@ -20,7 +20,7 @@ import {
   TERRAFORM,
   workerFleet,
 } from "../support/factory-world";
-import { appliedRecord, installableWorker } from "../support/fake-workers";
+import { appliedRecord, installableWorker, machine } from "../support/fake-workers";
 import { hostAddress, NETWORK, STATE_BUCKET_ADDRESS } from "../support/fake-provisioner";
 
 /** Approval that records every plan it is shown and answers from `answers` in turn. */
@@ -584,6 +584,256 @@ describe("fffactory apply (plan-apply §Apply)", () => {
       recordFailure: "S3 PutObject on the state bucket failed: SlowDown",
     });
     expect(lockStore.locks.size).toBe(0);
+  });
+});
+
+describe("a stopped worker (plan-apply §Stopped workers)", () => {
+  const STOPPED_B2 = {
+    kind: "machines" as const,
+    machines: [
+      machine("builder-1", "running", "i-0000000000000000a"),
+      machine("builder-2", "stopped", "i-0000000000000000b"),
+    ],
+  };
+
+  test("is shown skipped in the plan, sent nothing, and leaves the operation succeeded", async () => {
+    const workers = workerFleet(["builder-1"]);
+    workers.machines.inventory = STOPPED_B2;
+    const { deps, lockStore, approver } = applying({ hosts: ["builder-1", "builder-2"], workers });
+    const result = await applyFactory(
+      deps,
+      applyRequest({ instance: declaring("builder-1", "builder-2") }),
+    );
+    expect(approver.shown[0]).toContain(
+      "  = builder-2 (fff-abcd1234-builder-2): skipped: stopped; start it with `fffactory worker start builder-2`, then apply again to install it",
+    );
+    expect(result.kind === "applied" && result.workers.map((w) => w.kind)).toEqual([
+      "installed",
+      "stopped",
+    ]);
+    expect(
+      workers.transport.calls.some(({ worker }) => worker.hostname.endsWith("builder-2")),
+    ).toBe(false);
+    // Read once, under the lock: the plan and every stage go by it.
+    expect(workers.machines.reads).toBe(1);
+    expect(lockStore.operationWrites.at(-1)).toMatchObject({
+      status: "succeeded",
+      stages: [
+        { name: "infrastructure", status: "unchanged" },
+        { name: "workers", status: "installed" },
+        { name: "repositories", status: "synchronized" },
+      ],
+      workers: [
+        { key: "builder-1", status: "installed", summary: null },
+        { key: "builder-2", status: "stopped", summary: "Stopped: nothing was sent to it" },
+      ],
+      repositories: [
+        { key: "builder-1", status: "synchronized" },
+        { key: "builder-2", status: "stopped", summary: null },
+      ],
+    });
+  });
+
+  test("with an EC2 inventory it cannot read, a stopped worker is skipped by the tailnet, as before", async () => {
+    const workers = workerFleet(["builder-1"]);
+    workers.machines.inventory = { kind: "unavailable", reason: "EC2 DescribeInstances failed: x" };
+    const { deps, lockStore } = applying({ hosts: ["builder-1", "builder-2"], workers });
+    const result = await applyFactory(
+      deps,
+      applyRequest({ instance: declaring("builder-1", "builder-2") }),
+    );
+    expect(result.kind === "applied" && result.workers.map((w) => w.kind)).toEqual([
+      "installed",
+      "skipped",
+    ]);
+    expect(lockStore.operationWrites.at(-1)).toMatchObject({ status: "partial" });
+  });
+
+  test("an instance type change on a stopped worker is refused under the lock, before approval", async () => {
+    const workers = workerFleet(["builder-1"]);
+    workers.machines.inventory = STOPPED_B2;
+    const { deps, lockStore, approver, terraform } = applying({
+      hosts: ["builder-1", "builder-2"],
+      workers,
+    });
+    terraform.world.resize.add("builder-2");
+    const result = await applyFactory(
+      deps,
+      applyRequest({ instance: declaring("builder-1", "builder-2") }),
+    );
+    expect(result).toEqual({
+      kind: "stopped_resize",
+      inventory: "read",
+      workers: [
+        { key: "builder-2" as HostKey, hostname: "fff-abcd1234-builder-2", machine: "stopped" },
+      ],
+    });
+    expect(approver.shown).toEqual([]);
+    expect(terraform.calls.some(({ call }) => call === "applyPlan")).toBe(false);
+    expect(lockStore.operationWrites.at(-1)).toMatchObject({ status: "refused" });
+    expect(lockStore.locks.size).toBe(0);
+  });
+
+  test("with the EC2 inventory unreadable, any instance type change is refused, failing closed", async () => {
+    const workers = workerFleet(["builder-1", "builder-2"]);
+    workers.machines.inventory = { kind: "unavailable", reason: "EC2 DescribeInstances failed: x" };
+    const { deps, approver, terraform } = applying({ hosts: ["builder-1", "builder-2"], workers });
+    terraform.world.resize.add("builder-2");
+    expect(
+      await applyFactory(deps, applyRequest({ instance: declaring("builder-1", "builder-2") })),
+    ).toEqual({
+      kind: "stopped_resize",
+      inventory: "unreadable",
+      workers: [{ key: "builder-2" as HostKey, hostname: "fff-abcd1234-builder-2" }],
+    });
+    expect(approver.shown).toEqual([]);
+    expect(terraform.calls.some(({ call }) => call === "applyPlan")).toBe(false);
+  });
+
+  /** A saved plan of builder-1 and builder-2, made while `stopped` were stopped. */
+  async function plannedWhile(stopped: string[]) {
+    const workers = workerFleet(["builder-1", "builder-2"]);
+    const machines = (states: string[]) => ({
+      kind: "machines" as const,
+      machines: ["builder-1", "builder-2"].map((key) =>
+        machine(key, states.includes(key) ? "stopped" : "running"),
+      ),
+    });
+    workers.machines.inventory = machines(stopped);
+    const world = applying({ hosts: ["builder-1", "builder-2"], workers });
+    const planned = await planFactory(
+      world.deps,
+      planRequest({ instance: declaring("builder-1", "builder-2") }),
+    );
+    if (planned.kind !== "planned") throw new Error(`expected planned, got ${planned.kind}`);
+    const apply = () =>
+      applyFactory(
+        world.deps,
+        applyRequest({
+          planId: planned.saved.plan_id,
+          instance: declaring("builder-1", "builder-2"),
+          clock: () => new Date(NOW.getTime() + 60_000),
+        }),
+      );
+    return { ...world, workers, saved: planned.saved, machines, apply };
+  }
+
+  test("a saved plan skips the workers it planned as stopped", async () => {
+    const { saved, apply, approver, workers } = await plannedWhile(["builder-2"]);
+    expect(saved.stopped_workers).toEqual(["builder-2" as HostKey]);
+    workers.transport.calls.length = 0;
+    const result = await apply();
+    expect(approver.shown[0]).toContain(
+      "  = builder-2 (fff-abcd1234-builder-2): skipped: stopped; start it with `fffactory worker start builder-2`, then apply again to install it",
+    );
+    expect(result.kind === "applied" && result.workers.map((w) => `${w.key} ${w.kind}`)).toEqual([
+      "builder-1 installed",
+      "builder-2 stopped",
+    ]);
+    expect(
+      workers.transport.calls.some(({ worker }) => worker.hostname.endsWith("builder-2")),
+    ).toBe(false);
+  });
+
+  test("a saved plan is stale once a worker was started or stopped after it was made", async () => {
+    const started = await plannedWhile(["builder-2"]);
+    // `fffactory worker start builder-2`, between the plan and its apply.
+    started.workers.machines.inventory = started.machines([]);
+    expect(await started.apply()).toEqual({
+      kind: "stale",
+      planId: started.saved.plan_id,
+      reasons: ["worker builder-2 was stopped when it was planned, and is not now"],
+    });
+    expect(started.terraform.calls.some(({ call }) => call === "applyPlan")).toBe(false);
+    expect(started.lockStore.operationWrites.at(-1)).toMatchObject({ status: "refused" });
+
+    const stopped = await plannedWhile([]);
+    stopped.workers.machines.inventory = stopped.machines(["builder-1"]);
+    expect(await stopped.apply()).toMatchObject({
+      kind: "stale",
+      reasons: ["worker builder-1 is stopped now, and was not when it was planned"],
+    });
+
+    const unknown = await plannedWhile(["builder-2"]);
+    unknown.workers.machines.inventory = { kind: "unavailable", reason: "x" };
+    expect(await unknown.apply()).toMatchObject({
+      kind: "stale",
+      reasons: [
+        "the EC2 inventory could not be read to check that worker builder-2 is still stopped",
+      ],
+    });
+  });
+
+  test("the resize refusal is checked again on the saved Terraform plan that would be applied", async () => {
+    const { saved, apply, terraform, planStore } = await plannedWhile(["builder-2"]);
+    const update = { address: hostAddress("builder-2"), type: "aws_instance", actions: ["update"] };
+    terraform.world.shown = {
+      resource_changes: [
+        {
+          ...update,
+          change: {
+            actions: update.actions,
+            before: { instance_type: "m7i.large" },
+            after: { instance_type: "m7i.xlarge" },
+          },
+        },
+      ],
+    };
+    planStore.saved.set(`${FACTORY}/${saved.plan_id}`, { ...saved, changes: [update] });
+    expect(await apply()).toMatchObject({ kind: "stopped_resize" });
+    expect(terraform.calls.some(({ call }) => call === "applyPlan")).toBe(false);
+  });
+
+  /** A saved plan, made while every worker ran, that changes builder-2's instance type. */
+  async function resizingWhileRunning() {
+    const planned = await plannedWhile([]);
+    planned.terraform.world.resize.add("builder-2");
+    const replanned = await planFactory(
+      planned.deps,
+      planRequest({
+        instance: declaring("builder-1", "builder-2"),
+        randomBytes: (n) => new Uint8Array(n).fill(1),
+      }),
+    );
+    if (replanned.kind !== "planned") throw new Error(`expected planned, got ${replanned.kind}`);
+    expect(replanned.saved.stopped_workers).toEqual([]);
+    const apply = () =>
+      applyFactory(
+        planned.deps,
+        applyRequest({
+          planId: replanned.saved.plan_id,
+          instance: declaring("builder-1", "builder-2"),
+          clock: () => new Date(NOW.getTime() + 60_000),
+        }),
+      );
+    return { ...planned, apply };
+  }
+
+  test("a saved resize is refused once its worker is stopping, which Terraform would start", async () => {
+    const { apply, workers, terraform } = await resizingWhileRunning();
+    workers.machines.inventory = {
+      kind: "machines",
+      machines: [machine("builder-1", "running"), machine("builder-2", "stopping")],
+    };
+    expect(await apply()).toMatchObject({
+      kind: "stopped_resize",
+      inventory: "read",
+      workers: [{ key: "builder-2" as HostKey, machine: "stopping" }],
+    });
+    expect(terraform.calls.some(({ call }) => call === "applyPlan")).toBe(false);
+  });
+
+  test("a saved resize is refused when the EC2 inventory cannot be read at apply", async () => {
+    // A worker may have been stopped since: the plan skips none, so it is not stale.
+    const { apply, workers, terraform, lockStore } = await resizingWhileRunning();
+    workers.machines.inventory = { kind: "unavailable", reason: "EC2 DescribeInstances failed: x" };
+    expect(await apply()).toEqual({
+      kind: "stopped_resize",
+      inventory: "unreadable",
+      workers: [{ key: "builder-2" as HostKey, hostname: "fff-abcd1234-builder-2" }],
+    });
+    expect(terraform.calls.some(({ call }) => call === "applyPlan")).toBe(false);
+    expect(lockStore.operationWrites.at(-1)).toMatchObject({ status: "refused" });
   });
 });
 

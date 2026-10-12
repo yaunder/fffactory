@@ -49,8 +49,24 @@ interface WorldChange {
   readonly address: string;
   readonly type: string;
   readonly actions: readonly string[];
+  /** The resource's attributes before and after that matter to a test; none by default. */
+  readonly before?: Readonly<Record<string, unknown>>;
+  readonly after?: Readonly<Record<string, unknown>>;
   /** What applying it does to the world. */
   readonly apply: () => void;
+}
+
+/**
+ * A change's `before` and `after` as `terraform show -json` gives them: null where the
+ * resource does not exist (before a create, after a delete), its attributes otherwise.
+ */
+function shownAttributes({ actions, before, after }: WorldChange) {
+  const creates = actions.includes("create");
+  const deletes = actions.includes("delete");
+  return {
+    before: creates && !deletes ? null : (before ?? {}),
+    after: deletes && !creates ? null : (after ?? {}),
+  };
 }
 
 export const NETWORK = "module.network.aws_vpc.this";
@@ -61,11 +77,13 @@ export const STATE_BUCKET_ADDRESS = "module.state_bucket.aws_s3_bucket.state";
  * A factory's AWS world behind a Provisioner, so plan and apply can be tested against state
  * that changes: the state bucket (in `store`), the network and one host machine per host key.
  * The backend root plans creating the bucket. The factory root plans the network, a host per
- * declared key not yet provisioned and removing any provisioned key no longer declared, and
- * `replace` forces a host's replacement; `output` records the provisioned keys once there is
- * state. Applying a saved plan applies its changes one at a time, each written to the state
- * (a new revision in `store`), and runs `beforeChange` before each: a test can stop the apply
- * part way through by throwing there, as an interrupted Terraform does.
+ * declared key not yet provisioned and removing any provisioned key no longer declared,
+ * `replace` forces a host's replacement and `resize` an in-place change of its instance type;
+ * `output` records the provisioned keys once there is state. `showPlan` gives every change a
+ * `before` and an `after`, as `terraform show -json` does. Applying a saved plan applies its
+ * changes one at a time, each written to the state (a new revision in `store`), and runs
+ * `beforeChange` before each: a test can stop the apply part way through by throwing there,
+ * as an interrupted Terraform does.
  */
 export function fakeFactoryWorld(options: {
   readonly store: { readonly buckets: Set<string>; readonly states: Map<string, string> };
@@ -76,6 +94,7 @@ export function fakeFactoryWorld(options: {
     network: (options.hosts ?? []).length > 0,
     hosts: new Set(options.hosts ?? []),
     replace: new Set<string>(),
+    resize: new Set<string>(),
     revisions: 0,
     /** Answers `output` with this instead of the world's outputs when set. */
     outputs: undefined as Readonly<Record<string, unknown>> | undefined,
@@ -110,6 +129,17 @@ export function fakeFactoryWorld(options: {
       return [{ address, type: "aws_instance", actions: ["create"], apply: add }];
     if (world.replace.has(key))
       return [{ address, type: "aws_instance", actions: ["delete", "create"], apply: add }];
+    if (world.resize.has(key))
+      return [
+        {
+          address,
+          type: "aws_instance",
+          actions: ["update"],
+          before: { instance_type: "m7i.large" },
+          after: { instance_type: "m7i.xlarge" },
+          apply: () => world.resize.delete(key),
+        },
+      ];
     return [];
   }
 
@@ -169,10 +199,10 @@ export function fakeFactoryWorld(options: {
       if (world.shown !== undefined) return world.shown;
       return {
         format_version: "1.2",
-        resource_changes: (plans.get(request.planFile) ?? []).map(({ address, type, actions }) => ({
-          address,
-          type,
-          change: { actions },
+        resource_changes: (plans.get(request.planFile) ?? []).map((change) => ({
+          address: change.address,
+          type: change.type,
+          change: { actions: change.actions, ...shownAttributes(change) },
         })),
       };
     },

@@ -163,6 +163,38 @@ describe("end-to-end verification (dispatch §End-to-end verification)", () => {
     });
   });
 
+  test("a stopped worker is reported stopped in every stage and does not hold the factory back (plan-apply §Stopped workers)", () => {
+    const stopped = identity("builder-2");
+    const verification = verifyFactory({
+      workers: [
+        installed("builder-1"),
+        {
+          ...stopped,
+          kind: "stopped",
+          summary: "Stopped: nothing was sent to it",
+          nextAction: "x",
+        },
+      ],
+      repositories: [synchronized("builder-1"), { ...stopped, kind: "stopped" }],
+      controlPlane: [applied("builder-1"), { ...stopped, kind: "stopped" }],
+      dispatch: [activeDispatch("builder-1"), { ...stopped, kind: "stopped" }],
+    });
+    expect(verification.ready).toBe(true);
+    expect(verification.summary).toBe(
+      "The factory is ready: every worker but the 1 stopped is verified end to end",
+    );
+    expect(verification.workers[1]).toEqual({
+      ...stopped,
+      release: "stopped",
+      repositories: "stopped",
+      controlPlane: "stopped",
+      dispatch: "stopped",
+      ready: false,
+      summary: "fff-abcd1234-builder-2 is stopped: nothing was sent to it",
+      details: [],
+    });
+  });
+
   test("dispatch not requested does not hold the factory back", () => {
     const notRequested: DispatchOutcome = { ...identity("builder-1"), kind: "not_requested" };
     const verification = verifyFactory(request({ dispatch: [notRequested] }));

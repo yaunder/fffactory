@@ -14,7 +14,7 @@ import type { FactoryPlanRequest, PlanRefusal } from "../../application/plan-fac
 import { requireExpectedAccount } from "../../application/require-expected-account";
 import { accountExpectation } from "../../domain/aws-account";
 import { lockRefusal } from "../../domain/factory-lock";
-import { describeD11Refusal } from "../../domain/plan";
+import { describeD11Refusal, describeStoppedResizeRefusal } from "../../domain/plan";
 import { sha256Hex } from "../../infrastructure/release-tarball";
 import type { CliContext } from "../context";
 import {
@@ -75,27 +75,36 @@ export async function basisOf(
   };
 }
 
-/** Prints why `action` was refused before anything changed, to standard error. */
-export function printPlanRefusal(action: string, refusal: PlanRefusal, context: CliContext): void {
+/** Why `action` was refused before anything changed, one line per element. */
+function refusalLines(
+  action: string,
+  refusal: Exclude<PlanRefusal, { readonly kind: "refused" }>,
+  now: Date,
+): readonly string[] {
   switch (refusal.kind) {
     case "release_mismatch":
-      context.err(`Refusing to ${action}: ${refusal.message}`);
-      return;
-    case "refused":
-      printIssues(`Refusing to ${action}: factory.json is not ready:`, refusal.issues, context);
-      return;
+      return [`Refusing to ${action}: ${refusal.message}`];
     case "d11":
-      for (const line of describeD11Refusal(refusal.refusal)) context.err(line);
-      return;
+      return describeD11Refusal(refusal.refusal);
+    case "stopped_resize":
+      return describeStoppedResizeRefusal(action, refusal);
     case "unready":
-      for (const line of refusal.refusal) context.err(line);
-      return;
+      return refusal.refusal;
     case "unexpected_plan":
-      context.err(`Refusing to ${action}: Terraform's plan is not one fffactory can apply:`);
-      for (const reason of refusal.unexpected) context.err(`  ${reason}`);
-      return;
+      return [
+        `Refusing to ${action}: Terraform's plan is not one fffactory can apply:`,
+        ...refusal.unexpected.map((reason) => `  ${reason}`),
+      ];
     case "locked":
-      for (const line of lockRefusal(refusal.held, context.now())) context.err(line);
-      return;
+      return lockRefusal(refusal.held, now);
   }
+}
+
+/** Prints why `action` was refused before anything changed, to standard error. */
+export function printPlanRefusal(action: string, refusal: PlanRefusal, context: CliContext): void {
+  if (refusal.kind === "refused") {
+    printIssues(`Refusing to ${action}: factory.json is not ready:`, refusal.issues, context);
+    return;
+  }
+  for (const line of refusalLines(action, refusal, context.now())) context.err(line);
 }

@@ -463,6 +463,89 @@ describe("apply's full pipeline (dispatch §Requested versus active, §End-to-en
     expect(lockStore.operationWrites.at(-1)).toMatchObject({ status: "partial", failure: null });
   });
 
+  test("a stopped worker is sent nothing by any stage, and the factory is ready without it (plan-apply §Stopped workers)", async () => {
+    const { controlPlane } = fakeControlPlane("healthy", { kind: "idle" });
+    const { queue, reconcile, adoptions } = fakeQueue({ changed: true });
+    const B2 = `${FACTORY}-builder-2`;
+    const enrolled = installableWorker(
+      appliedRecord(B1, "0.3.0", { verification: verification(B1, "enrolled") }),
+      { inspection: currentWorker("builder-1") },
+    );
+    // Just stopped: the tailnet may still show the device online for a while.
+    const fleet = workerFleet(["builder-1", "builder-2"], { [B1]: enrolled });
+    fleet.machines.inventory = {
+      kind: "machines",
+      machines: [machine("builder-1"), machine("builder-2", "stopped", "i-0000000000000000b")],
+    };
+    const world = factory({ hosts: ["builder-1", "builder-2"], workers: fleet });
+    const shown: (readonly string[])[] = [];
+    const deps = {
+      ...world.deps,
+      approval: {
+        approve: async (plan: readonly string[]) => {
+          shown.push(plan);
+          return true;
+        },
+      },
+      interrupted: () => false,
+      controlPlane,
+      workflowQueue: queue,
+    };
+    const base = requestingDispatch();
+    const instance: FactoryInstance = {
+      ...base,
+      hosts: [...(base.hosts ?? []), ...(declaring("builder-2").hosts ?? [])],
+    };
+    const { now: _now, ...request } = planRequest();
+    const result = await applyFactory(deps, {
+      ...request,
+      instance,
+      host: "operator-laptop",
+      clock: () => new Date(NOW.getTime() + 1000),
+    });
+    if (result.kind !== "applied") throw new Error(`expected applied, got ${result.kind}`);
+    expect(shown[0]).toEqual(
+      expect.arrayContaining([
+        `  = builder-2 (${B2}): skipped: stopped; start it with \`fffactory worker start builder-2\`, then apply again to install it`,
+        `  = builder-2 (${B2}): skipped: stopped`,
+      ]),
+    );
+    expect(result.workers.map((w) => w.kind)).toEqual(["installed", "stopped"]);
+    expect(result.repositories?.map((r) => r.kind)).toEqual(["synchronized", "stopped"]);
+    expect(result.controlPlane?.map((c) => c.kind)).toEqual(["applied", "stopped"]);
+    expect(result.dispatch?.map((d) => d.kind)).toEqual(["active", "stopped"]);
+    expect(result.verification).toMatchObject({
+      ready: true,
+      summary: "The factory is ready: every worker but the 1 stopped is verified end to end",
+    });
+    // Nothing reached builder-2: no SSH, no Paseo, no dispatch.
+    expect(fleet.transport.calls.map(({ worker }) => worker.hostname)).not.toContain(B2);
+    expect(reconcile).toEqual([true]);
+    expect(adoptions.count).toBe(1);
+    expect(world.lockStore.operationWrites.at(-1)).toMatchObject({
+      status: "succeeded",
+      failure: null,
+      stages: expect.arrayContaining([
+        { name: "workers", status: "installed" },
+        { name: "repositories", status: "synchronized" },
+        { name: "control-plane", status: "reconciled" },
+        { name: "dispatch", status: "active" },
+        { name: "verification", status: "verified" },
+      ]),
+      workers: [{ status: "installed" }, { status: "stopped" }],
+      repositories: [{ status: "synchronized" }, { status: "stopped" }],
+      control_plane: [{ status: "applied" }, { status: "stopped" }],
+      dispatch: [{ status: "active" }, { status: "stopped" }],
+      verification: {
+        ready: true,
+        workers: [
+          { ready: true },
+          { release: "stopped", repositories: "stopped", dispatch: "stopped", ready: false },
+        ],
+      },
+    });
+  });
+
   test("dispatch not requested does not block a ready factory", async () => {
     const { controlPlane } = fakeControlPlane("healthy", { kind: "idle" });
     const { queue } = fakeQueue();

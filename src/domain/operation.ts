@@ -92,19 +92,19 @@ export interface StageRecord {
   readonly status: StageStatus;
 }
 
-/** One worker's result in the workers stage, in fffactory's own words. */
+/** One worker's result in the workers stage, in fffactory's own words; `stopped` is no skip. */
 export interface WorkerRecord {
   readonly key: string;
   readonly hostname: string;
   readonly status: WorkerOutcome["kind"];
-  /** Why it was skipped or failed; null otherwise. */
+  /** Why it was skipped, failed or stopped; null otherwise. */
   readonly summary: string | null;
 }
 
 export interface RepositoryRecord {
   readonly key: string;
   readonly hostname: string;
-  readonly status: "synchronized" | "unresolved" | "skipped";
+  readonly status: "synchronized" | "unresolved" | "skipped" | "stopped";
   readonly unmanaged: readonly string[];
   readonly summary: string | null;
 }
@@ -112,14 +112,14 @@ export interface RepositoryRecord {
 export interface ControlPlaneRecord {
   readonly key: string;
   readonly hostname: string;
-  readonly status: "applied" | "deferred" | "failed";
+  readonly status: "applied" | "deferred" | "failed" | "stopped";
   readonly summary: string | null;
 }
 
 export interface DispatchRecord {
   readonly key: string;
   readonly hostname: string;
-  readonly status: "not_requested" | "active" | "pending" | "failed" | "skipped";
+  readonly status: "not_requested" | "active" | "pending" | "failed" | "skipped" | "stopped";
   readonly blockers: readonly DispatchGate[];
   readonly summary: string | null;
 }
@@ -131,10 +131,10 @@ export interface OperationVerification {
     readonly key: HostKey;
     readonly hostname: string;
     readonly ready: boolean;
-    readonly release: "healthy" | "unhealthy" | "skipped" | "absent";
-    readonly repositories: "synchronized" | "unresolved" | "skipped" | "unknown";
-    readonly controlPlane: "applied" | "deferred" | "failed" | "unknown";
-    readonly dispatch: "active" | "pending" | "not_requested" | "failed" | "skipped";
+    readonly release: "healthy" | "unhealthy" | "skipped" | "absent" | "stopped";
+    readonly repositories: "synchronized" | "unresolved" | "skipped" | "unknown" | "stopped";
+    readonly controlPlane: "applied" | "deferred" | "failed" | "unknown" | "stopped";
+    readonly dispatch: "active" | "pending" | "not_requested" | "failed" | "skipped" | "stopped";
     readonly summary: string;
     readonly details: readonly string[];
   }[];
@@ -272,7 +272,7 @@ export function withControlPlane(
   outcomes: readonly {
     readonly key: string;
     readonly hostname: string;
-    readonly kind: "applied" | "deferred" | "failed";
+    readonly kind: ControlPlaneRecord["status"];
     readonly summary?: string;
   }[],
   now: Date,
@@ -295,7 +295,7 @@ export function withRepositories(
   outcomes: readonly {
     readonly key: string;
     readonly hostname: string;
-    readonly kind: "synchronized" | "unresolved" | "skipped";
+    readonly kind: RepositoryRecord["status"];
     readonly unmanaged?: readonly string[];
     readonly summary?: string;
   }[],
@@ -347,7 +347,7 @@ export function withWorkers(
     key: outcome.key,
     hostname: outcome.hostname,
     status: outcome.kind,
-    summary: outcome.kind === "skipped" || outcome.kind === "failed" ? outcome.summary : null,
+    summary: "summary" in outcome ? outcome.summary : null,
   }));
   return { ...record, workers, updated_at: now.toISOString() };
 }

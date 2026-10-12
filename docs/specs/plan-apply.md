@@ -160,15 +160,17 @@ skipped: no Terraform apply runs), `applyWorkers`
    source, every worker is skipped before the tailnet is read: `This fffactory
    carries no worker executable: it runs from source, not from a built
    release`.
-2. The peer view is read once; each worker is found by the
-   [hostname-match rule](host-protocol.md#finding-the-worker), or skipped with
-   status's reason and next action. A worker whose machine this apply created
-   is instead waited for while it boots ([below](#waiting-for-a-new-worker)).
-   Before any upload, an existing worker with approved Paseo maintenance is
-   asked for agent activity. Active or unknown activity defers it without
-   upload or activation, leaving its complete current release in place: it is
-   skipped, `Paseo maintenance is deferred while agents may be active`
-   ([control plane §Pre-activation deferral](control-plane.md#pre-activation-deferral)).
+2. A worker the approved plan skips as stopped is sent nothing
+   ([below](#stopped-workers)). The peer view is read once; each other worker
+   is found by the [hostname-match rule](host-protocol.md#finding-the-worker),
+   or skipped with status's reason and next action. A worker whose machine this
+   apply created is instead waited for while it boots
+   ([below](#waiting-for-a-new-worker)). Before any upload, an existing worker
+   with approved Paseo maintenance is asked for agent activity. Active or
+   unknown activity defers it without upload or activation, leaving its
+   complete current release in place: it is skipped, `Paseo maintenance is
+   deferred while agents may be active` ([control plane §Pre-activation
+   deferral](control-plane.md#pre-activation-deferral)).
 3. The release tarball is uploaded and activated with its embedded digest and
    the host projection on standard input ([host protocol §apply](host-protocol.md#apply)):
    the one `projectHosts` builds from factory.json's hosts, Paseo secret
@@ -183,10 +185,10 @@ skipped: no Terraform apply runs), `applyWorkers`
    be attempted; an install or verification failure stops the rollout, and the
    remaining workers are not attempted. A new worker whose first boot did not
    finish in time fails without stopping the rollout: no install step ran on
-   it. Each outcome is written to the
-   operation record as it ends. When the activation times out or its
-   connection drops, `host apply` may still be installing: the worker fails
-   with that said, and its next action is to wait for that install, then rerun.
+   it. Each outcome is written to the operation record as it ends. When the
+   activation times out or its connection drops, `host apply` may still be
+   installing: the worker fails with that said, and its next action is to wait
+   for that install, then rerun.
 
 After Terraform's line (`Applied: the factory's infrastructure matches
 factory.json.`, or `Infrastructure: no changes to apply.`), apply lists the
@@ -202,19 +204,20 @@ Workers:
              Next: Check that the instance is running and that Tailscale is up on it, then rerun `fffactory apply`.
 ```
 
-Each account's steps are apply's own, named for the hostname it resolved,
-never text from the worker ([readiness §Enrollment](readiness.md#enrollment)).
-Failed and not-attempted workers go to standard error. The exit status is 0
-when every worker was installed and verified, 2 when one was skipped and none
-failed, and 1 when one failed, including a new worker whose first boot did not
-finish in time. The dispatch stage never fails a skipped worker: it reports it
-`skipped` and sends it nothing. A deferred worker also bypasses the
+Each account's steps are apply's own, named for the hostname it resolved, never
+text from the worker ([readiness §Enrollment](readiness.md#enrollment)). Failed
+and not-attempted workers go to standard error. The exit status is 0 when every
+worker was installed and verified or is stopped, 2 when one was skipped and
+none failed, and 1 when one failed, including a new worker whose first boot did
+not finish in time. The dispatch stage never fails a skipped worker: it reports
+it `skipped` and sends it nothing. A deferred worker also bypasses the
 control-plane stage, but one skipped for another reason that the tailnet still
-locates goes through the control-plane stage, which may fail it (exit 1). Exit 0 means every worker is ready but for the accounts a human
-enrolls: fffactory cannot enroll them, so pending enrollment still counts as
-installed, and the worker's lines name each step. A failed install leaves that
-worker on the requested release, active and unhealthy; its next action names
-the failed step's log, and a rerun repairs it.
+locates goes through the control-plane stage, which may fail it (exit 1). Exit
+0 means every worker is ready but for the accounts a human enrolls: fffactory
+cannot enroll them, so pending enrollment still counts as installed, and the
+worker's lines name each step. A failed install leaves that worker on the
+requested release, active and unhealthy; its next action names the failed
+step's log, and a rerun repairs it.
 
 `plan` inspects each existing worker through the read-only host protocol to
 derive its Paseo changes. A worker created by the Terraform plan is known to
@@ -288,6 +291,102 @@ boot: no install step ran on it.`` before what the interrupt left
 ([Interruption](#interruption)). An interrupt while a look's activation runs
 is reported as any interrupted install.
 
+### Stopped workers
+
+A worker stopped with `fffactory worker stop` ([worker
+lifecycle](worker-lifecycle.md)) is not broken: apply never starts it, sends it
+nothing, and it does not make the operation partial. EC2's state is the truth.
+Plan and apply read the factory's EC2 inventory (`DescribeInstances`, as
+[status](status.md#inventories) lists it), and a declared worker whose one
+instance is `stopped` is a stopped worker. One `stopping` or `pending` is not:
+the tailnet judges it as before, though a `stopping` one's instance type may
+not change ([below](#instance-type-of-a-stopped-worker)). An inventory that
+cannot be read names no worker stopped, and the tailnet judges every one, as it
+did before stopped workers were planned: a stopped worker is then offline and
+skipped, exit 2. The one exception is a change of a worker's instance type,
+refused while the inventory cannot be read
+([below](#instance-type-of-a-stopped-worker)).
+
+`plan` reads the inventory once, after the lock check and before Terraform
+plans. `apply` reads it once under the lock, before it plans or reads back a
+saved plan: the plan, its refusals and every stage go by that one look, and
+`worker stop|start` take the same lock, so fffactory changes no worker's power
+while apply runs.
+
+- The plan shows a stopped worker's install, and its control-plane, repository
+  and dispatch changes, skipped. It is never inspected for its Paseo state:
+  its control-plane observation is `stopped`, with no change.
+
+  ```text
+  Worker changes, one worker at a time:
+    ~ builder-1 (fff-abcd1234-builder-1): install release 0.3.0 and its host configuration, then verify it
+    = builder-2 (fff-abcd1234-builder-2): skipped: stopped; start it with `fffactory worker start builder-2`, then apply again to install it
+  Control-plane changes, before worker activation:
+    ~ builder-1 (fff-abcd1234-builder-1): paseo-package, service-definition
+    = builder-2 (fff-abcd1234-builder-2): skipped: stopped
+  ```
+
+- A saved plan records them in `stopped_workers`, and is stale once a worker
+  has been started or stopped since ([Freshness](#freshness)).
+- A plan that changes the instance type of a worker stopped or stopping, or of
+  any worker while the inventory cannot be read, is refused
+  ([below](#instance-type-of-a-stopped-worker)).
+- The workers stage lists a stopped worker `stopped`, on standard output:
+  `Stopped: nothing was sent to it`, next ``To install it, start it with
+  `fffactory worker start KEY`, then rerun `fffactory apply`.``. It is not a
+  skip: the rollout goes on, and the stage still ends `installed`.
+- The repository, control-plane and dispatch stages send it nothing either and
+  report it `stopped`. End-to-end verification reports it `stopped` in every
+  column, never `absent`, and the factory is ready once every other worker is:
+  `The factory is ready: every worker but the 1 stopped is verified end to end`.
+
+Apply exits 0 when every other worker succeeded. Starting a stopped worker is
+the operator's call: `fffactory worker start KEY`, then a plan installs
+whatever it missed while stopped.
+
+#### Instance type of a stopped worker
+
+Verified against the pinned AWS provider, `hashicorp/aws` 6.66.0
+(`internal/service/ec2/ec2_instance.go`): an in-place change of
+`instance_type` runs `modifyInstanceAttributeWithStopStart`, which stops the
+instance (nothing to do for a stopped one), modifies its type, then calls
+`StartInstances` and waits for it to run, whatever state it was in. For a
+`stopping` instance the stop waits for it to be `stopped`, then the same start
+follows. Applying it would start a stopped or stopping worker behind the
+operator's back. So a plan that updates such a worker's `aws_instance` with
+another instance type, or with one Terraform does not show (failing closed), is
+refused by `plan` and `apply` alike, and nothing is saved or applied
+(`resizeRefusal`, `src/domain/plan.ts`). Apply judges a saved plan by the
+inventory it reads under the lock, so a worker stopped since the plan was made,
+or stopping now, is refused too:
+
+```text
+Refusing to plan: the plan changes the instance type of a stopped worker, and Terraform starts a stopped instance to change its type:
+  builder-2 (fff-abcd1234-builder-2): module.hosts.aws_instance.host["builder-2"] would be updated in place
+Nothing was applied. Start it first with `fffactory worker start builder-2`, then plan again.
+```
+
+A stopping worker's line ends `, and it is stopping`, and the last line says
+to start it `` `fffactory worker start KEY` once it has stopped ``
+(`worker start` refuses a stopping machine,
+[worker lifecycle](worker-lifecycle.md)).
+
+With the inventory unreadable no worker is known not to be stopped, so `plan`
+and `apply` (fresh or saved, whose staleness cannot see a worker stopped since)
+refuse a change of any worker's instance type, failing closed; everything else
+goes on as above:
+
+```text
+Refusing to apply: the plan changes the instance type of a worker the EC2 inventory could not be read to check is not stopped, and Terraform starts a stopped instance to change its type:
+  builder-2 (fff-abcd1234-builder-2): module.hosts.aws_instance.host["builder-2"] would be updated in place
+Nothing was applied. Plan again once the EC2 inventory can be read.
+```
+
+Other in-place updates of a stopped worker's machine, such as its tags or root
+volume size, do not start it and are planned as before; the hosts module
+ignores `ami` and `user_data`. Apply checks a saved plan's Terraform plan file
+again under the lock.
+
 ### Refusals until lifecycle work lands (D11)
 
 Until host retirement and replacement land in milestone M3, a plan is refused,
@@ -349,7 +448,8 @@ configuration value:
   "created_at": "2026-09-30T12:00:00.000Z",
   "expires_at": "2026-09-30T13:00:00.000Z",
   "changes": [{ "address": "module.hosts.aws_instance.host[\"builder-1\"]", "type": "aws_instance", "actions": ["create"] }],
-  "control_plane": [{ "key": "builder-1", "hostname": "fff-abcd1234-builder-1", "observation": "no-release", "changes": ["paseo-package", "service-definition", "listen-address", "password"] }]
+  "control_plane": [{ "key": "builder-1", "hostname": "fff-abcd1234-builder-1", "observation": "no-release", "changes": ["paseo-package", "service-definition", "listen-address", "password"] }],
+  "stopped_workers": []
 }
 ```
 
@@ -368,6 +468,7 @@ live assumptions are the AWS account and the factory's Terraform state:
 | `account_id` | The account check allowed a caller in another account. |
 | `state_revision` | The factory's Terraform state object (`factory/terraform.tfstate` in the state bucket) has another revision, or appeared or vanished: another apply, or anything else, wrote it. |
 | `control_plane[].observation` | The existing worker's active release or host-projection digest changed before activation. |
+| `stopped_workers` | A worker it skipped as stopped is not stopped now, or one it installs is ([Stopped workers](#stopped-workers)); or it skips one and the EC2 inventory cannot be read to check it. A record without the field skips none. |
 
 The revision is the state object's S3 version ID and entity tag, read with
 HeadObject (`ExpectedBucketOwner` set); every write changes it. It is read
@@ -379,9 +480,10 @@ must read back as this factory's plan with this ID; otherwise the plan is
 damaged. The file's SHA-256 is checked when the plan is loaded, before the
 lock, and again under the lock, immediately before the file is read back and
 immediately before it is applied: it must still be the file loaded, or the plan
-is damaged and nothing is applied. Under the lock, the Terraform plan file that will be applied is read
-back with `showPlan`: the changes shown for approval, and checked against D11,
-are the file's, and a file whose changes differ from its record's is damaged.
+is damaged and nothing is applied. Under the lock, the Terraform plan file that
+will be applied is read back with `showPlan`: the changes shown for approval,
+and checked against D11, are the file's, and a file whose changes differ from
+its record's is damaged.
 
 Refusal:
 
@@ -391,13 +493,16 @@ Refusing to apply plan k3x9q2ab: it is no longer the plan to apply:
 Nothing was applied. Review a new plan with `fffactory plan`.
 ```
 
-The other reasons: `it expired at T`, `it was planned for another
-factory.json, PATH`, `it was planned by fffactory R, not this release`, `it was
-planned with other release assets than this fffactory's` (only when the release
-is the same), `it was planned in AWS account A, not this one`, `the factory's
-Terraform state changed after it was planned`, and `the state bucket no longer
-exists`. An unknown or pruned plan ID: `There is no saved plan ID for this
-factory here: ...`; a damaged one: `Saved plan ID cannot be applied: ...`.
+The other reasons: `it expired at T`, `it was planned for another factory.json,
+PATH`, `it was planned by fffactory R, not this release`, `it was planned with
+other release assets than this fffactory's` (only when the release is the
+same), `it was planned in AWS account A, not this one`, `the factory's
+Terraform state changed after it was planned`, `the state bucket no longer
+exists`, `worker KEY was stopped when it was planned, and is not now`, `worker
+KEY is stopped now, and was not when it was planned`, and `the EC2 inventory
+could not be read to check that worker KEY is still stopped`. An unknown or
+pruned plan ID: `There is no saved plan ID for this factory here: ...`; a
+damaged one: `Saved plan ID cannot be applied: ...`.
 
 Plans are short-lived. Each `plan` and `apply` first prunes the factory's plans
 that expired over a day ago, and plan directories never saved that were made
@@ -441,7 +546,8 @@ After the checks above, and a saved plan's local freshness:
    Exactly the saved Terraform plan file is applied (`terraform apply
    PLANFILE`), never a new plan; a plan without infrastructure changes applies
    none.
-6. The workers stage ([above](#the-workers-stage)).
+6. The workers stage ([above](#the-workers-stage)). It and every later stage
+   send a stopped worker nothing ([Stopped workers](#stopped-workers)).
 7. The repository stage, exactly as shown in the plan, under the same lock.
 8. The control-plane stage installs the approved release assets and performs
    only the approved classified lifecycle action. It is independent of dispatch.
@@ -457,7 +563,8 @@ After the checks above, and a saved plan's local freshness:
 10. End-to-end verification joins the worker, repository, control-plane and
    observed dispatch outcomes. Pending, deferred or skipped is incomplete
    (exit 2); a failed reconciliation is a command failure (exit 1). A skipped
-   worker's release is left as is, never reported absent.
+   worker's release is left as is, never reported absent. A stopped worker is
+   not incomplete.
 11. `Operation record: s3://BUCKET/KEY`, with the combined exit status of those
    stages. The lock is released.
 
@@ -540,29 +647,33 @@ when the lock is taken and again at every step:
 `declined`, `refused` or `failed`. The workers stage (`workers`) goes
 `installing` and ends `installed`, `partial` or `failed`; `workers` lists each
 worker as it ends, `{"key", "hostname", "status", "summary"}`, with status
-`installed`, `skipped`, `failed` or `not_attempted` and the summary of a skip or
-failure. The operation's `status` is `running` until it ends `succeeded`,
-`partial` (a worker was skipped), `declined`, `refused` or `failed`, with
-`failure` naming why (for a worker, `worker KEY: SUMMARY`). Records are history: nothing reads them to decide anything. A final
-record that cannot be written after a successful apply does not fail it:
-`The operation record could not be finished: REASON` on standard error, exit 0.
-After a failure, the same line follows the failure's report, which is kept
-whole, and the exit stays 1.
+`installed`, `skipped`, `failed`, `not_attempted` or `stopped` and the summary
+of a skip, failure or stop. The operation's `status` is `running` until it ends
+`succeeded`, `partial` (a worker was skipped; a stopped one is not),
+`declined`, `refused` or `failed`, with `failure` naming why (for a worker,
+`worker KEY: SUMMARY`). Records are history: nothing reads them to decide
+anything. A final record that cannot be written after a successful apply does
+not fail it: `The operation record could not be finished: REASON` on standard
+error, exit 0. After a failure, the same line follows the failure's report,
+which is kept whole, and the exit stays 1.
 
 The repository stage (`repositories`) goes `synchronizing`, then
 `synchronized`, `partial` or `failed`. Its `repositories` array records each
-worker's key, hostname, result, unmanaged paths and summary. An unresolved or
-skipped repository result makes the operation `partial` and apply exit 2.
-The control-plane stage goes `reconciling`, then `reconciled`, `deferred` or
-`failed`. Its `control_plane` array records each worker's key, hostname, safe
-outcome and summary; it never records Paseo or secret output.
-The dispatch stage goes `reconciling`, then `active`, `pending` or `failed`;
-a skipped worker leaves it `pending`, like a pending one, and the operation
-`partial` unless another stage failed. Its `dispatch` array records each worker's safe outcome
-(`not_requested`, `active`, `pending`, `failed` or `skipped`), blocker gates and
-summary, never credentials or tool output. The verification stage goes
-`reconciling`, then `verified`, `pending` or `failed`, and records each
-composite worker verdict; a skipped worker's `release` is `skipped`.
+worker's key, hostname, result (`synchronized`, `unresolved`, `skipped` or
+`stopped`), unmanaged paths and summary. An unresolved or skipped repository
+result makes the operation `partial` and apply exit 2. The control-plane stage
+goes `reconciling`, then `reconciled`, `deferred` or `failed`. Its
+`control_plane` array records each worker's key, hostname, safe outcome
+(`applied`, `deferred`, `failed` or `stopped`) and summary; it never records
+Paseo or secret output. The dispatch stage goes `reconciling`, then `active`,
+`pending` or `failed`; a skipped worker leaves it `pending`, like a pending
+one, and the operation `partial` unless another stage failed. Its `dispatch`
+array records each worker's safe outcome (`not_requested`, `active`, `pending`,
+`failed`, `skipped` or `stopped`), blocker gates and summary, never credentials
+or tool output. The verification stage goes `reconciling`, then `verified`,
+`pending` or `failed`, and records each composite worker verdict; a skipped
+worker's `release` is `skipped`, and a stopped worker's every verdict
+`stopped`.
 
 ### Interruption
 
@@ -804,19 +915,19 @@ refused (D11).
 
 | Layer | Module | Responsibility |
 | --- | --- | --- |
-| Domain | `src/domain/plan.ts` | Plan IDs, the CLI/pin match guard, reading a JSON plan's resource changes, the plan's presentation, the D11 refusals, the saved plan record, its freshness rule, `FACTORY_STATE_KEY`, `PLAN_TTL_MS`. Pure. |
+| Domain | `src/domain/plan.ts` | Plan IDs, the CLI/pin match guard, reading a JSON plan's resource changes, the plan's presentation (stopped workers skipped), the D11 refusals, the refusal to resize a stopped or stopping worker, or any while the EC2 inventory cannot be read (`resizeRefusal`), the saved plan record, its freshness rule (`stoppedStaleness` too), `FACTORY_STATE_KEY`, `PLAN_TTL_MS`. Pure. |
 | Domain | `src/domain/release-compatibility.ts` | `RELEASE_COMPATIBILITY`, release precedence, upgrade's assessment of the pin, the schema version check, the base generation and schema D11 refusals, the pin move's preview. Pure. |
 | Domain | `src/domain/operation.ts` | The operation record, its key, stage transitions (upgrade's `pin` stage too), workers, repositories and control-plane outcomes. Pure. |
 | Domain | `src/domain/repository-placement.ts` | The per-worker repository manifest, fixed worker protocol commands, and completed-result parser. Pure. |
 | Domain | `src/domain/stable-host-keys.ts` | `recordedHostKeys`, reading the factory root's `host_keys` output. |
-| Application | `src/application/plan-factory.ts` | `checkPlannable`, `planInfrastructure`, `planFactory`. |
+| Application | `src/application/plan-factory.ts` | `checkPlannable`, `planInfrastructure`, `planFactory`, `declaredMachines` (the one inventory read: the stopped workers and the resize guard). |
 | Application | `src/application/apply-factory.ts` | `applyFactory`: saved-plan freshness, the lock, infrastructure, workers, repository and control-plane stages, operation records, interruption. |
 | Application | `src/application/plan-control-plane.ts` | Derives Paseo changes and saved live observations from worker inspections. |
 | Application | `src/application/apply-workers.ts` | `applyWorkers`: the workers stage ([host protocol §apply](host-protocol.md#apply)). |
 | Application | `src/application/apply-repositories.ts` | `applyRepositories`: projects each approved worker manifest through the fixed repository host protocol and records synchronized, unresolved, and unmanaged results. |
 | Application | `src/application/upgrade.ts` | `upgradeFactory`: the refusals, then apply's operation with the pin move written under the lock once approved. |
 | Application | `src/application/set-secret.ts` | The CLI/pin match guard on `secret set`. |
-| Domain | `src/domain/rollout.ts` | A worker's outcome, the rollout rule, and the first boot wait's rules: its deadline, poll and report intervals, which tailnet states are still joining, a bootstrap refusal to wait for, and the timed-out failure. Pure. |
+| Domain | `src/domain/rollout.ts` | A worker's outcome (`stoppedOutcome` too), the rollout rule, and the first boot wait's rules: its deadline, poll and report intervals, which tailnet states are still joining, a bootstrap refusal to wait for, and the timed-out failure. Pure. |
 | Application | `src/application/plan-store.ts` | The `PlanStore` port, with `digest` for the check under the lock, and `planStoreDirectory`. |
 | Application | `src/application/factory-lock.ts` | `Interrupted` and `settleFactoryLock`: an interrupted operation keeps its lock. |
 | Application | `src/application/lock-store.ts` | `writeOperation` and `stateRevision` on the state bucket port. |
@@ -829,77 +940,101 @@ refused (D11).
 | CLI adapter | `src/cli/main.ts` | Wires `terraformProvisioner`, `filesystemPlanStore`, and `interruptible` over the process, waiting on an interrupt as `waitsOnInterrupt` says for the command run. |
 
 Tests: `tests/domain/plan.test.ts` (plan IDs, the pin guard, presentation, both
-D11 refusals, unknown host machine actions refused, the record round trip and unreadable records, every staleness
-reason, the workers whose machine a plan creates), `tests/domain/rollout.test.ts` (the first boot's
-deadline, the tailnet states still joining, the bootstrap refusal waited for,
-the timed-out failure and the rollout going on after it), `tests/domain/operation.test.ts`, `tests/domain/stable-host-keys.test.ts`
-(recorded host keys), `tests/application/plan-factory.test.ts` (a first plan,
-the state revision bound before planning, no infrastructure changes still saved with the workers, the pin guard, incomplete
-factory.json, another account, a missing bucket's bootstrap plan, an unready
-bucket, a held lock, host key removal refused before Terraform plans, a host
-replacement refused and never saved, unreadable outputs and plans, a failing
-Terraform plan, no Terraform state lock, pruning), `tests/application/apply-factory.test.ts` (against
+D11 refusals, unknown host machine actions refused, the record round trip and
+unreadable records, every staleness reason, the workers whose machine a plan
+creates, stopped workers shown skipped, the resize of a stopped or stopping
+worker, or of any with the inventory unreadable, refused and an unreadable
+change failing closed, `stopped_workers` round-tripping and every stopped
+staleness reason), `tests/domain/rollout.test.ts` (a stopped worker neither
+stopping the rollout nor making it partial, the first boot's deadline, the
+tailnet states still joining, the bootstrap refusal waited for, the timed-out
+failure and the rollout going on after it), `tests/domain/operation.test.ts`,
+`tests/domain/stable-host-keys.test.ts` (recorded host keys),
+`tests/application/plan-factory.test.ts` (a first plan, the state revision
+bound before planning, no infrastructure changes still saved with the workers,
+the pin guard, incomplete factory.json, another account, a missing bucket's
+bootstrap plan, an unready bucket, a held lock, host key removal refused before
+Terraform plans, a host replacement refused and never saved, unreadable outputs
+and plans, a failing Terraform plan, no Terraform state lock, pruning, a
+stopped worker's install skipped and saved and never inspected, a stopped or
+stopping worker's resize refused and a running one's planned, an unreadable EC2
+inventory planning every install and refusing any resize),
+`tests/application/apply-factory.test.ts` (against
 `tests/support/fake-provisioner.ts`'s `fakeFactoryWorld`, a factory whose
 Terraform state changes as plans apply: plan, approve and apply under one lock;
-a first apply's two approvals; declining either; both D11
-refusals before apply; the pin guard; a held lock; failing plan and apply; a
-record that cannot be finished, after applying or after a failure; a saved plan applied exactly, refused after
-factory.json changes, from another release or with other assets, expired,
-after the state changed, unknown, damaged, whose record no longer matches its
-Terraform plan, unreadable, replacing a host, without its bucket, or whose
-Terraform plan file was swapped after it was loaded or after it was read back; a lock
-taken after bootstrap and never after an interrupt
+a first apply's two approvals; declining either; both D11 refusals before
+apply; the pin guard; a held lock; failing plan and apply; a record that cannot
+be finished, after applying or after a failure; a saved plan applied exactly,
+refused after factory.json changes, from another release or with other assets,
+expired, after the state changed, unknown, damaged, whose record no longer
+matches its Terraform plan, unreadable, replacing a host, without its bucket,
+or whose Terraform plan file was swapped after it was loaded or after it was
+read back; a lock taken after bootstrap and never after an interrupt
 (`tests/application/bootstrap-backend.test.ts`); the workers stage after the
 infrastructure under the same lock and record, without infrastructure changes
 still approved and installed with no Terraform apply, a failed install stopping
 the rollout and failing the operation and a rerun repairing it, a skip making
 it partial, an interrupt while installing keeping the lock and record and
 naming the worker it was installing, a tailscale.tag missing by then an error
-rather than a default, and an unexpected error failing the workers stage;
-`tests/application/apply-workers.test.ts` (a timeout or dropped connection
-saying the worker may still be installing, a busy worker skipped, an answer
-for another worker failed; a new worker waited for until it joins the tailnet
-and until its bootstrap finishes, uploaded once, failing after 15 minutes with
-the rollout going on, reporting every minute, bounded under a stalled clock,
-refused at once for a duplicate or untagged device appearing, an interrupt
-while waiting, and a worker this apply did not create skipped without waiting);
-in `apply-factory.test.ts`, a worker the apply creates waited for and installed
-in the same run, a provisioned worker missing skipped without waiting, a first
+rather than a default, and an unexpected error failing the workers stage; a
+stopped worker sent nothing and the operation succeeded with the inventory read
+once, an unreadable inventory skipping it by the tailnet as before, a stopped
+worker's resize refused under the lock, and any with the inventory unreadable,
+a saved plan skipping the workers it planned stopped and stale once one was
+started or stopped, the resize refusal checked again on the saved Terraform
+plan, and a saved resize planned while every worker ran refused once its worker
+is stopping or the inventory cannot be read;
+`tests/application/apply-factory-pipeline.test.ts` (a stopped worker sent
+nothing by any stage, every stage and the record reporting it `stopped`, the
+factory verified ready without it); `tests/application/apply-workers.test.ts`
+(a stopped worker sent nothing, the rollout going on, stopped even without a
+worker executable; a timeout or dropped connection saying the worker may still
+be installing, a busy worker skipped, an answer for another worker failed; a
+new worker waited for until it joins the tailnet and until its bootstrap
+finishes, uploaded once, failing after 15 minutes with the rollout going on,
+reporting every minute, bounded under a stalled clock, refused at once for a
+duplicate or untagged device appearing, an interrupt while waiting, and a
+worker this apply did not create skipped without waiting); in
+`apply-factory.test.ts`, a worker the apply creates waited for and installed in
+the same run, a provisioned worker missing skipped without waiting, a first
 boot timing out failing the operation, and an interrupt while waiting keeping
-the lock and record; an apply
-interrupted part way through leaving its lock and record, refused until the
-lock is broken, then converging; interrupts at approval, whether approved or
-declined, while Terraform reads a
-plan back (no more of the record written), once the record is written, while
-taking the lock and before it), `tests/application/factory-lock.test.ts` (an
-interrupted operation keeps its lock), `tests/infrastructure/plan-store.test.ts`
-(including the plan file's digest as it is now),
+the lock and record; an apply interrupted part way through leaving its lock and
+record, refused until the lock is broken, then converging; interrupts at
+approval, whether approved or declined, while Terraform reads a plan back (no
+more of the record written), once the record is written, while taking the lock
+and before it), `tests/application/factory-lock.test.ts` (an interrupted
+operation keeps its lock), `tests/infrastructure/plan-store.test.ts` (including
+the plan file's digest as it is now),
 `tests/infrastructure/aws-s3-lock-store.test.ts` (records and state revisions,
 stubbed and against `tests/support/stub-s3.ts`),
 `tests/infrastructure/terminal-prompt.test.ts` (Ctrl-C cancels an echoed
 question), `tests/cli/plan-apply.test.ts` (output, exit codes and every refusal
-in process, the workers' lines and exit codes 0, 2 and 1; one apply creating,
-waiting for and installing a worker; the wait's lines and a first boot timing
-out with exit 1 and its recovery; instructions a
-worker sends never printed; what each interrupt left, including a worker that
-may still be installing or a new worker being waited for; and, over the real provisioner and the
-stand-in Terraform, a failed apply's and plan's diagnostics kept in a private file
-whose path alone is printed, out of the output and the record), `tests/cli/apply-interrupted.test.ts` (the spawned `fffactory`
-over the stand-in Terraform and the S3 and STS stubs: SIGINT while Terraform
-applies exits 130 with the notice and apply's report of the lock and record it
-leaves, and leaves the lock and a `running` record; a rerun is refused until
-`lock break`, then applies Terraform and, run from source, skips the worker;
-and SIGINT while apply waits for a new worker's first boot, in
+in process, the workers' lines and exit codes 0, 2 and 1; a stopped worker
+shown skipped in the plan, listed `stopped` by apply with exit 0, its resize
+refused, and with the inventory unreadable skipped with exit 2 as before and a
+resize refused; one apply creating, waiting for and installing a worker; the
+wait's lines and a first boot timing out with exit 1 and its recovery;
+instructions a worker sends never printed; what each interrupt left, including
+a worker that may still be installing or a new worker being waited for; and,
+over the real provisioner and the stand-in Terraform, a failed apply's and
+plan's diagnostics kept in a private file whose path alone is printed, out of
+the output and the record), `tests/cli/apply-interrupted.test.ts` (the spawned
+`fffactory` over the stand-in Terraform and the S3 and STS stubs: SIGINT while
+Terraform applies exits 130 with the notice and apply's report of the lock and
+record it leaves, and leaves the lock and a `running` record; a rerun is
+refused until `lock break`, then applies Terraform and, run from source, skips
+the worker; and SIGINT while apply waits for a new worker's first boot, in
 `tests/support/apply-first-boot-main.ts` over the in-memory factory, exits 130
-only after naming the worker and the lock it keeps), `tests/cli/interrupts.test.ts`
-(the exit after the command returns, never before its tools stop, and at the
-grace's end at the latest; a command that does not wait exiting once its tools
-stop, without waiting for it; each signal's status; a second signal at once;
-sleeps woken), `tests/cli/run.test.ts` (only apply, upgrade, doctor and status
-wait on an interrupt; `host`, `secret` and `lock` do not),
-`tests/cli/main.test.ts`
-(doctor's interrupt notice, which offers no second interrupt), and `tests/assets/terraform/guardrails.test.ts` (the
-factory root's backend key is `FACTORY_STATE_KEY`, and it outputs `host_keys`).
+only after naming the worker and the lock it keeps),
+`tests/cli/interrupts.test.ts` (the exit after the command returns, never
+before its tools stop, and at the grace's end at the latest; a command that
+does not wait exiting once its tools stop, without waiting for it; each
+signal's status; a second signal at once; sleeps woken),
+`tests/cli/run.test.ts` (only apply, upgrade, doctor and status wait on an
+interrupt; `host`, `secret` and `lock` do not), `tests/cli/main.test.ts`
+(doctor's interrupt notice, which offers no second interrupt), and
+`tests/assets/terraform/guardrails.test.ts` (the factory root's backend key is
+`FACTORY_STATE_KEY`, and it outputs `host_keys`).
 
 Upgrade: `tests/domain/release-compatibility.test.ts` (release precedence, the
 pin assessment: an upgrade, nothing to upgrade, a downgrade, no pin, the base
@@ -927,4 +1062,5 @@ the pin), `tests/cli/plan-apply.test.ts` (the guard on plan and apply) and
 base generation).
 
 Introduced by [#99](https://github.com/yaunder/factory/issues/99); upgrade by
-[#102](https://github.com/yaunder/factory/issues/102).
+[#102](https://github.com/yaunder/factory/issues/102); stopped workers by
+[#7](https://github.com/yaunder/fffactory/issues/7).

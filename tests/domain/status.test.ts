@@ -12,6 +12,8 @@ import {
   machineVerdict,
   readinessVerdict,
   statusReport,
+  poweredDownWorkers,
+  stoppedWorkers,
   tailnetCheck,
   type WorkerInspection,
   type WorkerStatus,
@@ -298,16 +300,48 @@ describe("the EC2 inventory", () => {
       "Instance: i-0123456789abcdef0",
       "Instance: i-0fedcba9876543210",
     ]);
-    const stopped = verdict([machine(KEY, "stopped")]);
-    expect(stopped?.summary).toBe("EC2 instance i-0123456789abcdef0 is stopped");
-    expect(stopped?.status).toBe("not_ready");
-    expect(stopped?.nextAction).toBe(`Start it with \`fffactory worker start ${KEY}\`${RERUN}`);
-    for (const state of ["stopping", "shutting-down"] as const)
-      expect(verdict([machine(KEY, state)])?.summary).toBe(
-        `EC2 instance i-0123456789abcdef0 is ${state}`,
-      );
+    for (const state of ["stopping", "shutting-down"] as const) {
+      const verdictOf = verdict([machine(KEY, state)]);
+      expect(verdictOf?.summary).toBe(`EC2 instance i-0123456789abcdef0 is ${state}`);
+      expect(verdictOf?.status).toBe("not_ready");
+    }
     expect(verdict([machine(KEY, "running")])).toBeUndefined();
     expect(verdict([machine(KEY, "pending")])).toBeUndefined();
+  });
+
+  test("a stopped machine has its own verdict, stopped, naming the start command", () => {
+    const stopped = machineVerdict(
+      machineFacts({ kind: "machines", machines: [machine(KEY, "stopped")] }, KEY),
+      KEY,
+    );
+    expect(stopped).toEqual({
+      status: "stopped",
+      summary: "Stopped",
+      details: [],
+      nextAction: `Start it with \`fffactory worker start ${KEY}\`${RERUN}`,
+    });
+  });
+
+  test("the workers whose one machine is stopped", () => {
+    const keys = ["builder-1", "builder-2", "builder-3", "builder-4"] as HostKey[];
+    const inventory = {
+      kind: "machines" as const,
+      machines: [
+        machine("builder-1", "stopped", "i-0000000000000000a"),
+        machine("builder-2", "running", "i-0000000000000000b"),
+        machine("builder-3", "stopped", "i-0000000000000000c"),
+        machine("builder-3", "stopped", "i-0000000000000000d"),
+        machine("builder-4", "stopping", "i-0000000000000000e"),
+      ],
+    };
+    expect(stoppedWorkers(inventory, keys)).toEqual(["builder-1" as HostKey]);
+    expect(stoppedWorkers({ kind: "unavailable", reason: "x" }, keys)).toEqual([]);
+    // Changing the instance type of either would start it (plan-apply §Stopped workers).
+    expect(poweredDownWorkers(inventory, keys)).toEqual([
+      { key: "builder-1" as HostKey, machine: "stopped" },
+      { key: "builder-4" as HostKey, machine: "stopping" },
+    ]);
+    expect(poweredDownWorkers({ kind: "unavailable", reason: "x" }, keys)).toEqual([]);
   });
 
   test("an unavailable inventory leaves the machine unknown and still inspects it", () => {
@@ -412,5 +446,15 @@ describe("the report", () => {
     expect(statusReport([check], []).status).toBe("ready");
     expect(statusReport([check], [worker("ready"), worker("not_ready")]).status).toBe("not_ready");
     expect(statusReport([check], [worker("error"), worker("not_ready")]).status).toBe("error");
+  });
+
+  test("a stopped worker does not keep the report from being ready", () => {
+    const check = ready({ id: "x", title: "X" }, "fine");
+    const worker = (status: WorkerStatus["status"]) => ({ status }) as WorkerStatus;
+    expect(statusReport([check], [worker("ready"), worker("stopped")]).status).toBe("ready");
+    expect(statusReport([check], [worker("stopped")]).status).toBe("ready");
+    expect(statusReport([check], [worker("stopped"), worker("not_ready")]).status).toBe(
+      "not_ready",
+    );
   });
 });

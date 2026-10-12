@@ -214,6 +214,13 @@ describe("the dispatch stage (dispatch §Requested versus active)", () => {
     },
   );
 
+  test("a stopped worker is sent nothing and reported stopped (plan-apply §Stopped workers)", async () => {
+    const { queue, calls } = fakeQueue();
+    const { outcomes } = await run([{ worker: WORKER, stopped: true }, worker()], queue);
+    expect(outcomes[0]).toEqual({ ...WORKER, kind: "stopped" });
+    expect(calls).toEqual({ adoption: 1, reconcile: [{ active: true }] });
+  });
+
   test("adoption the queue cannot check keeps dispatch inactive", async () => {
     const { queue } = fakeQueue({ adoption: { kind: "unknown", reason: "gh timed out" } });
     const { outcomes } = await run([worker()], queue);

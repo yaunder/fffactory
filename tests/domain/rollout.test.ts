@@ -15,6 +15,7 @@ import {
   rolloutContinues,
   rolloutResult,
   skipped,
+  stoppedOutcome,
   type WorkerOutcome,
 } from "../../src/domain/rollout";
 import { locateWorker } from "../../src/domain/status";
@@ -223,6 +224,21 @@ describe("the rollout's result", () => {
     expect(rolloutResult([installed, offline])).toBe("partial");
     expect(rolloutResult([broken, untouched])).toBe("failed");
     expect(rolloutResult([])).toBe("installed");
+  });
+
+  test("a stopped worker neither stops the rollout nor makes it partial (plan-apply §Stopped workers)", () => {
+    const stopped = stoppedOutcome(WORKER);
+    expect(stopped).toEqual({
+      ...WORKER,
+      kind: "stopped",
+      summary: "Stopped: nothing was sent to it",
+      nextAction: `To install it, start it with \`fffactory worker start builder-1\`${THEN}`,
+    });
+    expect(rolloutContinues(stopped)).toBe(true);
+    expect(rolloutResult([installed, stopped])).toBe("installed");
+    expect(rolloutResult([stopped])).toBe("installed");
+    expect(rolloutResult([stopped, offline])).toBe("partial");
+    expect(rolloutResult([stopped, broken])).toBe("failed");
   });
 });
 

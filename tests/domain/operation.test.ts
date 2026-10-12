@@ -92,6 +92,13 @@ describe("operation records", () => {
         nextAction: "Check it, then rerun `fffactory apply`.",
       },
       { key: "builder-3" as HostKey, hostname: "fff-abcd1234-builder-3", kind: "not_attempted" },
+      {
+        key: "builder-4" as HostKey,
+        hostname: "fff-abcd1234-builder-4",
+        kind: "stopped",
+        summary: "Stopped: nothing was sent to it",
+        nextAction: "Start it, then rerun `fffactory apply`.",
+      },
     ];
     const record = withWorkers(
       withStage(startOperation(LOCK, undefined), WORKERS_STAGE, "installing", LATER),
@@ -111,6 +118,12 @@ describe("operation records", () => {
         hostname: "fff-abcd1234-builder-3",
         status: "not_attempted",
         summary: null,
+      },
+      {
+        key: "builder-4",
+        hostname: "fff-abcd1234-builder-4",
+        status: "stopped",
+        summary: "Stopped: nothing was sent to it",
       },
     ]);
     expect(record.updated_at).toBe(END.toISOString());

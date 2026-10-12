@@ -30,6 +30,8 @@ import {
   readyWorker,
 } from "./fake-workers";
 import type { PeerView } from "../../src/domain/tailnet";
+import type { MachineInventory } from "../../src/domain/status";
+import type { MachineInventorySource } from "../../src/application/machine-inventory";
 import { sha256Text } from "../../src/infrastructure/release-tarball";
 
 export const BUCKET = "fff-abcd1234-state";
@@ -136,7 +138,8 @@ export const WORKER_TAG = "tag:factory";
  * of `keys` answers the upload and the activator as a worker whose install and verification
  * succeed, unless `script` answers for it. `view` replaces the tailnet's view, read by read,
  * as when a new worker joins it during apply's wait; `sleeps` records each wait, after which
- * `afterSleep` runs.
+ * `afterSleep` runs. The EC2 inventory lists `machines.inventory`, no machine until a test sets
+ * one, and counts each listing in `machines.reads`.
  */
 export function workerFleet(
   keys: readonly string[] = ["builder-1", "builder-2", "b"],
@@ -156,7 +159,18 @@ export function workerFleet(
   const fleet = {
     afterSleep: (_slept: number) => {},
   };
+  const machines = {
+    inventory: { kind: "machines", machines: [] } as MachineInventory,
+    reads: 0,
+  };
+  const inventory: MachineInventorySource = {
+    list: async () => {
+      machines.reads += 1;
+      return machines.inventory;
+    },
+  };
   const deps = {
+    machines: inventory,
     peers: tailnet.tailnet,
     transport: transport.transport,
     assets: { workerRelease: async () => FAKE_WORKER_RELEASE },
@@ -170,7 +184,7 @@ export function workerFleet(
     // The CLI's real digest, so a worker reports drift exactly as it would on a real one.
     sha256: sha256Text,
   };
-  return { deps, tailnet, transport, progress, sleeps, fleet };
+  return { deps, tailnet, transport, progress, sleeps, fleet, machines };
 }
 
 /**

@@ -64,6 +64,7 @@ The endpoint persists a versioned result containing `synchronized` or
 | `synchronized` | The manifest was delivered and the sync run exited `0`. |
 | `unresolved` | The sync run exited non-zero: one or more placed checkouts were left unresolved (dirty tree, divergence, a wrong branch, an unadopted branch), each reported and left untouched. |
 | `skipped` | The worker was not located, or the manifest write or the sync run did not complete (unreachable, access denied, host-key mismatch, timed out, ssh missing or unstartable). |
+| `stopped` | The workers stage found its machine stopped ([plan and apply §Stopped workers](plan-apply.md#stopped-workers)): it was sent nothing, and is not located. Not a skip: the stage still ends `synchronized`. |
 
 ## The repository-sync program
 

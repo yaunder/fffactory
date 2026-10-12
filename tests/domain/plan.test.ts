@@ -7,6 +7,7 @@ import {
   describeInfrastructure,
   describePlan,
   describeRepositories,
+  describeStoppedResizeRefusal,
   describeWorkers,
   describeTarget,
   hostKeyRemovalRefusal,
@@ -20,11 +21,15 @@ import {
   parseSavedPlan,
   pinRefusal,
   planStaleness,
+  type ResizeGuard,
+  resizedStoppedWorkers,
+  resizeRefusal,
   resourceChanges,
   type SavedPlan,
   serializeSavedPlan,
   staleRefusal,
   stateStaleness,
+  stoppedStaleness,
 } from "../../src/domain/plan";
 
 const TARGET = {
@@ -160,6 +165,42 @@ describe("the plan's presentation", () => {
       "Repository changes, one worker at a time:",
       "  ~ builder-1 (fff-abcd1234-builder-1): reconcile 1 placed repository as factory; preserve and report unmanaged checkouts",
       "  ~ builder-2 (fff-abcd1234-builder-2): reconcile 0 placed repositories as factory; preserve and report unmanaged checkouts",
+    ]);
+  });
+
+  test("a stopped worker's install, and every later stage's change, is shown skipped (plan-apply §Stopped workers)", () => {
+    const workers = [
+      { key: "builder-1" as HostKey, hostname: "fff-abcd1234-builder-1" },
+      { key: "builder-2" as HostKey, hostname: "fff-abcd1234-builder-2" },
+    ];
+    const instance = {
+      schema_version: 1 as const,
+      hosts: [{ key: "builder-1" as HostKey }, { key: "builder-2" as HostKey }],
+    };
+    const controlPlane = workers.map((worker) => ({
+      ...worker,
+      observation: "unavailable:blocked",
+      changes: ["listen-address" as const],
+    }));
+    const dispatch = workers.map((worker) => ({ ...worker, requested: false, schedule: null }));
+    const stopped = ["builder-2" as HostKey];
+    expect(describePlan(TARGET, [], workers, instance, controlPlane, dispatch, stopped)).toEqual([
+      "Factory plan:",
+      ...describeTarget(TARGET),
+      "Infrastructure: no changes.",
+      "Worker changes, one worker at a time:",
+      "  ~ builder-1 (fff-abcd1234-builder-1): install release 0.3.0 and its host configuration, then verify it",
+      "  = builder-2 (fff-abcd1234-builder-2): skipped: stopped; start it with `fffactory worker start builder-2`, then apply again to install it",
+      "Control-plane changes, before worker activation:",
+      "  ~ builder-1 (fff-abcd1234-builder-1): listen-address",
+      "  = builder-2 (fff-abcd1234-builder-2): skipped: stopped",
+      "Repository changes, one worker at a time:",
+      "  ~ builder-1 (fff-abcd1234-builder-1): reconcile 0 placed repositories as factory; preserve and report unmanaged checkouts",
+      "  = builder-2 (fff-abcd1234-builder-2): skipped: stopped",
+      "Dispatch changes, after every readiness gate:",
+      "  ~ builder-1 (fff-abcd1234-builder-1): remove the factory dispatch schedule if it exists",
+      "  = builder-2 (fff-abcd1234-builder-2): skipped: stopped",
+      "End-to-end verification: observe each worker's release, repositories, Paseo and actual dispatch schedule.",
     ]);
   });
 
@@ -318,6 +359,123 @@ describe("D11 refusals", () => {
   });
 });
 
+describe("an instance type change on a stopped worker (plan-apply §Stopped workers)", () => {
+  const BUILDER_1 = { key: "builder-1" as HostKey, hostname: "fff-abcd1234-builder-1" };
+  const STOPPED = [BUILDER_1];
+  const update = (address: string, change: Record<string, unknown>) => ({
+    address,
+    mode: "managed",
+    type: "aws_instance",
+    change: { actions: ["update"], ...change },
+  });
+  const resize = (address: string) =>
+    update(address, {
+      before: { instance_type: "m7i.large", tags: {} },
+      after: { instance_type: "m7i.xlarge", tags: {} },
+    });
+
+  test("is refused: Terraform starts a stopped instance to change its type", () => {
+    const plan = { resource_changes: [resize(HOST)] };
+    expect(resizedStoppedWorkers(plan, STOPPED)).toEqual(STOPPED);
+    expect(
+      describeStoppedResizeRefusal("plan", {
+        inventory: "read",
+        workers: [{ ...BUILDER_1, machine: "stopped" }],
+      }),
+    ).toEqual([
+      "Refusing to plan: the plan changes the instance type of a stopped worker, and Terraform starts a stopped instance to change its type:",
+      `  builder-1 (fff-abcd1234-builder-1): ${HOST} would be updated in place`,
+      "Nothing was applied. Start it first with `fffactory worker start builder-1`, then plan again.",
+    ]);
+  });
+
+  test("an update it cannot read is taken as one, failing closed", () => {
+    for (const change of [{}, { before: null, after: {} }, { before: {}, after: 3 }])
+      expect(resizedStoppedWorkers({ resource_changes: [update(HOST, change)] }, STOPPED)).toEqual(
+        STOPPED,
+      );
+    const unknown = update(HOST, {
+      before: { instance_type: "m7i.large" },
+      after: {},
+      after_unknown: { instance_type: true },
+    });
+    expect(resizedStoppedWorkers({ resource_changes: [unknown] }, STOPPED)).toEqual(STOPPED);
+  });
+
+  test("a running worker's resize, a stopped worker's other updates and other resources are not", () => {
+    const plan = {
+      resource_changes: [
+        resize('module.hosts.aws_instance.host["builder-2"]'),
+        update(HOST, {
+          before: { instance_type: "m7i.large", tags: { a: "1" } },
+          after: { instance_type: "m7i.large", tags: { a: "2" } },
+        }),
+        {
+          address: "module.network.aws_vpc.this",
+          type: "aws_vpc",
+          change: { actions: ["update"] },
+        },
+      ],
+    };
+    expect(resizedStoppedWorkers(plan, STOPPED)).toEqual([]);
+    expect(resizedStoppedWorkers({ resource_changes: [resize(HOST)] }, [])).toEqual([]);
+    expect(resizedStoppedWorkers({}, STOPPED)).toEqual([]);
+    expect(resizedStoppedWorkers("unreadable", STOPPED)).toEqual([]);
+  });
+
+  test("several stopped workers are each named", () => {
+    const both: ResizeGuard = {
+      inventory: "read",
+      workers: [
+        { ...BUILDER_1, machine: "stopped" },
+        { key: "b" as HostKey, hostname: "fff-abcd1234-b", machine: "stopped" },
+      ],
+    };
+    expect(describeStoppedResizeRefusal("apply", both).at(-1)).toBe(
+      "Nothing was applied. Start each first with `fffactory worker start builder-1` and `fffactory worker start b`, then plan again.",
+    );
+  });
+
+  test("a stopping worker is refused as a stopped one: the provider waits for it to stop, then starts it", () => {
+    const stopping = { ...BUILDER_1, machine: "stopping" as const };
+    const guard: ResizeGuard = {
+      inventory: "read",
+      workers: [stopping, { key: "b" as HostKey, hostname: "fff-abcd1234-b", machine: "stopped" }],
+    };
+    const plan = { resource_changes: [resize(HOST)] };
+    const refusal = resizeRefusal(plan, guard);
+    expect(refusal).toEqual({ inventory: "read", workers: [stopping] });
+    expect(describeStoppedResizeRefusal("plan", refusal as ResizeGuard)).toEqual([
+      "Refusing to plan: the plan changes the instance type of a stopped worker, and Terraform starts a stopped instance to change its type:",
+      `  builder-1 (fff-abcd1234-builder-1): ${HOST} would be updated in place, and it is stopping`,
+      "Nothing was applied. Start it first with `fffactory worker start builder-1` once it has stopped, then plan again.",
+    ]);
+  });
+
+  test("with the EC2 inventory unreadable, any worker's resize is refused, failing closed", () => {
+    const guard: ResizeGuard = {
+      inventory: "unreadable",
+      workers: [...STOPPED, { key: "b" as HostKey, hostname: "fff-abcd1234-b" }],
+    };
+    const refusal = resizeRefusal({ resource_changes: [resize(HOST)] }, guard);
+    expect(refusal).toEqual({ inventory: "unreadable", workers: STOPPED });
+    expect(describeStoppedResizeRefusal("apply", refusal as ResizeGuard)).toEqual([
+      "Refusing to apply: the plan changes the instance type of a worker the EC2 inventory could not be read to check is not stopped, and Terraform starts a stopped instance to change its type:",
+      `  builder-1 (fff-abcd1234-builder-1): ${HOST} would be updated in place`,
+      "Nothing was applied. Plan again once the EC2 inventory can be read.",
+    ]);
+    // Without a resize nothing is refused, whatever the inventory.
+    const other = update(HOST, {
+      before: { instance_type: "m7i.large", tags: { a: "1" } },
+      after: { instance_type: "m7i.large", tags: { a: "2" } },
+    });
+    expect(resizeRefusal({ resource_changes: [other] }, guard)).toBeUndefined();
+    expect(
+      resizeRefusal({ resource_changes: [resize(HOST)] }, { inventory: "read", workers: [] }),
+    ).toBeUndefined();
+  });
+});
+
 const SAVED: SavedPlan = newSavedPlan({
   planId: "k3x9q2ab",
   factoryId: "fff-abcd1234" as FactoryId,
@@ -337,6 +495,7 @@ const SAVED: SavedPlan = newSavedPlan({
       changes: ["paseo-package", "listen-address"],
     },
   ],
+  stopped: ["builder-1" as HostKey],
 });
 
 const CURRENT: PlanCircumstances = {
@@ -373,6 +532,7 @@ describe("saved plans", () => {
         },
       ],
       dispatch: [],
+      stopped_workers: ["builder-1" as HostKey],
     });
     expect(PLAN_TTL_MS).toBe(60 * 60 * 1000);
   });
@@ -405,10 +565,22 @@ describe("saved plans", () => {
       text.replace('"observation": "no-release"', '"observation": 3'),
       text.replace('"paseo-package",', '"unknown-change",'),
       text.replace(',\n  "dispatch": []', ""),
+      text.replace(
+        '"stopped_workers": [\n    "builder-1"',
+        '"stopped_workers": [\n    "Builder 1"',
+      ),
+      text.replace('"stopped_workers": [\n    "builder-1"', '"stopped_workers": [\n    "b", "b"'),
+      text.replace('"stopped_workers": [\n    "builder-1"\n  ]', '"stopped_workers": "builder-1"'),
     ])
       expect(parseSavedPlan(broken, SAVED.factory_id, SAVED.plan_id)).toBeUndefined();
     expect(parseSavedPlan(text, "fff-other000" as FactoryId, SAVED.plan_id)).toBeUndefined();
     expect(parseSavedPlan(text, SAVED.factory_id, "zzzzzzzz")).toBeUndefined();
+    // A record from before stopped workers were planned skips none.
+    const { stopped_workers: _, ...older } = SAVED;
+    expect(parseSavedPlan(JSON.stringify(older), SAVED.factory_id, SAVED.plan_id)).toEqual({
+      ...SAVED,
+      stopped_workers: [],
+    });
     const duplicate = JSON.parse(text) as { control_plane: unknown[] };
     duplicate.control_plane.push(duplicate.control_plane[0]);
     expect(
@@ -503,6 +675,24 @@ describe("saved plans", () => {
     const first = { ...SAVED, state_revision: null };
     expect(stateStaleness(first, undefined)).toBeUndefined();
     expect(stateStaleness(first, "state-v1")).toBe(changed);
+  });
+
+  test("a worker stopped or started since it was planned makes it stale (plan-apply §Stopped workers)", () => {
+    // SAVED was planned with builder-1 stopped.
+    const b1 = "builder-1" as HostKey;
+    const b2 = "builder-2" as HostKey;
+    expect(stoppedStaleness(SAVED, [b1])).toEqual([]);
+    expect(stoppedStaleness(SAVED, [])).toEqual([
+      "worker builder-1 was stopped when it was planned, and is not now",
+    ]);
+    expect(stoppedStaleness(SAVED, [b1, b2])).toEqual([
+      "worker builder-2 is stopped now, and was not when it was planned",
+    ]);
+    expect(stoppedStaleness(SAVED, undefined)).toEqual([
+      "the EC2 inventory could not be read to check that worker builder-1 is still stopped",
+    ]);
+    const none = { ...SAVED, stopped_workers: [] };
+    expect(stoppedStaleness(none, undefined)).toEqual([]);
   });
 
   test("a stale plan is refused with every reason and the way forward", () => {

@@ -56,7 +56,7 @@ Status goes as far as it can and stops at the first thing that blocks it:
 | --- | --- | --- | --- |
 | Machine | No instance carries the host key | not ready | Not provisioned; provision it with `fffactory apply`. |
 | Machine | More than one does | not ready | N instances, each listed; remove the one that is not the worker yourself. Status never guesses. |
-| Machine | `stopped` | not ready | The named instance is stopped; start it with `fffactory worker start KEY` ([worker lifecycle §Start](worker-lifecycle.md#start)). |
+| Machine | `stopped` | stopped | `Stopped`; start it with `fffactory worker start KEY` ([worker lifecycle §Start](worker-lifecycle.md#start)). Never connected to. |
 | Machine | `stopping` or `shutting-down` | not ready | Check the named instance in the EC2 console. |
 | Tailnet | The peer view is unavailable | as the `tailscale` check | Fix the Tailscale client. |
 | Tailnet | `missing` | not ready | No device with that name is visible; wait for it to join, or check the tailnet policy and the bootstrap in the EC2 console output. A failed bootstrap never reruns: terminate the instance, and once it is terminated the next `fffactory apply` creates it again ([worker bootstrap §Failed first boot](worker-bootstrap.md#failed-first-boot)). |
@@ -75,6 +75,14 @@ Status goes as far as it can and stops at the first thing that blocks it:
 
 A pending or running instance, and one the inventory could not list, go on to
 the tailnet. Every next action ends ", then rerun `fffactory status`."
+
+A stopped worker is not broken: `fffactory worker stop` stopped it on purpose,
+and EC2's state is the only record of that
+([worker lifecycle](worker-lifecycle.md)). Its verdict is `stopped`, not
+`not ready`, and it never keeps the report from being ready. An instance still
+`stopping` is not ready until it has stopped. With the EC2 inventory
+unreadable, status cannot tell a stopped worker from an offline one: the
+tailnet judges it, as for any machine status cannot see.
 
 Each worker reports its facts whatever stopped it:
 
@@ -146,11 +154,12 @@ every account enrolled it is ready: "Ready on release <pin>".
 
 Statuses are doctor's: `ready`, `not_ready` (observed, and something is
 missing, offline, drifting, unhealthy or pending) and `error` (status could not
-observe it). The report's status is the worst of its inventories and workers.
+observe it). A worker may also be `stopped` ([Workers](#workers)), which counts
+as ready. The report's status is the worst of its inventories and workers.
 
 | Exit | When |
 | --- | --- |
-| 0 | Every inventory and every worker is ready. |
+| 0 | Every inventory and every worker is ready, or stopped. |
 | 2 | Inspection succeeded, but something is not ready, such as an offline worker. |
 | 1 | Status failed: invalid arguments, a missing, invalid or incomplete factory.json, another account, or an inventory or worker it could not inspect. |
 
@@ -181,6 +190,19 @@ Workers:
 Not ready: 1 of 4 entries needs attention.
 ```
 
+A stopped worker is labelled `stopped` and needs no attention; with every other
+entry ready, the last line counts it:
+
+```text
+  stopped    builder-1 (example-builder-1): Stopped
+             Machine: stopped (i-0000000000000000a); Tailscale: not_checked; Release: unknown; Repositories: unknown; Dispatch: unknown
+             Next: Start it with `fffactory worker start builder-1`, then rerun `fffactory status`.
+  ready      builder-2 (example-builder-2): Ready on release 0.1.0
+             ...
+
+Ready: 1 of 2 workers is ready; 1 is stopped.
+```
+
 ### JSON, schema version 1
 
 `--json` prints one document, indented by two spaces, on standard output and
@@ -192,18 +214,24 @@ nothing else. Its structure is published as
 - `factory`: `factory_id`, `account_id`, `region` and the pinned `release`;
 - `inventories`: checks shaped as doctor's (`id`, `title`, `status`,
   `summary`, `details`, `next_action`);
-- `workers`: `key`, `hostname`, `status`, `summary`, `details`,
-  `next_action`, `machine` (`state`, `instance_id`), `tailnet`, `release`,
-  `configuration`, `installation`, `repositories` (`state`, `unmanaged`),
-  `dispatch` (`state`, `blockers`) and
-  `enrollment`: null, or each account's
-  `id`, `title`, `state` and structured `next_action` (`summary`, `login`,
-  `commands`), null exactly when enrolled, for GitHub, OpenAI Codex and
-  Claude Code (Paseo clients are not listed until Paseo runs on workers).
+- `workers`: `key`, `hostname`, `status` (a check's, or `stopped`), `summary`,
+  `details`, `next_action`, `machine` (`state`, `instance_id`), `tailnet`,
+  `release`, `configuration`, `installation`, `repositories` (`state`,
+  `unmanaged`), `dispatch` (`state`, `blockers`) and `enrollment`: null, or
+  each account's `id`, `title`, `state` and structured `next_action`
+  (`summary`, `login`, `commands`), null exactly when enrolled, for GitHub,
+  OpenAI Codex and Claude Code (Paseo clients are not listed until Paseo runs
+  on workers).
 
 `next_action` is `null` exactly when `status` is `ready`. Adding a field, a
 check or a worker state keeps `schema_version` 1; consumers ignore what they do
-not know. Removing, renaming or redefining a field needs a new version.
+not know. Removing, renaming or redefining a field needs a new version. The
+worker status `stopped` is such an addition
+([#7](https://github.com/yaunder/fffactory/issues/7)). This deliberately
+differs from [doctor's rule](doctor.md#json-schema-version-1), under which
+changing the set of statuses needs a new version: it holds for every check and
+the report's top-level `status`, whose enum stays `ready`, `not_ready` and
+`error`, while a worker entry's `status` is its own enum, which may grow.
 
 ### What status never prints
 
@@ -218,7 +246,7 @@ versions and digests the worker reported after validation.
 
 | Layer | Module | Responsibility |
 | --- | --- | --- |
-| Domain | `src/domain/status.ts` | Machines and the EC2 inventory, worker inspections, facts and verdicts; the inventory checks; `machineVerdict`, `locateWorker`, `readinessVerdict`, `inspectionVerdict`; `SUPPORTED_BASE`, `MIN_AVAILABLE_BYTES`; the report. Pure. |
+| Domain | `src/domain/status.ts` | Machines and the EC2 inventory, worker inspections, facts and verdicts (`WorkerState`, with `stopped`); the inventory checks; `machineVerdict`, `stoppedWorkers`, `poweredDownWorkers` (the resize guard's stopped or stopping workers), `locateWorker`, `readinessVerdict`, `inspectionVerdict`; `SUPPORTED_BASE`, `MIN_AVAILABLE_BYTES`; the report, a stopped worker counted ready. Pure. |
 | Application | `src/application/status.ts` | `factoryStatus`: completeness, the account check, the inventories, each worker. |
 | Application | `src/application/inspect-dispatch.ts` | Reads dispatch through the fixed activator operation. |
 | Application | `src/application/machine-inventory.ts` | The `MachineInventorySource` port. |
@@ -229,27 +257,32 @@ Tests: `tests/domain/status.test.ts` (every finding and its order, a drifted
 configuration, every install record state, a running one that may still be
 going, a failure outside the steps, enrollment pending with each account's
 steps named for the resolved hostname, Paseo clients never counted, every
-uninspected outcome, the machine and tailnet stages, the inventory checks, the
-report's status), `tests/application/status.test.ts` (a ready factory; a
-duplicate and a missing hostname, and a device without the factory's tag,
-refused with the next action and never connected to; the tag read from
-factory.json; each worker's configuration compared with the projection apply
-would send it; enrollment pending reported with each account's state; an
-offline worker and one SSH cannot reach with an unknown
-release; no release; unprovisioned and stopped machines not connected to; an
-unreadable EC2 inventory; Tailscale logged out; another account refused before
-any inventory; an incomplete factory.json refused before AWS),
+uninspected outcome, the machine and tailnet stages, a stopped machine's own
+verdict, the workers stopped and those stopped or stopping, the inventory
+checks, the report's status and a stopped worker keeping it ready),
+`tests/application/status.test.ts` (a ready factory; a duplicate and a missing
+hostname, and a device without the factory's tag, refused with the next action
+and never connected to; the tag read from factory.json; each worker's
+configuration compared with the projection apply would send it; enrollment
+pending reported with each account's state; an offline worker and one SSH
+cannot reach with an unknown release; no release; unprovisioned and stopped
+machines not connected to, a stopped one with its own verdict; an unreadable
+EC2 inventory; Tailscale logged out; another account refused before any
+inventory; an incomplete factory.json refused before AWS),
 `tests/infrastructure/ec2-inventory.test.ts` (stubbed calls, and the real SDK
 against `tests/support/stub-ec2-instances.ts`), `tests/cli/status.test.ts`
 (exit codes 0, 2 and 1, no lock taken, no report once interrupted, the human
-report, the JSON report against the fixture and the schema, and enrollment
-pending in both), and `tests/cli/status-executable.test.ts`
-(the spawned executable with stand-in `tailscale` and `ssh` on a private PATH,
-STS and EC2 stubs: an offline worker exits 2 with an unknown release and is
-never connected to; a device with the worker's name but not the factory's tag
-exits 2, is never connected to and has neither tag printed; an unreachable one
-exits 2; a ready one exits 0; one without a release reports `none`).
+report, the JSON report against the fixture and the schema, enrollment pending
+in both, and a stopped worker exiting 0 with the start command, its JSON
+verdict `stopped` under schema version 1, and beside a worker that needs
+attention still exiting 2), and `tests/cli/status-executable.test.ts` (the
+spawned executable with stand-in `tailscale` and `ssh` on a private PATH, STS
+and EC2 stubs: an offline worker exits 2 with an unknown release and is never
+connected to; a device with the worker's name but not the factory's tag exits
+2, is never connected to and has neither tag printed; an unreachable one exits
+2; a ready one exits 0; one without a release reports `none`).
 
 Introduced by [#100](https://github.com/yaunder/factory/issues/100); the
 configuration comparison, install record and enrollment by
-[#101](https://github.com/yaunder/factory/issues/101).
+[#101](https://github.com/yaunder/factory/issues/101); the `stopped` verdict by
+[#7](https://github.com/yaunder/fffactory/issues/7).

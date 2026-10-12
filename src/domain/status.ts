@@ -91,9 +91,15 @@ export interface WorkerFacts {
   readonly enrollment: readonly EnrollmentReport[] | null;
 }
 
+/**
+ * A worker's status: a check's, or `stopped`, its machine stopped on purpose
+ * (`fffactory worker stop`), which is neither broken nor missing and keeps a report ready.
+ */
+export type WorkerState = CheckStatus | "stopped";
+
 /** A worker's result: `CheckResult`'s status, summary, details and next action, and facts. */
 export interface Verdict {
-  readonly status: CheckStatus;
+  readonly status: WorkerState;
   readonly summary: string;
   readonly details: readonly string[];
   readonly nextAction: string | null;
@@ -215,8 +221,35 @@ export function machineFacts(inventory: MachineInventory, key: HostKey): Machine
 }
 
 /**
+ * The workers of `keys` whose one machine the inventory shows `stopped`, in their order; none
+ * when the inventory could not be listed, whose workers are judged by the tailnet instead.
+ */
+export function stoppedWorkers(inventory: MachineInventory, keys: readonly HostKey[]): HostKey[] {
+  return keys.filter((key) => machineFacts(inventory, key).machine === "stopped");
+}
+
+/** A machine that is not running and that changing the instance type of would start. */
+export type PoweredDown = Extract<MachineState, "stopped" | "stopping">;
+
+/**
+ * The hosts among `keys` whose one machine is stopped or stopping, with its state, in their
+ * order: the pinned AWS provider starts either to change its instance type
+ * (`docs/specs/plan-apply.md` §Instance type of a stopped worker). None when the inventory is
+ * unavailable.
+ */
+export function poweredDownWorkers(
+  inventory: MachineInventory,
+  keys: readonly HostKey[],
+): { readonly key: HostKey; readonly machine: PoweredDown }[] {
+  return keys.flatMap((key) => {
+    const { machine } = machineFacts(inventory, key);
+    return machine === "stopped" || machine === "stopping" ? [{ key, machine }] : [];
+  });
+}
+
+/**
  * Why the machine of host `key` cannot be inspected, or undefined when status goes on to the
- * tailnet.
+ * tailnet. A stopped machine is not a fault: its verdict is `stopped`.
  */
 export function machineVerdict(facts: MachineFacts, key: HostKey): Verdict | undefined {
   const { machine, instanceId, instanceIds } = facts;
@@ -234,10 +267,12 @@ export function machineVerdict(facts: MachineFacts, key: HostKey): Verdict | und
         instanceIds.map((id) => `Instance: ${id}`),
       );
     case "stopped":
-      return notReadyVerdict(
-        `EC2 instance ${instanceId} is stopped`,
-        `Start it with \`fffactory worker start ${key}\``,
-      );
+      return {
+        status: "stopped",
+        summary: "Stopped",
+        details: [],
+        nextAction: thenRerunStatus(`Start it with \`fffactory worker start ${key}\``),
+      };
     case "stopping":
     case "shutting-down":
       return notReadyVerdict(
@@ -635,13 +670,21 @@ export function inspectionVerdict(
   };
 }
 
-/** The report: its status is the worst of every inventory and worker. */
+/** What a worker's state counts as in the report: a stopped worker keeps it ready. */
+function reportedStatus(state: WorkerState): CheckStatus {
+  return state === "stopped" ? "ready" : state;
+}
+
+/** The report: its status is the worst of every inventory and worker, a stopped one ready. */
 export function statusReport(
   inventories: readonly CheckResult[],
   workers: readonly WorkerStatus[],
 ): StatusReport {
   return {
-    status: worstStatus([...inventories, ...workers].map((entry) => entry.status)),
+    status: worstStatus([
+      ...inventories.map((entry) => entry.status),
+      ...workers.map((entry) => reportedStatus(entry.status)),
+    ]),
     inventories,
     workers,
   };

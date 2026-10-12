@@ -126,6 +126,7 @@ async function upgrade(args: readonly string[], context: CliContext): Promise<nu
       lockStore: context.lockStore,
       provisioner: context.provisioner,
       planStore: context.planStore,
+      machines: context.machines,
       approval: operatorApproval(undefined, context, QUESTION),
       interrupted: context.interrupted,
       peers: context.tailnet,

@@ -246,6 +246,84 @@ describe("fffactory status human output", () => {
   });
 });
 
+describe("fffactory status, a stopped worker (status §Workers)", () => {
+  /** builder-1 stopped with `fffactory worker stop`, offline in the tailnet; builder-2 ready. */
+  function stoppedScenario() {
+    const transport = ready();
+    const scenario = harness(
+      store(),
+      {},
+      {
+        machines: fakeMachineInventory({
+          kind: "machines",
+          machines: [
+            machine("builder-1", "stopped", "i-0000000000000000a"),
+            machine("builder-2", "running", "i-0000000000000000b"),
+          ],
+        }).machines,
+        tailnet: fakeTailnet(peers(peer(B1, { online: false }), peer(B2))).tailnet,
+        transport: transport.transport,
+      },
+    );
+    return { ...scenario, transport };
+  }
+
+  test("exits 0, shows it stopped with the start command and never connects to it", async () => {
+    const { context, out, transport } = stoppedScenario();
+    expect(await run(["status"], context)).toBe(0);
+    expect(out.slice(-8)).toEqual([
+      "Workers:",
+      `  stopped    builder-1 (${B1}): Stopped`,
+      "             Machine: stopped (i-0000000000000000a); Tailscale: not_checked; Release: unknown; Repositories: unknown; Dispatch: unknown",
+      "             Next: Start it with `fffactory worker start builder-1`, then rerun `fffactory status`.",
+      `  ready      builder-2 (${B2}): Ready on release 0.1.0`,
+      "             Machine: running (i-0000000000000000b); Tailscale: online; Release: 0.1.0; Repositories: synchronized; Dispatch: not_requested",
+      "",
+      "Ready: 1 of 2 workers is ready; 1 is stopped.",
+    ]);
+    expect(transport.calls.map((call) => call.worker.hostname)).not.toContain(B1);
+  });
+
+  test("its JSON verdict is stopped, under the same schema version", async () => {
+    const { context, out } = stoppedScenario();
+    expect(await run(["status", "--json"], context)).toBe(0);
+    const document = JSON.parse(out[0] ?? "");
+    expect(schemaAccepts(document)).toBe(true);
+    expect(document.schema_version).toBe(1);
+    expect(document.status).toBe("ready");
+    expect(document.workers[0]).toMatchObject({
+      key: "builder-1",
+      status: "stopped",
+      summary: "Stopped",
+      next_action:
+        "Start it with `fffactory worker start builder-1`, then rerun `fffactory status`.",
+      machine: { state: "stopped", instance_id: "i-0000000000000000a" },
+      tailnet: "not_checked",
+    });
+  });
+
+  test("a stopped worker beside one that needs attention still exits 2", async () => {
+    const { context, out } = harness(
+      store(),
+      {},
+      {
+        machines: fakeMachineInventory({
+          kind: "machines",
+          machines: [
+            machine("builder-1", "stopped", "i-0000000000000000a"),
+            machine("builder-2", "stopping", "i-0000000000000000b"),
+          ],
+        }).machines,
+      },
+    );
+    expect(await run(["status"], context)).toBe(2);
+    expect(out).toContain(
+      `  not ready  builder-2 (${B2}): EC2 instance i-0000000000000000b is stopping`,
+    );
+    expect(out.at(-1)).toBe("Not ready: 1 of 4 entries needs attention.");
+  });
+});
+
 describe("fffactory status, enrollment pending (readiness §Enrollment)", () => {
   function pendingScenario() {
     const pending = readyWorker("example", "builder-1", "0.1.0", B1_PASEO_SECRET);

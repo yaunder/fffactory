@@ -408,7 +408,7 @@ describe("factory status", () => {
     });
   });
 
-  test("a worker that is not provisioned or is stopped is not connected to", async () => {
+  test("a worker that is not provisioned or is stopped is not connected to; stopped is its own verdict", async () => {
     const { deps, transport } = world({
       inventory: { kind: "machines", machines: [machine("builder-2", "stopped")] },
     });
@@ -423,6 +423,8 @@ describe("factory status", () => {
     expect(workers["builder-2"]).toMatchObject({
       machine: "stopped",
       tailnet: "not_checked",
+      status: "stopped",
+      summary: "Stopped",
       nextAction:
         "Start it with `fffactory worker start builder-2`, then rerun `fffactory status`.",
     });

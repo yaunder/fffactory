@@ -59,7 +59,12 @@ export type ControlPlaneOutcome =
       readonly kind: "failed";
       readonly summary: string;
       readonly nextAction: string;
-    });
+    })
+  /**
+   * Its machine is stopped: apply sends it nothing, so the stage never reaches it
+   * (`docs/specs/plan-apply.md` §Stopped workers).
+   */
+  | (WorkerIdentity & { readonly kind: "stopped" });
 
 function deferred(
   worker: WorkerIdentity,

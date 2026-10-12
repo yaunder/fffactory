@@ -6,7 +6,9 @@
  * exact text, the release and its assets, the AWS account and the revision of the factory's
  * Terraform state, so `fffactory apply --plan-id` can apply exactly it. Planning changes
  * nothing: it takes no lock, inspects existing workers read-only for their Paseo state, and
- * refuses while another operation holds it.
+ * refuses while another operation holds it. The EC2 inventory says which workers are stopped:
+ * the plan skips them, and refuses to change the instance type of one stopped or stopping,
+ * which would start it, or of any worker while the inventory cannot be read.
  */
 import type { CredentialSelection } from "../domain/aws-account";
 import type { HeldLock } from "../domain/factory-lock";
@@ -17,6 +19,7 @@ import {
   type Issue,
   type Release,
 } from "../domain/instance";
+import { poweredDownWorkers, stoppedWorkers } from "../domain/status";
 import {
   changesSomething,
   type D11Refusal,
@@ -28,9 +31,12 @@ import {
   newPlanId,
   newSavedPlan,
   type PlanCircumstances,
+  type PlannedWorker,
   type PlanTarget,
   pinRefusal,
   plannedDispatch,
+  type ResizeGuard,
+  resizeRefusal,
   type ResourceChange,
   resourceChanges,
   type SavedPlan,
@@ -44,6 +50,7 @@ import { projectBackendVariables, projectFactoryVariables } from "./project-terr
 import type { Provisioner, ProvisioningTarget } from "./provisioner";
 import type { AllowedAccount } from "./require-expected-account";
 import { planControlPlane, type ControlPlanePlanDependencies } from "./plan-control-plane";
+import type { MachineInventorySource } from "./machine-inventory";
 
 /** The root module, in the release's Terraform tree, that defines the factory. */
 export const FACTORY_ROOT = "factory";
@@ -52,6 +59,8 @@ export interface FactoryPlanDependencies extends ControlPlanePlanDependencies {
   readonly lockStore: LockStore;
   readonly provisioner: Provisioner;
   readonly planStore: PlanStore;
+  /** The factory's EC2 instances, read for the workers whose machine is stopped. */
+  readonly machines: MachineInventorySource;
 }
 
 /** Everything a factory plan is made from, and bound to. */
@@ -81,6 +90,11 @@ export type PlanRefusal =
   /** The CLI/pin match guard: this fffactory is not the release factory.json pins. */
   | { readonly kind: "release_mismatch"; readonly message: string }
   | { readonly kind: "d11"; readonly refusal: D11Refusal }
+  /**
+   * The plan changes the instance type of these workers, stopped or stopping, which would
+   * start them, or that the EC2 inventory could not be read to check are not stopped.
+   */
+  | ({ readonly kind: "stopped_resize" } & ResizeGuard)
   /** The state bucket exists without every setting backend bootstrap applies. */
   | { readonly kind: "unready"; readonly refusal: readonly string[] }
   /** Terraform's plan or outputs could not be read, or a bootstrap plan did more than create. */
@@ -167,10 +181,15 @@ export interface InfrastructurePlanRequest {
    * own state lock: `plan` takes none, so a killed plan leaves no lock behind.
    */
   readonly underFactoryLock: boolean;
+  /** The workers whose instance type may not change now. */
+  readonly resizeGuard: ResizeGuard;
 }
 
 export type InfrastructurePlan =
-  | Extract<PlanRefusal, { readonly kind: "refused" | "d11" | "unexpected_plan" }>
+  | Extract<
+      PlanRefusal,
+      { readonly kind: "refused" | "d11" | "stopped_resize" | "unexpected_plan" }
+    >
   | {
       readonly kind: "planned";
       readonly changes: readonly ResourceChange[];
@@ -182,7 +201,8 @@ export type InfrastructurePlan =
  * The infrastructure stage's plan: reads the state's revision first, so any later write is
  * seen, then the host keys the state records (`Provisioner.output`; none before the first
  * apply), refuses removing one (D11), plans the factory root with factory.json's projection,
- * and refuses a plan that does more to a host machine than create or update it (D11).
+ * and refuses a plan that does more to a host machine than create or update it (D11), or that
+ * changes the instance type of a worker `resizeGuard` guards.
  */
 export async function planInfrastructure(
   { lockStore, provisioner }: Pick<FactoryPlanDependencies, "lockStore" | "provisioner">,
@@ -207,12 +227,53 @@ export async function planInfrastructure(
     variables: { ...projection.variables },
     stateLock: request.underFactoryLock,
   });
-  const changes = resourceChanges(await provisioner.showPlan(saved));
+  const shown = await provisioner.showPlan(saved);
+  const changes = resourceChanges(shown);
   if (changes === undefined)
     return { kind: "unexpected_plan", unexpected: ["Terraform's plan could not be read"] };
   const lost = hostMachineRefusal(changes);
   if (lost !== undefined) return { kind: "d11", refusal: lost };
+  const resized = resizeRefusal(shown, request.resizeGuard);
+  if (resized !== undefined) return { kind: "stopped_resize", ...resized };
   return { kind: "planned", changes: changes.filter(changesSomething), stateRevision };
+}
+
+/** What one read of the EC2 inventory says of the declared workers' machines. */
+export interface DeclaredMachines {
+  /**
+   * The declared workers whose one machine is stopped, or undefined when the inventory cannot
+   * be listed: then no worker is planned as stopped, and the tailnet judges every one, as
+   * before.
+   */
+  readonly stopped: PlannedWorker[] | undefined;
+  /**
+   * The workers whose instance type may not change: those stopped or stopping, or every
+   * declared one when the inventory cannot be listed, failing closed.
+   */
+  readonly resizeGuard: ResizeGuard;
+}
+
+export async function declaredMachines(
+  machines: MachineInventorySource,
+  request: Pick<FactoryPlanRequest, "instance" | "credentials">,
+  target: PlanTarget,
+): Promise<DeclaredMachines> {
+  const workers = declaredWorkers(request.instance, target.factoryId);
+  const inventory = await machines.list(request.credentials, target.region, target.factoryId);
+  if (inventory.kind === "unavailable")
+    return { stopped: undefined, resizeGuard: { inventory: "unreadable", workers } };
+  const keys = workers.map(({ key }) => key);
+  const stopped = stoppedWorkers(inventory, keys);
+  const down = poweredDownWorkers(inventory, keys);
+  return {
+    stopped: workers.filter(({ key }) => stopped.includes(key)),
+    resizeGuard: {
+      inventory: "read",
+      workers: workers.flatMap((worker) =>
+        down.filter(({ key }) => key === worker.key).map(({ machine }) => ({ ...worker, machine })),
+      ),
+    },
+  };
 }
 
 /** The circumstances a plan is bound to. */
@@ -271,11 +332,14 @@ export async function planFactory(
       return await planBootstrap(deps.provisioner, request, bucket, files.backend);
     const held = await deps.lockStore.read(bucket);
     if (held !== undefined) return { kind: "locked", held };
+    const machines = await declaredMachines(deps.machines, request, target);
+    const stopped = machines.stopped ?? [];
     const infrastructure = await planInfrastructure(deps, {
       ...request,
       bucket,
       planFile: files.factory,
       underFactoryLock: false,
+      resizeGuard: machines.resizeGuard,
     });
     if (infrastructure.kind !== "planned") return infrastructure;
     const tag = request.instance.tailscale?.tag;
@@ -289,8 +353,10 @@ export async function planFactory(
       new Set(
         createdWorkers(infrastructure.changes, declaredWorkers(request.instance, target.factoryId)),
       ),
+      new Set(stopped.map(({ key }) => key)),
     );
     const dispatch = plannedDispatch(request.instance, target.factoryId);
+    const stoppedKeys = stopped.map(({ key }) => key);
     const plan = describePlan(
       target,
       infrastructure.changes,
@@ -298,6 +364,7 @@ export async function planFactory(
       request.instance,
       controlPlane,
       dispatch,
+      stoppedKeys,
     );
     const record = newSavedPlan({
       ...circumstances(request, target),
@@ -306,6 +373,7 @@ export async function planFactory(
       changes: infrastructure.changes,
       controlPlane,
       dispatch,
+      stopped: stoppedKeys,
     });
     await deps.planStore.save(record);
     saved = record;
