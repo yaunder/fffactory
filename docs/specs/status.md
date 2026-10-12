@@ -14,7 +14,8 @@ record, writes no file and stores no result, so a worker it cannot reach has an
 unknown release: there is no last-known value to show. Its only calls are STS
 `GetCallerIdentity`, EC2 `DescribeInstances`, `tailscale status --json`, and
 `fffactory host inspect --json` plus, for an active release, `fffactory host
-repositories --json` on each reachable worker over SSH
+repositories --json` and `fffactory host dispatch inspect` on each reachable
+worker over SSH
 ([host protocol](host-protocol.md)).
 
 ## Order
@@ -220,7 +221,7 @@ versions and digests the worker reported after validation.
 | --- | --- | --- |
 | Domain | `src/domain/status.ts` | Machines and the EC2 inventory, worker inspections, facts and verdicts; the inventory checks; `machineVerdict`, `locateWorker`, `readinessVerdict`, `inspectionVerdict`; `SUPPORTED_BASE`, `MIN_AVAILABLE_BYTES`; the report. Pure. |
 | Application | `src/application/status.ts` | `factoryStatus`: completeness, the account check, the inventories, each worker. |
-| Application | `src/application/inspect-dispatch.ts` | Reads dispatch through the fixed activator operation. |
+| Application | `src/application/inspect-dispatch.ts` | Runs status's fixed dispatch inspection over the transport and reads the answer. |
 | Application | `src/application/machine-inventory.ts` | The `MachineInventorySource` port. |
 | Infrastructure | `src/infrastructure/ec2-inventory.ts` | `ec2MachineInventory` over `DescribeInstances` (AWS SDK for JavaScript v3), paged, within one deadline. |
 | CLI adapter | `src/cli/commands/status.ts` | Arguments, the refusals, the human and JSON reports, the exit code. |
@@ -252,4 +253,6 @@ exits 2; a ready one exits 0; one without a release reports `none`).
 
 Introduced by [#100](https://github.com/yaunder/factory/issues/100); the
 configuration comparison, install record and enrollment by
-[#101](https://github.com/yaunder/factory/issues/101).
+[#101](https://github.com/yaunder/factory/issues/101). Dispatch inspection is
+covered by `tests/application/inspect-dispatch.test.ts` (the fixed command,
+exit-status agreement, and fail-closed handling of untrusted answers).
