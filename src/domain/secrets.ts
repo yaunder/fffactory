@@ -9,6 +9,7 @@ import {
   type HostKey,
   parseHostKey,
   type SecretReference,
+  type TailscaleSecretField,
 } from "./instance";
 import { FACTORY_ID_TAG, MANAGED_BY_TAG } from "./resource-naming";
 import { fieldPath, itemPath } from "./validation";
@@ -66,9 +67,28 @@ export function readSecretMaterial(raw: string, source: MaterialSource): Materia
 }
 
 /** The secrets factory.json refers to, by the name `fffactory secret set` takes. */
-export type SecretName = "tailscale-auth-key" | "paseo-password";
+export type SecretName = "tailscale-auth-key" | "tailscale-admin-client" | "paseo-password";
 
-const SECRET_NAMES: readonly SecretName[] = ["tailscale-auth-key", "paseo-password"];
+const SECRET_NAMES: readonly SecretName[] = [
+  "tailscale-auth-key",
+  "tailscale-admin-client",
+  "paseo-password",
+];
+
+/** The secrets that belong to the whole factory, each under factory.json's `tailscale`. */
+type FactorySecretName = Exclude<SecretName, "paseo-password">;
+
+/**
+ * Each factory-wide secret's field under `tailscale` and what it is. The auth key is the
+ * workers' join-only enrollment key; the admin client is the operator's own Tailscale OAuth
+ * client, which no worker ever receives.
+ */
+const FACTORY_SECRETS: Readonly<
+  Record<FactorySecretName, { readonly field: TailscaleSecretField; readonly what: string }>
+> = {
+  "tailscale-auth-key": { field: "auth_key_secret", what: "Tailscale auth key" },
+  "tailscale-admin-client": { field: "admin_client_secret", what: "Tailscale admin client" },
+};
 
 /** Where one secret lives in Secrets Manager and in factory.json. */
 export interface SecretTarget {
@@ -127,23 +147,30 @@ export function resolveSecretTarget(
   host: string | undefined,
 ): SecretTargetResolution {
   if (!isSecretName(name))
-    return refuse(`unknown secret name; expected ${SECRET_NAMES.join(" or ")}`);
+    return refuse(
+      `unknown secret name; expected ${SECRET_NAMES.slice(0, -1).join(", ")} or ${SECRET_NAMES.at(-1)}`,
+    );
   const factoryId = instance.factory_id;
   if (factoryId === undefined)
     return refuse("factory.json needs factory_id before a secret can be named");
   if (name === "paseo-password") return hostTarget(instance, factoryId, host);
-  if (host !== undefined)
-    return refuse("tailscale-auth-key belongs to the whole factory and takes no --host");
+  if (host !== undefined) return refuse(`${name} belongs to the whole factory and takes no --host`);
+  const { field, what } = FACTORY_SECRETS[name];
   return {
     ok: true,
     target: {
       name,
-      field: "tailscale.auth_key_secret",
-      secretName: `${factoryId}/tailscale-auth-key`,
-      description: `Tailscale auth key of factory ${factoryId}`,
+      field: fieldPath("tailscale", field),
+      secretName: `${factoryId}/${name}`,
+      description: `${what} of factory ${factoryId}`,
       factoryId,
     },
   };
+}
+
+/** The `tailscale` field of a factory-wide target; a host's target has none. */
+function tailscaleField(target: SecretTarget): TailscaleSecretField | undefined {
+  return target.name === "paseo-password" ? undefined : FACTORY_SECRETS[target.name].field;
 }
 
 /** The reference factory.json currently holds for the target, if any. */
@@ -151,7 +178,8 @@ export function secretReference(
   instance: FactoryInstance,
   target: SecretTarget,
 ): SecretReference | undefined {
-  if (target.hostKey === undefined) return instance.tailscale?.auth_key_secret;
+  const field = tailscaleField(target);
+  if (field !== undefined) return instance.tailscale?.[field];
   return instance.hosts?.find((host) => host.key === target.hostKey)?.paseo_password_secret;
 }
 
@@ -167,8 +195,9 @@ export function withSecretReference(
   target: SecretTarget,
   arn: SecretReference,
 ): FactoryInstance {
-  if (target.hostKey === undefined)
-    return withEntry(instance, "tailscale", withEntry(instance.tailscale, "auth_key_secret", arn));
+  const field = tailscaleField(target);
+  if (field !== undefined)
+    return withEntry(instance, "tailscale", withEntry(instance.tailscale, field, arn));
   const hosts = (instance.hosts ?? []).map((host) =>
     host.key === target.hostKey ? withEntry(host, "paseo_password_secret", arn) : host,
   );

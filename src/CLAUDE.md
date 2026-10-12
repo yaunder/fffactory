@@ -57,6 +57,9 @@ Dependencies point inward: `domain <- application <- infrastructure, cli`, and
 - Secret material is a `SecretMaterial` from a hidden prompt or standard input, never a
   command argument; only a `SecretStore` adapter calls `reveal`, and factory.json keeps
   only the ARN (`docs/specs/secrets.md`). Arguments of `secret` are never echoed.
+  `tailscale.admin_client_secret`, the operator's admin-tier Tailscale OAuth client, never
+  reaches a worker: neither the host projection nor the Terraform inputs carry it, so the
+  hosts' IAM policy cannot read it.
 - A command is a `Command` in `cli/commands/<name>.ts`, registered in `cli/run.ts`.
   Commands receive a `CliContext`; they never read `process` directly.
 - Commands return exit codes; `run` maps unexpected errors to exit 1.

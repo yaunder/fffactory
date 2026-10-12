@@ -21,6 +21,7 @@ const valid: Record<string, unknown>[] = [
   { schema_version: 1, network: { vpc_cidr: "010.001.0.09/9", public_subnet_cidr: "10.0.0.0/19" } },
   { schema_version: 1, repositories: [{ ...repository, path: "a/b.c/..d" }] },
   { schema_version: 1, hosts: [{ key: "a", paseo_password_secret: ARN, repositories: [] }] },
+  { schema_version: 1, tailscale: { auth_key_secret: ARN, admin_client_secret: ARN } },
   {
     schema_version: 1,
     hosts: [
@@ -67,6 +68,8 @@ const invalid: Record<string, unknown>[] = [
   { schema_version: 1, network: { availability_zone: "us-east-1" } },
   { schema_version: 1, tailscale: { tag: "tag:" } },
   { schema_version: 1, tailscale: { auth_key_secret: "tskey-auth-abc" } },
+  { schema_version: 1, tailscale: { admin_client_secret: "tskey-client-abc" } },
+  { schema_version: 1, tailscale: { admin_client_secret: 1 } },
   { schema_version: 1, repositories: [{ key: "r" }] },
   { schema_version: 1, repositories: [{ ...repository, path: "../r" }] },
   { schema_version: 1, repositories: [{ ...repository, path: "a/./b" }] },

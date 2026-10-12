@@ -245,7 +245,7 @@ account, Region and tailnet (D5), so every factory keeps to its own namespace.
 | `factory/` (root) | The factory: `network`, `host-identity` and `hosts`, and the current Amazon Linux 2023 x86-64 image from the public SSM parameter `/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64`. Its state lives in the S3 backend: the bucket comes from the backend settings, the key is `factory/terraform.tfstate`, encrypted, with S3 native locking (`use_lockfile`). |
 | `backend/` (root) | The state bucket's definition, `state-bucket`, planned and applied only by [backend bootstrap](#backend-bootstrap). It has no backend of its own. |
 | `modules/network` | The factory VPC (DNS support and hostnames on), its internet gateway, one public subnet in `network.availability_zone` that assigns no public IPs by default, a route table with a default route to the gateway, and the hosts' security group: no ingress, all egress (hosts are reached over Tailscale). |
-| `modules/host-identity` | The hosts' IAM role, assumable only by EC2, its instance profile, and one inline policy allowing `secretsmanager:GetSecretValue` on exactly the secret references factory.json declares. Hosts can mutate nothing. |
+| `modules/host-identity` | The hosts' IAM role, assumable only by EC2, its instance profile, and one inline policy allowing `secretsmanager:GetSecretValue` on exactly the workers' secret references factory.json declares (`tailscale.auth_key_secret`, `hosts[].paseo_password_secret`), never the operator's Tailscale admin client. Hosts can mutate nothing. |
 | `modules/hosts` | One EC2 instance per stable host key: `hosts[].instance_type`, an encrypted gp3 root volume of `hosts[].root_volume_gib` deleted with the instance, a public IP, IMDSv2 only with a hop limit of 1 and instance tags in metadata, the security group and instance profile above. Its user data is the worker bootstrap, `bootstrap/user-data.sh.tftpl` rendered with the host's namespaced hostname, the Region, the Tailscale reference and tag, and the activator ([worker bootstrap](worker-bootstrap.md)). It changes neither `ami` nor `user_data` of a running host: a newer image or bootstrap template never replaces a host. |
 | `bootstrap/` | Not a module: the worker bootstrap's user data template and root activator, which `modules/hosts` reads ([worker bootstrap](worker-bootstrap.md)). |
 | `modules/state-bucket` | The state bucket: public access blocked, bucket-owner-enforced ownership, SSE-S3 encryption, versioning, a policy denying any request without TLS, and `prevent_destroy`. |
@@ -275,7 +275,7 @@ resource's own name (`src/domain/resource-naming.ts`):
 | Host root volume | `Name` tag `<id>-<host key>-root` |
 | State bucket | `state_backend.bucket`, which must start with `<id>-` ([instance configuration](instance-configuration.md#state-bucket)) |
 | Factory-wide lock, its break log | Objects `<id>-lock.json` and `<id>-lock-log/…` in the state bucket ([Lock](#lock)) |
-| Secrets `fffactory secret set` creates | `<id>/tailscale-auth-key`, `<id>/<host key>/paseo-password`: Secrets Manager names are paths, as in `examples/factory.json` ([secrets](secrets.md)) |
+| Secrets `fffactory secret set` creates | `<id>/tailscale-auth-key`, `<id>/tailscale-admin-client`, `<id>/<host key>/paseo-password`: Secrets Manager names are paths, as in `examples/factory.json` ([secrets](secrets.md)) |
 
 The AWS provider's default tags put `fffactory:factory-id = <id>` and
 `fffactory:managed-by = fffactory` on every taggable resource; a host's
@@ -402,6 +402,9 @@ state. Secrets appear only as the references factory.json holds.
 | `tailscale_tag` | `tailscale.tag` |
 | `paseo_password_secret_arns` | `hosts[].paseo_password_secret`, by host key, for hosts that declare one |
 | `hosts` | `hosts[]` by host key: `instance_type` and `root_volume_gib` |
+
+`tailscale.admin_client_secret` is projected into no variable: no worker may
+read the operator's Tailscale admin client ([secrets](secrets.md#the-tailscale-admin-client)).
 
 | Variable (`backend`) | From |
 | --- | --- |

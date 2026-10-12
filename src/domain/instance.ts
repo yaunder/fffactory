@@ -103,10 +103,23 @@ export interface FactoryInstance {
     readonly public_subnet_cidr?: string;
     readonly availability_zone?: string;
   };
-  readonly tailscale?: { readonly tag?: string; readonly auth_key_secret?: SecretReference };
+  readonly tailscale?: {
+    readonly tag?: string;
+    /** Workers' join-only enrollment key, read at first boot. */
+    readonly auth_key_secret?: SecretReference;
+    /** The operator-only OAuth client (`devices:core`) that deletes devices; never a worker's. */
+    readonly admin_client_secret?: SecretReference;
+  };
   readonly repositories?: readonly Repository[];
   readonly hosts?: readonly Host[];
 }
+
+/** The secret reference fields under factory.json's `tailscale`; the schema lists the same. */
+export const TAILSCALE_SECRET_FIELDS = [
+  "auth_key_secret",
+  "admin_client_secret",
+] as const satisfies readonly (keyof NonNullable<FactoryInstance["tailscale"]>)[];
+export type TailscaleSecretField = (typeof TAILSCALE_SECRET_FIELDS)[number];
 
 const OCTET = String.raw`(25[0-5]|2[0-4]\d|1\d\d|0?\d?\d)`;
 /** Same rule as the schema's CIDR pattern: octets 0-255, prefix 0-32 without a leading zero. */
@@ -190,6 +203,7 @@ const documentRule = object(
     tailscale: object({
       tag: pattern(/^tag:[A-Za-z][A-Za-z0-9-]*$/, "must be a Tailscale tag like tag:factory"),
       auth_key_secret: secretReference,
+      admin_client_secret: secretReference,
     }),
     repositories: arrayOf(repositoryRule),
     hosts: arrayOf(hostRule),
@@ -271,8 +285,10 @@ function nested(document: Record<string, unknown>, parent: string, field: string
 
 /** Every secret field that holds a well-formed ARN, by field path. */
 function secretFields(document: Record<string, unknown>): { path: string; arn: string }[] {
-  const tailscale = nested(document, "tailscale", "auth_key_secret");
-  const fields = [{ path: "tailscale.auth_key_secret", arn: tailscale }];
+  const fields = TAILSCALE_SECRET_FIELDS.map((field) => ({
+    path: fieldPath("tailscale", field),
+    arn: nested(document, "tailscale", field),
+  }));
   if (Array.isArray(document.hosts))
     document.hosts.forEach((host, index) => {
       if (!isRecord(host)) return;
@@ -286,8 +302,9 @@ function secretFields(document: Record<string, unknown>): { path: string; arn: s
 
 /**
  * Every secret lives in the factory's own Region and account: first boot reads the Tailscale
- * key in the factory Region, and the host role has no access to another account. Messages
- * name the field, never the ARN.
+ * key in the factory Region, and the host role has no access to another account. The
+ * operator-only admin client follows the same rule, so every secret is the factory's own.
+ * Messages name the field, never the ARN.
  */
 function checkSecretPlacement(document: Record<string, unknown>, issues: Issue[]): void {
   const region = nested(document, "aws", "region");

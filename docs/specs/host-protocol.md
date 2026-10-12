@@ -307,6 +307,10 @@ reference the [control plane](control-plane.md) installs Paseo's password
 from, never the password it names. The projection holds no secret material,
 and never appears in an argument, a plan or a log. `release` is the release
 factory.json pins, which the CLI/pin match guard makes the running one's.
+No factory-wide reference is projected: the worker reads its Tailscale key
+only at first boot, through Terraform, and the operator's Tailscale admin
+client, `tailscale.admin_client_secret`, never reaches a worker
+([secrets §The Tailscale admin client](secrets.md#the-tailscale-admin-client)).
 Repositories and dispatch travel in their own documents
 ([repositories](repositories.md), [dispatch](dispatch.md)).
 

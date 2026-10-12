@@ -102,6 +102,46 @@ describe("setSecret", () => {
     ]);
   });
 
+  test("the Tailscale admin client is stored factory-wide beside the auth key", async () => {
+    const { deps, store, secrets } = setup({
+      store: files({ ...DOCUMENT, tailscale: { tag: "tag:factory", auth_key_secret: ARN } }),
+    });
+    const result = await setSecret(deps, request({ name: "tailscale-admin-client" }));
+    expect(result).toMatchObject({ kind: "stored", created: true, reference: "added" });
+    expect(secrets.writes).toEqual([
+      {
+        name: "fff-abcd1234/tailscale-admin-client",
+        description: "Tailscale admin client of factory fff-abcd1234",
+        tags: { "fffactory:factory-id": "fff-abcd1234", "fffactory:managed-by": "fffactory" },
+        region: "eu-west-2",
+        credentials: { source: "chain" },
+        value: VALUE,
+      },
+    ]);
+    const written = store.files[PATH] ?? "";
+    expect(JSON.parse(written).tailscale).toEqual({
+      tag: "tag:factory",
+      auth_key_secret: ARN,
+      admin_client_secret:
+        "arn:aws:secretsmanager:eu-west-2:123456789012:secret:fff-abcd1234/tailscale-admin-client-AbCdEf",
+    });
+    expect(written).not.toContain(VALUE);
+  });
+
+  test("the Tailscale admin client takes no --host, refused before reaching AWS", async () => {
+    const { deps, identity, secrets } = setup();
+    const result = await setSecret(
+      deps,
+      request({ name: "tailscale-admin-client", host: "builder-1" }),
+    );
+    expect(result).toEqual({
+      kind: "refused",
+      message: "tailscale-admin-client belongs to the whole factory and takes no --host",
+    });
+    expect(identity.requests).toEqual([]);
+    expect(secrets.writes).toEqual([]);
+  });
+
   test("setting it again stores a new value and leaves factory.json as it is", async () => {
     const { deps, store } = setup();
     await setSecret(deps, request());

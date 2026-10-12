@@ -63,7 +63,7 @@ chain. Every such command first refuses unless the caller is in factory.json's
 | [2. Create the instance](#2-create-the-instance) | Agent | `fffactory init` | `Created PATH.` and a new factory ID. |
 | [3. Declare the factory](#3-declare-the-factory) | Agent, with the operator's choices | edit factory.json, `fffactory validate` | Only `tailscale.auth_key_secret` is still needed. |
 | [4. Check the workstation](#4-check-the-workstation) | Agent | `fffactory doctor` | Every check is ready but the instance check. |
-| [5. Prepare the tailnet](#5-prepare-the-tailnet) | Human (tailnet admin) | Tailscale admin console | Tag, grant, SSH rule and auth key exist. |
+| [5. Prepare the tailnet](#5-prepare-the-tailnet) | Human (tailnet admin) | Tailscale admin console | Tag, grant, SSH rule and auth key exist, and the admin client if you create it. |
 | [6. Store the secrets](#6-store-the-secrets) | Human | `fffactory secret set` | `validate` reports `Complete` and `doctor` exits 0. |
 | [7. Bootstrap and provision](#7-bootstrap-and-provision) | Human (approves at a terminal) | `fffactory plan`, `fffactory apply` | apply exits 0; the worker is installed, enrollment pending. |
 | [8. Enroll the worker's accounts](#8-enroll-the-workers-accounts) | Human | `tailscale ssh factory@HOSTNAME`, then each login | Each login's status command succeeds. |
@@ -262,11 +262,30 @@ Every worker that first-boots reads it, including one recreated after a failed
 first boot ([step 7](#7-bootstrap-and-provision)). Keep its value only until step 6 stores it;
 never put it in a file in a repository or in factory.json.
 
-**Done when** the policy is saved and the key is generated.
+Optionally, create the factory's **admin client**, a Tailscale OAuth client
+that only the operator's `fffactory` uses, never a worker. No command reads
+it yet: it is for deleting a terminated worker's Tailscale device. On the
+admin console's **Trust credentials** page, create an OAuth credential with
+the **`devices:core`** scope (read and write) and only that scope, and select
+factory.json's tag as its tag. Copy its client secret (`tskey-client-…`):
+the console shows it only once.
+
+`devices:core` is the narrowest scope that can remove a device, and it cannot
+be limited to the factory's devices. Tailscale requires a tag for it, which
+constrains the tags of the auth keys the client creates, not which devices it
+can see or remove: it reads the list of every device in the tailnet, and
+whoever holds its secret can remove any of them. Treat it as admin-tier, like
+the AWS credentials that can destroy the factory, and keep the client secret
+only until step 6 stores it. Workers keep only their join-only auth key.
+
+**Done when** the policy is saved and the key is generated, and the admin
+client is created if you chose to.
 
 **Otherwise:** the admin console refuses a policy that does not validate:
 fix the entry it names and save again. A key generated without these options
-cannot be changed: revoke it and generate a new one.
+cannot be changed: revoke it and generate a new one. A lost admin client
+secret cannot be shown again: revoke the client and create a new one, then
+store its secret in step 6.
 
 ## 6. Store the secrets
 
@@ -276,16 +295,23 @@ cannot be changed: revoke it and generate a new one.
 ```bash
 fffactory secret set tailscale-auth-key --profile NAME
 fffactory secret set paseo-password --host KEY --profile NAME
+fffactory secret set tailscale-admin-client --profile NAME   # if you created the admin client
 fffactory validate
 fffactory doctor --profile NAME
 ```
 
 Each `secret set` asks for the value with a hidden prompt (`DESCRIPTION
 (input is hidden): `), stores it in Secrets Manager in the factory's account
-and Region as `FACTORY_ID/tailscale-auth-key` or `FACTORY_ID/KEY/paseo-password`,
-and writes only the ARN into factory.json. A value is never an argument;
+and Region as `FACTORY_ID/tailscale-auth-key`, `FACTORY_ID/KEY/paseo-password`
+or `FACTORY_ID/tailscale-admin-client`, and writes only the ARN into
+factory.json (`tailscale.auth_key_secret`, `hosts[].paseo_password_secret`,
+`tailscale.admin_client_secret`). A value is never an argument;
 without a terminal it is read from standard input, such as `fffactory secret
 set tailscale-auth-key < key.txt`.
+
+The admin client's value is its client secret alone, and factory.json is
+complete without it. Workers' IAM role cannot read it: fffactory never gives
+it to a worker ([secrets §The Tailscale admin client](docs/specs/secrets.md#the-tailscale-admin-client)).
 
 The Paseo password is the one every Paseo client of that worker types in
 [step 10](#10-enroll-paseo-clients): choose a strong, unique one and keep it in
