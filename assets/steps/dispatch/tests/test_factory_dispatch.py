@@ -139,7 +139,7 @@ class FactoryDispatchTest(unittest.TestCase):
         self.assertIn("--new-workspace", call["args"])
         self.assertIn("factory-epic=101", call["args"])
         self.assertTrue(call["args"][-1].startswith("/fff:work-epic 101\n"))
-        self.assertIn("ffflow-task and epic-101", call["args"][-1])
+        self.assertNotIn("epic:<id>", call["args"][-1])
         self.assertIn("create epic/101 from origin/main", call["args"][-1])
         second = self.invoke()
         self.assertEqual(second["started"], [])

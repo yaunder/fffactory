@@ -24,10 +24,10 @@ issue state. A repository that fails adoption is not eligible.
 The executor provider, model and permission mode come from the host's reviewed
 `factory.json` dispatch declaration. FFFlow's implement and review subagents
 inherit that mode.
-The launched prompt gives the agent the pinned FFFlow 0.4.1 capture cartridge's
-task labels (`ffflow-task`, `epic-<id>`), because its `work-epic` example still
-uses the older `epic:<id>` label. The agent creates the `epic/<id>` branch
-inside its new worktree, starting from the repository's declared remote branch.
+The launched prompt is `/fff:work-epic <id>`. The pinned FFFlow (0.4.2+)
+resolves tasks by the capture cartridge's `ffflow-task` and `epic-<id>` labels
+itself. The prompt also tells the agent to create the `epic/<id>` branch inside
+its new worktree, starting from the repository's declared remote branch.
 Unexpected `work-epic` stops, including an existing branch, missing acceptance
 criteria, or review cap reached, remain visible in the agent timeline and any
 Paseo question or permission queue. An enrolled client can answer there. Do
