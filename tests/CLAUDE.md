@@ -48,7 +48,9 @@ EC2 at `support/stub-ec2-instances.ts`, which also answers `StopInstances`,
 records every call, so a test can assert EC2 was never asked to change anything
 (`mutations`), and terminate against its `fakeTailnetAdmin`, a tailnet of `tailnetDevice`s
 recording every call and the secret each `open` got, and `fake-secrets.ts`'s
-`fakeSecretStore` reading the admin client by its ARN. Terminate removing the host plans and
+`fakeSecretStore` reading the admin client by its ARN. Terminate's work inspection answers
+through the same scripted transport: `statusAnswers` answers it, by default with no work, or
+with `workAnswer`'s document or any outcome a test gives. Terminate removing the host plans and
 applies against `fakeFactoryWorld` (which plans deleting a provisioned key no longer declared,
 its `before` naming the instance the state holds (`instanceIds`), records it no longer once
 applied, and, given the secrets the hosts' policy allows (`secretArns`), plans that policy's

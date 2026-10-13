@@ -37,6 +37,12 @@ over SSH as `fffactory-admin` (`docs/specs/host-protocol.md`). Rules:
   `inspect` actions and shares that lock. It installs only the active release's assets,
   persists canonical desired and observed state, and drops to `factory` for FFFlow,
   repository and Paseo commands. Inspection checks the schedule before reporting active.
+- `host work inspect` runs only through the activator's fixed `work inspect` operation and
+  shares that lock. It lists directories as root but runs every Git command as `factory`
+  (`runuser`, `env -i`) with `GIT_OPTIONAL_LOCKS=0` and no fsmonitor, so it writes no index,
+  lock or ref and never fetches. Its document carries counts and printable paths and branch
+  names only (`printablePath`, `printableBranch`), never a file's name or content. It bounds
+  itself (`WORK_BUDGET_MS`, `WORK_LIMITS`) and says `complete: false` rather than guess.
 - A step's output goes only to its log under `WORKER_PATHS.logs`, written by the step itself as
   it runs (`ProcessOptions.output`), never collected and written afterwards; a verifier's tool
   output goes nowhere. Documents carry fffactory's own words and states, never a tool's output.

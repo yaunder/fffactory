@@ -506,8 +506,9 @@ until dispatch gains a pause.
 ## Gates (terminate)
 
 Before terminating a running worker, terminate inspects it as stop does, and
-also reads its last repository result (`host repositories inspect`, as
-[status](status.md#readiness) reads it):
+also reads its last repository result (`host repositories --json`, as
+[status](status.md#readiness) reads it) and, fresh, the work in every checkout
+and worktree on it ([host protocol §work inspect](host-protocol.md#work-inspect)):
 
 1. Locate it in the operator's peer view. A worker that cannot be located is
    refused, `HOSTNAME could not be inspected: SUMMARY`, with terminate's own
@@ -524,20 +525,54 @@ also reads its last repository result (`host repositories inspect`, as
 2. Its agent activity: active agents refuse it, `N agents are active on
    HOSTNAME: terminating it would end them`; activity that could not be read,
    or no control plane, refuses it too.
-3. Its repository result: placed checkouts left unresolved (a dirty tree,
-   divergence, a wrong or unadopted branch) refuse it, `Placed repositories on
-   HOSTNAME are unresolved: terminating it would lose their work`, listing any
-   unmanaged checkouts; unmanaged checkouts alone (present on the worker, no
-   longer placed there, never removed) refuse it, `HOSTNAME holds unmanaged
-   checkouts: terminating it would lose them`, each listed, next action
-   `--force`; a result that could not be read refuses it, `HOSTNAME could not be
-   inspected for checkouts: REASON`. A worker that has never synchronized
-   repositories (`none`) passes.
+3. Its current work (`sudo -n /usr/local/libexec/fffactory-activate work
+   inspect`), asked only once the activity has been read, since the activator
+   runs one operation at a time. The worker reads, as the runtime account and
+   changing nothing, every checkout under `/workspace/repos`, every worktree
+   under Paseo's `~factory/.paseo/worktrees`, and every worktree Git lists for
+   their repositories. **Unresolved work** is any of:
+   - in a worktree: tracked changes, staged or not, or unmerged; untracked files
+     Git does not ignore; commits reachable from its HEAD that no
+     remote-tracking branch holds (a detached HEAD's too, and a worktree whose
+     directory is gone); a merge, rebase, cherry-pick or revert in progress;
+   - in a repository: commits on any local branch that no remote-tracking
+     branch holds (ahead of its upstream, or on a branch with none); a stash
+     entry.
 
-The repository result is the last synchronization's: a checkout dirtied since
-then is not seen. `--force` skips the inspection: `--force: the worker is not
-inspected for active agents or checkouts.` It never skips the account check, the
-pin guard, the lock, the admin client or the confirmation.
+   Ignored files are not work. Nothing is fetched, so "on a remote" is as of the
+   worker's last fetch or push: a branch merged by squash whose remote branch
+   was since pruned counts as unpushed, the safe side. Unresolved work refuses
+   it, `HOSTNAME holds work not pushed to any remote: terminating it would lose
+   it`, one line for each checkout or worktree holding some (`PATH (branch
+   NAME): 1 untracked file, 2 commits not on any remote`; at most 20, then `...
+   and N more`), next action ``Push or discard it, then rerun `fffactory worker
+   terminate KEY --keep`, or pass --force to terminate it anyway.`` A
+   repository or worktree the worker could not read, or an inspection it did
+   not finish within its time or limits, refuses it, `HOSTNAME could not be
+   fully inspected for unpushed work`, each listed. An inspection that could
+   not be had refuses it, `HOSTNAME could not be inspected for unpushed work:
+   REASON`: no answer within 2 min, SSH could not reach it, another host
+   operation held the activator (rerun), an answer for another worker, or one
+   that is not a work inspection (never quoted). A worker whose activator
+   predates the work inspection (it refuses the operation as a usage error,
+   exit 64) cannot get it: a worker's activator is installed at its first boot
+   and never updated. It is refused with that reason, and the next action
+   ``Check its checkouts and worktrees for work to keep yourself, then terminate
+   it with --force: `fffactory worker terminate KEY --keep --force`.``
+4. Its repository result: placed checkouts left unresolved at the last
+   synchronization (a dirty tree, divergence, a wrong or unadopted branch)
+   refuse it, `Placed repositories on HOSTNAME are unresolved: terminating it
+   would lose their work`, listing any unmanaged checkouts; unmanaged checkouts
+   alone (present on the worker, no longer placed there, never removed) refuse
+   it, `HOSTNAME holds unmanaged checkouts: terminating it would lose them`,
+   each listed, next action `--force`; a result that could not be read refuses
+   it, `HOSTNAME could not be inspected for checkouts: REASON`. A worker that
+   has never synchronized repositories (`none`) passes.
+
+The gates are judged in that order, and the first that refuses is reported.
+`--force` skips the inspection: `--force: the worker is not inspected for active
+agents or checkouts.` It never skips the account check, the pin guard, the
+lock, the admin client or the confirmation.
 
 A worker whose machine is `stopped` passes uninspected, without `--force`: no
 agent runs on it, and it cannot be reached. **Accepted risk:** unpushed work on
@@ -711,7 +746,8 @@ what status prints of a worker.
 
 | Layer | Module | Responsibility |
 | --- | --- | --- |
-| Domain | `src/domain/worker-lifecycle.ts` | The host key check, the one target machine, what each EC2 state means for an action (`powerStep`), the gates of stop and terminate (`stopGate`, `terminateGate`, the stopped pass and the repository result), the confirmation rules (y/N, the typed key, `--confirm`), the admin client's refusals, the device removal's outcome (`deviceRemovalRefusal`), the waits' bounds and steps, the words of every refusal and next action. Pure. |
+| Domain | `src/domain/worker-lifecycle.ts` | The host key check, the one target machine, what each EC2 state means for an action (`powerStep`), the gates of stop and terminate (`stopGate`, `terminateGate`, the stopped pass, the current work and the repository result), the confirmation rules (y/N, the typed key, `--confirm`), the admin client's refusals, the device removal's outcome (`deviceRemovalRefusal`), the waits' bounds and steps, the words of every refusal and next action. Pure. |
+| Domain | `src/domain/work-inspection.ts` | The work inspection's document, its parser, the fixed command, and what counts as unresolved work (`workFindings`). Pure. |
 | Domain | `src/domain/host-removal.ts` | Terminate's removal: factory.json without the host by own entries (`withoutHost`), the only-host refusal, the scoped removal rule over Terraform's JSON plan (`removalPlanRefusal`, the secret-reading policy's allowed update included), the removal plan as shown, and the words of its refusals and failures. Pure. |
 | Domain | `src/domain/plan.ts`, `src/domain/stable-host-keys.ts` | The D11 refusal of a host removed by hand, naming `fffactory worker terminate KEY`. |
 | Domain | `src/domain/tailnet.ts` | `selectWorkerDevices`: the devices terminate deletes (the reported hostname, never the MagicDNS label, and the factory's tag) and the untagged ones it reports. |
@@ -720,7 +756,7 @@ what status prints of a worker.
 | Application | `src/application/machine-control.ts` | The `MachineControl` port: `stop`, `start`, `terminate`, `state`. |
 | Application | `src/application/tailnet-admin.ts` | The `TailnetAdmin` port: `open` (the client secret for a session), the session's `devices` and `remove`. |
 | Application | `src/application/secret-store.ts` | `SecretStore.read`: the admin client's secret, as `SecretMaterial`. |
-| Application | `src/application/worker-lifecycle.ts` | `stopWorker`, `startWorker`, `terminateWorker`: the order above, under the lock and its record; terminate's inspection reuses `inspectRepositories`; its removal plans and applies over `Provisioner` (the factory root, `planInfrastructure`'s target and projection), keeps its plan file in `PlanStore`, and writes factory.json through `InstanceStore`. |
+| Application | `src/application/worker-lifecycle.ts` | `stopWorker`, `startWorker`, `terminateWorker`: the order above, under the lock and its record; terminate's inspection reuses `inspectRepositories`, then reads the current work with `inspectWork` (`src/application/inspect-work.ts`); its removal plans and applies over `Provisioner` (the factory root, `planInfrastructure`'s target and projection), keeps its plan file in `PlanStore`, and writes factory.json through `InstanceStore`. |
 | Infrastructure | `src/infrastructure/ec2-machine-control.ts` | `ec2MachineControl` over `StopInstances`, `StartInstances`, `TerminateInstances` and `DescribeInstances` (AWS SDK for JavaScript v3, imported on first use), each call within 15 s (`EC2_CONTROL_TIMEOUT_MS`), failures by error name, a request past its deadline `unanswered`. |
 | Infrastructure | `src/infrastructure/aws-secrets-manager-store.ts` | `GetSecretValue` by ARN, within 30 s. |
 | Infrastructure | `src/infrastructure/tailscale-api-admin.ts` | `tailscaleApiAdmin`: the token exchange, the device list and deletion over HTTPS with `fetch`, each within 15 s, no redirects, failures by HTTP status or network code. |
@@ -757,6 +793,15 @@ is gone or already being terminated, and for a removal whose machine was, the
 admin client's refusals, the device removal's outcome) and
 `tests/domain/tailnet.test.ts` (tagged devices with the hostname selected,
 untagged ones reported, the tag compared exactly);
+`tests/domain/work-inspection.test.ts` (the document, its parser and limits, what
+is unresolved and what uninspected), `tests/host/work.test.ts` (the worker's
+inspection over real Git repositories: clean, untracked, ignored only, tracked
+and staged changes, ahead of the upstream, a branch without one, a stash, a merge
+in progress, a dirty Paseo worktree, one whose directory is gone, one of a
+repository kept elsewhere, no remote at all, an unreadable `.git`, no symbolic
+link followed, nothing written: no index refresh, lock file or fetch; the time
+budget), `tests/application/inspect-work.test.ts` (every transport outcome and
+activator exit, an answer for another worker, never quoted),
 `tests/application/worker-lifecycle.test.ts` (a terminate recorded step by step;
 the admin client missing, an undeclared key, another account, a pin mismatch, a
 held lock, a wrong `--confirm`, a wrong typed key, an unreadable secret and a
@@ -764,7 +809,11 @@ refused client, all before any mutation; each gate refused and `--force`
 overriding it; a stopped worker passing uninspected; a machine already
 shutting down waited for once the typed key, asked before the wait, or
 `--confirm`, confirms it, declined or a wrong key deleting no device, and
-refused without a terminal; a machine already gone: no gates and no EC2 call,
+refused without a terminal; work made since the last synchronization refused,
+with and without `--keep`, `--force` terminating it all the same; work that could
+not be inspected (an older activator, a timeout, a malformed answer, an unreadable
+worktree) refused; the work asked only once the activity is read, and not at all
+once interrupted; a machine already gone: no gates and no EC2 call,
 its devices deleted after the typed key, `unchanged` or partial, the admin
 client still required, an unreadable inventory refused, and an interrupted
 `--keep` finished by its rerun; only tagged devices deleted, an untagged one
@@ -779,7 +828,8 @@ body, secret or token, the deadline, an expired token renewed once (only on
 HTTP 401) and the call retried, a redirect refused with its target never
 asked), the Secrets Manager read in
 `tests/infrastructure/aws-secrets-manager-store.test.ts`, and the terminate
-reports, exit 2, an unechoed `--confirm`, a machine already being terminated:
+reports, exit 2, an unechoed `--confirm`, unpushed work refused with where it is and
+forced, an older activator's refusal and its next action, a worker's answer never printed, a machine already being terminated:
 the typed key asked, a decline deleting no device, `--confirm` unasked and no
 terminal refused, and a machine already gone, its
 devices deleted with exit 0 or 2 and an interrupted `--keep`'s rerun finishing

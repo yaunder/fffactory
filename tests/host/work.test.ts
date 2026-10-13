@@ -252,6 +252,20 @@ describe("host work inspect (host-protocol §work inspect)", () => {
     expect(result.repositories).toEqual([repository()]);
   });
 
+  test("a worktree Git cannot report on is unreadable, its repository still inspected", async () => {
+    await checkout();
+    const result = await inspect({
+      run: async (argv, timeoutMs, options) =>
+        argv.includes("status")
+          ? { kind: "exited", exitCode: 128, stdout: "", stderr: "fatal" }
+          : asTestUser(argv, timeoutMs, options),
+    });
+    expect(result.repositories).toEqual([
+      repository({ worktrees: [clean(CHECKOUT, { state: "unreadable" })] }),
+    ]);
+    expect(result.complete).toBe(true);
+  });
+
   test("symbolic links under the roots are not followed", async () => {
     const elsewhere = join(outside, "linked");
     git(outside, "clone", "--quiet", origin, elsewhere);

@@ -42,10 +42,11 @@ describe("the composed worker endpoint", () => {
       endpoint.adoption(),
       endpoint.reconcileDispatch(),
       endpoint.inspectDispatch(),
+      endpoint.inspectWork(),
     ]);
 
     expect(endpoint.isRoot()).toBe(false);
-    expect(results).toHaveLength(12);
+    expect(results).toHaveLength(13);
     expect(results.slice(0, 4).every(({ status }) => status === "fulfilled")).toBe(true);
     expect(results[4]?.status).toBe("rejected");
     expect(results.slice(5, 9).every(({ status }) => status === "fulfilled")).toBe(true);

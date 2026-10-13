@@ -169,6 +169,14 @@ result and checks the real schedule, without changing it. Exit 2 means a
 genuine adoption/readiness pending state; malformed input or reconciliation
 failure exits 1. See [dispatch](dispatch.md).
 
+Terminate reads a worker's current work through one more, read-only, fixed
+operation of that activator and lock
+([work inspect](#work-inspect)):
+
+```text
+sudo -n /usr/local/libexec/fffactory-activate work inspect
+```
+
 ## Versioning
 
 Every document carries `protocol_version`, the protocol's major version,
@@ -514,12 +522,138 @@ account's next action itself, from its `id` and the hostname the CLI resolved
 a worker sends with an account. So a compromised worker cannot put a command
 in front of the operator.
 
+## work inspect
+
+```text
+sudo -n /usr/local/libexec/fffactory-activate work inspect
+```
+
+What terminate destroys with a running worker's root volume, read just before
+it does ([worker lifecycle §Gates (terminate)](worker-lifecycle.md#gates-terminate)).
+The repository result (`host repositories --json`) is the last
+synchronization's, so work made after it, such as an untracked file in a
+checkout that synchronized cleanly, is only seen here.
+
+The activator accepts exactly `work inspect`, takes its lock (exit 75 while
+another activation or host reconciliation holds it), and replaces itself with
+the active root-owned release's `fffactory host work inspect` in a clean
+environment (exit 65 without one). An activator from before this operation
+refuses it as a usage error, exit 64: a worker's activator is installed at its
+first boot and never updated ([worker bootstrap §Activator](worker-bootstrap.md#activator)).
+`host work inspect` refuses unless it runs as root, then reads as the runtime
+account `factory`, which owns the checkouts.
+
+### What it reads
+
+1. **Working trees.** Every directory holding a `.git` (a directory or a
+   file) under `/workspace/repos`, at most 4 levels down, then under
+   `/home/factory/.paseo/worktrees`, where Paseo creates its worktrees
+   ([SDLC §Worktree ownership](../../SDLC.md#worktree-ownership)), at most 3
+   levels down; nothing below a working tree, and no symbolic link, is
+   followed. Directories are listed as root, without reading any file.
+2. **Repositories.** For each working tree not already listed by an earlier
+   repository, `git worktree list --porcelain -z` names its repository's
+   worktrees, wherever they are; an answer that does not list the tree itself
+   (Git found a repository in a parent directory) makes it unreadable. Then,
+   once per repository: `git rev-list --count --branches --not --remotes`
+   (commits on local branches that no remote-tracking branch holds); for each
+   local branch, until 10 are named, the same count from its tip; and
+   `git stash list` (only counted).
+3. **Worktrees.** For each worktree the repository lists (a bare entry
+   skipped): commits reachable from its HEAD that no remote-tracking branch
+   holds (`git rev-list --count HEAD_ID --not --remotes`); then, unless Git
+   marks it prunable or its directory is gone (`missing`), `git status
+   --porcelain=v2 --untracked-files=normal --ignore-submodules=none -z`, counted
+   as tracked changes (`1`, `2`, `u` entries) and untracked files (`?`), and
+   whether its own Git directory (`git rev-parse --absolute-git-dir`) holds
+   `MERGE_HEAD`, `rebase-merge`, `rebase-apply`, `CHERRY_PICK_HEAD` or
+   `REVERT_HEAD`.
+
+Every Git command runs as `/usr/sbin/runuser -u factory -- /usr/bin/env -i
+HOME=/home/factory PATH=/usr/local/bin:/usr/bin:/bin LANG=C LC_ALL=C
+GIT_OPTIONAL_LOCKS=0 GIT_TERMINAL_PROMPT=0 git --no-pager -c
+core.fsmonitor=false -C DIRECTORY ...`, each within 20 s. It changes nothing:
+optional locks off, `git status` neither refreshes nor writes the index and
+takes no lock file; nothing fetches, prunes or writes a ref; no fsmonitor hook
+runs. No file's content or name reaches the document, only counts. It starts no
+Git command after 75 s, nor inspects more than 100 repositories or 100 worktrees
+of one; any of these, or a directory it could not list, leaves it `complete:
+false`.
+
+### Document, protocol version 1
+
+```json
+{
+  "protocol_version": 1,
+  "hostname": "fff-aaaa1111-builder-1",
+  "complete": true,
+  "repositories": [
+    {
+      "path": "/workspace/repos/acme/widget",
+      "state": "inspected",
+      "unpushed_commits": 1,
+      "unpushed_branches": ["epic/5"],
+      "stashes": 0,
+      "worktrees": [
+        {
+          "path": "/workspace/repos/acme/widget",
+          "branch": "main",
+          "state": "inspected",
+          "tracked_changes": 0,
+          "untracked_files": 1,
+          "unpushed_commits": 0,
+          "operation": null
+        }
+      ]
+    }
+  ]
+}
+```
+
+| Field | Values |
+| --- | --- |
+| `complete` | `false` when the worker ran out of time or limits, or could not list a directory. |
+| `repositories[].path`, `worktrees[].path` | The working tree's absolute path, or `null` when it is not printable ASCII of at most 256 characters. A repository's is the working tree it was found through. |
+| `repositories[].state` | `inspected`, or `unreadable`: Git could not read it (its counts 0, no worktrees). |
+| `unpushed_commits` | A repository's: on any local branch; a worktree's: from its HEAD. Commits no remote-tracking branch holds. |
+| `unpushed_branches` | Local branches carrying such commits, at most 10, printable names only. |
+| `stashes` | Stash entries. |
+| `worktrees[].branch` | The branch checked out there, or `null`: a detached HEAD, or a name that is not printable ASCII without blanks of at most 200 characters. |
+| `worktrees[].state` | `inspected`, `missing` (listed by Git, its directory gone: only its commits are counted) or `unreadable`. |
+| `tracked_changes`, `untracked_files` | Counts, 0 unless `inspected`. Ignored files are not counted. |
+| `operation` | `merge`, `rebase`, `cherry_pick`, `revert`, or `null`. |
+
+The worker exits 0 with the document whatever work it found: it reports, the
+CLI judges ([worker lifecycle §Gates (terminate)](worker-lifecycle.md#gates-terminate),
+`workFindings`). Keys keep this order (`workInspectionJson`). A path or branch
+the CLI would print is printable ASCII by the parser's rule, so a worker cannot
+put control sequences on the operator's terminal; a document breaking it is
+not a work inspection.
+
+### The CLI side
+
+| Result of running it | Reads as |
+| --- | --- |
+| Exit 0 and a valid document for this worker (its `hostname`, compared without case) | `inspected` |
+| Exit 0 and a document for another worker | unknown: "its answer is for another worker" |
+| Exit 0 and output that is not a valid document | unknown, naming the first malformed field, never quoting the output |
+| Another major version | unknown: "the work inspection speaks protocol version N" |
+| Exit 64: an activator from before this operation | unknown and unsupported: "its activator predates the work inspection" |
+| Exit 65 / 75 | unknown: no active release / another host operation was running |
+| Any other exit status | unknown: "the work inspection exited with status N" |
+| `timed_out` (2 min) and every other transport outcome | unknown, in fffactory's words |
+
+The CLI runs it only after reading the worker's agent activity, which goes
+through the same activator lock. An unknown inspection refuses terminate; it
+never reads as no work.
+
 ## Layer mapping
 
 | Layer | Module | Responsibility |
 | --- | --- | --- |
 | Domain | `src/domain/protocol-fields.ts` | `HOST_PROTOCOL_VERSION`, the version rule and field readers every document's parser shares. Pure. |
 | Domain | `src/domain/host-protocol.ts` | The worker paths, the inspect document's types, `hostInspectionJson`, `parseHostInspection`, `RemoteCommand`, `INSPECT_COMMAND`, `UPLOAD_COMMAND` and `activateCommand`. Pure. |
+| Domain | `src/domain/work-inspection.ts` | The work inspection's document, `workInspectionJson`, `parseWorkInspection`, `INSPECT_WORK_COMMAND`, the printable path and branch rules, and `workFindings`. Pure. |
 | Domain | `src/domain/host-projection.ts` | The host projection, its canonical text and its parser. Pure. |
 | Domain | `src/domain/dispatch-projection.ts` | The dispatch projection, adoption and inspection documents, their parsers, and fixed inspect command. Pure. |
 | Domain | `src/domain/installation.ts` | `INSTALL_STEPS`, step results, the install state rule, the apply document and record, `Installation`, and reading the activator's answer. Pure. |
@@ -528,6 +662,7 @@ in front of the operator.
 | Domain | `src/domain/tailnet.ts` | Peer views, the hostname-match rule and the tag check, `WorkerAddress`, the host key and address checks, the private known_hosts text. Pure. |
 | Application | `src/application/host-transport.ts`, `src/application/tailnet-peers.ts` | The `HostTransport` and `TailnetPeers` ports. |
 | Application | `src/application/inspect-worker.ts` | `inspectWorker`: runs inspect over the transport and reads the answer. |
+| Application | `src/application/inspect-work.ts` | `inspectWork`: runs `work inspect` through the activator and reads the answer, trusting it only for that worker. |
 | Application | `src/application/inspect-dispatch.ts` | Runs fixed dispatch inspection over the transport and reads the answer. |
 | Application | `src/application/apply-workers.ts` | `applyWorkers`: the workers stage. |
 | Infrastructure | `src/infrastructure/ssh-transport.ts` | `sshTransport`: the private known_hosts file, the ssh command and environment, streamed standard input, outcome classification. |
@@ -537,9 +672,10 @@ in front of the operator.
 | Worker | `src/host/install-lock.ts` | `flockExclusive`: the install lock over `flock(2)`, through libc. |
 | Worker | `src/host/verify.ts` | `workerVerifier`: the verifiers and enrollment checks. |
 | Worker | `src/host/dispatch.ts` | Dispatch adoption, installation, reconciliation and checked observation, with privilege drop. |
+| Worker | `src/host/work.ts` | `workerWork`: the work inspection, over the worker's working trees, as `factory`, read-only. |
 | Worker | `src/host/endpoint.ts` | `workerEndpoint`: all worker endpoints together. |
 | Worker | `assets/steps/` | The wrapped install steps, the pins and the plugin manifest. |
-| CLI adapter | `src/cli/commands/host.ts` | The fixed `fffactory host` inspect, apply, verify, repository, control-plane and dispatch operations. |
+| CLI adapter | `src/cli/commands/host.ts` | The fixed `fffactory host` inspect, apply, verify, repository, control-plane, dispatch and work operations. |
 
 Tests: `tests/host/protocol-contract.test.ts` is the contract: four worker
 filesystems (`tests/host/worker-scenarios.ts`: installed with enrollment
@@ -584,6 +720,14 @@ and the next plan and `status` find it current), `tests/infrastructure/ssh-trans
 throw, the environment, streamed standard input, every failure
 classification), `tests/infrastructure/tailscale-peers.test.ts`,
 `tests/cli/host.test.ts`, `tests/cli/status-executable.test.ts`,
+`tests/host/work.test.ts` (`host work inspect` over real Git repositories in a
+temporary worker: each kind of work, ignored files, missing and unreadable
+worktrees, nothing written, the time budget; `tests/host/work-scenarios.ts`),
+`tests/host/protocol-contract.test.ts`'s `work-unresolved.json` (the worker
+produces it byte for byte from real Git, the CLI reads it back over the
+transport), `tests/domain/work-inspection.test.ts`,
+`tests/application/inspect-work.test.ts`, the activator's `work inspect` in
+`tests/bootstrap/activator.test.sh`,
 `tests/assets/steps/steps.test.ts` (one script per step, parsing with
 `bash -n`, no marker polling, jq's re-evaluation markers, the plugin manifest
 valid, no SSM anywhere on the worker path), the container cases of
@@ -598,4 +742,5 @@ or reaches a worker or tailnet.
 
 Introduced by [#100](https://github.com/yaunder/factory/issues/100); `apply`,
 `verify` and the host projection by
-[#101](https://github.com/yaunder/factory/issues/101).
+[#101](https://github.com/yaunder/factory/issues/101); `work inspect` by
+[#9](https://github.com/yaunder/fffactory/issues/9).

@@ -109,6 +109,15 @@ release's unprivileged `host repositories --json` endpoint, reports that last
 completed observation and includes every unmanaged path. An unresolved or
 missing result keeps the worker not ready; an unreadable result is an error.
 
+## The last result and the current work
+
+The persisted result is the last completed synchronization's: a checkout
+dirtied, or a commit made, after it is not in it. Status reports it as such.
+Terminate, which destroys the checkouts with the machine, also reads their
+current state, and that of every Paseo worktree, through the read-only
+[work inspection](host-protocol.md#work-inspect)
+([worker lifecycle §Gates (terminate)](worker-lifecycle.md#gates-terminate)).
+
 ## Layer mapping
 
 | Concern | Layer | Where |
