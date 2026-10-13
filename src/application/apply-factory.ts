@@ -1151,7 +1151,8 @@ async function infrastructureStage(
     await log.finish("refused", "refused");
     return ready;
   }
-  // A complete factory.json declares a worker, so every plan has the workers stage's changes.
+  // Every declared worker is in the workers stage; a factory that declares none has no worker
+  // changes, and its plan says so.
   const workers = declaredWorkers(request.instance, locked.target.factoryId);
   // A saved plan skips the workers stopped when it was made, which are stopped still.
   const stopped = locked.saved?.stopped_workers ?? (machines.stopped ?? []).map(({ key }) => key);

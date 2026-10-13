@@ -101,7 +101,8 @@ E3 Repository, dispatch and the switch
 - Base migrations with reboot and reconnect (removes the D11 base refusal).
 - Host retirement: shipped in reduced form as `fffactory worker terminate KEY` (epic #5, #10): a
   scoped Terraform removal plan approved with the host key, then factory.json and the tailnet
-  devices. Removing a host by hand stays refused (D11, naming the command). Still deferred: EBS
+  devices. It removes the last host too, leaving an empty factory to which a replacement of
+  another size can be added. Removing a host by hand stays refused (D11, naming the command). Still deferred: EBS
   snapshots, a `retiring` state that pauses dispatch first, and host replacement (which removes
   the D11 destroy/replace refusal).
 - Inventory and orphan reporting across AWS, Tailscale and factory.json.

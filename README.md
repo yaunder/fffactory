@@ -294,7 +294,7 @@ is skipped, see [Mark an epic ready](MACHINE_ONBOARDING.md#12-mark-an-epic-ready
 | `fffactory apply` | Review and apply a plan under the factory-wide lock. |
 | `fffactory status` | Read worker readiness and dispatch state. |
 | `fffactory worker stop\|start KEY` | Stop an idle worker's instance to save compute, or start it again. |
-| `fffactory worker terminate KEY` | Remove a worker: a reviewed Terraform plan destroys its instance, factory.json no longer declares it, and its Tailscale devices are deleted. With `--keep`, destroy only the instance and devices, keeping the host so the next `fffactory apply` creates it afresh. Needs the Tailscale admin client (`fffactory secret set tailscale-admin-client`). |
+| `fffactory worker terminate KEY` | Remove a worker: a reviewed Terraform plan destroys its instance, factory.json no longer declares it, and its Tailscale devices are deleted. The last worker too: the factory keeps its network and state, and a replacement of another size is declared and created with `fffactory apply`. With `--keep`, destroy only the instance and devices, keeping the host so the next `fffactory apply` creates it afresh. Needs the Tailscale admin client (`fffactory secret set tailscale-admin-client`). |
 | `fffactory upgrade` | Use a newer release to review and apply a release-pin change. |
 
 Operate with the release factory.json pins; change that pin only through

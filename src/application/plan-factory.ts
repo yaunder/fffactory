@@ -1,8 +1,8 @@
 /**
  * `fffactory plan`: the factory's complete plan from factory.json and live state: the
  * infrastructure stage, the factory root module's Terraform plan, then the workers and
- * control-plane stages. A complete factory.json declares a worker,
- * so every plan has changes, and is saved under a short-lived plan ID, bound to factory.json's
+ * control-plane stages. Every plan, even one of a factory that declares no worker and has
+ * nothing to change, is saved under a short-lived plan ID, bound to factory.json's
  * exact text, the release and its assets, the AWS account and the revision of the factory's
  * Terraform state, so `fffactory apply --plan-id` can apply exactly it. Planning changes
  * nothing: it takes no lock, inspects existing workers read-only for their Paseo state, and

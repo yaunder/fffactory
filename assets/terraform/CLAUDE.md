@@ -33,6 +33,10 @@ Shipped in the release bundle and run only by the managed Terraform through the
   `aws_iam_policy_document` and `aws_ssm_parameter`; no `provisioner` or `connection` blocks.
   Widening an allowlist is a guardrail change: update the spec and fixtures with it.
 - Host instances are keyed by stable host key and ignore `ami` and `user_data` changes.
+- `hosts` may be empty: a factory whose last host `fffactory worker terminate` removed keeps
+  its network, state and host identity, whose policy then allows only the Tailscale enrollment
+  key. No validation may require a host; `guardrails.test.ts` checks it and
+  `just terraform-check` plans the empty factory.
 - `bootstrap/` is not a module: the worker bootstrap user data template and root activator
   that `modules/hosts` reads. Its own CLAUDE.md has the rules.
 - Check with `just terraform-check` (fmt, validate, namespacing plans); `bun test` runs the

@@ -612,6 +612,12 @@ is recorded with the next action that finishes it, usually rerunning the
 command. `--keep` destroys only the machine and its devices, keeping the host,
 so the next apply creates it afresh.
 
+The last host is removed the same way, leaving an empty factory: `hosts: []` is
+complete, the state bucket, network and host identity stay, and plan, apply and
+status report no worker declared. Resizing a single-worker factory is
+terminate, then a replacement declared with the size wanted and created by
+`fffactory apply`; the removed key is no longer recorded, so it may be reused.
+
 Deleting a host entry by hand is invalid, and `plan` refuses it (D11), naming
 the command. Renaming a stable host key is also invalid; create a new host and
 remove the old one.

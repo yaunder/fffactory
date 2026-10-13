@@ -13,7 +13,9 @@
   endpoint at a local stand-in. It downloads Terraform and the provider, so `check-all` does
   not run it.
 - `terraform-check.ts` also compares each planned host's `user_data` with the rendering the
-  bootstrap tests use (`tests/support/user-data.ts`).
+  bootstrap tests use (`tests/support/user-data.ts`), and plans the factory root without
+  hosts, an empty factory: no instance, the shared infrastructure kept, the hosts' policy
+  allowing only the Tailscale enrollment key.
 - `repository-skills.sh` (`just repository-skills`, part of `check-all`, and CI's
   "Factory code validation" job in `.github/workflows/repository-checks.yml`) checks the
   absence of checkout-local repository skills, AGENTS.md's capability routing and the

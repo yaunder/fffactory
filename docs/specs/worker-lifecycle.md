@@ -64,8 +64,6 @@ Every command goes in this order, and stops at the first refusal:
    admin client (tailscale.admin_client_secret): terminate deletes the worker's
    tailnet device with it`, next action `fffactory secret set
    tailscale-admin-client` ([secrets](secrets.md#the-tailscale-admin-client)).
-   Terminate without `--keep` then refuses the only host factory.json declares
-   ([Terminate (remove)](#terminate-remove)).
 5. The account check: the caller must be in `aws.account_id`, resolved in the
    factory Region ([doctor §AWS account](doctor.md#aws-account)).
 6. The [CLI/pin match guard](plan-apply.md#clipin-match-guard): only the
@@ -234,9 +232,22 @@ What it does depends on the instance's state when it is located:
 | No instance carries the key | The machine is already gone: `Worker KEY (HOSTNAME): no EC2 instance carries its key; its machine is already gone.`, no gates; opens the admin client, then the removal below, whose plan must not destroy an instance. |
 | `pending`, `stopping` | Refused, as with `--keep`. |
 
-The only host factory.json declares is refused before anything reaches AWS: a
-factory keeps at least one worker. Its next action is to declare and create a
-replacement first, or to terminate it with `--keep`.
+The last host factory.json declares is removed like any other, under the same
+lock, plan, typed key and record: an empty factory is a factory
+([instance configuration §Completeness](instance-configuration.md#completeness)).
+Its machine, its recorded host key, its factory.json entry (and with it its
+repository placements and dispatch settings) and its tailnet devices go; the
+factory's shared infrastructure stays: the state bucket and Terraform state,
+the network, the hosts' IAM role and instance profile, whose policy then allows
+only the Tailscale enrollment key. factory.json keeps `hosts: []` and its
+`repositories` inventory. To change the size of a single-worker factory,
+terminate the worker, then declare its replacement with the `instance_type`
+and `root_volume_gib` wanted, under a new key or the same one, and run
+`fffactory apply`: Terraform no longer records the removed key, so either is a
+plain create, never refused as a removed host key
+([provisioning §Stable host keys](provisioning.md#stable-host-keys)).
+`--keep` is no substitute: it leaves the host declared, and the next apply
+recreates it as declared.
 
 The removal, under the same lock and record:
 
@@ -333,7 +344,10 @@ Operation record: s3://fff-abcd1234-state/fff-abcd1234-operations/2026-10-12T12:
 
 Afterwards `fffactory plan` shows no change for the host, since Terraform no
 longer records it and factory.json no longer declares it, and
-[status](status.md) no longer lists it.
+[status](status.md) no longer lists it. Once the last host is removed, `plan`
+shows `Workers: none declared.` with no other change, and `status` reports no
+workers declared and exits 0
+([plan-apply §An empty factory](plan-apply.md#an-empty-factory)).
 
 Each failure leaves a state the next action names, and every one is recorded
 and releases the lock:
@@ -865,7 +879,7 @@ That the next plan creates a terminated worker afresh is
 create`).
 
 Terminate (remove): `tests/domain/host-removal.test.ts` (the host removed by
-own entries, the only host refused, the scoped removal rule: only the named
+own entries, the last host leaving a valid and complete empty factory, the scoped removal rule: only the named
 delete passes, and extra creates, updates, other deletes, replaces, unknown
 actions and an unreadable plan fail closed; a plan that does not destroy the
 machine EC2 lists, or destroys one it does not; the policy update dropping
@@ -874,8 +888,11 @@ plan as shown; the failures' words);
 `tests/application/worker-lifecycle.test.ts` (a removal recorded step by step,
 its plan file removed, factory.json written by `InstanceStore`; afterwards the
 infrastructure plan shows no change and status no longer lists the host;
-another pending change refused before the question; the only host refused
-before AWS; the typed key asked after the plan; factory.json changed before the
+another pending change refused before the question; the last host removed, its
+Paseo password dropped from the policy, which keeps the enrollment key alone,
+and the network kept; the empty factory planning no host and no change, and
+status listing none; a replacement declared under a new key or the removed one,
+with another instance type, applied as a plain create; the typed key asked after the plan; factory.json changed before the
 apply; a machine already being terminated asked about after the wait and the
 plan, saying so, and declined changing nothing; a failed plan or apply leaving factory.json untouched with its
 diagnostics file, never in the record; factory.json that cannot be written,
@@ -883,7 +900,9 @@ then a rerun finishing; a machine already gone, or being terminated; a state
 still recording the key applied and checked; the gates; a device left behind;
 an interrupt during Terraform's apply and after the write); and
 `tests/cli/worker.test.ts` (the plan and reports, a refused plan, Terraform's
-diagnostics path, a machine already gone, the only host, both interruptions).
+diagnostics path, a machine already gone, the last host removed and the empty
+factory validated, planned and reported, then a replacement of another size
+planned as a create, both interruptions).
 The D11 refusal of a host removed by hand naming the command:
 `tests/domain/stable-host-keys.test.ts`, `tests/domain/plan.test.ts` and
 `tests/cli/plan-apply.test.ts`.

@@ -115,11 +115,42 @@ keeps Terraform's state lock as well.
    only with the same factory.json. Each change shows Terraform's symbol: `+`
    create, `~` update, `-` delete, `-/+` and `+/-` replace; any other set of
    actions is shown by name, and reads and no-ops are left out. Without
-   infrastructure changes it prints `Infrastructure: no changes.`. A complete
-   factory.json declares a worker, so every plan has the workers, control-plane,
-   repository, dispatch and verification stages' changes and is saved. A saved
-   plan contains the dispatch projection; a record without it is damaged and is
+   infrastructure changes it prints `Infrastructure: no changes.`. Every plan
+   is saved, even one with nothing to change. A factory that declares a worker
+   has the workers, control-plane, repository, dispatch and verification
+   stages' changes; one that declares none has no stage after the
+   infrastructure ([An empty factory](#an-empty-factory)). A saved plan
+   contains the dispatch projection; a record without it is damaged and is
    never applied.
+
+### An empty factory
+
+factory.json may declare no worker, `hosts: []`, as
+[`fffactory worker terminate KEY`](worker-lifecycle.md#terminate-remove) leaves
+it after removing the last host; it is complete
+([instance configuration §Completeness](instance-configuration.md#completeness)).
+Its plan is the factory's shared infrastructure alone: the
+[projection](provisioning.md#terraform-inputs) has no hosts and no Paseo
+passwords, Terraform plans no instance, and the hosts' policy allows only the
+Tailscale enrollment key. In place of the workers and later stages the plan
+shows:
+
+```text
+Infrastructure: no changes.
+Workers: none declared. Declare a host in factory.json's hosts, then apply to create it.
+```
+
+Apply asks for the approval of that plan and applies it as any other, under the
+lock and its record. It installs nothing and reaches no worker: `Workers: none
+declared.`, no repository, control-plane or dispatch lines, and `End-to-end
+verification: The factory is ready: it declares no workers`, exit 0, never
+partial. `upgrade` moves the pin of an empty factory the same way.
+
+A host declared later is a plain create, applied and waited for
+([Waiting for a new worker](#waiting-for-a-new-worker)) as any new worker: under
+a new key, or under the key just removed, since Terraform no longer records it
+and the D11 refusal concerns only a recorded key no longer declared. Its
+`instance_type` and `root_volume_gib` need not be the removed host's.
 
 ### The infrastructure stage
 
@@ -1021,7 +1052,9 @@ the plan file's digest as it is now),
 stubbed and against `tests/support/stub-s3.ts`),
 `tests/infrastructure/terminal-prompt.test.ts` (Ctrl-C cancels an echoed
 question), `tests/cli/plan-apply.test.ts` (output, exit codes and every refusal
-in process, the workers' lines and exit codes 0, 2 and 1; a stopped worker
+in process, the workers' lines and exit codes 0, 2 and 1; an empty factory
+planning its shared infrastructure alone with `Workers: none declared.`, and
+applying it, then nothing, with exit 0; a stopped worker
 shown skipped in the plan, listed `stopped` by apply with exit 0, its resize
 refused, and with the inventory unreadable skipped with exit 2 as before and a
 resize refused; one apply creating, waiting for and installing a worker; the

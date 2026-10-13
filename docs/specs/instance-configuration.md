@@ -59,7 +59,7 @@ Schema is [`schemas/factory.schema.json`](../../schemas/factory.schema.json), an
 | `tailscale.auth_key_secret` | Secret reference to the factory's Tailscale enrollment key. |
 | `tailscale.admin_client_secret` | Secret reference to the client secret of the operator's Tailscale OAuth client with the `devices:core` scope, the factory's admin client ([secrets](secrets.md#the-tailscale-admin-client)). Workers never receive it. |
 | `repositories[]` | Repository inventory. Each entry requires `key`, `remote` (`https://github.com/OWNER/NAME`), `path` (relative checkout path; no empty, `.` or `..` segments) and `branch`. |
-| `hosts[]` | Stable hosts. Each entry requires `key`. |
+| `hosts[]` | Stable hosts, possibly none. Each entry requires `key`. |
 | `hosts[].instance_type`, `hosts[].root_volume_gib` | Machine declaration: EC2 instance type; root volume of 8-16384 GiB. |
 | `hosts[].paseo_password_secret` | Secret reference to the host's Paseo password. |
 | `hosts[].repositories[]` | Repository placement: keys of declared repositories. |
@@ -79,7 +79,10 @@ namespaced hostname `<factory_id>-<host key>` is at most 53 characters and fits
 in a DNS label. Host keys are unique within the document and are never
 renamed: replacing a host means declaring a new key. Planning rejects a
 document that no longer declares a key the factory has provisioned
-([provisioning §Stable host keys](provisioning.md#stable-host-keys)).
+([provisioning §Stable host keys](provisioning.md#stable-host-keys)); only
+[`fffactory worker terminate KEY`](worker-lifecycle.md#terminate-remove)
+removes a host, and Terraform's record of its key with it, after which the key
+may be declared again as a new host.
 
 ### State bucket
 
@@ -134,11 +137,17 @@ A valid document may be partial; only `schema_version` is required.
 Completeness is reported separately from validity. A valid document is complete
 when it has `release`, `factory_id`, `name`, `aws.account_id`, `aws.region`,
 `state_backend.bucket`, `network.vpc_cidr`, `network.public_subnet_cidr`,
-`network.availability_zone`, `tailscale.tag`, `tailscale.auth_key_secret`, at
-least one host, and `instance_type` and `root_volume_gib` for every host. The
-report lists missing fields by path in that order. Repositories, dispatch
-settings, Paseo password references and `tailscale.admin_client_secret` are
-optional for completeness.
+`network.availability_zone`, `tailscale.tag`, `tailscale.auth_key_secret`,
+`hosts`, and `instance_type` and `root_volume_gib` for every host. The report
+lists missing fields by path in that order. `hosts` may be an empty list: a
+factory may declare no worker, as
+[`fffactory worker terminate KEY`](worker-lifecycle.md#terminate-remove) leaves
+it after removing the last host, and its plan is then its shared
+infrastructure alone
+([plan-apply §An empty factory](plan-apply.md#an-empty-factory)). An absent
+`hosts` is still reported missing, so a new document is not taken for a factory
+deliberately without workers. Repositories, dispatch settings, Paseo password
+references and `tailscale.admin_client_secret` are optional for completeness.
 
 ## `fffactory validate`
 

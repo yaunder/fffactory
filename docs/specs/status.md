@@ -30,7 +30,9 @@ repositories --json` on each reachable worker over SSH
    refused, exit 1, with the refusal and its next action.
 4. List the EC2 instances and read the peer view, once each, at the same time.
 5. For each declared host, in factory.json's order and all at once, work out
-   its [result](#workers).
+   its [result](#workers). A factory that declares none
+   ([plan-apply §An empty factory](plan-apply.md#an-empty-factory)) reaches no
+   worker: its report is the inventories alone.
 
 A CLI whose release differs from factory.json's pin may run status: it
 diagnoses and changes nothing (design §Release and compatibility model).
@@ -159,7 +161,7 @@ as ready. The report's status is the worst of its inventories and workers.
 
 | Exit | When |
 | --- | --- |
-| 0 | Every inventory and every worker is ready, or stopped. |
+| 0 | Every inventory and every worker is ready, or stopped; with no worker declared, every inventory is ready. |
 | 2 | Inspection succeeded, but something is not ready, such as an offline worker. |
 | 1 | Status failed: invalid arguments, a missing, invalid or incomplete factory.json, another account, or an inventory or worker it could not inspect. |
 
@@ -202,6 +204,19 @@ entry ready, the last line counts it:
 
 Ready: 1 of 2 workers is ready; 1 is stopped.
 ```
+
+A factory that declares no worker says so, and how to add one; with its
+inventories ready, it exits 0:
+
+```text
+Workers:
+  none declared
+  Next: Declare a host in factory.json's hosts, then create it with `fffactory apply`.
+
+Ready: no workers are declared.
+```
+
+Its JSON report has `workers: []`.
 
 ### JSON, schema version 1
 
@@ -272,7 +287,8 @@ inventory; an incomplete factory.json refused before AWS),
 `tests/infrastructure/ec2-inventory.test.ts` (stubbed calls, and the real SDK
 against `tests/support/stub-ec2-instances.ts`), `tests/cli/status.test.ts`
 (exit codes 0, 2 and 1, no lock taken, no report once interrupted, the human
-report, the JSON report against the fixture and the schema, enrollment pending
+report, a factory declaring no worker exiting 0 with how to add one and an empty
+`workers` in JSON, the JSON report against the fixture and the schema, enrollment pending
 in both, and a stopped worker exiting 0 with the start command, its JSON
 verdict `stopped` under schema version 1, and beside a worker that needs
 attention still exiting 2), and `tests/cli/status-executable.test.ts` (the

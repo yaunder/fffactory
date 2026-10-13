@@ -246,7 +246,7 @@ account, Region and tailnet (D5), so every factory keeps to its own namespace.
 | `backend/` (root) | The state bucket's definition, `state-bucket`, planned and applied only by [backend bootstrap](#backend-bootstrap). It has no backend of its own. |
 | `modules/network` | The factory VPC (DNS support and hostnames on), its internet gateway, one public subnet in `network.availability_zone` that assigns no public IPs by default, a route table with a default route to the gateway, and the hosts' security group: no ingress, all egress (hosts are reached over Tailscale). |
 | `modules/host-identity` | The hosts' IAM role, assumable only by EC2, its instance profile, and one inline policy allowing `secretsmanager:GetSecretValue` on exactly the workers' secret references factory.json declares (`tailscale.auth_key_secret`, `hosts[].paseo_password_secret`), never the operator's Tailscale admin client. Hosts can mutate nothing. |
-| `modules/hosts` | One EC2 instance per stable host key: `hosts[].instance_type`, an encrypted gp3 root volume of `hosts[].root_volume_gib` deleted with the instance, a public IP, IMDSv2 only with a hop limit of 1 and instance tags in metadata, the security group and instance profile above. Its user data is the worker bootstrap, `bootstrap/user-data.sh.tftpl` rendered with the host's namespaced hostname, the Region, the Tailscale reference and tag, and the activator ([worker bootstrap](worker-bootstrap.md)). It changes neither `ami` nor `user_data` of a running host: a newer image or bootstrap template never replaces a host. |
+| `modules/hosts` | One EC2 instance per stable host key, none for a factory that declares no host: `hosts[].instance_type`, an encrypted gp3 root volume of `hosts[].root_volume_gib` deleted with the instance, a public IP, IMDSv2 only with a hop limit of 1 and instance tags in metadata, the security group and instance profile above. Its user data is the worker bootstrap, `bootstrap/user-data.sh.tftpl` rendered with the host's namespaced hostname, the Region, the Tailscale reference and tag, and the activator ([worker bootstrap](worker-bootstrap.md)). It changes neither `ami` nor `user_data` of a running host: a newer image or bootstrap template never replaces a host. |
 | `bootstrap/` | Not a module: the worker bootstrap's user data template and root activator, which `modules/hosts` reads ([worker bootstrap](worker-bootstrap.md)). |
 | `modules/state-bucket` | The state bucket: public access blocked, bucket-owner-enforced ownership, SSE-S3 encryption, versioning, a policy denying any request without TLS, and `prevent_destroy`. |
 
@@ -380,8 +380,12 @@ each plan's planned values must be known when planning and carry that plan's
 factory ID, and no name of one factory's plans may appear in the other's; a
 plan with no names fails too. Each planned host's `user_data`, rendered by
 Terraform, must equal the rendering the
-[worker bootstrap tests](worker-bootstrap.md#tests) run for the same inputs. The
-plans reach no AWS account: an override file in the script's copy only keeps
+[worker bootstrap tests](worker-bootstrap.md#tests) run for the same inputs.
+Last, it plans the factory root for `fff-aaaa1111` from the example without
+hosts, an empty factory ([plan-apply §An empty factory](plan-apply.md#an-empty-factory)):
+the plan must hold no instance, keep the VPC, the hosts' role and instance
+profile, and its secret-reading policy must allow exactly the Tailscale
+enrollment key. The plans reach no AWS account: an override file in the script's copy only keeps
 state local, gives the provider AWS's documentation example keys, skips its
 account and credential checks, and points every endpoint at a local
 stand-in that answers only the image parameter lookup.
@@ -401,7 +405,7 @@ state. Secrets appear only as the references factory.json holds.
 | `tailscale_auth_key_secret_arn` | `tailscale.auth_key_secret` |
 | `tailscale_tag` | `tailscale.tag` |
 | `paseo_password_secret_arns` | `hosts[].paseo_password_secret`, by host key, for hosts that declare one |
-| `hosts` | `hosts[]` by host key: `instance_type` and `root_volume_gib` |
+| `hosts` | `hosts[]` by host key: `instance_type` and `root_volume_gib`; empty for a factory that declares no host |
 
 `tailscale.admin_client_secret` is projected into no variable: no worker may
 read the operator's Tailscale admin client ([secrets](secrets.md#the-tailscale-admin-client)).
@@ -417,7 +421,9 @@ The factory projection is refused, listing each issue by field path with
 needs only `factory_id`, `aws.account_id`, `aws.region` and
 `state_backend.bucket`, and refuses a bucket that does not carry the factory
 ID. The root modules repeat factory.json's format rules as variable
-validations. A test checks that each projection supplies exactly its root
+validations; none requires a host, so an empty factory's projection plans its
+shared infrastructure alone, and its hosts' policy allows only the Tailscale
+enrollment key. A test checks that each projection supplies exactly its root
 module's variables.
 
 ### Stable host keys
@@ -448,7 +454,10 @@ replacements catches.
 factory.json without the host against the set less that one key, and plans and
 applies it; the apply drops the key from the `host_keys` output, which it then
 reads again to check. Once factory.json is written without the host, neither
-records it, and the next plan has no change for it.
+records it, and the next plan has no change for it. That holds for the last
+host too: the recorded set and the declared hosts are then both empty. A key
+removed this way is no longer recorded, so declaring it again later is a plain
+create, as is any new key.
 
 ## First apply
 
@@ -799,15 +808,16 @@ Resources and namespacing: `tests/domain/resource-naming.test.ts`,
 rejected, adding accepted, malformed keys never echoed),
 `tests/domain/instance.test.ts` (the state bucket rule),
 `tests/application/project-terraform-inputs.test.ts` (every variable
-projected, the factory's own Tailscale reference and tag, incomplete instances and
-renamed host keys refused),
+projected, the factory's own Tailscale reference and tag, an empty factory
+projecting no hosts, incomplete instances and renamed host keys refused),
 `tests/infrastructure/terraform/resource-names.test.ts` (names collected from
 JSON plans, unprefixed and unknown names and unclassified types reported, two
 factory IDs sharing no name) and `tests/assets/terraform/guardrails.test.ts`
 (the modules pass, each fixture fails with its violations, the lockfiles pin
-the required provider version, and each projection matches its root module's
-variables). `scripts/terraform-check.ts` runs the modules' `fmt`, `validate`
-and namespacing plans with the managed Terraform in CI.
+the required provider version, each projection matches its root module's
+variables, and no validation of the `hosts` variable requires a host).
+`scripts/terraform-check.ts` runs the modules' `fmt`, `validate`, namespacing
+plans and the empty factory's plan with the managed Terraform in CI.
 First apply and lock: `tests/domain/backend-bootstrap.test.ts` (resource
 changes read, unreadable plans, the create-only rule, the presentation; the
 readiness rule, the TLS-only policy check, the unready bucket's refusal and

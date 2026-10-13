@@ -51,7 +51,9 @@ recording every call and the secret each `open` got, and `fake-secrets.ts`'s
 `fakeSecretStore` reading the admin client by its ARN. Terminate's work inspection answers
 through the same scripted transport: `statusAnswers` answers it, by default with no work, or
 with `workAnswer`'s document or any outcome a test gives. Terminate removing the host plans and
-applies against `fakeFactoryWorld` (which plans deleting a provisioned key no longer declared,
+applies against `fakeFactoryWorld` (whose network exists once it is given hosts or applied,
+and stays when its last host is removed, as an empty factory's does; which plans deleting a
+provisioned key no longer declared,
 its `before` naming the instance the state holds (`instanceIds`), records it no longer once
 applied, and, given the secrets the hosts' policy allows (`secretArns`), plans that policy's
 in-place update as Terraform renders it) and writes factory.json to `MemoryInstanceStore`.

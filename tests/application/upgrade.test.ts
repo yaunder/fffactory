@@ -102,6 +102,27 @@ function stages(record: OperationRecord | undefined) {
 }
 
 describe("fffactory upgrade (plan-apply §Upgrade)", () => {
+  test("an empty factory moves its pin with nothing to install", async () => {
+    const { deps, request, store, shown, terraform, lockStore } = upgrading({ hosts: [] });
+    // Its shared infrastructure exists, as `worker terminate` leaves it after the last host.
+    terraform.world.network = true;
+    const instance: FactoryInstance = { ...pinnedTo("0.2.0"), hosts: [] };
+    const text = textOf(instance);
+    store.files[PATH] = text;
+    const result = await upgradeFactory(deps, { ...request, instance, text });
+    expect(result).toMatchObject({
+      kind: "upgrade",
+      pinned: true,
+      apply: { kind: "applied", infrastructure: "unchanged", workers: [] },
+    });
+    expect(shown[0]?.slice(-2)).toEqual([
+      "Infrastructure: no changes.",
+      "Workers: none declared. Declare a host in factory.json's hosts, then apply to create it.",
+    ]);
+    expect(JSON.parse(store.files[PATH] ?? "")).toEqual({ ...instance, release: "0.3.0" });
+    expect(lockStore.locks.size).toBe(0);
+  });
+
   test("shows the pin move with the plan made for the running release, writes the pin once approved under the lock, then applies", async () => {
     const { deps, request, store, events, shown, lockStore, pinned } = upgrading();
     const result = await upgradeFactory(deps, request);
