@@ -13,6 +13,7 @@
  * must allow or refuse it as the case says. The plans run with `-refresh=false`: the state is
  * the fixture's, never AWS's.
  */
+import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { Provisioner, ProvisioningTarget } from "../src/application/provisioner";
 import { projectFactoryVariables } from "../src/application/project-terraform-inputs";
@@ -73,7 +74,8 @@ interface RemovalCase {
 
 const POLICY_UPDATE = `${HOST_SECRETS_POLICY}: update`;
 const deletes = (key: HostKey) => `${hostMachineAddress(key)}: delete`;
-const MORE_THAN = /^The removal plan changes more than host builder-1's machine/;
+const moreThan = (key: HostKey) =>
+  new RegExp(`^The removal plan changes more than host ${key}'s machine`);
 const ALLOWED: readonly Verdict[] = [{ listed: "the state's" }];
 
 const CASES: readonly RemovalCase[] = [
@@ -128,7 +130,7 @@ const CASES: readonly RemovalCase[] = [
         host.key === "builder-2" ? { ...host, instance_type: "m7i.2xlarge" } : host,
       ),
     }),
-    verdicts: [{ listed: "the state's", refused: MORE_THAN }],
+    verdicts: [{ listed: "the state's", refused: moreThan("builder-1" as HostKey) }],
   },
   {
     title: "a host, with the subnet's CIDR block changed too",
@@ -138,7 +140,28 @@ const CASES: readonly RemovalCase[] = [
       ...document,
       network: { ...(document.network as Json), public_subnet_cidr: "10.78.2.0/24" },
     }),
-    verdicts: [{ listed: "the state's", refused: MORE_THAN }],
+    verdicts: [{ listed: "the state's", refused: moreThan("builder-1" as HostKey) }],
+  },
+  {
+    title: "a host without a Paseo password, with another host's password changed too",
+    hosts: "several",
+    key: "builder-3" as HostKey,
+    edit: (document) => ({
+      ...document,
+      hosts: (document.hosts as Json[]).map((host) =>
+        host.key === "builder-1"
+          ? {
+              ...host,
+              paseo_password_secret: String(host.paseo_password_secret).replace(
+                "/builder-1/",
+                "/builder-1-rotated/",
+              ),
+            }
+          : host,
+      ),
+    }),
+    changes: [POLICY_UPDATE, deletes("builder-3" as HostKey)],
+    verdicts: [{ listed: "the state's", refused: moreThan("builder-3" as HostKey) }],
   },
 ];
 
@@ -256,7 +279,7 @@ async function removalPlan(
   const label = `remove-${removalCase.hosts}-${key}${edit === undefined ? "" : "-edited"}`;
   const inputs = join(context.work, `${label}.tfvars.json`);
   const planFile = join(context.work, `${label}.tfplan`);
-  await Bun.write(inputs, JSON.stringify(projection.variables));
+  await writeFile(inputs, JSON.stringify(projection.variables), { mode: 0o600 });
   const { exitCode } = await context.run(
     context.session,
     [
@@ -353,7 +376,8 @@ async function checkCase(
 export async function removalPlanProblems(
   context: RemovalCheckContext,
 ): Promise<{ report: string[]; problems: string[] }> {
-  const fixture: StateFixtureContext = { ...context.fixture, ...context };
+  const { run, session, statePath, work } = context;
+  const fixture: StateFixtureContext = { ...context.fixture, run, session, statePath, work };
   const report: string[] = [];
   const problems: string[] = [];
   for (const hosts of ["several", "one"] as const) {
@@ -366,7 +390,7 @@ export async function removalPlanProblems(
       `removal fixture: ${hosts === "one" ? "one host" : "several hosts"} (${String(recordedHostKeys(outputs))}), a state Terraform plans no change for`,
     );
     for (const removalCase of CASES.filter((each) => each.hosts === hosts)) {
-      await Bun.write(context.statePath, state);
+      await writeFile(context.statePath, state, { mode: 0o600 });
       const result = await checkCase(context, removalCase, instance, outputs);
       report.push(...result.report);
       problems.push(...result.problems);

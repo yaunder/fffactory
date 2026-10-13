@@ -8,10 +8,11 @@
 - `terraform-check.ts` (`just terraform-check`, CI's Terraform job) checks `assets/terraform`
   with the managed Terraform only: `fmt`, `validate` against the shipped lockfiles, and plans
   of both root modules for two factory IDs whose JSON must keep every name in its own
-  namespace. Its plans reach
-  no AWS: an override in its private copy gives the provider example keys and points every
-  endpoint at a local stand-in. It downloads Terraform and the provider, so `check-all` does
-  not run it.
+  namespace. Its plans reach no AWS: an override in its private copy gives the provider
+  example keys and points every endpoint at a local stand-in, and Terraform runs with
+  `AWS_CONFIG_FILE` and `AWS_SHARED_CREDENTIALS_FILE` at `/dev/null` and
+  `AWS_EC2_METADATA_DISABLED=true`, so no local AWS profile or credential can be read. It
+  downloads Terraform and the provider, so `check-all` does not run it.
 - `terraform-check.ts` also compares each planned host's `user_data` with the rendering the
   bootstrap tests use (`tests/support/user-data.ts`), and plans the factory root without
   hosts, an empty factory: no instance, the shared infrastructure kept, the hosts' policy

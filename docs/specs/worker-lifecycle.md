@@ -316,7 +316,13 @@ The removal, under the same lock and record:
    `delete`; removing the last host leaves the policy allowing only the
    enrollment key. Each is allowed. Refused: the same plan judged with another
    instance listed, or none, and removals planned together with another host's
-   instance type or the subnet's CIDR block changed.
+   instance type, the subnet's CIDR block or another host's Paseo password
+   changed, the last a policy update that is more than the removed host's
+   password dropped. With `-refresh=false` each change's `before` values are
+   Terraform's planned values, not what AWS returns on refresh, so the check
+   proves the plan's shape and the rule's verdicts on it, not that a production
+   refresh adds no drift; drift that does appear is another change, which the
+   rule refuses.
 3. Show the plan, reusing the plan review's words:
 
    ```text
@@ -910,8 +916,9 @@ plan as shown; the failures' words);
 `scripts/terraform-state-fixture.ts` (the rule against Terraform's real
 removal plans from synthesized fixture states: a host with its own password,
 without one, sharing one, and the last host allowed, each plan exactly the
-removal's changes; another instance listed, none listed, and another host's or
-the network's change planned together refused);
+removal's changes; another instance listed, none listed, and another host's
+instance type or Paseo password, or the network's change, planned together
+refused);
 `tests/application/worker-lifecycle.test.ts` (a removal recorded step by step,
 its plan file removed, factory.json written by `InstanceStore`; afterwards the
 infrastructure plan shows no change and status no longer lists the host;

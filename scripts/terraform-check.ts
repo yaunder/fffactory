@@ -25,7 +25,9 @@
  * The plans run against no AWS account. An override file, added only to this script's copy
  * of the modules, keeps state local and gives the AWS provider documentation example keys,
  * skips its account and credential checks, and points every endpoint it could call at a
- * local stand-in that answers only the Amazon Linux image parameter lookup. Downloads the
+ * local stand-in that answers only the Amazon Linux image parameter lookup. Terraform runs
+ * with only the caller's PATH, HOME, TMPDIR and proxy settings, its AWS config and
+ * credentials files set to /dev/null and the instance metadata service disabled. Downloads the
  * managed Terraform (into the FFFactory cache) and the AWS provider when they are not cached.
  * Spec: docs/specs/provisioning.md §Resources and namespacing; the removal plans,
  * docs/specs/worker-lifecycle.md §Terminate (remove).
@@ -67,12 +69,21 @@ const EXAMPLE_KEYS = {
 /** Services the AWS provider could call for these modules; each goes to the stand-in. */
 const ENDPOINTS = ["ec2", "iam", "s3", "ssm", "sts"];
 
-/** Only what Terraform needs to run and download; no AWS or Terraform settings of the caller. */
-const operator = Object.fromEntries(
-  ["PATH", "HOME", "TMPDIR", "HTTPS_PROXY", "https_proxy", "NO_PROXY", "no_proxy"].flatMap(
-    (name) => (process.env[name] === undefined ? [] : [[name, process.env[name] as string]]),
+/**
+ * Only what Terraform needs to run and download; no AWS or Terraform settings of the caller.
+ * The AWS config and credentials files point at /dev/null and the instance metadata service is
+ * off, so the provider can read no local profile or credential even through `HOME`.
+ */
+const operator = {
+  ...Object.fromEntries(
+    ["PATH", "HOME", "TMPDIR", "HTTPS_PROXY", "https_proxy", "NO_PROXY", "no_proxy"].flatMap(
+      (name) => (process.env[name] === undefined ? [] : [[name, process.env[name] as string]]),
+    ),
   ),
-);
+  AWS_CONFIG_FILE: "/dev/null",
+  AWS_SHARED_CREDENTIALS_FILE: "/dev/null",
+  AWS_EC2_METADATA_DISABLED: "true",
+};
 const run = terraformRunner(operator);
 
 /** Answers the SSM lookup of the Amazon Linux image; refuses every other request. */
