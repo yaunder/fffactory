@@ -2,9 +2,10 @@
  * Factory plans: what `fffactory plan` shows and saves, and what `fffactory apply` applies.
  * A saved plan is bound to the circumstances it was planned in (factory.json's exact text,
  * the release and its assets, the AWS account and the factory's Terraform state); applying
- * it in any others is refused, as is a plan older than its lifetime. Until the lifecycle
- * work of milestone M3 lands, a plan that would remove a host key or destroy or replace a
- * host machine is refused, naming the capability it needs (D11).
+ * it in any others is refused, as is a plan older than its lifetime. A plan that would
+ * remove a host key is refused, naming `fffactory worker terminate KEY`, the only command that
+ * removes a host (`host-removal.ts`); until host replacement lands in milestone M3, one that
+ * would destroy or replace a host machine is refused, naming the capability it needs (D11).
  */
 import { type RandomBytes, randomAlphanumeric } from "./initialization";
 import {
@@ -287,7 +288,7 @@ export function declaredWorkers(instance: FactoryInstance, factoryId: FactoryId)
 }
 
 /** The address the hosts module gives host `key`'s machine. */
-function hostMachineAddress(key: HostKey): string {
+export function hostMachineAddress(key: HostKey): string {
   return `module.hosts.aws_instance.host["${key}"]`;
 }
 
@@ -373,9 +374,14 @@ export function describePlan(
   ];
 }
 
-/** A change a lifecycle capability not yet built would need, refused until it lands (D11). */
+/**
+ * A change a lifecycle capability not yet built would need, refused until it lands (D11), or
+ * one only a lifecycle command (`command`) may make.
+ */
 export interface D11Refusal {
   readonly capability: string;
+  /** The only command that makes the change, when one does. */
+  readonly command?: string;
   readonly reasons: readonly string[];
   /** What the operator can do instead. */
   readonly instead: string;
@@ -388,15 +394,15 @@ const HOST_MACHINE = /(^|\.)aws_instance\.[A-Za-z0-9_-]+(\[[^\]]*\])?$/;
  * A managed `aws_instance`. A plan that names no mode is judged by type and address alone,
  * failing closed: a data source is only ever read, so it is never refused anyway.
  */
-function isHostMachine({ address, type, mode }: ResourceChange): boolean {
+export function isHostMachine({ address, type, mode }: ResourceChange): boolean {
   if (mode !== undefined && mode !== "managed") return false;
   if (type !== undefined) return type === "aws_instance";
   return HOST_MACHINE.test(address);
 }
 
 /**
- * What a host machine may undergo before host retirement and replacement land: creation, an
- * in-place update, or nothing. Any other action, even one fffactory does not know, is refused.
+ * What a host machine may undergo before host replacement lands: creation, an in-place
+ * update, or nothing. Any other action, even one fffactory does not know, is refused.
  */
 const KEEPS_HOST = new Set(["no-op", "read", "create", "update"]);
 
@@ -414,35 +420,46 @@ function fate(actions: readonly string[]): string {
 /**
  * D11: a plan that does anything to a host machine (an `aws_instance`) but create it, update
  * it in place or leave it, such as destroying or replacing it, is refused until host
- * retirement and replacement land.
+ * replacement lands. Only `fffactory worker terminate KEY`'s removal plan destroys one
+ * (`host-removal.ts`).
  */
 export function hostMachineRefusal(changes: readonly ResourceChange[]): D11Refusal | undefined {
   const lost = changes.filter((change) => isHostMachine(change) && !keepsHost(change.actions));
   if (lost.length === 0) return undefined;
   return {
-    capability: "host retirement and replacement",
+    capability: "host replacement",
     reasons: lost.map(({ address, actions }) => `${address} would be ${fate(actions)}`),
     instead: "Change factory.json so the plan keeps every host machine, then plan again.",
   };
 }
 
+/** The one command that removes a host, its machine with it. */
+const REMOVES_HOST = "fffactory worker terminate KEY";
+
 /**
- * D11: removing (or renaming) a host key the factory's state records is refused until host
- * retirement lands. `issues` are the stable host key check's.
+ * D11: removing (or renaming) a host key the factory's state records by editing factory.json is
+ * refused: only `fffactory worker terminate KEY` removes a host. `issues` are the stable host
+ * key check's.
  */
 export function hostKeyRemovalRefusal(issues: readonly Issue[]): D11Refusal | undefined {
   if (issues.length === 0) return undefined;
   return {
-    capability: "host retirement",
+    capability: "host removal",
+    command: REMOVES_HOST,
     reasons: issues.map(({ path, message }) => `${path}: ${message}`),
-    instead: "Declare every provisioned host key in factory.json again, then plan again.",
+    instead:
+      "Declare every provisioned host key in factory.json again, then remove a host with " +
+      `\`${REMOVES_HOST}\`.`,
   };
 }
 
 export function describeD11Refusal(refusal: D11Refusal): string[] {
+  const missing =
+    refusal.command === undefined
+      ? "which fffactory does not have yet (D11; it arrives in milestone M3):"
+      : `which only \`${refusal.command}\` does (D11):`;
   return [
-    `Refusing: this change needs ${refusal.capability}, which fffactory does not have yet ` +
-      "(D11; it arrives in milestone M3):",
+    `Refusing: this change needs ${refusal.capability}, ${missing}`,
     ...refusal.reasons.map((reason) => `  ${reason}`),
     `Nothing was applied. ${refusal.instead}`,
   ];

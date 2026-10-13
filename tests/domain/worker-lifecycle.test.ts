@@ -59,6 +59,9 @@ describe("the worker lifecycle commands (worker-lifecycle §Commands)", () => {
       "Wait, then rerun `fffactory worker stop builder-1`.",
     );
     expect(thenRerunWorker("terminate", KEY)("Wait")).toBe(
+      "Wait, then rerun `fffactory worker terminate builder-1`.",
+    );
+    expect(thenRerunWorker("terminate-keep", KEY)("Wait")).toBe(
       "Wait, then rerun `fffactory worker terminate builder-1 --keep`.",
     );
   });
@@ -366,13 +369,13 @@ const TERMINATE_RERUN = "`fffactory worker terminate builder-1 --keep`";
 
 describe("what each EC2 state means for terminate (worker-lifecycle §Terminate (keep))", () => {
   test("acts on a running or a stopped worker, and only waits for one being terminated", () => {
-    expect(powerStep("terminate", machine("running"), KEY)).toEqual({ kind: "act" });
-    expect(powerStep("terminate", machine("stopped"), KEY)).toEqual({ kind: "act" });
-    expect(powerStep("terminate", machine("shutting-down"), KEY)).toEqual({ kind: "await" });
+    expect(powerStep("terminate-keep", machine("running"), KEY)).toEqual({ kind: "act" });
+    expect(powerStep("terminate-keep", machine("stopped"), KEY)).toEqual({ kind: "act" });
+    expect(powerStep("terminate-keep", machine("shutting-down"), KEY)).toEqual({ kind: "await" });
   });
 
   test("refuses a machine on its way up or down until it gets there", () => {
-    expect(powerStep("terminate", machine("pending"), KEY)).toEqual({
+    expect(powerStep("terminate-keep", machine("pending"), KEY)).toEqual({
       kind: "refused",
       refusal: {
         summary: `EC2 instance ${ID} is pending`,
@@ -380,7 +383,7 @@ describe("what each EC2 state means for terminate (worker-lifecycle §Terminate 
         nextAction: `Wait until it is running, then rerun ${TERMINATE_RERUN}.`,
       },
     });
-    expect(powerStep("terminate", machine("stopping"), KEY)).toMatchObject({
+    expect(powerStep("terminate-keep", machine("stopping"), KEY)).toMatchObject({
       kind: "refused",
       refusal: { nextAction: `Wait until it has stopped, then rerun ${TERMINATE_RERUN}.` },
     });
@@ -394,17 +397,19 @@ describe("what each EC2 state means for terminate (worker-lifecycle §Terminate 
   });
 
   test("words its request's failures with TerminateInstances", () => {
-    expect(requestFailed("terminate", WORKER, ID, "EC2 TerminateInstances failed: X")).toEqual({
-      summary: "EC2 TerminateInstances failed: X",
-      details: [],
-      nextAction:
-        `Check that the credentials may call ec2:TerminateInstances on instance ${ID}, then ` +
-        `rerun ${TERMINATE_RERUN}.`,
-    });
-    expect(requestUnanswered("terminate", WORKER, ID, "timed out").details).toEqual([
+    expect(requestFailed("terminate-keep", WORKER, ID, "EC2 TerminateInstances failed: X")).toEqual(
+      {
+        summary: "EC2 TerminateInstances failed: X",
+        details: [],
+        nextAction:
+          `Check that the credentials may call ec2:TerminateInstances on instance ${ID}, then ` +
+          `rerun ${TERMINATE_RERUN}.`,
+      },
+    );
+    expect(requestUnanswered("terminate-keep", WORKER, ID, "timed out").details).toEqual([
       `The request may have reached EC2: instance ${ID} may be shutting down.`,
     ]);
-    expect(powerTimedOut("terminate", WORKER, ID, "shutting-down").summary).toBe(
+    expect(powerTimedOut("terminate-keep", WORKER, ID, "shutting-down").summary).toBe(
       `EC2 instance ${ID} did not reach terminated within 10 min (last seen: shutting-down)`,
     );
   });
@@ -424,13 +429,17 @@ describe("terminate's gates (worker-lifecycle §Gates (terminate))", () => {
       { protocol_version: HOST_PROTOCOL_VERSION, state: "none" },
     ] satisfies RepositoryObservation[])
       expect(
-        terminateGate({ kind: "inspected", activity: IDLE, repositories }, WORKER),
+        terminateGate(
+          { kind: "inspected", activity: IDLE, repositories },
+          WORKER,
+          "terminate-keep",
+        ),
       ).toBeUndefined();
   });
 
   test("pass a stopped worker uninspected, and anything --force skipped", () => {
-    expect(terminateGate({ kind: "stopped" }, WORKER)).toBeUndefined();
-    expect(terminateGate({ kind: "forced" }, WORKER)).toBeUndefined();
+    expect(terminateGate({ kind: "stopped" }, WORKER, "terminate-keep")).toBeUndefined();
+    expect(terminateGate({ kind: "forced" }, WORKER, "terminate-keep")).toBeUndefined();
   });
 
   test("refuse while agents are active: terminating would end them", () => {
@@ -442,6 +451,7 @@ describe("terminate's gates (worker-lifecycle §Gates (terminate))", () => {
           repositories: synchronized(),
         },
         WORKER,
+        "terminate-keep",
       ),
     ).toEqual({
       summary: "2 agents are active on fff-abcd1234-builder-1: terminating it would end them",
@@ -465,6 +475,7 @@ describe("terminate's gates (worker-lifecycle §Gates (terminate))", () => {
           },
         },
         WORKER,
+        "terminate-keep",
       ),
     ).toEqual({
       summary:
@@ -478,6 +489,7 @@ describe("terminate's gates (worker-lifecycle §Gates (terminate))", () => {
       terminateGate(
         { kind: "inspected", activity: IDLE, repositories: synchronized(["acme/a", "acme/b"]) },
         WORKER,
+        "terminate-keep",
       ),
     ).toEqual({
       summary: "fff-abcd1234-builder-1 holds unmanaged checkouts: terminating it would lose them",
@@ -497,6 +509,7 @@ describe("terminate's gates (worker-lifecycle §Gates (terminate))", () => {
           repositories: synchronized(),
         },
         WORKER,
+        "terminate-keep",
       ),
     ).toEqual({
       summary:
@@ -511,7 +524,11 @@ describe("terminate's gates (worker-lifecycle §Gates (terminate))", () => {
       { state: "unknown", reason: "the worker's repository result could not be read" },
     ] satisfies RepositoryObservation[])
       expect(
-        terminateGate({ kind: "inspected", activity: IDLE, repositories }, WORKER),
+        terminateGate(
+          { kind: "inspected", activity: IDLE, repositories },
+          WORKER,
+          "terminate-keep",
+        ),
       ).toMatchObject({
         summary: expect.stringMatching(
           /^fff-abcd1234-builder-1 could not be inspected for checkouts: /,
@@ -529,7 +546,7 @@ describe("terminate's gates (worker-lifecycle §Gates (terminate))", () => {
       details: ["See the Tailscale client check."],
       nextAction: `If it failed, terminate it with ${TERMINATE_RERUN}, then rerun ${TERMINATE_RERUN}.`,
     };
-    expect(terminateGate({ kind: "unlocated", verdict }, WORKER)).toEqual({
+    expect(terminateGate({ kind: "unlocated", verdict }, WORKER, "terminate-keep")).toEqual({
       summary:
         "fff-abcd1234-builder-1 could not be inspected: No Tailscale device named fff-abcd1234-builder-1 is visible from this machine",
       details: ["See the Tailscale client check."],
@@ -550,7 +567,7 @@ describe("terminate's confirmation (worker-lifecycle §Confirmation (typed key))
   });
 
   test("the question names the worker, its instance and what is destroyed", () => {
-    expect(confirmationQuestion("terminate", WORKER, ID)).toBe(
+    expect(confirmationQuestion("terminate-keep", WORKER, ID)).toBe(
       `Terminate worker builder-1 (fff-abcd1234-builder-1), EC2 instance ${ID}? ` +
         "Its machine and root volume are destroyed. Type the host key to confirm: ",
     );
@@ -575,7 +592,7 @@ describe("terminate's confirmation (worker-lifecycle §Confirmation (typed key))
 
 describe("the Tailscale admin client (worker-lifecycle §Tailnet device removal)", () => {
   test("is required before anything reaches AWS", () => {
-    expect(adminClientMissing(KEY)).toEqual({
+    expect(adminClientMissing("terminate-keep", KEY)).toEqual({
       summary:
         "factory.json has no Tailscale admin client (tailscale.admin_client_secret): terminate deletes the worker's tailnet device with it",
       details: [],
@@ -584,14 +601,22 @@ describe("the Tailscale admin client (worker-lifecycle §Tailnet device removal)
   });
 
   test("a secret that cannot be read, or a client Tailscale refuses, is refused", () => {
-    expect(adminSecretUnreadable(KEY, "Reading the secret failed: AccessDeniedException")).toEqual({
+    expect(
+      adminSecretUnreadable(
+        "terminate-keep",
+        KEY,
+        "Reading the secret failed: AccessDeniedException",
+      ),
+    ).toEqual({
       summary: "Reading the secret failed: AccessDeniedException",
       details: [],
       nextAction:
         "Check that the credentials may call secretsmanager:GetSecretValue on the secret " +
         `tailscale.admin_client_secret refers to, then rerun ${TERMINATE_RERUN}.`,
     });
-    expect(adminClientUnusable(KEY, "Tailscale refused the admin client (HTTP 401)")).toEqual({
+    expect(
+      adminClientUnusable("terminate-keep", KEY, "Tailscale refused the admin client (HTTP 401)"),
+    ).toEqual({
       summary:
         "The Tailscale admin client could not be used: Tailscale refused the admin client (HTTP 401)",
       details: [],
@@ -611,10 +636,18 @@ describe("the tailnet device removal's outcome (worker-lifecycle §Tailnet devic
 
   test("is complete when every tagged device was deleted and no untagged one remains", () => {
     expect(
-      deviceRemovalRefusal({ kind: "listed", removed: ["nA"], failed: [], untagged: [] }, WORKER),
+      deviceRemovalRefusal(
+        { kind: "listed", removed: ["nA"], failed: [], untagged: [] },
+        WORKER,
+        "terminate-keep",
+      ),
     ).toBeUndefined();
     expect(
-      deviceRemovalRefusal({ kind: "listed", removed: [], failed: [], untagged: [] }, WORKER),
+      deviceRemovalRefusal(
+        { kind: "listed", removed: [], failed: [], untagged: [] },
+        WORKER,
+        "terminate-keep",
+      ),
     ).toBeUndefined();
   });
 
@@ -628,6 +661,7 @@ describe("the tailnet device removal's outcome (worker-lifecycle §Tailnet devic
           untagged: ["nC"],
         },
         WORKER,
+        "terminate-keep",
       ),
     ).toEqual({
       summary: "Not every Tailscale device named fff-abcd1234-builder-1 was deleted",
@@ -641,7 +675,11 @@ describe("the tailnet device removal's outcome (worker-lifecycle §Tailnet devic
 
   test("a listing that failed deleted nothing", () => {
     expect(
-      deviceRemovalRefusal({ kind: "unlisted", reason: "Tailscale answered HTTP 503" }, WORKER),
+      deviceRemovalRefusal(
+        { kind: "unlisted", reason: "Tailscale answered HTTP 503" },
+        WORKER,
+        "terminate-keep",
+      ),
     ).toEqual({
       summary: "The tailnet's devices could not be listed: Tailscale answered HTTP 503",
       details: [],

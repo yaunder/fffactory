@@ -589,20 +589,39 @@ steps; it does not duplicate the checks.
 
 ## Host retirement
 
-Removing a host is a two-step operation.
+A host is removed with one command, `fffactory worker terminate KEY`
+(admin-tier; [worker lifecycle §Terminate (remove)](../specs/worker-lifecycle.md#terminate-remove)),
+under the factory-wide lock and one operation record:
 
-1. Mark the stable host as retiring. Apply pauses dispatch, prevents new work,
-   and reports active agents, unsafe repositories, credentials, and data that
-   need attention.
-2. After those gates are satisfied, a later reviewed removal may snapshot and
-   destroy the AWS machine with a destructive-action approval.
+1. Gates: a running worker is inspected, and active agents, unresolved or
+   unmanaged checkouts, or a worker that cannot be inspected refuse the
+   removal unless `--force` overrides them. A stopped worker passes
+   uninspected.
+2. A scoped Terraform plan of factory.json without the host, which may only
+   destroy that host's machine (and stop allowing its own Paseo password); any
+   other pending change is refused until it is applied.
+3. A destructive-action approval: the plan is shown and the operator types the
+   host key.
+4. Terraform applies exactly that plan, which drops the key from the keys its
+   state records; factory.json is then written without the host, and the
+   worker's Tailscale devices are deleted through the Tailscale API with the
+   operator's admin client.
 
-Deleting a host entry without retirement is invalid. Renaming a stable host key
-is also invalid; create a new host and retire the old one. Tailscale cleanup
-remains manual and report-only in the first cut.
+Each partial state (Terraform failed, factory.json not written, a device left)
+is recorded with the next action that finishes it, usually rerunning the
+command. `--keep` destroys only the machine and its devices, keeping the host,
+so the next apply creates it afresh.
 
-Retirement arrives in M3. Until then `plan` refuses to remove a host key or to
-destroy or replace a host machine (D11).
+Deleting a host entry by hand is invalid, and `plan` refuses it (D11), naming
+the command. Renaming a stable host key is also invalid; create a new host and
+remove the old one.
+
+This cut drops the earlier two-step design: there is no `retiring` state, apply
+does not pause dispatch first (an agent dispatch starts between the gates and
+the removal ends with the machine), and no EBS snapshot is taken: treat Git as
+the durability boundary. Host replacement in place is not built either: until
+it arrives in M3, `plan` refuses any other plan that destroys or replaces a
+host machine (D11).
 
 ## Companion skill
 
@@ -716,7 +735,8 @@ M3, operate and expand, planned as need dictates:
 - a second worker and the rollout policy;
 - full `upgrade` with schema migration and backup;
 - base migrations with reboot and reconnect;
-- host retirement with snapshot and destroy approvals;
+- host retirement: `fffactory worker terminate KEY` removes a host with a
+  reviewed, scoped destroy; snapshots and a `retiring` step remain deferred;
 - inventory and orphan reporting across AWS, Tailscale, and `factory.json`;
 - the companion `fffactory` skill and `skill install`;
 - the full acceptance exercise.
@@ -727,8 +747,10 @@ Deferring lifecycle work to M3 is safe only because `plan` refuses what it
 cannot yet do (D11). Until the epic that adds the capability lands, `plan`
 refuses:
 
-- removing a host key from `factory.json` (no retirement yet);
-- any Terraform plan that destroys or replaces a host machine (no retirement or
+- removing a host key from `factory.json` by hand (only `fffactory worker
+  terminate KEY` removes a host, through its scoped removal plan, the one plan
+  allowed to destroy a host machine);
+- any other Terraform plan that destroys or replaces a host machine (no
   replacement yet);
 - an upgrade whose release needs a newer base generation (no base migration
   yet);

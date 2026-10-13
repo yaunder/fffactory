@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { AgentActivity } from "../../src/application/control-plane";
 import type { MachineControl } from "../../src/application/machine-control";
+import { ProvisioningFailed } from "../../src/application/provisioner";
 import { run, waitsOnInterrupt } from "../../src/cli/run";
 import { newLockRecord } from "../../src/domain/factory-lock";
 import type { FactoryInstance, Release, SecretReference } from "../../src/domain/instance";
@@ -31,6 +32,7 @@ import {
 import { BUCKET, declaring, FACTORY, RELEASE, WORKER_TAG } from "../support/factory-world";
 import { MemoryInstanceStore } from "../support/memory-instance-store";
 import { MemoryLockStore } from "../support/memory-lock-store";
+import { fakeFactoryWorld } from "../support/fake-provisioner";
 
 const PATH = "/work/repo/.fffactory/factory.json";
 const KEY = "builder-1";
@@ -58,6 +60,10 @@ interface Setup {
   readonly worker?: ReturnType<typeof readyWorker>;
   readonly repositories?: "synchronized" | "unresolved";
   readonly admin?: Parameters<typeof fakeTailnetAdmin>[0];
+  /** The EC2 inventory: the one machine carrying builder-1's key, unless given. */
+  readonly machines?: readonly Machine[];
+  /** The host keys the factory's Terraform state has provisioned. */
+  readonly provisioned?: readonly string[];
 }
 
 const ADMIN_ARN =
@@ -87,11 +93,22 @@ function workerTransport(options: Setup) {
   });
 }
 
+/** The EC2 inventory's machines: builder-1's, in the state given, unless the setup lists them. */
+function machinesOf(options: Setup): readonly Machine[] {
+  return options.machines ?? [machine(KEY, options.state ?? "running", ID)];
+}
+
 function setup(options: Setup = {}) {
   const store = new MemoryInstanceStore({
     [PATH]: JSON.stringify(options.instance ?? declaring(KEY, "builder-2")),
   });
   const lockStore = new MemoryLockStore([BUCKET]);
+  const terraform = fakeFactoryWorld({
+    store: lockStore,
+    bucket: BUCKET,
+    hosts: options.provisioned ?? [KEY, "builder-2"],
+    instanceIds: { [KEY]: ID },
+  });
   const control = fakeMachineControl({ states: options.states ?? ["stopped"] });
   const controlPlane = fakeControlPlane("healthy", options.activity ?? { kind: "idle" });
   const identity = options.identity ?? fakeCallerIdentity();
@@ -106,10 +123,8 @@ function setup(options: Setup = {}) {
     {
       lockStore,
       identity: identity.identity,
-      machines: fakeMachineInventory({
-        kind: "machines",
-        machines: [machine(KEY, options.state ?? "running", ID)],
-      }).machines,
+      machines: fakeMachineInventory({ kind: "machines", machines: machinesOf(options) }).machines,
+      provisioner: terraform.provisioner,
       machineControl: options.control ?? control.control,
       controlPlane: controlPlane.controlPlane,
       tailnet: fakeTailnet(options.view ?? ONLINE).tailnet,
@@ -123,7 +138,7 @@ function setup(options: Setup = {}) {
       },
     },
   );
-  return { ...cli, lockStore, control, controlPlane, identity, transport, admin };
+  return { ...cli, store, lockStore, terraform, control, controlPlane, identity, transport, admin };
 }
 
 const all = (cli: { out: string[]; err: string[] }) => [...cli.out, ...cli.err].join("\n");
@@ -603,15 +618,6 @@ describe("fffactory worker terminate --keep (worker-lifecycle §Terminate (keep)
 });
 
 describe("fffactory worker terminate's refusals (worker-lifecycle §Terminate (keep))", () => {
-  test("without --keep: removal arrives later", async () => {
-    const cli = setup(TERMINATING);
-    expect(await run(["worker", "terminate", KEY, "--confirm", KEY], cli.context)).toBe(1);
-    expect(cli.err).toEqual([
-      "fffactory worker terminate: removal arrives in a later release; use --keep",
-    ]);
-    expect(cli.identity.requests).toEqual([]);
-  });
-
   test("without the admin client, naming how to store it", async () => {
     const cli = setup({ states: ["terminated"] });
     expect(await run(TERMINATE(), cli.context)).toBe(1);
@@ -664,7 +670,142 @@ describe("fffactory worker terminate's refusals (worker-lifecycle §Terminate (k
     const cli = setup();
     expect(await run(["worker", "--help"], cli.context)).toBe(0);
     expect(cli.out).toContain(
-      "       fffactory worker terminate KEY --keep [--force] [--confirm KEY] [--instance PATH] [--profile NAME]",
+      "       fffactory worker terminate KEY [--keep] [--force] [--confirm KEY] [--instance PATH] [--profile NAME]",
     );
+  });
+});
+
+const REMOVE = (...more: string[]) => ["worker", "terminate", KEY, "--confirm", KEY, ...more];
+
+describe("fffactory worker terminate (worker-lifecycle §Terminate (remove))", () => {
+  test("shows the removal plan, applies it, writes factory.json without the host and deletes its device", async () => {
+    const cli = setup({ instance: withAdmin() });
+    expect(await run(REMOVE(), cli.context)).toBe(0);
+    expect(cli.err).toEqual([]);
+    expect(cli.out).toEqual([
+      `Instance: ${PATH} (nearest .fffactory/factory.json)`,
+      `Worker ${KEY} (${HOSTNAME}): EC2 instance ${ID} is running.`,
+      `Planning the removal of host ${KEY}. Terraform's output is not shown.`,
+      "Removal plan:",
+      `  Configuration: ${PATH}`,
+      `  Factory: Test factory (${FACTORY})`,
+      "  AWS account: 123456789012, Region: eu-west-2",
+      `  Release: ${RELEASE}`,
+      "Infrastructure changes:",
+      `  - module.hosts.aws_instance.host["${KEY}"]`,
+      "  0 to add, 0 to change, 1 to destroy.",
+      `factory.json: remove host ${KEY}.`,
+      `Tailnet: delete the devices named ${HOSTNAME} that carry the factory's tag.`,
+      "Applying the removal plan. Terraform's output is not shown; this can take several minutes.",
+      `factory.json no longer declares host ${KEY}: ${PATH}`,
+      `Deleting the Tailscale devices named ${HOSTNAME}.`,
+      `Removed worker ${KEY} (${HOSTNAME}): its EC2 instance and root volume are gone, and ` +
+        "neither Terraform nor factory.json records it.",
+      `Deleted Tailscale device nWorker1CNTRL (${HOSTNAME}).`,
+      expect.stringMatching(/^Operation record: s3:\/\/fff-abcd1234-state\/.+\.json$/),
+    ]);
+    const written = JSON.parse(cli.store.files[PATH] as string) as FactoryInstance;
+    expect(written.hosts?.map((host): string => host.key)).toEqual(["builder-2"]);
+    expect([...cli.terraform.world.hosts]).toEqual(["builder-2"]);
+    expect(cli.control.mutations()).toEqual([]);
+    expect(all(cli)).not.toContain(ADMIN_SECRET);
+    expect(cli.lockStore.locks.size).toBe(0);
+  });
+
+  test("a plan with any other change is refused before the question, applying nothing", async () => {
+    const cli = setup({ instance: withAdmin(), provisioned: [KEY] });
+    expect(await run(REMOVE(), cli.context)).toBe(1);
+    expect(cli.err).toEqual([
+      `Refusing to terminate the worker: The removal plan changes more than host ${KEY}'s ` +
+        "machine: apply factory.json's other changes first",
+      '  module.hosts.aws_instance.host["builder-2"] would be created',
+      "Next: Apply factory.json's other changes first with `fffactory apply`, or undo them, " +
+        `then rerun \`fffactory worker terminate ${KEY}\`.`,
+    ]);
+    expect(cli.terraform.calls.map(({ call }) => call)).not.toContain("applyPlan");
+    expect(cli.store.writes).toEqual([]);
+  });
+
+  test("a failed Terraform apply prints where its diagnostics are, never their text", async () => {
+    const cli = setup({ instance: withAdmin() });
+    const failing = {
+      ...cli.context,
+      provisioner: {
+        ...cli.context.provisioner,
+        applyPlan: async () => {
+          throw new ProvisioningFailed(
+            "`terraform apply` exited with status 1",
+            "/home/operator/.cache/fffactory/terraform/diagnostics/apply.log",
+          );
+        },
+      },
+    };
+    expect(await run(REMOVE(), failing)).toBe(1);
+    expect(cli.err).toEqual([
+      "Terminating the worker failed: Removing the host failed: `terraform apply` exited with status 1",
+      "  Terraform may have destroyed the machine before it stopped. factory.json is unchanged: " +
+        `it still declares host ${KEY}.`,
+      `Next: Rerun \`fffactory worker terminate ${KEY}\`: it plans the removal again from what ` +
+        "exists now, and finishes it.",
+      "Terraform's diagnostics: /home/operator/.cache/fffactory/terraform/diagnostics/apply.log",
+    ]);
+    expect(cli.out.at(-1)).toStartWith("Operation record: s3://");
+    expect(cli.store.writes).toEqual([]);
+  });
+
+  test("a host whose machine is already gone is removed, saying so", async () => {
+    const cli = setup({ instance: withAdmin(), machines: [], provisioned: ["builder-2"] });
+    expect(await run(REMOVE(), cli.context)).toBe(0);
+    expect(cli.out).toContain(
+      `Worker ${KEY} (${HOSTNAME}): no EC2 instance carries its key; its machine is already gone.`,
+    );
+    expect(cli.out).toContain("Infrastructure: no changes.");
+    expect(cli.out).not.toContain(
+      "Applying the removal plan. Terraform's output is not shown; this can take several minutes.",
+    );
+  });
+
+  test("the only declared host is refused before anything reaches AWS", async () => {
+    const both = withAdmin();
+    const cli = setup({ instance: { ...both, hosts: (both.hosts ?? []).slice(0, 1) } });
+    expect(await run(REMOVE(), cli.context)).toBe(1);
+    expect(cli.err[0]).toBe(
+      `Refusing to terminate the worker: ${KEY} is the only host factory.json declares: a ` +
+        "factory keeps at least one worker",
+    );
+    expect(cli.identity.requests).toEqual([]);
+  });
+
+  test("interrupted while Terraform applies: factory.json still declares the host, and the rerun finishes", async () => {
+    const cli = setup({ instance: withAdmin() });
+    let interrupted = false;
+    cli.terraform.world.beforeChange = () => {
+      interrupted = true;
+    };
+    expect(await run(REMOVE(), { ...cli.context, interrupted: () => interrupted })).toBe(1);
+    expect(cli.err).toEqual([
+      "Terraform was applying the removal and may have destroyed the machine; factory.json " +
+        `still declares host ${KEY}, and the rerun finishes the removal.`,
+      "Interrupted: the factory stays locked, with a record of this operation. Once fffactory " +
+        "has exited, break the lock with `fffactory lock break`, then rerun " +
+        `\`fffactory worker terminate ${KEY}\`.`,
+    ]);
+  });
+
+  test("interrupted once factory.json is written: nothing to rerun, the devices may remain", async () => {
+    const cli = setup({ instance: withAdmin() });
+    let interrupted = false;
+    const write = cli.store.write.bind(cli.store);
+    cli.store.write = async (path, contents) => {
+      await write(path, contents);
+      interrupted = true;
+    };
+    expect(await run(REMOVE(), { ...cli.context, interrupted: () => interrupted })).toBe(1);
+    expect(cli.err).toEqual([
+      `factory.json no longer declares host ${KEY}, and Terraform destroyed its machine; its ` +
+        "tailnet devices may remain: check them at https://login.tailscale.com/admin/machines.",
+      "Interrupted: the factory stays locked, with a record of this operation. Once fffactory " +
+        "has exited, break the lock with `fffactory lock break`.",
+    ]);
   });
 });

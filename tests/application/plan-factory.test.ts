@@ -247,7 +247,8 @@ describe("fffactory plan (plan-apply §Plan)", () => {
     expect(result).toMatchObject({
       kind: "d11",
       refusal: {
-        capability: "host retirement",
+        capability: "host removal",
+        command: "fffactory worker terminate KEY",
         reasons: [expect.stringContaining('host key "builder-2" is provisioned')],
       },
     });
@@ -262,7 +263,7 @@ describe("fffactory plan (plan-apply §Plan)", () => {
     expect(await planFactory(deps, planRequest())).toEqual({
       kind: "d11",
       refusal: {
-        capability: "host retirement and replacement",
+        capability: "host replacement",
         reasons: [`${hostAddress("builder-1")} would be replaced`],
         instead: "Change factory.json so the plan keeps every host machine, then plan again.",
       },

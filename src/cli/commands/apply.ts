@@ -60,10 +60,11 @@ const USAGE = [
   "whose first boot did not finish in time.",
   "",
   "Refused, naming what is missing, when this fffactory is not the release",
-  "factory.json pins, and until host retirement exists (milestone M3) when",
-  "factory.json removes a provisioned host key or the plan would destroy or",
-  "replace a host machine. Like every command that plans or changes AWS, it first",
-  "checks that the credentials belong to the factory's account.",
+  "factory.json pins, when factory.json no longer declares a provisioned host key",
+  "(only `fffactory worker terminate KEY` removes a host), and until host",
+  "replacement exists (milestone M3) when the plan would destroy or replace a host",
+  "machine. Like every command that plans or changes AWS, it first checks that the",
+  "credentials belong to the factory's account.",
 ];
 
 const APPROVAL_QUESTION = 'Apply this plan? Only "yes" applies it: ';

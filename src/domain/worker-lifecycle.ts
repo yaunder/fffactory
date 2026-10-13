@@ -19,8 +19,27 @@ import {
   type Verdict,
 } from "./status";
 
-/** The lifecycle commands this module rules. Terminate keeps the host (`--keep`). */
+/** What a lifecycle command does to the machine. */
 export type PowerAction = "stop" | "start" | "terminate";
+
+/**
+ * A lifecycle command as the operator runs it, which its next actions rerun: terminate removes
+ * the host from factory.json (`terminate`) unless it keeps it (`terminate-keep`, `--keep`).
+ */
+export type WorkerCommand = "stop" | "start" | "terminate" | "terminate-keep";
+
+/** The terminate commands: removing the host, or keeping it. */
+export type TerminateCommand = Extract<WorkerCommand, "terminate" | "terminate-keep">;
+
+/** The action a command takes on the machine. */
+export function actionOf(command: WorkerCommand): PowerAction {
+  return command === "terminate-keep" ? "terminate" : command;
+}
+
+/** Whether `command` removes the host from factory.json: terminate without `--keep`. */
+export function removesHost(command: WorkerCommand): command is "terminate" {
+  return command === "terminate";
+}
 
 /** The operation each action holds the factory lock as, and names its record by. */
 export const WORKER_OPERATIONS: Readonly<Record<PowerAction, string>> = {
@@ -55,17 +74,14 @@ export interface Refusal {
   readonly nextAction: string;
 }
 
-/**
- * The command line that runs `action` for host `key`. Terminate runs only with `--keep` until
- * it can remove the host too (`cli/commands/worker.ts`).
- */
-export function workerCommandLine(action: PowerAction, key: HostKey): string {
-  return `fffactory worker ${action} ${key}${action === "terminate" ? " --keep" : ""}`;
+/** The command line that runs `command` for host `key`. */
+export function workerCommandLine(command: WorkerCommand, key: HostKey): string {
+  return `fffactory worker ${actionOf(command)} ${key}${command === "terminate-keep" ? " --keep" : ""}`;
 }
 
 /** Completes a next action by rerunning the same command for the same host. */
-export function thenRerunWorker(action: PowerAction, key: HostKey): Then {
-  return (step) => `${step}, then rerun \`${workerCommandLine(action, key)}\`.`;
+export function thenRerunWorker(command: WorkerCommand, key: HostKey): Then {
+  return (step) => `${step}, then rerun \`${workerCommandLine(command, key)}\`.`;
 }
 
 function refusal(summary: string, nextAction: string, details: readonly string[] = []): Refusal {
@@ -95,15 +111,21 @@ export function hostKeyRefusal(argument: string, instance: FactoryInstance): Ref
 
 export type MachineSelection =
   | { readonly kind: "found"; readonly machine: Machine }
+  /** Terminate removing the host: no instance carries its key, so its machine is gone. */
+  | { readonly kind: "absent" }
   | { readonly kind: "refused"; readonly refusal: Refusal };
 
-/** The one instance carrying `key`: none, or several, is refused, never guessed. */
+/**
+ * The one instance carrying `key`: several, or an inventory that could not be read, is refused,
+ * never guessed. None is refused too, except to terminate removing the host, for which the
+ * machine is already gone (`absent`).
+ */
 export function selectMachine(
   inventory: MachineInventory,
   key: HostKey,
-  action: PowerAction,
+  command: WorkerCommand,
 ): MachineSelection {
-  const then = thenRerunWorker(action, key);
+  const then = thenRerunWorker(command, key);
   const refused = (summary: string, step: string, details: readonly string[] = []) =>
     ({ kind: "refused", refusal: refusal(summary, then(step), details) }) as const;
   if (inventory.kind === "unavailable")
@@ -113,6 +135,7 @@ export function selectMachine(
     );
   const machines = inventory.machines.filter((machine) => machine.hostKey === key);
   const [only] = machines;
+  if (only === undefined && removesHost(command)) return { kind: "absent" };
   if (only === undefined)
     return refused(
       `No EC2 instance carries the host key ${key}`,
@@ -156,12 +179,13 @@ const IN_PASSING: Readonly<Record<PowerAction, Partial<Record<MachineState, stri
   terminate: { pending: UNTIL_RUNNING, stopping: UNTIL_STOPPED },
 };
 
-export function powerStep(action: PowerAction, machine: Machine, key: HostKey): PowerStep {
+export function powerStep(command: WorkerCommand, machine: Machine, key: HostKey): PowerStep {
   const { state, instanceId } = machine;
+  const action = actionOf(command);
   if (state === TARGET_STATE[action]) return { kind: "done" };
   if (STEPS[action].act.includes(state)) return { kind: "act" };
   if (state === STEPS[action].await) return { kind: "await" };
-  const then = thenRerunWorker(action, key);
+  const then = thenRerunWorker(command, key);
   const until = IN_PASSING[action][state];
   if (until !== undefined)
     return {
@@ -190,6 +214,9 @@ export type StopInspection =
 /** The actions whose gates inspect the worker first, and their words. */
 type GatedAction = Extract<PowerAction, "stop" | "terminate">;
 
+/** The commands whose gates inspect the worker first. */
+type GatedCommand = Exclude<WorkerCommand, "start">;
+
 const GATE_WORDS: Readonly<Record<GatedAction, { readonly verb: string; readonly doing: string }>> =
   {
     stop: { verb: "stop", doing: "stopping" },
@@ -197,8 +224,9 @@ const GATE_WORDS: Readonly<Record<GatedAction, { readonly verb: string; readonly
   };
 
 /** Completes a gate's next action: rerun, or pass `--force` to act `how`. */
-function orForce(action: GatedAction, key: HostKey, step: string, how: string): string {
-  return `${step}, then rerun \`${workerCommandLine(action, key)}\`, or pass --force to ${GATE_WORDS[action].verb} it ${how}.`;
+function orForce(command: GatedCommand, key: HostKey, step: string, how: string): string {
+  const { verb } = GATE_WORDS[actionOf(command) as GatedAction];
+  return `${step}, then rerun \`${workerCommandLine(command, key)}\`, or pass --force to ${verb} it ${how}.`;
 }
 
 /**
@@ -230,9 +258,9 @@ function stopUnlocatedAction(tailnet: TailnetFact, verdict: Verdict, key: HostKe
  * terminate it and then rerun the very command refused, but a worker whose bootstrap failed
  * never joins the tailnet, so only `--force` terminates it.
  */
-function terminateUnlocatedAction(key: HostKey): string {
+function terminateUnlocatedAction(command: TerminateCommand, key: HostKey): string {
   return (
-    `${thenRerunWorker("terminate", key)(CHECK_STATUS)} If the instance's EC2 console output ` +
+    `${thenRerunWorker(command, key)(CHECK_STATUS)} If the instance's EC2 console output ` +
     "shows its bootstrap failed, it never joined the tailnet: rerun with --force, which " +
     "terminates it uninspected."
   );
@@ -240,7 +268,7 @@ function terminateUnlocatedAction(key: HostKey): string {
 
 /** Active agents, or activity that could not be read, refuse the action. */
 function activityGate(
-  action: GatedAction,
+  command: GatedCommand,
   activity: AgentActivity,
   worker: WorkerIdentity,
 ): Refusal | undefined {
@@ -250,14 +278,14 @@ function activityGate(
     case "active": {
       const one = activity.count === 1;
       return refusal(
-        `${activity.count} ${one ? "agent is" : "agents are"} active on ${worker.hostname}: ${GATE_WORDS[action].doing} it would end ${one ? "it" : "them"}`,
-        orForce(action, worker.key, "Wait until no agent is active there", "anyway"),
+        `${activity.count} ${one ? "agent is" : "agents are"} active on ${worker.hostname}: ${GATE_WORDS[actionOf(command) as GatedAction].doing} it would end ${one ? "it" : "them"}`,
+        orForce(command, worker.key, "Wait until no agent is active there", "anyway"),
       );
     }
     case "unknown":
       return refusal(
         `${worker.hostname} could not be inspected for active agents: ${activity.reason}`,
-        orForce(action, worker.key, CHECK_STATUS, "uninspected"),
+        orForce(command, worker.key, CHECK_STATUS, "uninspected"),
       );
   }
 }
@@ -300,6 +328,7 @@ export type TerminateInspection =
 function checkoutGate(
   repositories: RepositoryObservation,
   worker: WorkerIdentity,
+  command: TerminateCommand,
 ): Refusal | undefined {
   const { hostname, key } = worker;
   switch (repositories.state) {
@@ -313,7 +342,7 @@ function checkoutGate(
             ? repositories.reason
             : "the worker's repository result could not be read"
         }`,
-        orForce("terminate", key, CHECK_STATUS, "uninspected"),
+        orForce(command, key, CHECK_STATUS, "uninspected"),
       );
     case "synchronized":
     case "unresolved":
@@ -323,14 +352,14 @@ function checkoutGate(
   if (repositories.state === "unresolved")
     return refusal(
       `Placed repositories on ${hostname} are unresolved: terminating it would lose their work`,
-      orForce("terminate", key, "Resolve the checkouts `fffactory status` reports", "anyway"),
+      orForce(command, key, "Resolve the checkouts `fffactory status` reports", "anyway"),
       unmanaged,
     );
   if (unmanaged.length === 0) return undefined;
   return refusal(
     `${hostname} holds unmanaged checkouts: terminating it would lose them`,
     "Copy what you need off them, then terminate it with --force: " +
-      `\`${workerCommandLine("terminate", key)} --force\`.`,
+      `\`${workerCommandLine(command, key)} --force\`.`,
     unmanaged,
   );
 }
@@ -344,17 +373,22 @@ function checkoutGate(
 export function terminateGate(
   inspection: TerminateInspection,
   worker: WorkerIdentity,
+  command: TerminateCommand,
 ): Refusal | undefined {
   switch (inspection.kind) {
     case "forced":
     case "stopped":
       return undefined;
     case "unlocated":
-      return unlocatedGate(inspection.verdict, worker, terminateUnlocatedAction(worker.key));
+      return unlocatedGate(
+        inspection.verdict,
+        worker,
+        terminateUnlocatedAction(command, worker.key),
+      );
     case "inspected":
       return (
-        activityGate("terminate", inspection.activity, worker) ??
-        checkoutGate(inspection.repositories, worker)
+        activityGate(command, inspection.activity, worker) ??
+        checkoutGate(inspection.repositories, worker, command)
       );
   }
 }
@@ -398,15 +432,27 @@ const VERBS: Readonly<Record<PowerAction, { readonly name: string; readonly doin
   terminate: { name: "Terminate", doing: "Terminating" },
 };
 
+const TYPE_KEY = "Type the host key to confirm: ";
+
+/**
+ * The question asked before acting on `instanceId`. Terminate removing the host says so, and
+ * without an instance, its machine already gone, asks only to remove the host.
+ */
 export function confirmationQuestion(
-  action: PowerAction,
+  command: WorkerCommand,
   worker: WorkerIdentity,
-  instanceId: string,
+  instanceId: string | undefined,
 ): string {
-  const asked = `${VERBS[action].name} worker ${worker.key} (${worker.hostname}), EC2 instance ${instanceId}?`;
+  const named = `worker ${worker.key} (${worker.hostname})`;
+  if (instanceId === undefined)
+    return `Remove ${named} from factory.json? No EC2 instance carries its key: its machine is already gone. ${TYPE_KEY}`;
+  const action = actionOf(command);
+  const asked = `${VERBS[action].name} ${named}, EC2 instance ${instanceId}`;
+  if (removesHost(command))
+    return `${asked}, and remove it from factory.json? Its machine and root volume are destroyed. ${TYPE_KEY}`;
   return action === "terminate"
-    ? `${asked} Its machine and root volume are destroyed. Type the host key to confirm: `
-    : `${asked} [y/N] `;
+    ? `${asked}? Its machine and root volume are destroyed. ${TYPE_KEY}`
+    : `${asked}? [y/N] `;
 }
 
 /** Why the command refuses without a terminal or a confirmation in advance. */
@@ -432,34 +478,34 @@ export function waitStep(
   return "waiting";
 }
 
-function checkInstance(action: PowerAction, worker: WorkerIdentity, instanceId: string): string {
-  return thenRerunWorker(action, worker.key)(`Check instance ${instanceId} in the EC2 console`);
+function checkInstance(command: WorkerCommand, worker: WorkerIdentity, instanceId: string): string {
+  return thenRerunWorker(command, worker.key)(`Check instance ${instanceId} in the EC2 console`);
 }
 
 /** The machine did not reach the target state in time; `lastSeen` is its last state read. */
 export function powerTimedOut(
-  action: PowerAction,
+  command: WorkerCommand,
   worker: WorkerIdentity,
   instanceId: string,
   lastSeen: ObservedMachineState | undefined,
 ): Refusal {
   return refusal(
-    `EC2 instance ${instanceId} did not reach ${TARGET_STATE[action]} within ${POWER_DEADLINE_MS / 60_000} min (last seen: ${lastSeen ?? "unknown"})`,
-    checkInstance(action, worker, instanceId),
+    `EC2 instance ${instanceId} did not reach ${TARGET_STATE[actionOf(command)]} within ${POWER_DEADLINE_MS / 60_000} min (last seen: ${lastSeen ?? "unknown"})`,
+    checkInstance(command, worker, instanceId),
   );
 }
 
 /** The machine went away, or is being terminated, while the action waited for it. */
 export function machineGone(
-  action: PowerAction,
+  command: WorkerCommand,
   worker: WorkerIdentity,
   instanceId: string,
   state: ObservedMachineState,
 ): Refusal {
   const now = state === "absent" ? "gone" : state;
   return refusal(
-    `EC2 instance ${instanceId} is ${now} while fffactory waited for it to be ${TARGET_STATE[action]}`,
-    checkInstance(action, worker, instanceId),
+    `EC2 instance ${instanceId} is ${now} while fffactory waited for it to be ${TARGET_STATE[actionOf(command)]}`,
+    checkInstance(command, worker, instanceId),
   );
 }
 
@@ -471,17 +517,18 @@ const PERMISSIONS: Readonly<Record<PowerAction, string>> = {
 
 /** EC2 refused or failed the request; `reason` names the error, never quoting AWS. */
 export function requestFailed(
-  action: PowerAction,
+  command: WorkerCommand,
   worker: WorkerIdentity,
   instanceId: string,
   reason: string,
 ): Refusal {
+  const permission = PERMISSIONS[actionOf(command)];
   return refusal(
     reason,
     thenRerunWorker(
-      action,
+      command,
       worker.key,
-    )(`Check that the credentials may call ${PERMISSIONS[action]} on instance ${instanceId}`),
+    )(`Check that the credentials may call ${permission} on instance ${instanceId}`),
   );
 }
 
@@ -496,33 +543,34 @@ const UNDER_WAY: Readonly<Record<PowerAction, string>> = {
  * reached EC2, so the machine may be changing. `reason` names the timeout, never quoting AWS.
  */
 export function requestUnanswered(
-  action: PowerAction,
+  command: WorkerCommand,
   worker: WorkerIdentity,
   instanceId: string,
   reason: string,
 ): Refusal {
-  return refusal(reason, thenRerunWorker(action, worker.key)(CHECK_STATUS), [
-    `The request may have reached EC2: instance ${instanceId} may be ${UNDER_WAY[action]}.`,
+  return refusal(reason, thenRerunWorker(command, worker.key)(CHECK_STATUS), [
+    `The request may have reached EC2: instance ${instanceId} may be ${UNDER_WAY[actionOf(command)]}.`,
   ]);
 }
 
 /** Terminate deletes the worker's tailnet device with the admin client: refused without one. */
-export function adminClientMissing(key: HostKey): Refusal {
+export function adminClientMissing(command: TerminateCommand, key: HostKey): Refusal {
   return refusal(
     "factory.json has no Tailscale admin client (tailscale.admin_client_secret): terminate deletes the worker's tailnet device with it",
-    thenRerunWorker(
-      "terminate",
-      key,
-    )("Store it with `fffactory secret set tailscale-admin-client`"),
+    thenRerunWorker(command, key)("Store it with `fffactory secret set tailscale-admin-client`"),
   );
 }
 
 /** The admin client's secret could not be read; `reason` names the error, never quoting AWS. */
-export function adminSecretUnreadable(key: HostKey, reason: string): Refusal {
+export function adminSecretUnreadable(
+  command: TerminateCommand,
+  key: HostKey,
+  reason: string,
+): Refusal {
   return refusal(
     reason,
     thenRerunWorker(
-      "terminate",
+      command,
       key,
     )(
       "Check that the credentials may call secretsmanager:GetSecretValue on the secret " +
@@ -535,11 +583,15 @@ export function adminSecretUnreadable(key: HostKey, reason: string): Refusal {
 const TRUST_CREDENTIALS = "https://login.tailscale.com/admin/settings/trust-credentials";
 
 /** Tailscale did not grant the admin client a token, or could not be reached. */
-export function adminClientUnusable(key: HostKey, reason: string): Refusal {
+export function adminClientUnusable(
+  command: TerminateCommand,
+  key: HostKey,
+  reason: string,
+): Refusal {
   return refusal(
     `The Tailscale admin client could not be used: ${reason}`,
     thenRerunWorker(
-      "terminate",
+      command,
       key,
     )(
       `Check the OAuth client at ${TRUST_CREDENTIALS} (scope devices:core) and store its ` +
@@ -563,18 +615,30 @@ export type DeviceRemoval =
     };
 
 /**
+ * What to do about the devices a terminate may have left: remove them by hand, then, after
+ * `--keep`, run the apply that creates the worker afresh. Removing the host, there is nothing
+ * to rerun: factory.json no longer declares it.
+ */
+export function remainingDevicesAction(worker: WorkerIdentity, command: TerminateCommand): string {
+  const yourself =
+    `Remove the remaining devices named ${worker.hostname} at ${ADMIN_CONSOLE} yourself (one ` +
+    "without the factory's tag only if it was this worker)";
+  return removesHost(command)
+    ? `${yourself}: factory.json no longer declares the host.`
+    : `${yourself}, then run \`fffactory apply\`, which creates the worker afresh.`;
+}
+
+/**
  * Why the device removal left something behind, or undefined when it did not. The machine is
- * already terminated: what remains is the operator's to remove before the next apply, whose
- * new device a remaining one would make a duplicate.
+ * already terminated: what remains is the operator's to remove, with `--keep` before the next
+ * apply, whose new device a remaining one would make a duplicate.
  */
 export function deviceRemovalRefusal(
   removal: DeviceRemoval,
   worker: WorkerIdentity,
+  command: TerminateCommand,
 ): Refusal | undefined {
-  const left =
-    `Remove the remaining devices named ${worker.hostname} at ${ADMIN_CONSOLE} yourself (one ` +
-    "without the factory's tag only if it was this worker), then run `fffactory apply`, which " +
-    "creates the worker afresh.";
+  const left = remainingDevicesAction(worker, command);
   if (removal.kind === "unlisted")
     return refusal(`The tailnet's devices could not be listed: ${removal.reason}`, left);
   if (removal.failed.length === 0 && removal.untagged.length === 0) return undefined;

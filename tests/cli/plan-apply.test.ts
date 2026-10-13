@@ -267,14 +267,18 @@ describe("fffactory plan (plan-apply §Plan)", () => {
     ]);
   });
 
-  test("D11: removing a provisioned host key is refused, naming host retirement", async () => {
+  test("D11: removing a provisioned host key by hand is refused, naming `fffactory worker terminate`", async () => {
     const { context, err, planStore } = cli({ hosts: ["builder-1", "builder-2"] });
     expect(await run(["plan"], context)).toBe(1);
-    expect(err[0]).toBe(
-      "Refusing: this change needs host retirement, which fffactory does not have yet " +
-        "(D11; it arrives in milestone M3):",
-    );
-    expect(err[1]).toContain('host key "builder-2" is provisioned but no longer declared');
+    expect(err).toEqual([
+      "Refusing: this change needs host removal, which only `fffactory worker terminate KEY` " +
+        "does (D11):",
+      '  hosts: host key "builder-2" is provisioned but no longer declared: host keys cannot ' +
+        "be renamed, and only `fffactory worker terminate builder-2` removes a host. Restore " +
+        "it, and declare any new host under a new key beside it",
+      "Nothing was applied. Declare every provisioned host key in factory.json again, then " +
+        "remove a host with `fffactory worker terminate KEY`.",
+    ]);
     expect(planStore.saved.size).toBe(0);
   });
 
@@ -283,7 +287,7 @@ describe("fffactory plan (plan-apply §Plan)", () => {
     terraform.world.replace.add("builder-1");
     expect(await run(["plan"], context)).toBe(1);
     expect(err).toEqual([
-      "Refusing: this change needs host retirement and replacement, which fffactory does " +
+      "Refusing: this change needs host replacement, which fffactory does " +
         "not have yet (D11; it arrives in milestone M3):",
       `  ${hostAddress("builder-1")} would be replaced`,
       "Nothing was applied. Change factory.json so the plan keeps every host machine, then " +
@@ -919,7 +923,7 @@ describe("fffactory apply (plan-apply §Apply)", () => {
   test("refusals to plan are shown for apply too", async () => {
     const { context, err } = cli({ interactive: true, hosts: ["builder-1", "builder-2"] });
     expect(await run(["apply"], context)).toBe(1);
-    expect(err[0]).toStartWith("Refusing: this change needs host retirement");
+    expect(err[0]).toStartWith("Refusing: this change needs host removal");
     const other = cli({
       interactive: true,
       document: text(["builder-1"], { release: "0.2.0" }),

@@ -58,7 +58,9 @@ export type OperationStatus =
  * `awaiting_approval`, `stopping`, `starting` or `terminating`, then `waiting` (start, for the
  * tailnet) or `removing_devices` (terminate), and ends `stopped`, `started`, `terminated`,
  * `unchanged`, `partial` (terminate left tailnet devices behind), `declined`, `refused` or
- * `failed` (`docs/specs/worker-lifecycle.md` §Operation record).
+ * `failed`. Terminate removing the host goes `planning` after `authorizing`, then
+ * `awaiting_approval`, `applying` (Terraform), `writing` (factory.json) and `removing_devices`,
+ * and ends `removed` (`docs/specs/worker-lifecycle.md` §Operation record).
  */
 export type StageStatus =
   | "pending"
@@ -87,6 +89,8 @@ export type StageStatus =
   | "terminating"
   | "terminated"
   | "removing_devices"
+  | "writing"
+  | "removed"
   | "waiting"
   | "partial"
   | "declined"

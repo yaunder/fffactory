@@ -3,9 +3,14 @@ import type { AgentActivity } from "../../src/application/control-plane";
 import { INSPECT_TIMEOUT_MS } from "../../src/application/inspect-worker";
 import type { MachineRequest } from "../../src/application/machine-control";
 import { factoryStatus } from "../../src/application/status";
+import { stateBucketOf } from "../../src/application/factory-lock";
+import { planInfrastructure } from "../../src/application/plan-factory";
+import { ProvisioningFailed } from "../../src/application/provisioner";
+import { withoutHost } from "../../src/domain/host-removal";
 import {
   startWorker,
   stopWorker,
+  type TerminateRequest,
   terminateWorker,
   type WorkerLifecycleDependencies,
   type WorkerLifecycleRequest,
@@ -13,7 +18,12 @@ import {
 import type { CallerObservation } from "../../src/domain/aws-account";
 import { newLockRecord } from "../../src/domain/factory-lock";
 import { INSPECT_COMMAND } from "../../src/domain/host-protocol";
-import type { FactoryInstance, Release } from "../../src/domain/instance";
+import {
+  type FactoryInstance,
+  type HostKey,
+  type Release,
+  serializeInstance,
+} from "../../src/domain/instance";
 import type { MachineInventory } from "../../src/domain/status";
 import type { PeerView } from "../../src/domain/tailnet";
 import {
@@ -46,6 +56,9 @@ import {
 import { BUCKET, declaring, FACTORY, NOW, RELEASE, WORKER_TAG } from "../support/factory-world";
 import type { SecretReference } from "../../src/domain/instance";
 import { MemoryLockStore } from "../support/memory-lock-store";
+import { fakeFactoryWorld, SECRETS_POLICY } from "../support/fake-provisioner";
+import { MemoryInstanceStore } from "../support/memory-instance-store";
+import { MemoryPlanStore } from "../support/memory-plan-store";
 
 const KEY = "builder-1";
 const HOSTNAME = `${FACTORY}-${KEY}`;
@@ -66,12 +79,39 @@ interface WorldOptions {
   readonly onSleep?: (slept: number) => void;
   readonly admin?: Parameters<typeof fakeTailnetAdmin>[0];
   readonly secretReadFails?: Error;
+  /** The host keys the factory's Terraform state has provisioned. */
+  readonly provisioned?: readonly string[];
+  /** factory.json's text in the instance store. */
+  readonly configuration?: string;
+  /** The secrets the state's secret-reading policy allows; not modeled unless set. */
+  readonly secretArns?: readonly string[];
 }
+
+/** Where the instance store holds factory.json. */
+const PATH = "/work/.fffactory/factory.json";
+const TERRAFORM = "/cache/releases/0.3.0/terraform";
 
 /** The admin client's reference, and the client secret Secrets Manager holds for it. */
 const ADMIN_ARN =
   "arn:aws:secretsmanager:eu-west-2:123456789012:secret:fff-abcd1234/tailscale-admin-client-AbCdEf" as SecretReference;
 const ADMIN_SECRET = "tskey-client-kExample1CNTRL-0123456789abcdef";
+
+/** What terminate's removal reaches: the factory's Terraform, the plan store and factory.json. */
+function removalPorts(lockStore: MemoryLockStore, options: WorldOptions) {
+  return {
+    terraform: fakeFactoryWorld({
+      store: lockStore,
+      bucket: BUCKET,
+      hosts: options.provisioned ?? [KEY, "builder-2"],
+      instanceIds: { [KEY]: ID },
+      ...(options.secretArns === undefined ? {} : { secretArns: options.secretArns }),
+    }),
+    planStore: new MemoryPlanStore(),
+    store: new MemoryInstanceStore({
+      [PATH]: options.configuration ?? serializeInstance(withAdmin()),
+    }),
+  };
+}
 
 /** One declared worker, `builder-1`, its machine and the ports a power command reaches. */
 function world(options: WorldOptions = {}) {
@@ -100,6 +140,8 @@ function world(options: WorldOptions = {}) {
   const progress: unknown[] = [];
   let interrupted = false;
   const time = fakeTime(NOW, (slept) => options.onSleep?.(slept));
+  const { terraform, planStore, store } = removalPorts(lockStore, options);
+  let materialized = 0;
   const deps: WorkerLifecycleDependencies = {
     identity: identity.identity,
     lockStore,
@@ -111,6 +153,13 @@ function world(options: WorldOptions = {}) {
     prompt: prompt.prompt,
     secrets: secrets.store,
     tailnetAdmin: admin.admin,
+    provisioner: terraform.provisioner,
+    planStore,
+    store,
+    terraformDirectory: async () => {
+      materialized += 1;
+      return TERRAFORM;
+    },
     interrupted: () => interrupted,
     sleep: time.sleep,
     sha256: sha256Text,
@@ -130,6 +179,10 @@ function world(options: WorldOptions = {}) {
     admin,
     progress,
     time,
+    terraform,
+    planStore,
+    store,
+    materialized: () => materialized,
     interrupt: () => {
       interrupted = true;
     },
@@ -775,12 +828,52 @@ function withAdmin(): FactoryInstance {
   };
 }
 
+/** The Tailscale auth key's reference, and Paseo password references in the test account. */
+const AUTH = declaring(KEY).tailscale?.auth_key_secret as string;
+const paseoPassword = (name: string) =>
+  `arn:aws:secretsmanager:eu-west-2:123456789012:secret:${FACTORY}/${name}-AbCdEf` as SecretReference;
+const PASEO_1 = paseoPassword("builder-1-paseo-password");
+const PASEO_2 = paseoPassword("builder-2-paseo-password");
+const OLD_PASEO_1 = paseoPassword("builder-1-paseo-password-old");
+
+/** withAdmin's factory.json, builder-1 and builder-2 each with its own Paseo password. */
+function withPasswords(first: SecretReference, second: SecretReference): FactoryInstance {
+  const instance = withAdmin();
+  const passwords = [first, second];
+  return {
+    ...instance,
+    hosts: (instance.hosts ?? []).map((host, index) => ({
+      ...host,
+      paseo_password_secret: passwords[index],
+    })),
+  };
+}
+
 /** A terminate request: keep mode, confirmed in advance with `--confirm builder-1`. */
 function terminating(
   w: World,
   overrides: Partial<Omit<WorkerLifecycleRequest, "action">> = {},
-): Omit<WorkerLifecycleRequest, "action"> {
-  return request(w, { instance: withAdmin(), yes: false, confirm: KEY, ...overrides });
+): TerminateRequest {
+  return {
+    ...request(w, { instance: withAdmin(), yes: false, confirm: KEY, ...overrides }),
+    keep: true,
+  } as TerminateRequest;
+}
+
+/**
+ * A terminate request removing the host, confirmed in advance with `--confirm builder-1`,
+ * factory.json read as the text of its instance.
+ */
+function removing(
+  w: World,
+  overrides: Partial<Omit<WorkerLifecycleRequest, "action">> = {},
+): TerminateRequest {
+  const instance = overrides.instance ?? withAdmin();
+  return {
+    ...request(w, { instance, yes: false, confirm: KEY, ...overrides }),
+    keep: false,
+    configuration: { path: PATH, text: serializeInstance(instance) },
+  } as TerminateRequest;
 }
 
 /** The worker answering its inspection, its repository result and its dispatch state. */
@@ -1295,5 +1388,598 @@ describe("terminate's interruption (worker-lifecycle §Interruption)", () => {
     expect(w.admin.calls.filter((call) => call.startsWith("remove"))).toEqual([
       "remove nWorker1CNTRL",
     ]);
+  });
+});
+
+/** factory.json as terminate writes it: `withAdmin()` without builder-1. */
+const WITHOUT_KEY = serializeInstance(withoutHost(withAdmin(), KEY as HostKey));
+const calls = (w: World) => w.terraform.calls.map(({ call }) => call);
+
+describe("fffactory worker terminate (worker-lifecycle §Terminate (remove))", () => {
+  test("destroys the machine with a scoped Terraform plan, writes factory.json without the host and deletes its device, under one lock and record", async () => {
+    const w = world({ worker: CLEAN });
+    const result = await terminateWorker(w.deps, removing(w));
+    expect(result).toMatchObject({
+      kind: "done",
+      action: "terminate",
+      worker: { key: KEY, hostname: HOSTNAME },
+      instanceId: ID,
+      changed: true,
+      removed: true,
+      devices: { kind: "listed", removed: ["nWorker1CNTRL"], failed: [], untagged: [] },
+      leftover: undefined,
+    });
+    // Terraform plans factory.json without the host, under its own state lock, then applies
+    // exactly that plan file, and checks its state no longer records the key; EC2 is never
+    // asked to terminate anything directly.
+    expect(calls(w)).toEqual(["output", "plan", "showPlan", "applyPlan", "output"]);
+    const [, plan, shown, applied] = w.terraform.calls;
+    expect(plan?.call === "plan" && plan.request.stateLock).toBe(true);
+    expect(plan?.call === "plan" && Object.keys(plan.request.variables.hosts as object)).toEqual([
+      "builder-2",
+    ]);
+    expect(plan?.request.configuration).toEqual({ directory: TERRAFORM, root: "factory" });
+    expect(shown?.request).toEqual(applied?.request);
+    expect(applied?.call === "applyPlan" && applied.request.planFile).toMatch(/factory\.tfplan$/);
+    expect(w.control.mutations()).toEqual([]);
+    expect([...w.terraform.world.hosts]).toEqual(["builder-2"]);
+    expect(w.store.files[PATH]).toBe(WITHOUT_KEY);
+    expect(w.store.writes).toEqual([PATH]);
+    expect(w.admin.calls).toEqual(["open", "devices", "remove nWorker1CNTRL"]);
+    expect(w.planStore.directories.size).toBe(0);
+    expect(w.materialized()).toBe(1);
+    expect(w.lockStore.locks.size).toBe(0);
+    expect(records(w)).toHaveLength(1);
+    expect(records(w)[0]).toMatchObject({
+      operation: "worker-terminate",
+      status: "succeeded",
+      stages: [{ name: "terminate", status: "removed" }],
+      machine: { key: KEY, hostname: HOSTNAME, instance_id: ID, state: "terminated" },
+      failure: null,
+    });
+    expect(stages(w)).toEqual([
+      "locating",
+      "locating",
+      "inspecting",
+      "authorizing",
+      "planning",
+      "applying",
+      "applying",
+      "writing",
+      "removing_devices",
+      "removed",
+    ]);
+    expect(w.progress).toEqual([
+      { kind: "located", key: KEY, hostname: HOSTNAME, instanceId: ID, state: "running" },
+      { kind: "planning_removal", key: KEY },
+      {
+        kind: "removal_plan",
+        plan: [
+          "Removal plan:",
+          `  Configuration: ${PATH}`,
+          `  Factory: Test factory (${FACTORY})`,
+          "  AWS account: 123456789012, Region: eu-west-2",
+          `  Release: ${RELEASE}`,
+          "Infrastructure changes:",
+          `  - module.hosts.aws_instance.host["${KEY}"]`,
+          "  0 to add, 0 to change, 1 to destroy.",
+          `factory.json: remove host ${KEY}.`,
+          `Tailnet: delete the devices named ${HOSTNAME} that carry the factory's tag.`,
+        ],
+      },
+      { kind: "applying_removal" },
+      { kind: "configuration_written", key: KEY, path: PATH },
+      { kind: "removing_devices", hostname: HOSTNAME },
+    ]);
+  });
+
+  test("afterwards plan shows no changes for the host, and status no longer lists it", async () => {
+    const w = world({ worker: CLEAN });
+    expect(await terminateWorker(w.deps, removing(w))).toMatchObject({ kind: "done" });
+    const instance = JSON.parse(w.store.files[PATH] as string) as FactoryInstance;
+    const location = stateBucketOf(instance, { source: "chain" });
+    if (!location.ok) throw new Error("factory.json has no state bucket");
+    const planned = await planInfrastructure(w.deps, {
+      instance,
+      bucket: location.bucket,
+      terraformDirectory: TERRAFORM,
+      planFile: "/plans/after/factory.tfplan",
+      underFactoryLock: false,
+      resizeGuard: { inventory: "read", workers: [] },
+    });
+    expect(planned).toMatchObject({ kind: "planned", changes: [] });
+    const status = await factoryStatus(
+      {
+        identity: w.deps.identity,
+        machines: fakeMachineInventory({ kind: "machines", machines: [] }).machines,
+        peers: w.deps.peers,
+        transport: w.deps.transport,
+        sha256: sha256Text,
+      },
+      { instance, credentials: { source: "chain" } },
+    );
+    expect(status.kind === "report" && status.report.workers.map(({ key }): string => key)).toEqual(
+      ["builder-2"],
+    );
+  });
+
+  test("a plan with any other change is refused before the question, and nothing is applied", async () => {
+    const pending = withAdmin();
+    const instance = {
+      ...pending,
+      hosts: [...(pending.hosts ?? []), { ...(pending.hosts ?? [])[1], key: "builder-3" }],
+    } as FactoryInstance;
+    const w = world({ worker: CLEAN, prompt: fakePrompt({ interactive: true }) });
+    const result = await terminateWorker(w.deps, removing(w, { instance, confirm: undefined }));
+    expect(result).toMatchObject({
+      kind: "refused",
+      refusal: {
+        summary: `The removal plan changes more than host ${KEY}'s machine: apply factory.json's other changes first`,
+        details: ['module.hosts.aws_instance.host["builder-3"] would be created'],
+      },
+    });
+    expect(w.prompt.asked).toEqual([]);
+    expect(calls(w)).toEqual(["output", "plan", "showPlan"]);
+    expect([...w.terraform.world.hosts]).toEqual([KEY, "builder-2"]);
+    expect(w.store.writes).toEqual([]);
+    expect(w.admin.calls).toEqual(["open"]);
+    expect(w.lockStore.locks.size).toBe(0);
+    expect(records(w)[0]).toMatchObject({ status: "refused" });
+  });
+
+  test("the only declared host is refused before anything reaches AWS", async () => {
+    const both = withAdmin();
+    const only = { ...both, hosts: (both.hosts ?? []).slice(0, 1) };
+    const w = world();
+    expect(await terminateWorker(w.deps, removing(w, { instance: only }))).toMatchObject({
+      kind: "refused",
+      refusal: { summary: expect.stringContaining("is the only host factory.json declares") },
+      operation: undefined,
+    });
+    expect(w.identity.requests).toEqual([]);
+    expect(w.lockStore.calls).toEqual([]);
+  });
+
+  test("the host key is typed after the plan is shown; anything else declines, applying nothing", async () => {
+    const w = world({ worker: CLEAN, prompt: fakePrompt({ interactive: true, answers: ["yes"] }) });
+    // One log of what the operator sees, in order: progress by kind, and the question.
+    const seen: string[] = [];
+    const { progress, prompt } = w.deps;
+    w.deps = {
+      ...w.deps,
+      progress: (event) => {
+        seen.push(event.kind);
+        progress(event);
+      },
+      prompt: {
+        ...prompt,
+        ask: (question) => {
+          seen.push("question");
+          return prompt.ask(question);
+        },
+      },
+    };
+    expect(await terminateWorker(w.deps, removing(w, { confirm: undefined }))).toMatchObject({
+      kind: "declined",
+    });
+    expect(w.prompt.asked).toEqual([
+      `Terminate worker ${KEY} (${HOSTNAME}), EC2 instance ${ID}, and remove it from ` +
+        "factory.json? Its machine and root volume are destroyed. Type the host key to confirm: ",
+    ]);
+    expect(seen).toEqual(["located", "planning_removal", "removal_plan", "question"]);
+    expect(calls(w)).toEqual(["output", "plan", "showPlan"]);
+    expect(w.store.writes).toEqual([]);
+    expect(records(w)[0]).toMatchObject({ status: "declined" });
+    const typed = world({
+      worker: CLEAN,
+      prompt: fakePrompt({ interactive: true, answers: [` ${KEY}\n`] }),
+    });
+    expect(
+      await terminateWorker(typed.deps, removing(typed, { confirm: undefined })),
+    ).toMatchObject({ kind: "done", removed: true });
+  });
+
+  test("factory.json changed after it was read: nothing is applied", async () => {
+    const w = world({ worker: CLEAN, configuration: `${serializeInstance(withAdmin())} ` });
+    expect(await terminateWorker(w.deps, removing(w))).toMatchObject({
+      kind: "refused",
+      refusal: {
+        summary: "factory.json changed after fffactory read it: nothing was applied",
+      },
+    });
+    expect(calls(w)).not.toContain("applyPlan");
+    expect(w.store.writes).toEqual([]);
+  });
+
+  test("recorded keys that cannot be read, another host removed by hand, or an unreadable factory.json refuse it", async () => {
+    const garbled = world({ worker: CLEAN });
+    garbled.terraform.world.outputs = { host_keys: "builder-1" };
+    expect(await terminateWorker(garbled.deps, removing(garbled))).toMatchObject({
+      kind: "refused",
+      refusal: { summary: "The factory's Terraform state records host keys that cannot be read" },
+    });
+    const handEdited = world({ worker: CLEAN, provisioned: [KEY, "builder-2", "builder-3"] });
+    expect(await terminateWorker(handEdited.deps, removing(handEdited))).toMatchObject({
+      kind: "refused",
+      refusal: {
+        summary: `factory.json without host ${KEY} cannot be planned`,
+        details: [expect.stringContaining('host key "builder-3" is provisioned')],
+      },
+    });
+    const unreadable = world({ worker: CLEAN });
+    unreadable.store.read = async () => {
+      throw new Error("EIO: i/o error");
+    };
+    expect(await terminateWorker(unreadable.deps, removing(unreadable))).toMatchObject({
+      kind: "refused",
+      refusal: {
+        summary: "factory.json could not be read again (EIO: i/o error): nothing was applied",
+      },
+    });
+    for (const w of [garbled, handEdited, unreadable]) {
+      expect(calls(w)).not.toContain("applyPlan");
+      expect(w.store.writes).toEqual([]);
+    }
+  });
+
+  test("a failed Terraform plan or apply leaves factory.json untouched, keeping Terraform's diagnostics", async () => {
+    const planning = world({ worker: CLEAN });
+    planning.deps = {
+      ...planning.deps,
+      provisioner: {
+        ...planning.deps.provisioner,
+        plan: async () => {
+          throw new ProvisioningFailed("`terraform plan` exited with status 1", "/diag/plan.log");
+        },
+      },
+    };
+    expect(await terminateWorker(planning.deps, removing(planning))).toMatchObject({
+      kind: "failed",
+      refusal: {
+        summary: "Planning the removal failed: `terraform plan` exited with status 1",
+        nextAction: `Rerun \`fffactory worker terminate ${KEY}\`.`,
+      },
+      diagnosticsFile: "/diag/plan.log",
+    });
+    expect(planning.planStore.directories.size).toBe(0);
+    const applying = world({ worker: CLEAN });
+    applying.deps = {
+      ...applying.deps,
+      provisioner: {
+        ...applying.deps.provisioner,
+        applyPlan: async () => {
+          throw new ProvisioningFailed("`terraform apply` exited with status 1", "/diag/apply.log");
+        },
+      },
+    };
+    const result = await terminateWorker(applying.deps, removing(applying));
+    expect(result).toMatchObject({
+      kind: "failed",
+      refusal: {
+        summary: "Removing the host failed: `terraform apply` exited with status 1",
+        details: [expect.stringContaining(`it still declares host ${KEY}`)],
+      },
+      diagnosticsFile: "/diag/apply.log",
+    });
+    for (const w of [planning, applying]) {
+      expect(w.store.writes).toEqual([]);
+      expect(w.admin.calls).toEqual(["open"]);
+      expect(w.lockStore.locks.size).toBe(0);
+      expect(records(w)[0]).toMatchObject({ status: "failed" });
+      expect(JSON.stringify(records(w)[0])).not.toContain("/diag/");
+    }
+  });
+
+  test("factory.json that cannot be written after Terraform removed the host says exactly what to remove; a rerun finishes", async () => {
+    const w = world({ worker: CLEAN });
+    const write = w.store.write.bind(w.store);
+    w.store.write = async () => {
+      throw new Error("EACCES: permission denied");
+    };
+    const summary =
+      `Terraform destroyed host ${KEY}'s machine and no longer records it, but factory.json ` +
+      "could not be written (EACCES: permission denied): it still declares the host";
+    expect(await terminateWorker(w.deps, removing(w))).toMatchObject({
+      kind: "failed",
+      refusal: {
+        summary,
+        nextAction: expect.stringContaining(`Remove the host ${KEY} from hosts in ${PATH}`),
+      },
+    });
+    expect([...w.terraform.world.hosts]).toEqual(["builder-2"]);
+    expect(w.admin.calls).toEqual(["open"]);
+    expect(records(w)[0]).toMatchObject({ status: "failed", failure: summary });
+    expect(w.lockStore.locks.size).toBe(0);
+
+    // The rerun finds no machine, plans nothing to destroy, writes factory.json and deletes the device.
+    w.store.write = write;
+    w.inventory.machines.list = async () => ({ kind: "machines", machines: [] });
+    expect(await terminateWorker(w.deps, removing(w))).toMatchObject({
+      kind: "done",
+      instanceId: undefined,
+      removed: true,
+      devices: { removed: ["nWorker1CNTRL"] },
+    });
+    expect(w.store.files[PATH]).toBe(WITHOUT_KEY);
+  });
+
+  test("an error once factory.json no longer declares the host names the devices to remove, never a rerun", async () => {
+    const w = world({ worker: CLEAN });
+    const writeOperation = w.lockStore.writeOperation.bind(w.lockStore);
+    w.lockStore.writeOperation = async (bucket, record) => {
+      if (record.stages.at(-1)?.status === "removing_devices")
+        throw new Error("S3 PutObject on the state bucket failed: SlowDown");
+      await writeOperation(bucket, record);
+    };
+    expect(await terminateWorker(w.deps, removing(w))).toMatchObject({
+      kind: "failed",
+      refusal: {
+        summary: "S3 PutObject on the state bucket failed: SlowDown",
+        details: [
+          `Terraform destroyed host ${KEY}'s machine and factory.json no longer declares it; ` +
+            "its Tailscale devices may remain.",
+        ],
+        nextAction:
+          `Remove the remaining devices named ${HOSTNAME} at https://login.tailscale.com/admin/machines ` +
+          "yourself (one without the factory's tag only if it was this worker): factory.json no " +
+          "longer declares the host.",
+      },
+    });
+    expect(w.store.files[PATH]).toBe(WITHOUT_KEY);
+    expect(w.admin.calls).toEqual(["open"]);
+    expect(w.lockStore.locks.size).toBe(0);
+    expect(records(w)[0]).toMatchObject({ status: "failed" });
+
+    // An error before factory.json is written still names the rerun.
+    const early = world({ worker: CLEAN });
+    early.planStore.create = async () => {
+      throw new Error("ENOSPC: no space left on device");
+    };
+    expect(await terminateWorker(early.deps, removing(early))).toMatchObject({
+      kind: "failed",
+      refusal: {
+        summary: "ENOSPC: no space left on device",
+        nextAction:
+          "Check the worker with `fffactory status`, then rerun " +
+          `\`fffactory worker terminate ${KEY}\`.`,
+      },
+    });
+    expect(early.store.writes).toEqual([]);
+  });
+
+  test("a machine already gone is removed without gates; one Terraform still holds is refused", async () => {
+    const gone = world({
+      provisioned: ["builder-2"],
+      inventory: { kind: "machines", machines: [] },
+      view: OFFLINE,
+      prompt: fakePrompt({ interactive: true, answers: [KEY] }),
+    });
+    expect(await terminateWorker(gone.deps, removing(gone, { confirm: undefined }))).toMatchObject({
+      kind: "done",
+      removed: true,
+      instanceId: undefined,
+    });
+    expect(gone.prompt.asked).toEqual([
+      `Remove worker ${KEY} (${HOSTNAME}) from factory.json? No EC2 instance carries its key: ` +
+        "its machine is already gone. Type the host key to confirm: ",
+    ]);
+    expect(gone.progress[0]).toEqual({ kind: "absent", key: KEY, hostname: HOSTNAME });
+    expect(gone.controlPlane.calls).toEqual([]);
+    expect(calls(gone)).toEqual(["output", "plan", "showPlan"]);
+    expect(gone.store.files[PATH]).toBe(WITHOUT_KEY);
+
+    const held = world({ inventory: { kind: "machines", machines: [] } });
+    expect(await terminateWorker(held.deps, removing(held))).toMatchObject({
+      kind: "refused",
+      refusal: {
+        summary: `Terraform's state holds a machine for host ${KEY} that EC2 does not list with the factory's tags`,
+      },
+    });
+    expect(calls(held)).not.toContain("applyPlan");
+  });
+
+  test("a plan destroying another instance than the one EC2 lists and the question names is refused, applying nothing", async () => {
+    // Terraform's state holds i-0aaaaaaaaaaaaaaaa, its tags stripped by hand, while EC2 lists
+    // the tagged ID, which the gates inspected and the operator approves.
+    const w = world({ worker: CLEAN, prompt: fakePrompt({ interactive: true, answers: [KEY] }) });
+    w.terraform.world.instanceIds.set(KEY, "i-0aaaaaaaaaaaaaaaa");
+    expect(await terminateWorker(w.deps, removing(w, { confirm: undefined }))).toMatchObject({
+      kind: "refused",
+      refusal: {
+        summary:
+          `Terraform's plan destroys instance i-0aaaaaaaaaaaaaaaa for host ${KEY}, not ${ID}, ` +
+          "the instance EC2 lists for it",
+        nextAction:
+          `Check instances i-0aaaaaaaaaaaaaaaa and ${ID} in the EC2 console, then rerun ` +
+          `\`fffactory worker terminate ${KEY}\`.`,
+      },
+    });
+    expect(w.prompt.asked).toEqual([]);
+    expect(calls(w)).toEqual(["output", "plan", "showPlan"]);
+    expect([...w.terraform.world.hosts]).toEqual([KEY, "builder-2"]);
+    expect(w.store.writes).toEqual([]);
+    expect(w.admin.calls).toEqual(["open"]);
+    expect(w.lockStore.locks.size).toBe(0);
+    expect(records(w)[0]).toMatchObject({ status: "refused", machine: { state: "running" } });
+  });
+
+  test("a host with its own Paseo password: the plan stops the hosts' policy allowing exactly that ARN, and the removal proceeds", async () => {
+    const instance = withPasswords(PASEO_1, PASEO_2);
+    const text = serializeInstance(instance);
+    const w = world({ worker: CLEAN, configuration: text, secretArns: [AUTH, PASEO_1, PASEO_2] });
+    const result = await terminateWorker(w.deps, removing(w, { instance }));
+    expect(result).toMatchObject({ kind: "done", removed: true, instanceId: ID });
+    const [, plan] = w.terraform.calls;
+    expect(plan?.call === "plan" && plan.request.variables.paseo_password_secret_arns).toEqual({
+      "builder-2": PASEO_2,
+    });
+    expect(w.progress).toContainEqual({
+      kind: "removal_plan",
+      plan: expect.arrayContaining([
+        `  ~ ${SECRETS_POLICY}`,
+        `  - module.hosts.aws_instance.host["${KEY}"]`,
+        "  0 to add, 1 to change, 1 to destroy.",
+      ]),
+    });
+    expect(calls(w)).toEqual(["output", "plan", "showPlan", "applyPlan", "output"]);
+    expect(w.terraform.world.secretArns).toEqual([AUTH, PASEO_2]);
+    expect([...w.terraform.world.hosts]).toEqual(["builder-2"]);
+    expect(w.store.files[PATH]).toBe(serializeInstance(withoutHost(instance, KEY as HostKey)));
+  });
+
+  test("a policy update dropping another ARN than the removed host's password is refused, applying nothing", async () => {
+    // factory.json now names a new password for builder-1, not yet applied: the state's policy
+    // still allows the old one, which the removal plan would drop instead.
+    const instance = withPasswords(PASEO_1, PASEO_2);
+    const text = serializeInstance(instance);
+    const w = world({
+      worker: CLEAN,
+      configuration: text,
+      secretArns: [AUTH, OLD_PASEO_1, PASEO_2],
+    });
+    const result = await terminateWorker(w.deps, removing(w, { instance }));
+    expect(result).toMatchObject({
+      kind: "refused",
+      refusal: {
+        summary: `The removal plan changes more than host ${KEY}'s machine: apply factory.json's other changes first`,
+        details: [`${SECRETS_POLICY} would be updated in place`],
+      },
+    });
+    expect(calls(w)).toEqual(["output", "plan", "showPlan"]);
+    expect(w.terraform.world.secretArns).toEqual([AUTH, OLD_PASEO_1, PASEO_2]);
+    expect([...w.terraform.world.hosts]).toEqual([KEY, "builder-2"]);
+    expect(w.store.writes).toEqual([]);
+    expect(records(w)[0]).toMatchObject({ status: "refused" });
+  });
+
+  test("a state still recording the key is applied, so Terraform stops recording it, and checked afterwards", async () => {
+    const w = world({
+      provisioned: ["builder-2"],
+      inventory: { kind: "machines", machines: [] },
+    });
+    // An earlier removal destroyed the machine but its apply never wrote the outputs.
+    w.terraform.world.outputs = { host_keys: [KEY, "builder-2"] };
+    const apply = w.deps.provisioner.applyPlan;
+    w.deps = {
+      ...w.deps,
+      provisioner: {
+        ...w.deps.provisioner,
+        applyPlan: async (request) => {
+          await apply(request);
+          w.terraform.world.outputs = undefined;
+        },
+      },
+    };
+    expect(await terminateWorker(w.deps, removing(w))).toMatchObject({
+      kind: "done",
+      removed: true,
+    });
+    expect(calls(w)).toEqual(["output", "plan", "showPlan", "applyPlan", "output"]);
+    expect(w.store.files[PATH]).toBe(WITHOUT_KEY);
+
+    // Terraform still recording the key after its apply fails, writing nothing.
+    const stuck = world({
+      provisioned: ["builder-2"],
+      inventory: { kind: "machines", machines: [] },
+    });
+    stuck.terraform.world.outputs = { host_keys: [KEY, "builder-2"] };
+    expect(await terminateWorker(stuck.deps, removing(stuck))).toMatchObject({
+      kind: "failed",
+      refusal: {
+        summary: `Terraform still records host ${KEY} after applying its removal`,
+        nextAction: `Rerun \`fffactory worker terminate ${KEY}\`.`,
+      },
+    });
+    expect(stuck.store.writes).toEqual([]);
+    expect(stuck.admin.calls).toEqual(["open"]);
+  });
+
+  test("a machine already being terminated is waited for, then the host removed", async () => {
+    const w = world({
+      provisioned: ["builder-2"],
+      inventory: { kind: "machines", machines: [machine(KEY, "shutting-down", ID)] },
+      states: ["terminated"],
+    });
+    expect(await terminateWorker(w.deps, removing(w))).toMatchObject({
+      kind: "done",
+      awaited: true,
+      removed: true,
+      instanceId: ID,
+    });
+    expect(w.control.mutations()).toEqual([]);
+    expect(w.store.files[PATH]).toBe(WITHOUT_KEY);
+  });
+
+  test("its gates still refuse a busy running worker before anything is planned", async () => {
+    const w = world({ worker: CLEAN, activity: { kind: "active", count: 1 } });
+    expect(await terminateWorker(w.deps, removing(w))).toMatchObject({
+      kind: "refused",
+      refusal: {
+        nextAction:
+          `Wait until no agent is active there, then rerun \`fffactory worker terminate ${KEY}\`, ` +
+          "or pass --force to terminate it anyway.",
+      },
+    });
+    expect(calls(w)).toEqual([]);
+  });
+
+  test("a device left behind leaves the removal partial, naming only the device to remove", async () => {
+    const w = world({
+      worker: CLEAN,
+      admin: {
+        devices: [tailnetDevice("nWorker1CNTRL", HOSTNAME, [WORKER_TAG])],
+        failing: { nWorker1CNTRL: "Tailscale answered HTTP 500" },
+      },
+    });
+    expect(await terminateWorker(w.deps, removing(w))).toMatchObject({
+      kind: "done",
+      removed: true,
+      leftover: {
+        nextAction:
+          `Remove the remaining devices named ${HOSTNAME} at https://login.tailscale.com/admin/machines ` +
+          "yourself (one without the factory's tag only if it was this worker): factory.json no " +
+          "longer declares the host.",
+      },
+    });
+    expect(w.store.files[PATH]).toBe(WITHOUT_KEY);
+    expect(records(w)[0]).toMatchObject({ status: "partial" });
+  });
+});
+
+describe("terminate's removal interrupted (worker-lifecycle §Interruption)", () => {
+  test("while Terraform applies: factory.json is untouched, the lock stays, no device is deleted", async () => {
+    let w: World | undefined;
+    w = world({ worker: CLEAN });
+    w.terraform.world.beforeChange = () => w?.interrupt();
+    expect(await terminateWorker(w.deps, removing(w))).toMatchObject({
+      kind: "interrupted",
+      locked: true,
+      removal: "applying",
+    });
+    expect(w.store.writes).toEqual([]);
+    expect(w.admin.calls).toEqual(["open"]);
+    expect(w.lockStore.locks.size).toBe(1);
+    expect(records(w)[0]).toMatchObject({
+      status: "running",
+      stages: [{ name: "terminate", status: "applying" }],
+    });
+  });
+
+  test("once factory.json is written: no device is deleted, and it says so", async () => {
+    let w: World | undefined;
+    w = world({ worker: CLEAN });
+    const write = w.store.write.bind(w.store);
+    w.store.write = async (path, contents) => {
+      await write(path, contents);
+      w?.interrupt();
+    };
+    expect(await terminateWorker(w.deps, removing(w))).toMatchObject({
+      kind: "interrupted",
+      locked: true,
+      removal: "written",
+    });
+    expect(w.store.files[PATH]).toBe(WITHOUT_KEY);
+    expect(w.admin.calls).toEqual(["open"]);
+    expect(w.lockStore.locks.size).toBe(1);
   });
 });

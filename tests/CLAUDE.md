@@ -48,8 +48,13 @@ EC2 at `support/stub-ec2-instances.ts`, which also answers `StopInstances`,
 records every call, so a test can assert EC2 was never asked to change anything
 (`mutations`), and terminate against its `fakeTailnetAdmin`, a tailnet of `tailnetDevice`s
 recording every call and the secret each `open` got, and `fake-secrets.ts`'s
-`fakeSecretStore` reading the admin client by its ARN. Tests never reach Tailscale's API:
-`infrastructure/tailscale-api-admin.test.ts` sends real HTTP to
+`fakeSecretStore` reading the admin client by its ARN. Terminate removing the host plans and
+applies against `fakeFactoryWorld` (which plans deleting a provisioned key no longer declared,
+its `before` naming the instance the state holds (`instanceIds`), records it no longer once
+applied, and, given the secrets the hosts' policy allows (`secretArns`), plans that policy's
+in-place update as Terraform renders it) and writes factory.json to `MemoryInstanceStore`.
+Tests never reach Tailscale's API: `infrastructure/tailscale-api-admin.test.ts` sends real
+HTTP to
 `support/stub-tailscale-api.ts`, a local stand-in for the token exchange, the device list
 and deletion that echoes refused requests back, so a test can assert no body, token or
 secret reaches a reason; its `expireTokens` expires the tokens granted so far, and

@@ -70,6 +70,39 @@ function shownAttributes({ actions, before, after }: WorldChange) {
 }
 
 export const NETWORK = "module.network.aws_vpc.this";
+export const SECRETS_POLICY = "module.host_identity.aws_iam_role_policy.read_secrets";
+
+/**
+ * The hosts' secret-reading policy document as `aws_iam_policy_document` renders it
+ * (`assets/terraform/modules/host-identity`): a single resource as a string, several as a list.
+ */
+export function secretsPolicy(arns: readonly string[]): string {
+  return JSON.stringify({
+    Version: "2012-10-17",
+    Statement: [
+      {
+        Sid: "ReadFactorySecrets",
+        Effect: "Allow",
+        Action: "secretsmanager:GetSecretValue",
+        Resource: arns.length === 1 ? arns[0] : arns,
+      },
+    ],
+  });
+}
+
+/**
+ * The secrets the factory root lets hosts read, as `assets/terraform/factory/main.tf` builds
+ * them: the Tailscale auth key, then every host's Paseo password, distinct.
+ */
+function secretArnsOf(variables: Readonly<Record<string, unknown>>): string[] {
+  const passwords = (variables.paseo_password_secret_arns ?? {}) as Record<string, string>;
+  return [
+    ...new Set([String(variables.tailscale_auth_key_secret_arn), ...Object.values(passwords)]),
+  ];
+}
+
+const sameSet = (a: readonly string[], b: readonly string[]) =>
+  a.length === b.length && a.every((arn) => b.includes(arn));
 export const hostAddress = (key: string) => `module.hosts.aws_instance.host["${key}"]`;
 export const STATE_BUCKET_ADDRESS = "module.state_bucket.aws_s3_bucket.state";
 
@@ -80,7 +113,10 @@ export const STATE_BUCKET_ADDRESS = "module.state_bucket.aws_s3_bucket.state";
  * declared key not yet provisioned and removing any provisioned key no longer declared,
  * `replace` forces a host's replacement and `resize` an in-place change of its instance type;
  * `output` records the provisioned keys once there is state. `showPlan` gives every change a
- * `before` and an `after`, as `terraform show -json` does. Applying a saved plan applies its
+ * `before` and an `after`, as `terraform show -json` does: a host machine's `before` names the
+ * instance its state holds (`instanceIds`, or one made up from its key). Given the resources
+ * the hosts' secret-reading policy allows in the state (`secretArns`), it also plans that
+ * policy's in-place update whenever the projected secrets differ, as Terraform renders it. Applying a saved plan applies its
  * changes one at a time, each written to the state (a new revision in `store`), and runs
  * `beforeChange` before each: a test can stop the apply part way through by throwing there,
  * as an interrupted Terraform does.
@@ -89,10 +125,18 @@ export function fakeFactoryWorld(options: {
   readonly store: { readonly buckets: Set<string>; readonly states: Map<string, string> };
   readonly bucket: string;
   readonly hosts?: readonly string[];
+  /** The instance the state holds for a host key, by key. */
+  readonly instanceIds?: Readonly<Record<string, string>>;
+  /** The secrets the state's secret-reading policy allows; the policy is not modeled unless set. */
+  readonly secretArns?: readonly string[];
 }) {
   const world = {
     network: (options.hosts ?? []).length > 0,
     hosts: new Set(options.hosts ?? []),
+    /** The instance the state holds for a host key; `i-<key>` unless set. */
+    instanceIds: new Map(Object.entries(options.instanceIds ?? {})),
+    /** The secrets the state's secret-reading policy allows, when it is modeled. */
+    secretArns: options.secretArns,
     replace: new Set<string>(),
     resize: new Set<string>(),
     revisions: 0,
@@ -143,7 +187,36 @@ export function fakeFactoryWorld(options: {
     return [];
   }
 
-  function factoryChanges(declared: readonly string[]): WorldChange[] {
+  function policyChange(variables: Readonly<Record<string, unknown>>): WorldChange[] {
+    const allowed = world.secretArns;
+    if (allowed === undefined) return [];
+    const projected = secretArnsOf(variables);
+    if (sameSet(allowed, projected)) return [];
+    const factory = String(variables.factory_id);
+    const attributes = {
+      id: `${factory}-host:${factory}-read-secrets`,
+      name: `${factory}-read-secrets`,
+      name_prefix: "",
+      role: `${factory}-host`,
+    };
+    return [
+      {
+        address: SECRETS_POLICY,
+        type: "aws_iam_role_policy",
+        actions: ["update"],
+        before: { ...attributes, policy: secretsPolicy(allowed) },
+        after: { ...attributes, policy: secretsPolicy(projected) },
+        apply: () => {
+          world.secretArns = projected;
+        },
+      },
+    ];
+  }
+
+  function factoryChanges(
+    declared: readonly string[],
+    variables: Readonly<Record<string, unknown>>,
+  ): WorldChange[] {
     const network: WorldChange = {
       address: NETWORK,
       type: "aws_vpc",
@@ -155,11 +228,13 @@ export function fakeFactoryWorld(options: {
     const removed = [...world.hosts].filter((key) => !declared.includes(key));
     return [
       ...(world.network ? [] : [network]),
+      ...policyChange(variables),
       ...declared.flatMap(hostChange),
       ...removed.map((key) => ({
         address: hostAddress(key),
         type: "aws_instance",
         actions: ["delete"],
+        before: { id: world.instanceIds.get(key) ?? `i-${key}`, instance_type: "t3.large" },
         apply: () => world.hosts.delete(key),
       })),
     ];
@@ -189,7 +264,9 @@ export function fakeFactoryWorld(options: {
       failing("plan");
       const declared = Object.keys((request.variables.hosts ?? {}) as Record<string, unknown>);
       const changes =
-        request.configuration.root === "backend" ? backendChanges() : factoryChanges(declared);
+        request.configuration.root === "backend"
+          ? backendChanges()
+          : factoryChanges(declared, request.variables);
       plans.set(request.planFile, changes);
       return { changes: changes.length > 0 };
     },
@@ -202,7 +279,7 @@ export function fakeFactoryWorld(options: {
         resource_changes: (plans.get(request.planFile) ?? []).map((change) => ({
           address: change.address,
           type: change.type,
-          change: { actions: change.actions, ...shownAttributes(change) },
+          change: { actions: change.actions, ...shownAttributes(change), after_unknown: {} },
         })),
       };
     },

@@ -99,7 +99,11 @@ E3 Repository, dispatch and the switch
 - Second worker and rollout policy (one at a time, skip offline, stop on unexpected failure).
 - Full upgrade: schema migration with backup (removes the D11 schema refusal).
 - Base migrations with reboot and reconnect (removes the D11 base refusal).
-- Host retirement with snapshot and destroy approvals (removes the D11 host refusals).
+- Host retirement: shipped in reduced form as `fffactory worker terminate KEY` (epic #5, #10): a
+  scoped Terraform removal plan approved with the host key, then factory.json and the tailnet
+  devices. Removing a host by hand stays refused (D11, naming the command). Still deferred: EBS
+  snapshots, a `retiring` state that pauses dispatch first, and host replacement (which removes
+  the D11 destroy/replace refusal).
 - Inventory and orphan reporting across AWS, Tailscale and factory.json.
 - Companion fffactory skill and `skill install`.
 - Full acceptance exercise across all failure paths.

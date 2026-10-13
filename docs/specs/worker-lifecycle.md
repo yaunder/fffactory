@@ -1,7 +1,7 @@
 # Worker lifecycle
 
 `fffactory worker` powers one declared worker's EC2 instance off and on, or
-terminates it. It is the operator's side of a worker's lifecycle; `fffactory
+terminates it, removing the host from the factory or keeping it. It is the operator's side of a worker's lifecycle; `fffactory
 host` stays the worker side of the [host protocol](host-protocol.md). EC2's
 state is the truth: no factory.json field records whether a worker is stopped.
 Epic: [#5](https://github.com/yaunder/fffactory/issues/5).
@@ -11,7 +11,7 @@ Epic: [#5](https://github.com/yaunder/fffactory/issues/5).
 ```text
 fffactory worker stop KEY [--force] [--yes] [--instance PATH] [--profile NAME]
 fffactory worker start KEY [--yes] [--instance PATH] [--profile NAME]
-fffactory worker terminate KEY --keep [--force] [--confirm KEY] [--instance PATH] [--profile NAME]
+fffactory worker terminate KEY [--keep] [--force] [--confirm KEY] [--instance PATH] [--profile NAME]
 ```
 
 - `stop` stops compute billing. The instance, its root volume (whose storage is
@@ -19,6 +19,11 @@ fffactory worker terminate KEY --keep [--force] [--confirm KEY] [--instance PATH
   non-ephemeral key) and its factory.json entry all stay.
 - `start` brings the same worker back, with the same identity, and reports its
   readiness as [status](status.md) would.
+- `terminate` removes the worker from the factory: a scoped Terraform plan
+  destroys the instance and its root volume and stops recording the host key,
+  factory.json is written without the host, and the worker's Tailscale devices
+  are deleted, so the factory has no record of it ([Terminate
+  (remove)](#terminate-remove)).
 - `terminate --keep` destroys the instance and its root volume and deletes the
   worker's Tailscale devices; the host stays in factory.json, so the next
   `fffactory apply` creates it afresh ([Terminate (keep)](#terminate-keep)).
@@ -34,19 +39,18 @@ start it.
 and terminate's ([Gates](#gates), [Gates (terminate)](#gates-terminate));
 `--yes` confirms stop and start in advance ([Confirmation](#confirmation)), and
 `--confirm KEY` a terminate ([Confirmation (typed
-key)](#confirmation-typed-key)); `--keep` is terminate's, and required;
-`--instance` and `--profile` select the instance and the AWS credentials as for
-every command. Anything else, an option of another subcommand (`unknown option
---yes`), a missing subcommand, or not exactly one `KEY` is refused, exit 1,
-before anything is read.
+key)](#confirmation-typed-key)); `--keep` is terminate's; `--instance` and
+`--profile` select the instance and the AWS credentials as for every command.
+Anything else, an option of another subcommand (`unknown option --yes`), a
+missing subcommand, or not exactly one `KEY` is refused, exit 1, before
+anything is read.
 
 ## Order
 
 Every command goes in this order, and stops at the first refusal:
 
 1. Select, read and validate factory.json, printing `Instance: PATH (SOURCE)`
-   ([instance configuration](instance-configuration.md)). `terminate` without
-   `--keep` is refused before, at its arguments ([Terminate (keep)](#terminate-keep)).
+   ([instance configuration](instance-configuration.md)).
 2. Refuse without a terminal and without `--yes` (terminate: `--confirm KEY`):
    the command could never be confirmed ([Confirmation](#confirmation)).
 3. Refuse a `KEY` factory.json does not declare, naming the declared keys. An
@@ -60,6 +64,8 @@ Every command goes in this order, and stops at the first refusal:
    admin client (tailscale.admin_client_secret): terminate deletes the worker's
    tailnet device with it`, next action `fffactory secret set
    tailscale-admin-client` ([secrets](secrets.md#the-tailscale-admin-client)).
+   Terminate without `--keep` then refuses the only host factory.json declares
+   ([Terminate (remove)](#terminate-remove)).
 5. The account check: the caller must be in `aws.account_id`, resolved in the
    factory Region ([doctor §AWS account](doctor.md#aws-account)).
 6. The [CLI/pin match guard](plan-apply.md#clipin-match-guard): only the
@@ -71,7 +77,9 @@ Every command goes in this order, and stops at the first refusal:
    factory ID and `fffactory:host-key` = `KEY`, in every state but
    `terminated` (`DescribeInstances`, as [status](status.md#inventories) lists
    them). None, several (each listed) or an inventory that could not be read is
-   refused: fffactory never guesses.
+   refused: fffactory never guesses. Terminate without `--keep` takes none as
+   the machine already gone, and removes the host
+   ([Terminate (remove)](#terminate-remove)).
 9. The gates: stop's ([Gates](#gates)) or terminate's ([Gates
    (terminate)](#gates-terminate)).
 10. Terminate: read the admin client from Secrets Manager and exchange it for a
@@ -87,10 +95,14 @@ Every command goes in this order, and stops at the first refusal:
 15. Release the lock (`settleFactoryLock`): unless interrupted
     ([Interruption](#interruption)).
 
+Terminate without `--keep` replaces steps 11 to 14 with its removal: the
+scoped Terraform plan, its approval, Terraform's apply, factory.json and the
+devices ([Terminate (remove)](#terminate-remove)).
+
 Steps 2 to 6 reach nothing that could change: refusals there take no lock and
 write no record. From step 7 every refusal, decline and failure is recorded and
-releases the lock. No step before 12 calls EC2's mutating API or deletes a
-device.
+releases the lock. No step before 12, or before the removal's apply, calls
+EC2's mutating API, applies Terraform, writes factory.json or deletes a device.
 
 ## Tiers
 
@@ -108,6 +120,7 @@ them.
 | `ec2:StartInstances` | The same resource and condition | `worker start`. |
 | `ec2:TerminateInstances` | The same resource and condition | `worker terminate`. |
 | `secretsmanager:GetSecretValue` | The secret `tailscale.admin_client_secret` refers to | `worker terminate`: the Tailscale admin client. |
+| What `fffactory apply` needs of the factory's Terraform | The state object `factory/terraform.tfstate` and Terraform's lock beside it, and the factory root module's resources: `ec2:TerminateInstances` on the instance, and `iam:PutRolePolicy` on the hosts' role when the host has its own Paseo password | `worker terminate` without `--keep`: the scoped removal plan and its apply. |
 | `s3:PutObject`, `s3:GetObject`, `s3:DeleteObject`, `s3:DeleteObjectVersion` | `arn:aws:s3:::BUCKET/<factory ID>-lock.json` | The factory-wide lock ([provisioning §Lock](provisioning.md#lock)). |
 | `s3:PutObject` | `arn:aws:s3:::BUCKET/<factory ID>-operations/*` | The operation record. |
 
@@ -193,6 +206,148 @@ Status:
   Next: Install release 0.3.0 with `fffactory apply`, then rerun `fffactory status`.
 ```
 
+## Terminate (remove)
+
+Without `--keep`, terminate removes the worker from the factory
+([#10](https://github.com/yaunder/fffactory/issues/10)): Terraform destroys its
+machine and stops recording its host key, factory.json no longer declares it,
+and its tailnet devices are deleted. It is the only way to remove a host:
+removing one from factory.json by hand is still refused by the D11 refusal,
+which names this command
+([plan-apply §Refusals](plan-apply.md#refusals-until-lifecycle-work-lands-d11)),
+and the scoped removal plan is the only plan allowed to destroy a host
+machine. It is a reduced form of host retirement
+([design §Host retirement](../designs/fffactory-v2.md#host-retirement)): no
+snapshot, no `retiring` step, and dispatch is not paused first.
+
+What it does depends on the instance's state when it is located:
+
+| State | Terminate (remove) |
+| --- | --- |
+| `running` | Runs the [gates](#gates-terminate), opens the [admin client](#tailnet-device-removal), then the removal below, whose plan must destroy the instance. |
+| `stopped` | The same, but passes the gates uninspected. |
+| `shutting-down` | No gates and no question yet; opens the admin client and waits for `terminated`, as `--keep` does, then the removal below, whose plan must not destroy an instance. |
+| No instance carries the key | The machine is already gone: `Worker KEY (HOSTNAME): no EC2 instance carries its key; its machine is already gone.`, no gates; opens the admin client, then the removal below, whose plan must not destroy an instance. |
+| `pending`, `stopping` | Refused, as with `--keep`. |
+
+The only host factory.json declares is refused before anything reaches AWS: a
+factory keeps at least one worker. Its next action is to declare and create a
+replacement first, or to terminate it with `--keep`.
+
+The removal, under the same lock and record:
+
+1. Plan. This release's Terraform tree is materialized as `plan` materializes
+   it. The host keys the state records are read as for any plan
+   ([provisioning §Stable host keys](provisioning.md#stable-host-keys)); a
+   record that cannot be read is refused. factory.json without the host is built
+   in memory, by own entries, and projected with the recorded keys less the
+   removed one; any other issue, such as another host already removed by hand,
+   is refused, listed by field path. The factory root is planned from that
+   projection into a plan file of the operation's own in the plan store (kept
+   only while the operation runs, never saved), with Terraform's state lock
+   taken, and read back with `showPlan`.
+2. The scoped removal rule (`removalPlanRefusal`, `src/domain/host-removal.ts`).
+   Leaving reads and no-ops aside, the plan may only:
+   - delete `module.hosts.aws_instance.host["KEY"]`, a managed `aws_instance`,
+     with the single action `delete`. It must when EC2 listed the instance, and
+     must not when it listed none: `Terraform's plan does not destroy host KEY's
+     machine: its state does not hold the instance EC2 lists for it`, or
+     `Terraform's state holds a machine for host KEY that EC2 does not list with
+     the factory's tags`, each naming the EC2 console. The instance it deletes,
+     the `id` its `before` names, must be the one EC2 lists, which the gates
+     inspected and the question names: another, say one the state holds whose
+     tags were stripped by hand while EC2 lists a tagged one, would be destroyed
+     while the approved instance kept running. Another is refused, `Terraform's
+     plan destroys instance ID for host KEY, not LISTED, the instance EC2 lists
+     for it`, and so is one it does not name, `Terraform's plan does not
+     identify the instance it destroys for host KEY: only LISTED, the instance
+     EC2 lists for it, may be destroyed`. The first names both instances in the
+     EC2 console, the second the instances carrying the host key;
+   - update `module.host_identity.aws_iam_role_policy.read_secrets`, the hosts'
+     secret-reading policy, in place, only when the removed host declares a
+     `paseo_password_secret` and the update only stops allowing it: every other
+     attribute as before, nothing unknown until apply, and the policy document
+     (its statements' actions and resources compared as sets) as before less
+     that one ARN.
+
+   Any other change, a replacement of the host, another host's change, a pending
+   create or update, drift or an action fffactory does not know, fails closed,
+   and nothing is applied:
+
+   ```text
+   Refusing to terminate the worker: The removal plan changes more than host builder-1's machine: apply factory.json's other changes first
+     module.hosts.aws_instance.host["builder-2"] would be created
+   Next: Apply factory.json's other changes first with `fffactory apply`, or undo them, then rerun `fffactory worker terminate builder-1`.
+   ```
+
+   A plan that cannot be read is refused too.
+3. Show the plan, reusing the plan review's words:
+
+   ```text
+   Removal plan:
+     Configuration: /work/.fffactory/factory.json
+     Factory: Test factory (fff-abcd1234)
+     AWS account: 123456789012, Region: eu-west-2
+     Release: 0.3.0
+   Infrastructure changes:
+     - module.hosts.aws_instance.host["builder-1"]
+     0 to add, 0 to change, 1 to destroy.
+   factory.json: remove host builder-1.
+   Tailnet: delete the devices named fff-abcd1234-builder-1 that carry the factory's tag.
+   ```
+
+4. The typed-key [confirmation](#confirmation-typed-key), or `--confirm KEY`.
+5. factory.json must still be the exact text read in step 1 of the
+   [order](#order): otherwise `factory.json changed after fffactory read it:
+   nothing was applied`.
+6. Apply exactly that plan file (`Applying the removal plan. Terraform's output
+   is not shown; this can take several minutes.`). Terraform terminates the
+   instance and waits for it. A plan that changes nothing is not applied, unless
+   the state still records the key (an earlier removal's apply that stopped
+   before writing its outputs). Then the recorded host keys are read again: one
+   still holding the key fails, `Terraform still records host KEY after
+   applying its removal`, factory.json unwritten.
+7. Write factory.json without the host (`InstanceStore.write`, atomic), only if
+   it is still the text read; `factory.json no longer declares host KEY: PATH`.
+   Every other field and host is kept; the document is written as
+   `JSON.stringify` with two spaces, as `upgrade` writes it.
+8. Delete the worker's tailnet devices ([Tailnet device removal](#tailnet-device-removal)).
+
+```text
+Instance: /work/.fffactory/factory.json (nearest .fffactory/factory.json)
+Worker builder-1 (fff-abcd1234-builder-1): EC2 instance i-0123456789abcdef0 is running.
+Planning the removal of host builder-1. Terraform's output is not shown.
+Removal plan:
+  ...
+Applying the removal plan. Terraform's output is not shown; this can take several minutes.
+factory.json no longer declares host builder-1: /work/.fffactory/factory.json
+Deleting the Tailscale devices named fff-abcd1234-builder-1.
+Removed worker builder-1 (fff-abcd1234-builder-1): its EC2 instance and root volume are gone, and neither Terraform nor factory.json records it.
+Deleted Tailscale device nAbCdEf1CNTRL (fff-abcd1234-builder-1).
+Operation record: s3://fff-abcd1234-state/fff-abcd1234-operations/2026-10-12T12:00:00.000Z-aaaaaaaa.json
+```
+
+Afterwards `fffactory plan` shows no change for the host, since Terraform no
+longer records it and factory.json no longer declares it, and
+[status](status.md) no longer lists it.
+
+Each failure leaves a state the next action names, and every one is recorded
+and releases the lock:
+
+| Fails | Leaves | Next action |
+| --- | --- | --- |
+| Planning (`Planning the removal failed: REASON`) | Nothing applied: the machine and factory.json as they were. | Rerun `fffactory worker terminate KEY`. |
+| Terraform's apply (`Removing the host failed: REASON`) | Terraform may have destroyed the machine; factory.json untouched, still declaring the host. | Rerun `fffactory worker terminate KEY`: it plans again from what exists, which may be a machine shutting down or gone, and finishes. |
+| The key still recorded after the apply | The machine destroyed; factory.json untouched. | Rerun `fffactory worker terminate KEY`. |
+| Writing factory.json, or it changed meanwhile (`Terraform destroyed host KEY's machine and no longer records it, but factory.json could not be written (REASON): it still declares the host`) | No machine, no recorded key; factory.json still declaring the host, whose next `fffactory apply` would create it afresh; its devices not yet deleted. | Remove the host KEY from `hosts` in PATH yourself and delete the devices named HOSTNAME at the admin console, or rerun `fffactory worker terminate KEY` once factory.json can be written: it finds the machine gone and finishes. |
+| Deleting a device | The host removed everywhere but the tailnet: exit 2, `partial`. | Remove the remaining devices named HOSTNAME at the admin console ([Tailnet device removal](#tailnet-device-removal)). |
+| Any other error once factory.json is written, such as the operation record's write before the devices are deleted | The host removed everywhere but the tailnet, whose devices may remain; a rerun would be refused, since factory.json no longer declares the host. | Remove the remaining devices named HOSTNAME at the admin console. |
+
+A failed Terraform command's reason is fffactory's own; its diagnostics are
+kept in a private local file whose path alone is printed after the failure, as
+for `apply` ([plan-apply §Failure](plan-apply.md#failure)), and never reach the
+operation record.
+
 ## Terminate (keep)
 
 What terminate does depends on the instance's state when it is located:
@@ -222,12 +377,6 @@ and waits for its first boot (D3b). Until then [status](status.md#workers)
 reports the host `Not provisioned`, since EC2 lists no instance carrying its
 key. This is the recovery for a [failed first boot](worker-bootstrap.md#failed-first-boot),
 with `--force`: a worker that never joined the tailnet cannot be inspected.
-
-Terminate without `--keep` is refused before anything is read: `fffactory
-worker terminate: removal arrives in a later release; use --keep`. Removing the
-host from factory.json is a later task of the epic
-([#10](https://github.com/yaunder/fffactory/issues/10)), marked
-`TODO(re-evaluate when terminate removal lands)` in `src/cli/commands/worker.ts`.
 
 ```text
 Instance: /work/.fffactory/factory.json (nearest .fffactory/factory.json)
@@ -312,6 +461,9 @@ Deleting the worker's tailnet devices was not complete: Not every Tailscale devi
 Next: Remove the remaining devices named fff-abcd1234-builder-1 at https://login.tailscale.com/admin/machines yourself (one without the factory's tag only if it was this worker), then run `fffactory apply`, which creates the worker afresh.
 ```
 
+That is `--keep`'s next action. Removing the host, it ends `...: factory.json
+no longer declares the host.` instead: there is no next apply to prepare for.
+
 fffactory does not check the token's scope before terminating: a client
 without write access to devices (`devices:core`) is found only here.
 
@@ -356,7 +508,9 @@ also reads its last repository result (`host repositories inspect`, as
    next action, not the tailnet's: ``Check the worker with `fffactory status`,
    then rerun `fffactory worker terminate KEY --keep`. If the instance's EC2
    console output shows its bootstrap failed, it never joined the tailnet:
-   rerun with --force, which terminates it uninspected.`` Status's recovery for
+   rerun with --force, which terminates it uninspected.`` (without `--keep` in
+   the rerun when the command removed the host: every next action reruns the
+   command as given). Status's recovery for
    a missing worker is terminating it, so its words here would send the
    operator back to the command refused. The gate stays, though a worker whose
    [bootstrap failed](worker-bootstrap.md#failed-first-boot) is always refused
@@ -407,7 +561,11 @@ by y/N or `--yes`:
 
 - At a terminal, without `--confirm`, terminate asks `Terminate worker KEY
   (HOSTNAME), EC2 instance ID? Its machine and root volume are destroyed. Type
-  the host key to confirm: `. Only the host key itself, exactly (blank space
+  the host key to confirm: `. Removing the host, it asks `Terminate worker KEY
+  (HOSTNAME), EC2 instance ID, and remove it from factory.json? ...`, after the
+  removal plan is shown, and for a machine already gone `Remove worker KEY
+  (HOSTNAME) from factory.json? No EC2 instance carries its key: its machine is
+  already gone. Type the host key to confirm: `. Only the host key itself, exactly (blank space
   around it aside), confirms; `y`, `yes`, another key, or no answer declines:
   `Not confirmed: the worker was not terminated.`, exit 1, recorded `declined`.
 - `--confirm KEY` confirms without asking, for use without a terminal. Any
@@ -416,9 +574,10 @@ by y/N or `--yes`:
 - Without a terminal and without `--confirm`: `Terminating a worker needs your
   confirmation: rerun at a terminal, or pass --confirm KEY.`
 
-The question comes after the gates and the admin client: a terminate that would
-be refused is never asked about. A machine already shutting down is not asked
-about either.
+The question comes after the gates and the admin client, and for a removal
+after its plan: a terminate that would be refused is never asked about. With
+`--keep`, a machine already shutting down is not asked about either; a removal
+always is, since it also changes factory.json.
 
 ## Operation record
 
@@ -429,21 +588,27 @@ the lock is taken and again at each step. Its `operation` is `worker-stop`,
 stop and terminate), `authorizing` (terminate's admin client),
 `awaiting_approval` (only when asked), `stopping`, `starting` or `terminating`
 (the request and the wait), then `waiting` (start's tailnet wait) or
-`removing_devices` (terminate), and ends:
+`removing_devices` (terminate), and ends as below. Terminate removing the host
+goes `planning` after `authorizing` (and after `terminating`, for a machine
+already shutting down), then `awaiting_approval`, `applying` (Terraform; only
+when the plan is applied), `writing` (factory.json) and `removing_devices`:
 
 | Stage ends | Operation `status` | When |
 | --- | --- | --- |
 | `stopped`, `started`, `terminated` | `succeeded` | This command changed the machine's state. |
+| `removed` | `succeeded` | Terminate removed the host: Terraform, factory.json and its devices. |
 | `unchanged` | `succeeded` | The machine was already in, or on its way to, the target state. |
 | `partial` | `partial` | Terminate: the machine is terminated, but a tailnet device remains ([Tailnet device removal](#tailnet-device-removal)); `failure` holds the summary. |
-| `refused` | `refused` | No single instance, a state it refuses, a gate, or terminate's admin client. |
+| `refused` | `refused` | No single instance, a state it refuses, a gate, terminate's admin client, the removal plan's rule, or factory.json changed before the apply. |
 | `declined` | `declined` | The question was not confirmed. |
-| `failed` | `failed` | EC2 refused the request or did not answer it in time, the machine vanished, the deadline passed, or a step failed. |
+| `failed` | `failed` | EC2 refused the request or did not answer it in time, the machine vanished, the deadline passed, Terraform failed to plan or apply the removal, factory.json could not be written, or a step failed. |
 
 The record also carries `machine`: `{"key", "hostname", "instance_id",
 "state"}`, the instance once located, with its state when located, then the
 state that ended the wait: the target state, the state of a machine being
 terminated or gone (`absent`), or at the deadline the last state a read found.
+A removal whose Terraform destroyed the instance records it `terminated`; one
+whose machine was already gone records none.
 `failure`
 names why, in fffactory's words. A record whose final write fails does not
 change the outcome: `The operation record could not be finished: REASON` on
@@ -473,16 +638,28 @@ starting. Terminate says instead `EC2 was asked to terminate the instance and
 may still be doing so; its tailnet devices may remain: check them at
 https://login.tailscale.com/admin/machines.`, and deletes no more devices; its
 rerun is `fffactory worker terminate KEY --keep`, which waits for a machine
-still shutting down, then deletes the devices. At the confirmation question, an
+still shutting down, then deletes the devices (`fffactory worker terminate
+KEY`, removing the host, waits for it too, then removes the host). At the confirmation question, an
 interrupt wins over the answer.
+
+A removal interrupted while Terraform applies its plan (Terraform is stopped
+gracefully, [plan-apply §Interruption](plan-apply.md#interruption)) says
+`Terraform was applying the removal and may have destroyed the machine;
+factory.json still declares host KEY, and the rerun finishes the removal.`: its
+rerun, `fffactory worker terminate KEY`, finds the machine running, shutting
+down or gone and plans again. Interrupted once factory.json is written, it
+deletes no device and says `factory.json no longer declares host KEY, and
+Terraform destroyed its machine; its tailnet devices may remain: check them at
+https://login.tailscale.com/admin/machines.`; there is nothing to rerun, so the
+lock line ends at `fffactory lock break`.
 
 ## Exit codes
 
 | Exit | When |
 | --- | --- |
-| 0 | The worker is stopped, started or terminated, including a no-op, and a started worker that is not ready or not online in time. |
+| 0 | The worker is stopped, started, terminated or removed, including a no-op, and a started worker that is not ready or not online in time. |
 | 1 | Refused, declined or failed. |
-| 2 | Terminated, but a tailnet device remains ([Tailnet device removal](#tailnet-device-removal)). |
+| 2 | Terminated or removed, but a tailnet device remains ([Tailnet device removal](#tailnet-device-removal)). |
 | 128 + N | Interrupted by signal N. |
 
 ## What it never prints
@@ -503,17 +680,19 @@ what status prints of a worker.
 | Layer | Module | Responsibility |
 | --- | --- | --- |
 | Domain | `src/domain/worker-lifecycle.ts` | The host key check, the one target machine, what each EC2 state means for an action (`powerStep`), the gates of stop and terminate (`stopGate`, `terminateGate`, the stopped pass and the repository result), the confirmation rules (y/N, the typed key, `--confirm`), the admin client's refusals, the device removal's outcome (`deviceRemovalRefusal`), the waits' bounds and steps, the words of every refusal and next action. Pure. |
+| Domain | `src/domain/host-removal.ts` | Terminate's removal: factory.json without the host by own entries (`withoutHost`), the only-host refusal, the scoped removal rule over Terraform's JSON plan (`removalPlanRefusal`, the secret-reading policy's allowed update included), the removal plan as shown, and the words of its refusals and failures. Pure. |
+| Domain | `src/domain/plan.ts`, `src/domain/stable-host-keys.ts` | The D11 refusal of a host removed by hand, naming `fffactory worker terminate KEY`. |
 | Domain | `src/domain/tailnet.ts` | `selectWorkerDevices`: the devices terminate deletes (the reported hostname, never the MagicDNS label, and the factory's tag) and the untagged ones it reports. |
 | Domain | `src/domain/operation.ts` | `startStageOperation`, `withMachine` and the lifecycle stage's statuses. |
 | Domain | `src/domain/status.ts`, `src/domain/rollout.ts` | The `stopped` machine's verdict, `stopped`, and its next action, `fffactory worker start KEY`; a failed first boot's next action, `fffactory worker terminate KEY --keep --force`. |
 | Application | `src/application/machine-control.ts` | The `MachineControl` port: `stop`, `start`, `terminate`, `state`. |
 | Application | `src/application/tailnet-admin.ts` | The `TailnetAdmin` port: `open` (the client secret for a session), the session's `devices` and `remove`. |
 | Application | `src/application/secret-store.ts` | `SecretStore.read`: the admin client's secret, as `SecretMaterial`. |
-| Application | `src/application/worker-lifecycle.ts` | `stopWorker`, `startWorker`, `terminateWorker`: the order above, under the lock and its record; terminate's inspection reuses `inspectRepositories`. |
+| Application | `src/application/worker-lifecycle.ts` | `stopWorker`, `startWorker`, `terminateWorker`: the order above, under the lock and its record; terminate's inspection reuses `inspectRepositories`; its removal plans and applies over `Provisioner` (the factory root, `planInfrastructure`'s target and projection), keeps its plan file in `PlanStore`, and writes factory.json through `InstanceStore`. |
 | Infrastructure | `src/infrastructure/ec2-machine-control.ts` | `ec2MachineControl` over `StopInstances`, `StartInstances`, `TerminateInstances` and `DescribeInstances` (AWS SDK for JavaScript v3, imported on first use), each call within 15 s (`EC2_CONTROL_TIMEOUT_MS`), failures by error name, a request past its deadline `unanswered`. |
 | Infrastructure | `src/infrastructure/aws-secrets-manager-store.ts` | `GetSecretValue` by ARN, within 30 s. |
 | Infrastructure | `src/infrastructure/tailscale-api-admin.ts` | `tailscaleApiAdmin`: the token exchange, the device list and deletion over HTTPS with `fetch`, each within 15 s, no redirects, failures by HTTP status or network code. |
-| CLI adapter | `src/cli/commands/worker.ts` | Arguments, progress, the reports, the exit code; `waitsOnInterrupt`; the refusal without `--keep`. |
+| CLI adapter | `src/cli/commands/worker.ts` | Arguments, progress, the removal plan, the reports, Terraform's diagnostics path, the exit code; `waitsOnInterrupt`; this release's Terraform tree, materialized only when a removal runs. |
 
 Tests: `tests/domain/worker-lifecycle.test.ts` (the host key check, an argument
 never echoed, the one machine, every state for each action, each gate, a
@@ -560,10 +739,34 @@ body, secret or token, the deadline, an expired token renewed once (only on
 HTTP 401) and the call retried, a redirect refused with its target never
 asked), the Secrets Manager read in
 `tests/infrastructure/aws-secrets-manager-store.test.ts`, and the terminate
-reports, exit 2, the refusal without `--keep` and an unechoed `--confirm` in
-`tests/cli/worker.test.ts`. That the next plan creates a terminated worker
-afresh is `tests/domain/plan.test.ts` (`a worker terminated outside fffactory
-plans as a create`).
+reports, exit 2 and an unechoed `--confirm` in `tests/cli/worker.test.ts`.
+That the next plan creates a terminated worker afresh is
+`tests/domain/plan.test.ts` (`a worker terminated outside fffactory plans as a
+create`).
+
+Terminate (remove): `tests/domain/host-removal.test.ts` (the host removed by
+own entries, the only host refused, the scoped removal rule: only the named
+delete passes, and extra creates, updates, other deletes, replaces, unknown
+actions and an unreadable plan fail closed; a plan that does not destroy the
+machine EC2 lists, or destroys one it does not; the policy update dropping
+exactly the removed Paseo password and any other policy change refused; the
+plan as shown; the failures' words);
+`tests/application/worker-lifecycle.test.ts` (a removal recorded step by step,
+its plan file removed, factory.json written by `InstanceStore`; afterwards the
+infrastructure plan shows no change and status no longer lists the host;
+another pending change refused before the question; the only host refused
+before AWS; the typed key asked after the plan; factory.json changed before the
+apply; a failed plan or apply leaving factory.json untouched with its
+diagnostics file, never in the record; factory.json that cannot be written,
+then a rerun finishing; a machine already gone, or being terminated; a state
+still recording the key applied and checked; the gates; a device left behind;
+an interrupt during Terraform's apply and after the write); and
+`tests/cli/worker.test.ts` (the plan and reports, a refused plan, Terraform's
+diagnostics path, a machine already gone, the only host, both interruptions).
+The D11 refusal of a host removed by hand naming the command:
+`tests/domain/stable-host-keys.test.ts`, `tests/domain/plan.test.ts` and
+`tests/cli/plan-apply.test.ts`.
 
 Introduced by [#6](https://github.com/yaunder/fffactory/issues/6); terminate
-`--keep` by [#9](https://github.com/yaunder/fffactory/issues/9).
+`--keep` by [#9](https://github.com/yaunder/fffactory/issues/9); terminate
+removing the host by [#10](https://github.com/yaunder/fffactory/issues/10).

@@ -422,24 +422,33 @@ module's variables.
 
 ### Stable host keys
 
-A host key, once provisioned, is never renamed. The factory root module's
-`host_keys` output records the keys its state has provisioned. The factory
-projection takes that recorded set (empty before the first apply) and refuses
-factory.json when it no longer declares one of them:
+A host key, once provisioned, is never renamed, and only `fffactory worker
+terminate KEY` removes one from factory.json, its machine with it
+([worker lifecycle §Terminate (remove)](worker-lifecycle.md#terminate-remove)).
+The factory root module's `host_keys` output records the keys its state has
+provisioned. The factory projection takes that recorded set (empty before the
+first apply) and refuses factory.json when it no longer declares one of them:
 
 ```text
-hosts: host key "builder-1" is provisioned but no longer declared: host keys cannot be renamed or removed. Restore it, and declare any new host under a new key beside it
+hosts: host key "builder-1" is provisioned but no longer declared: host keys cannot be renamed, and only `fffactory worker terminate builder-1` removes a host. Restore it, and declare any new host under a new key beside it
 ```
 
 A rename is indistinguishable from removing one key and adding another, so the
 check rejects both; the recorded key is quoted only when it is a well-formed
-host key. Adding keys is always accepted. The plan use case reads the recorded
-set with `Provisioner.output` before planning (`recordedHostKeys`), and refuses
-removing a host key as a D11 refusal until retirement lands in M3
+host key (otherwise the command reads `fffactory worker terminate KEY`). Adding
+keys is always accepted. The plan use case reads the recorded set with
+`Provisioner.output` before planning (`recordedHostKeys`), and refuses removing
+a host key by hand as a D11 refusal naming the command
 ([plan and apply §Refusals](plan-apply.md#refusals-until-lifecycle-work-lands-d11)).
 Terraform backs this up: instances are keyed by host key, so a rename would
 plan destroying the old host, which the refusal of host destroys and
 replacements catches.
+
+`worker terminate`'s removal reads the recorded set the same way, projects
+factory.json without the host against the set less that one key, and plans and
+applies it; the apply drops the key from the `host_keys` output, which it then
+reads again to check. Once factory.json is written without the host, neither
+records it, and the next plan has no change for it.
 
 ## First apply
 

@@ -1,10 +1,13 @@
 /**
- * `fffactory worker stop|start|terminate --keep` (`docs/specs/worker-lifecycle.md`): power one
- * declared worker's EC2 instance off or on, or terminate it, under the factory-wide lock and an
- * operation record. EC2's state is the truth: factory.json keeps no power field. Stop and start
- * keep the instance, its volume, its Terraform state and its tailnet device; terminate destroys
- * the instance and its volume and deletes its tailnet devices, and with `--keep` the host stays
- * in factory.json, so the next apply creates it afresh. Terraform is never run.
+ * `fffactory worker stop|start|terminate` (`docs/specs/worker-lifecycle.md`): power one declared
+ * worker's EC2 instance off or on, or terminate it, under the factory-wide lock and an operation
+ * record. EC2's state is the truth: factory.json keeps no power field. Stop and start keep the
+ * instance, its volume, its Terraform state and its tailnet device; terminate destroys the
+ * instance and its volume and deletes its tailnet devices. With `--keep` the host stays in
+ * factory.json, so the next apply creates it afresh, and Terraform is not run. Without it,
+ * terminate removes the host: Terraform's scoped removal plan of factory.json without the host,
+ * approved with the host key, destroys the machine and stops recording the key, then
+ * factory.json is written without the host (§Terminate (remove)).
  *
  * Before anything reaches AWS: a confirmation must be possible, the key must be declared, and
  * factory.json complete (for terminate, with its Tailscale admin client). Then the account
@@ -33,7 +36,22 @@ import {
   parseRelease,
   type Release,
   type SecretReference,
+  serializeInstance,
 } from "../domain/instance";
+import {
+  describeRemovalPlan,
+  failedAfterRemoval,
+  lastHostRefusal,
+  recordedKeysUnreadable,
+  removalApplyFailed,
+  removalConfigurationChanged,
+  removalPlanningFailed,
+  removalPlanRefusal,
+  removalProjectionRefusal,
+  removalStillRecorded,
+  removalUnwritten,
+  withoutHost,
+} from "../domain/host-removal";
 import {
   finishOperation,
   type OperationRecord,
@@ -44,9 +62,17 @@ import {
   withMachine,
   withStage,
 } from "../domain/operation";
-import { pinRefusal } from "../domain/plan";
+import {
+  changesSomething,
+  newPlanId,
+  type PlanTarget,
+  pinRefusal,
+  type ResourceChange,
+  resourceChanges,
+} from "../domain/plan";
 import type { SecretMaterial } from "../domain/secrets";
 import { hostName } from "../domain/resource-naming";
+import { recordedHostKeys } from "../domain/stable-host-keys";
 import { joiningTailnet, type WorkerIdentity } from "../domain/rollout";
 import { inspectionVerdict, locateWorker, type Machine, type Verdict } from "../domain/status";
 import { selectWorkerDevices } from "../domain/tailnet";
@@ -69,6 +95,7 @@ import {
   POWER_POLL_MS,
   type PowerAction,
   powerStep,
+  removesHost,
   powerTimedOut,
   type Refusal,
   requestFailed,
@@ -76,12 +103,14 @@ import {
   selectMachine,
   type StopInspection,
   stopGate,
+  type TerminateCommand,
   TARGET_STATE,
   type TerminateInspection,
   terminateGate,
   thenRerunWorker,
   typedKeyConfirms,
   waitStep,
+  type WorkerCommand,
   WORKER_OPERATIONS,
 } from "../domain/worker-lifecycle";
 import type { OperationLocation } from "./apply-factory";
@@ -96,12 +125,17 @@ import {
   stateBucketOf,
 } from "./factory-lock";
 import type { HostTransport } from "./host-transport";
+import type { InstanceStore } from "./instance-store";
 import { inspectRepositories } from "./inspect-repositories";
 import { inspectWorker } from "./inspect-worker";
 import type { LockStore, StateBucket } from "./lock-store";
 import type { MachineControl, MachineRequest, MachineTarget } from "./machine-control";
 import type { MachineInventorySource } from "./machine-inventory";
 import type { OperatorPrompt } from "./operator-prompt";
+import { factoryTarget } from "./plan-factory";
+import type { PlanStore } from "./plan-store";
+import { projectFactoryVariables } from "./project-terraform-inputs";
+import { diagnosticsFileOf, type Provisioner, type ProvisioningTarget } from "./provisioner";
 import { type AccountRequirement, requireExpectedAccount } from "./require-expected-account";
 import type { SecretStore } from "./secret-store";
 import type { TailnetAdmin, TailnetAdminSession } from "./tailnet-admin";
@@ -121,6 +155,14 @@ export interface WorkerLifecycleDependencies {
   readonly secrets: SecretStore;
   /** Deletes a terminated worker's tailnet devices. */
   readonly tailnetAdmin: TailnetAdmin;
+  /** Terminate removing the host: plans and applies its scoped removal with managed Terraform. */
+  readonly provisioner: Provisioner;
+  /** Where the removal's Terraform plan file is kept while the operation runs. */
+  readonly planStore: PlanStore;
+  /** Where factory.json is, to write it without the removed host. */
+  readonly store: InstanceStore;
+  /** This release's materialized Terraform tree, materialized only when a removal needs it. */
+  readonly terraformDirectory: () => Promise<string>;
   readonly interrupted: Interrupted;
   /** Waits `ms`, or less once interrupted: the use case checks `interrupted` after it. */
   readonly sleep: (ms: number) => Promise<void>;
@@ -146,11 +188,25 @@ export interface WorkerLifecycleRequest {
    * other value refuses; `yes` never confirms a terminate.
    */
   readonly confirm?: string | undefined;
+  /** Terminate: keep the host in factory.json (`--keep`). Without it terminate removes the host. */
+  readonly keep?: boolean;
+  /** Terminate removing the host: factory.json's path and its exact text, as `instance` was read. */
+  readonly configuration?: Configuration;
   /** This machine's name, recorded as the lock holder's host. */
   readonly host: string;
   readonly clock: () => Date;
   readonly randomBytes: RandomBytes;
 }
+
+/** Where factory.json is, and its exact text as the command read it. */
+export interface Configuration {
+  readonly path: string;
+  readonly text: string;
+}
+
+/** Terminate's request: keeping the host (`--keep`), or removing it from `configuration`. */
+export type TerminateRequest = Omit<WorkerLifecycleRequest, "action" | "keep" | "configuration"> &
+  ({ readonly keep: true } | { readonly keep?: false; readonly configuration: Configuration });
 
 /** What the operator is told while the command runs. */
 export type PowerProgress =
@@ -172,7 +228,17 @@ export type PowerProgress =
   /** Start waits for the worker's tailnet device to come online. */
   | { readonly kind: "waiting_online"; readonly hostname: string }
   /** Terminate deletes the terminated worker's tailnet devices. */
-  | { readonly kind: "removing_devices"; readonly hostname: string };
+  | { readonly kind: "removing_devices"; readonly hostname: string }
+  /** Terminate removing the host: no EC2 instance carries its key, so its machine is gone. */
+  | { readonly kind: "absent"; readonly key: HostKey; readonly hostname: string }
+  /** Terminate removing the host: Terraform plans its removal. */
+  | { readonly kind: "planning_removal"; readonly key: HostKey }
+  /** The removal plan, shown before the host key is asked for. */
+  | { readonly kind: "removal_plan"; readonly plan: readonly string[] }
+  /** Terraform applies the removal plan. */
+  | { readonly kind: "applying_removal" }
+  /** factory.json no longer declares the host. */
+  | { readonly kind: "configuration_written"; readonly key: HostKey; readonly path: string };
 
 export type WorkerPower =
   /** No terminal to confirm at, and no `--yes`. */
@@ -190,13 +256,16 @@ export type WorkerPower =
   /**
    * Interrupted holding the lock, which stays with the record as far as it was written:
    * `record` once a write of it finished. `requested` when EC2 may have been asked to change
-   * the machine, which then goes on changing.
+   * the machine, which then goes on changing. A removal says how far it got: Terraform was
+   * `applying` it, so may have destroyed the machine, or factory.json was `written` without
+   * the host.
    */
   | {
       readonly kind: "interrupted";
       readonly locked: true;
       readonly record: OperationLocation | undefined;
       readonly requested: boolean;
+      readonly removal?: Removal | undefined;
     }
   /** Refused, changing nothing: before the lock (`operation` undefined), or under it. */
   | {
@@ -215,19 +284,24 @@ export type WorkerPower =
       readonly refusal: Refusal;
       readonly operation: OperationLocation;
       readonly recordFailure: string | undefined;
+      /** The private local file keeping a failed Terraform command's diagnostics, if any. */
+      readonly diagnosticsFile?: string | undefined;
     }
   /**
    * The machine is in the target state: `changed` when this command asked EC2 for it, `awaited`
    * when it was already on its way and this command only waited for it. Start adds the worker's
    * `verdict`, as status words it; a worker not ready is not start's failure. Terminate adds how
    * deleting the worker's tailnet devices went, and `leftover`, what it left behind, when it did:
-   * the terminate stands, and is partial.
+   * the terminate stands, and is partial. A terminate that `removed` the host also destroyed its
+   * machine with Terraform and wrote factory.json without it; `instanceId` is undefined when no
+   * EC2 instance carried its key.
    */
   | {
       readonly kind: "done";
       readonly action: PowerAction;
       readonly worker: WorkerIdentity;
-      readonly instanceId: string;
+      readonly instanceId: string | undefined;
+      readonly removed?: boolean;
       readonly changed: boolean;
       readonly awaited: boolean;
       readonly verdict?: Verdict;
@@ -254,12 +328,13 @@ export function startWorker(
 }
 
 /**
- * Terminates a declared worker's machine and deletes its tailnet devices, keeping the host in
- * factory.json (§Terminate (keep)).
+ * Terminates a declared worker's machine and deletes its tailnet devices, removing the host from
+ * Terraform and factory.json (§Terminate (remove)), or with `keep` keeping it in factory.json
+ * (§Terminate (keep)).
  */
 export function terminateWorker(
   deps: WorkerLifecycleDependencies,
-  request: Omit<WorkerLifecycleRequest, "action">,
+  request: TerminateRequest,
 ): Promise<WorkerPower> {
   return powerWorker(deps, { ...request, action: "terminate" });
 }
@@ -269,6 +344,8 @@ interface Power {
   readonly request: WorkerLifecycleRequest;
   readonly bucket: StateBucket;
   readonly action: PowerAction;
+  /** The command as run, which next actions rerun. */
+  readonly command: WorkerCommand;
   readonly worker: WorkerIdentity;
   /** The worker's host as factory.json declares it, for the projection status compares. */
   readonly host: Host;
@@ -279,6 +356,19 @@ interface Power {
   readonly pinned: Release;
   /** Terminate's Tailscale admin client (`tailscale.admin_client_secret`). */
   readonly adminClient: SecretReference | undefined;
+  /** Terminate removing the host: factory.json as read, and as it is to be without the host. */
+  readonly removal: HostRemovalPlan | undefined;
+}
+
+interface HostRemovalPlan {
+  readonly configuration: Configuration;
+  readonly remaining: FactoryInstance;
+}
+
+/** The command a request runs: terminate removes the host unless it keeps it. */
+function commandOf(request: WorkerLifecycleRequest): WorkerCommand {
+  if (request.action !== "terminate") return request.action;
+  return request.keep === true ? "terminate-keep" : "terminate";
 }
 
 type Checked = { readonly kind: "checked"; readonly power: Power } | WorkerPower;
@@ -299,6 +389,7 @@ function localChecks(deps: WorkerLifecycleDependencies, request: WorkerLifecycle
   const unknown = hostKeyRefusal(request.key, instance);
   if (unknown !== undefined) return { kind: "refused", refusal: unknown, operation: undefined };
   const terminating = request.action === "terminate";
+  const command = commandOf(request);
   // The key is declared: a `--confirm` that differs is never echoed, it could be a secret.
   if (terminating && request.confirm !== undefined && request.confirm !== request.key)
     return {
@@ -318,13 +409,21 @@ function localChecks(deps: WorkerLifecycleDependencies, request: WorkerLifecycle
     return { kind: "incomplete", missing };
   const adminClient = instance.tailscale?.admin_client_secret;
   if (terminating && adminClient === undefined)
-    return { kind: "refused", refusal: adminClientMissing(host.key), operation: undefined };
+    return {
+      kind: "refused",
+      refusal: adminClientMissing(command as TerminateCommand, host.key),
+      operation: undefined,
+    };
+  const removal = removalCheck(request, command, host.key);
+  if (removal.kind === "refused") return removal;
   return {
     kind: "checked",
     power: {
       request,
       bucket: location.bucket,
       action: request.action,
+      command,
+      removal: removal.removal,
       worker: { key: host.key, hostname: hostName(factoryId, host.key) },
       host,
       factoryId,
@@ -333,6 +432,29 @@ function localChecks(deps: WorkerLifecycleDependencies, request: WorkerLifecycle
       pinned: pinned.value,
       adminClient,
     },
+  };
+}
+
+/**
+ * What terminate removing the host works from: factory.json as read and without the host. The
+ * only declared host is refused: a factory keeps a worker.
+ */
+function removalCheck(
+  request: WorkerLifecycleRequest,
+  command: WorkerCommand,
+  key: HostKey,
+):
+  | { readonly kind: "removal"; readonly removal: HostRemovalPlan | undefined }
+  | Extract<WorkerPower, { readonly kind: "refused" }> {
+  if (!removesHost(command)) return { kind: "removal", removal: undefined };
+  const last = lastHostRefusal(request.instance, key);
+  if (last !== undefined) return { kind: "refused", refusal: last, operation: undefined };
+  const { configuration } = request;
+  if (configuration === undefined)
+    throw new Error("terminate without --keep needs factory.json's path and text");
+  return {
+    kind: "removal",
+    removal: { configuration, remaining: withoutHost(request.instance, key) },
   };
 }
 
@@ -398,9 +520,16 @@ function powerLog(deps: WorkerLifecycleDependencies, power: Power, lock: Factory
 
 type PowerLog = ReturnType<typeof powerLog>;
 
+/**
+ * How far a removal got: Terraform was asked to apply it, so may have destroyed the machine, or
+ * factory.json was written without the host.
+ */
+export type Removal = "applying" | "written";
+
 /** How far the operation got: whether EC2 may have been asked to change the machine. */
 interface Progress {
   requested: boolean;
+  removal?: Removal;
 }
 
 function interruptedUnder(log: PowerLog, progress: Progress): WorkerPower {
@@ -409,6 +538,7 @@ function interruptedUnder(log: PowerLog, progress: Progress): WorkerPower {
     locked: true,
     record: log.written() ? log.location : undefined,
     requested: progress.requested,
+    ...(progress.removal === undefined ? {} : { removal: progress.removal }),
   };
 }
 
@@ -446,14 +576,18 @@ async function operateOrFail(
     if (deps.interrupted()) return interruptedUnder(log, progress);
     const reason = reasonOf(error);
     const recordFailure = await log.finish("failed", "failed", reason);
-    const refusal = {
-      summary: reason,
-      details: [],
-      nextAction: thenRerunWorker(
-        power.action,
-        power.worker.key,
-      )("Check the worker with `fffactory status`"),
-    };
+    // Once factory.json no longer declares the host, a rerun is refused: only its devices remain.
+    const refusal =
+      progress.removal === "written"
+        ? failedAfterRemoval(power.worker, reason)
+        : {
+            summary: reason,
+            details: [],
+            nextAction: thenRerunWorker(
+              power.command,
+              power.worker.key,
+            )("Check the worker with `fffactory status`"),
+          };
     return { kind: "failed", refusal, operation: log.location, recordFailure };
   }
 }
@@ -463,9 +597,19 @@ async function refusedUnder(log: PowerLog, refusal: Refusal): Promise<WorkerPowe
   return { kind: "refused", refusal, operation: log.location, recordFailure };
 }
 
-async function failedUnder(log: PowerLog, refusal: Refusal): Promise<WorkerPower> {
+async function failedUnder(
+  log: PowerLog,
+  refusal: Refusal,
+  diagnosticsFile?: string,
+): Promise<WorkerPower> {
   const recordFailure = await log.finish("failed", "failed", refusal.summary);
-  return { kind: "failed", refusal, operation: log.location, recordFailure };
+  return {
+    kind: "failed",
+    refusal,
+    operation: log.location,
+    recordFailure,
+    ...(diagnosticsFile === undefined ? {} : { diagnosticsFile }),
+  };
 }
 
 function targetOf(power: Power, machine: Machine): MachineTarget {
@@ -491,8 +635,9 @@ async function operate(
     power.factoryId,
   );
   if (deps.interrupted()) return interruptedUnder(log, progress);
-  const selection = selectMachine(inventory, power.worker.key, power.action);
+  const selection = selectMachine(inventory, power.worker.key, power.command);
   if (selection.kind === "refused") return refusedUnder(log, selection.refusal);
+  if (selection.kind === "absent") return removeAbsent(deps, power, log, progress);
   const { machine } = selection;
   await log.machine(machine.instanceId, machine.state);
   deps.progress({
@@ -501,7 +646,7 @@ async function operate(
     instanceId: machine.instanceId,
     state: machine.state,
   });
-  const step = powerStep(power.action, machine, power.worker.key);
+  const step = powerStep(power.command, machine, power.worker.key);
   switch (step.kind) {
     case "refused":
       return refusedUnder(log, step.refusal);
@@ -549,12 +694,18 @@ async function adminFor(
       credentials: power.request.credentials,
     });
   } catch (error) {
-    return { kind: "refused", refusal: adminSecretUnreadable(key, reasonOf(error)) };
+    return {
+      kind: "refused",
+      refusal: adminSecretUnreadable(power.command as TerminateCommand, key, reasonOf(error)),
+    };
   }
   if (deps.interrupted()) return { kind: "open", session: undefined };
   const opening = await deps.tailnetAdmin.open(secret);
   if (opening.kind === "failed")
-    return { kind: "refused", refusal: adminClientUnusable(key, opening.reason) };
+    return {
+      kind: "refused",
+      refusal: adminClientUnusable(power.command as TerminateCommand, key, opening.reason),
+    };
   return { kind: "open", session: opening.session };
 }
 
@@ -577,7 +728,7 @@ function gates(
 
 /**
  * The gates, terminate's admin session, the confirmation, then the request to EC2 and the
- * wait for its outcome.
+ * wait for its outcome. Terminate removing the host goes on to its removal instead.
  */
 async function act(
   deps: WorkerLifecycleDependencies,
@@ -592,7 +743,14 @@ async function act(
   const admin = await adminFor(deps, power, log);
   if (deps.interrupted()) return interruptedUnder(log, progress);
   if (admin.kind === "refused") return refusedUnder(log, admin.refusal);
-  const confirmed = await confirmation(deps, power, log, machine);
+  if (removesHost(power.command))
+    return removeHost(deps, power, log, progress, {
+      machine,
+      destroys: true,
+      awaited: false,
+      admin: admin.session,
+    });
+  const confirmed = await confirmation(deps, power, log, machine.instanceId);
   if (deps.interrupted()) return interruptedUnder(log, progress);
   if (!confirmed) {
     const recordFailure = await log.finish("declined", "declined");
@@ -635,11 +793,14 @@ async function requestTarget(
   const { action, worker } = power;
   switch (requested.kind) {
     case "failed":
-      return failedUnder(log, requestFailed(action, worker, machine.instanceId, requested.reason));
+      return failedUnder(
+        log,
+        requestFailed(power.command, worker, machine.instanceId, requested.reason),
+      );
     case "unanswered":
       return failedUnder(
         log,
-        requestUnanswered(action, worker, machine.instanceId, requested.reason),
+        requestUnanswered(power.command, worker, machine.instanceId, requested.reason),
       );
     case "requested":
       deps.progress({ kind: "requested", action, instanceId: machine.instanceId });
@@ -705,24 +866,28 @@ async function terminateGates(
   if (machine.state === "stopped") {
     // Accepted risk: unpushed work on a stopped worker's disk goes unreported.
     deps.progress({ kind: "uninspected_stopped" });
-    return terminateGate({ kind: "stopped" }, power.worker);
+    return terminateGate({ kind: "stopped" }, power.worker, power.command as TerminateCommand);
   }
   if (power.request.force) {
     deps.progress({ kind: "forced", action: "terminate" });
-    return terminateGate({ kind: "forced" }, power.worker);
+    return terminateGate({ kind: "forced" }, power.worker, power.command as TerminateCommand);
   }
   await log.stage("inspecting");
   // TODO(re-evaluate when dispatch gains a pause): pause dispatch on the worker before this
   // inspection, as for stop: until then an agent dispatch starts between the check and the
   // terminate ends with the machine (accepted race, D5).
-  return terminateGate(await terminateInspection(deps, power), power.worker);
+  return terminateGate(
+    await terminateInspection(deps, power),
+    power.worker,
+    power.command as TerminateCommand,
+  );
 }
 
 async function terminateInspection(
   deps: WorkerLifecycleDependencies,
   power: Power,
 ): Promise<TerminateInspection> {
-  const then = thenRerunWorker("terminate", power.worker.key);
+  const then = thenRerunWorker(power.command, power.worker.key);
   const location = locateWorker(await deps.peers.view(), power.worker, power.tag, then);
   if (location.kind === "blocked") return { kind: "unlocated", verdict: location.verdict };
   const [activity, repositories] = await Promise.all([
@@ -745,13 +910,13 @@ async function confirmation(
   deps: WorkerLifecycleDependencies,
   power: Power,
   log: PowerLog,
-  machine: Machine,
+  instanceId: string | undefined,
 ): Promise<boolean> {
   const { request } = power;
   if (confirmationRule(confirmedInAdvance(request), deps.prompt.interactive) === "confirmed")
     return true;
   await log.stage("awaiting_approval");
-  const question = confirmationQuestion(power.action, power.worker, machine.instanceId);
+  const question = confirmationQuestion(power.command, power.worker, instanceId);
   const answer = await deps.prompt.ask(question);
   return power.action === "terminate"
     ? typedKeyConfirms(answer, power.worker.key)
@@ -802,7 +967,7 @@ async function readTarget(
   if (step === "reached") return { kind: "reached" };
   if (step === "waiting" || observed === undefined) return { kind: "waiting", observed };
   await log.machine(target.instanceId, observed);
-  const gone = machineGone(power.action, power.worker, target.instanceId, observed);
+  const gone = machineGone(power.command, power.worker, target.instanceId, observed);
   return { kind: "ended", result: await failedUnder(log, gone) };
 }
 
@@ -833,7 +998,23 @@ async function awaitTarget(
     if (!(await pause(deps, POWER_POLL_MS))) return interruptedUnder(log, progress);
   }
   await log.machine(machine.instanceId, TARGET_STATE[power.action]);
-  return reached(deps, power, log, progress, reaching);
+  return onwards(deps, power, log, progress, reaching);
+}
+
+/**
+ * What follows the target state: terminate removing the host waited for a machine already being
+ * terminated, so its removal follows; every other command has reached its end.
+ */
+function onwards(
+  deps: WorkerLifecycleDependencies,
+  power: Power,
+  log: PowerLog,
+  progress: Progress,
+  reaching: Reaching,
+): Promise<WorkerPower> {
+  if (!removesHost(power.command)) return reached(deps, power, log, progress, reaching);
+  const { machine, awaited, admin } = reaching;
+  return removeHost(deps, power, log, progress, { machine, destroys: false, awaited, admin });
 }
 
 /** The deadline passed: recorded with the last state a read found, when one did. */
@@ -844,7 +1025,7 @@ async function timedOut(
   lastSeen: ObservedMachineState | undefined,
 ): Promise<WorkerPower> {
   if (lastSeen !== undefined) await log.machine(machine.instanceId, lastSeen);
-  return failedUnder(log, powerTimedOut(power.action, power.worker, machine.instanceId, lastSeen));
+  return failedUnder(log, powerTimedOut(power.command, power.worker, machine.instanceId, lastSeen));
 }
 
 /** The stage status each action ends with once it changed the machine. */
@@ -902,7 +1083,10 @@ async function tailnetCleanup(
   await log.stage("removing_devices");
   deps.progress({ kind: "removing_devices", hostname: power.worker.hostname });
   const devices = await removeDevices(deps, power, admin);
-  return { devices, leftover: deviceRemovalRefusal(devices, power.worker) };
+  return {
+    devices,
+    leftover: deviceRemovalRefusal(devices, power.worker, power.command as TerminateCommand),
+  };
 }
 
 /**
@@ -987,4 +1171,296 @@ async function readiness(
       deps.sha256,
     ),
   }).verdict;
+}
+
+/** What terminate removing the host found of its machine, and its admin session. */
+interface Removing {
+  /** The instance EC2 listed for the host; undefined when it listed none. */
+  readonly machine: Machine | undefined;
+  /** Whether Terraform must destroy the machine: false once it is gone. */
+  readonly destroys: boolean;
+  /** Whether a machine already being terminated was waited for first. */
+  readonly awaited: boolean;
+  readonly admin: TailnetAdminSession | undefined;
+}
+
+/** Terminate removing a host whose machine EC2 no longer lists: no gates, nothing to inspect. */
+async function removeAbsent(
+  deps: WorkerLifecycleDependencies,
+  power: Power,
+  log: PowerLog,
+  progress: Progress,
+): Promise<WorkerPower> {
+  deps.progress({ kind: "absent", ...power.worker });
+  const admin = await adminFor(deps, power, log);
+  if (deps.interrupted()) return interruptedUnder(log, progress);
+  if (admin.kind === "refused") return refusedUnder(log, admin.refusal);
+  return removeHost(deps, power, log, progress, {
+    machine: undefined,
+    destroys: false,
+    awaited: false,
+    admin: admin.session,
+  });
+}
+
+/**
+ * Removes the host (§Terminate (remove)): plans the removal into a plan file of its own, kept
+ * only while the operation runs, then applies exactly that plan once approved.
+ */
+async function removeHost(
+  deps: WorkerLifecycleDependencies,
+  power: Power,
+  log: PowerLog,
+  progress: Progress,
+  removing: Removing,
+): Promise<WorkerPower> {
+  const planId = newPlanId(power.request.randomBytes);
+  const files = await deps.planStore.create(power.factoryId, planId);
+  try {
+    return await planAndRemove(deps, power, log, progress, removing, files.factory);
+  } finally {
+    await deps.planStore.remove(power.factoryId, planId);
+  }
+}
+
+/** The removal's own state: factory.json as read and without the host. */
+function removalOf(power: Power): HostRemovalPlan {
+  if (power.removal === undefined) throw new Error("a removal needs factory.json as read");
+  return power.removal;
+}
+
+/** The scoped removal plan, shown and approved with the host key, then applied. */
+async function planAndRemove(
+  deps: WorkerLifecycleDependencies,
+  power: Power,
+  log: PowerLog,
+  progress: Progress,
+  removing: Removing,
+  planFile: string,
+): Promise<WorkerPower> {
+  await log.stage("planning");
+  if (deps.interrupted()) return interruptedUnder(log, progress);
+  deps.progress({ kind: "planning_removal", key: power.worker.key });
+  const destroying = removing.destroys ? removing.machine?.instanceId : undefined;
+  const planning = await planRemoval(deps, power, planFile, destroying);
+  if (deps.interrupted()) return interruptedUnder(log, progress);
+  if (planning.kind === "refused") return refusedUnder(log, planning.refusal);
+  if (planning.kind === "failed")
+    return failedUnder(log, planning.refusal, planning.diagnosticsFile);
+  const target = removalTarget(power);
+  deps.progress({
+    kind: "removal_plan",
+    plan: describeRemovalPlan(target, planning.changes, power.worker),
+  });
+  const confirmed = await confirmation(deps, power, log, removing.machine?.instanceId);
+  if (deps.interrupted()) return interruptedUnder(log, progress);
+  if (!confirmed) {
+    const recordFailure = await log.finish("declined", "declined");
+    return { kind: "declined", operation: log.location, recordFailure };
+  }
+  return applyRemoval(deps, power, log, progress, removing, { ...planning, planFile });
+}
+
+/** What the removal plan shows first: the factory.json, factory, account, Region and release. */
+function removalTarget(power: Power): PlanTarget {
+  const { instance, release } = power.request;
+  return {
+    instancePath: removalOf(power).configuration.path,
+    ...(instance.name === undefined ? {} : { name: instance.name }),
+    factoryId: power.factoryId,
+    accountId: power.bucket.accountId,
+    region: power.region,
+    release,
+  };
+}
+
+type RemovalPlanning =
+  | {
+      readonly kind: "planned";
+      /** The resource changes the plan makes, as shown for approval. */
+      readonly changes: readonly ResourceChange[];
+      /**
+       * Whether to apply it: it changes resources or outputs, or the state still records the
+       * removed key.
+       */
+      readonly applies: boolean;
+      readonly target: ProvisioningTarget;
+    }
+  | { readonly kind: "refused"; readonly refusal: Refusal }
+  | {
+      readonly kind: "failed";
+      readonly refusal: Refusal;
+      readonly diagnosticsFile: string | undefined;
+    };
+
+/**
+ * Plans factory.json without the host with the factory root's Terraform, its state lock taken,
+ * the host keys the state records read as for any plan, the removed one no longer expected, and
+ * checks the plan with the scoped removal rule (`removalPlanRefusal`): it must destroy exactly
+ * `instanceId`, the instance EC2 lists, the gates inspected and the question names, or none
+ * when that is undefined.
+ */
+async function planRemoval(
+  deps: WorkerLifecycleDependencies,
+  power: Power,
+  planFile: string,
+  instanceId: string | undefined,
+): Promise<RemovalPlanning> {
+  const { key } = power.worker;
+  try {
+    const target = factoryTarget(power.bucket, await deps.terraformDirectory());
+    const recorded = recordedHostKeys(await deps.provisioner.output(target));
+    if (recorded === undefined) return { kind: "refused", refusal: recordedKeysUnreadable(key) };
+    const kept = recorded.filter((recordedKey) => recordedKey !== key);
+    const projection = projectFactoryVariables(removalOf(power).remaining, kept);
+    if (!projection.ok)
+      return { kind: "refused", refusal: removalProjectionRefusal(key, projection.issues) };
+    const saved = { ...target, planFile };
+    const { changes } = await deps.provisioner.plan({
+      ...saved,
+      variables: { ...projection.variables },
+      stateLock: true,
+    });
+    const shown = await deps.provisioner.showPlan(saved);
+    const secret = power.host.paseo_password_secret;
+    const refusal = removalPlanRefusal(shown, { key, instanceId, secret });
+    if (refusal !== undefined) return { kind: "refused", refusal };
+    const changing = (resourceChanges(shown) ?? []).filter(changesSomething);
+    // A state still recording the key is applied too, whatever Terraform reports, so the key
+    // stops being recorded: every later plan would refuse it once factory.json drops the host.
+    const applies = changes || recorded.includes(key);
+    return { kind: "planned", changes: changing, applies, target };
+  } catch (error) {
+    return {
+      kind: "failed",
+      refusal: removalPlanningFailed(key, reasonOf(error)),
+      diagnosticsFile: diagnosticsFileOf(error),
+    };
+  }
+}
+
+/** Why factory.json is no longer the text read, or undefined while it is. */
+async function configurationChange(configuration: Configuration, store: InstanceStore) {
+  try {
+    const now = await store.read(configuration.path);
+    return now === configuration.text ? undefined : "changed after fffactory read it";
+  } catch (error) {
+    return `could not be read again (${reasonOf(error)})`;
+  }
+}
+
+/**
+ * Applies exactly the approved plan, once factory.json is still the text it was made from; a
+ * plan that changes nothing, not even the recorded host keys, is not applied.
+ */
+async function applyRemoval(
+  deps: WorkerLifecycleDependencies,
+  power: Power,
+  log: PowerLog,
+  progress: Progress,
+  removing: Removing,
+  planned: Extract<RemovalPlanning, { readonly kind: "planned" }> & { readonly planFile: string },
+): Promise<WorkerPower> {
+  const { key } = power.worker;
+  const changed = await configurationChange(removalOf(power).configuration, deps.store);
+  if (deps.interrupted()) return interruptedUnder(log, progress);
+  if (changed !== undefined) return refusedUnder(log, removalConfigurationChanged(key, changed));
+  if (planned.applies) {
+    const ended = await terraformApply(deps, power, log, progress, planned);
+    if (ended !== undefined) return ended;
+  }
+  if (removing.destroys && removing.machine !== undefined)
+    await log.machine(removing.machine.instanceId, "terminated");
+  return writeAndClean(deps, power, log, progress, removing);
+}
+
+/**
+ * Terraform's apply of exactly the approved plan file, then a read of the host keys its state
+ * records, which must no longer hold the removed one; undefined once both succeeded.
+ */
+async function terraformApply(
+  deps: WorkerLifecycleDependencies,
+  power: Power,
+  log: PowerLog,
+  progress: Progress,
+  planned: { readonly target: ProvisioningTarget; readonly planFile: string },
+): Promise<WorkerPower | undefined> {
+  await log.stage("applying");
+  if (deps.interrupted()) return interruptedUnder(log, progress);
+  progress.removal = "applying";
+  deps.progress({ kind: "applying_removal" });
+  const { key } = power.worker;
+  let recorded: readonly string[] | undefined;
+  try {
+    await deps.provisioner.applyPlan({ ...planned.target, planFile: planned.planFile });
+    if (deps.interrupted()) return interruptedUnder(log, progress);
+    recorded = recordedHostKeys(await deps.provisioner.output(planned.target));
+  } catch (error) {
+    if (deps.interrupted()) return interruptedUnder(log, progress);
+    return failedUnder(log, removalApplyFailed(key, reasonOf(error)), diagnosticsFileOf(error));
+  }
+  if (deps.interrupted()) return interruptedUnder(log, progress);
+  if (recorded === undefined || recorded.includes(key))
+    return failedUnder(log, removalStillRecorded(key));
+  return undefined;
+}
+
+/**
+ * Writes factory.json without the host, provided it is still the text read: otherwise, or when
+ * the write fails, why, and factory.json is left as it is.
+ */
+async function writeWithoutHost(
+  deps: WorkerLifecycleDependencies,
+  power: Power,
+): Promise<string | undefined> {
+  const { configuration, remaining } = removalOf(power);
+  const changed = await configurationChange(configuration, deps.store);
+  if (changed !== undefined) return changed;
+  try {
+    await deps.store.write(configuration.path, serializeInstance(remaining));
+    return undefined;
+  } catch (error) {
+    return reasonOf(error);
+  }
+}
+
+/** Once Terraform removed the host: factory.json without it, then its tailnet devices. */
+async function writeAndClean(
+  deps: WorkerLifecycleDependencies,
+  power: Power,
+  log: PowerLog,
+  progress: Progress,
+  removing: Removing,
+): Promise<WorkerPower> {
+  const { worker } = power;
+  const { path } = removalOf(power).configuration;
+  await log.stage("writing");
+  if (deps.interrupted()) return interruptedUnder(log, progress);
+  const unwritten = await writeWithoutHost(deps, power);
+  if (unwritten === undefined) {
+    progress.removal = "written";
+    deps.progress({ kind: "configuration_written", key: worker.key, path });
+  }
+  if (deps.interrupted()) return interruptedUnder(log, progress);
+  if (unwritten !== undefined) return failedUnder(log, removalUnwritten(worker, path, unwritten));
+  const { admin } = removing;
+  const removal = admin === undefined ? undefined : await tailnetCleanup(deps, power, log, admin);
+  if (deps.interrupted()) return interruptedUnder(log, progress);
+  const leftover = removal?.leftover;
+  const recordFailure =
+    leftover === undefined
+      ? await log.finish("removed", "succeeded")
+      : await log.finish("partial", "partial", leftover.summary);
+  return {
+    kind: "done",
+    action: power.action,
+    worker,
+    instanceId: removing.machine?.instanceId,
+    changed: true,
+    awaited: removing.awaited,
+    removed: true,
+    ...(removal ?? {}),
+    operation: log.location,
+    recordFailure,
+  };
 }

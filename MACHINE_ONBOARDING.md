@@ -265,7 +265,7 @@ never put it in a file in a repository or in factory.json.
 Optionally, create the factory's **admin client**, a Tailscale OAuth client
 that only the operator's `fffactory` uses, never a worker. `fffactory worker
 terminate` deletes a terminated worker's Tailscale devices with it, and refuses
-without it, so create it before you need to replace a worker. On the
+without it, so create it before you need to replace or remove a worker. On the
 admin console's **Trust credentials** page, create an OAuth credential with
 the **`devices:core`** scope (read and write) and only that scope, and select
 factory.json's tag as its tag. Copy its client secret (`tskey-client-…`):
@@ -622,10 +622,17 @@ operation that may still be running
 
 ### Not available yet
 
-Until milestone M3, a plan that removes or renames a host key, or that would
-destroy or replace a worker, is refused (D11): there is no retirement or
-guided replacement, and the failed-first-boot recovery above is the only
-replacement path. A worker's root volume, with its credentials, checkouts and
-any uncommitted work, is deleted with its instance: treat Git as the
-durability boundary. Second workers, a rollout policy and the companion skill
-are M3 items ([design §Milestones](docs/designs/fffactory-v2.md#milestones)).
+Removing a host by editing factory.json, or renaming a host key, is refused
+(D11): remove a worker with `fffactory worker terminate KEY`, which shows a
+Terraform plan that may only destroy that worker's instance, and once you type
+the host key applies it, writes factory.json without the host and deletes its
+Tailscale devices
+([worker lifecycle §Terminate (remove)](docs/specs/worker-lifecycle.md#terminate-remove)).
+Apply any other pending change first: the removal plan refuses one. Until
+milestone M3, a plan that would destroy or replace a worker any other way is
+refused too: there is no guided replacement or snapshot, and the
+failed-first-boot recovery above is the only replacement path. A worker's root
+volume, with its credentials, checkouts and any uncommitted work, is deleted
+with its instance: treat Git as the durability boundary. Second workers, a
+rollout policy and the companion skill are M3 items
+([design §Milestones](docs/designs/fffactory-v2.md#milestones)).

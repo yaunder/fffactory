@@ -1,15 +1,17 @@
 /**
- * Stable host keys: a host key, once provisioned, is never renamed or removed from
- * factory.json. Replacing a host means declaring a new key beside the old one; removing one
- * waits for host retirement (M3). A rename is indistinguishable from removing one key and
- * adding another, so both are rejected by comparing factory.json with the keys the factory's
- * Terraform state records.
+ * Stable host keys: a host key, once provisioned, is never renamed, and is removed from
+ * factory.json only by `fffactory worker terminate KEY`, which removes the host's machine with
+ * it (`host-removal.ts`). Replacing a host means declaring a new key beside the old one. A
+ * rename is indistinguishable from removing one key and adding another, so editing factory.json
+ * to do either is rejected by comparing it with the keys the factory's Terraform state records.
  */
 import { type FactoryInstance, type Issue, parseHostKey } from "./instance";
 
-const RENAMED =
-  "is provisioned but no longer declared: host keys cannot be renamed or removed. " +
-  "Restore it, and declare any new host under a new key beside it";
+/** Why `key` (`KEY` when it is not one to quote) may not go missing from factory.json. */
+const renamed = (key: string) =>
+  "is provisioned but no longer declared: host keys cannot be renamed, and only " +
+  `\`fffactory worker terminate ${key}\` removes a host. Restore it, and declare any new host ` +
+  "under a new key beside it";
 
 /**
  * One issue at `hosts` for every recorded key factory.json no longer declares, in recorded
@@ -25,8 +27,8 @@ export function checkStableHostKeys(
     .map((key) => ({
       path: "hosts",
       message: parseHostKey(key).ok
-        ? `host key "${key}" ${RENAMED}`
-        : `a provisioned host key ${RENAMED}`,
+        ? `host key "${key}" ${renamed(key)}`
+        : `a provisioned host key ${renamed("KEY")}`,
     }));
 }
 

@@ -390,16 +390,25 @@ again under the lock.
 
 ### Refusals until lifecycle work lands (D11)
 
-Until host retirement and replacement land in milestone M3, a plan is refused,
-naming the capability it needs, and nothing is saved or applied:
+A host is removed only by `fffactory worker terminate KEY`, whose scoped
+removal plan is the only plan allowed to destroy a host machine
+([worker lifecycle §Terminate (remove)](worker-lifecycle.md#terminate-remove)).
+Until host replacement lands in milestone M3, `plan` and `apply` refuse,
+naming the capability the change needs, and nothing is saved or applied:
 
 | Change | Capability named |
 | --- | --- |
-| factory.json no longer declares a host key the state records (removal, or a rename) | `host retirement` |
-| The Terraform plan does anything to an `aws_instance` but create it, update it in place or leave it: deletes, replaces (`delete` then `create`, or `create` then `delete`) or forgets it, or takes any action fffactory does not know | `host retirement and replacement` |
+| factory.json no longer declares a host key the state records (removed by hand, or renamed) | `host removal`, which only `fffactory worker terminate KEY` does |
+| The Terraform plan does anything to an `aws_instance` but create it, update it in place or leave it: deletes, replaces (`delete` then `create`, or `create` then `delete`) or forgets it, or takes any action fffactory does not know | `host replacement` |
 
 ```text
-Refusing: this change needs host retirement and replacement, which fffactory does not have yet (D11; it arrives in milestone M3):
+Refusing: this change needs host removal, which only `fffactory worker terminate KEY` does (D11):
+  hosts: host key "builder-2" is provisioned but no longer declared: host keys cannot be renamed, and only `fffactory worker terminate builder-2` removes a host. Restore it, and declare any new host under a new key beside it
+Nothing was applied. Declare every provisioned host key in factory.json again, then remove a host with `fffactory worker terminate KEY`.
+```
+
+```text
+Refusing: this change needs host replacement, which fffactory does not have yet (D11; it arrives in milestone M3):
   module.hosts.aws_instance.host["builder-1"] would be replaced
 Nothing was applied. Change factory.json so the plan keeps every host machine, then plan again.
 ```
@@ -412,9 +421,8 @@ new instance type, is not refused. Any other action fails closed too, and is
 named: `module.hosts.aws_instance.host["builder-1"] would be changed by an
 action fffactory does not know (ACTION)`. Actions must be printable text, or
 the plan cannot be read. The removal refusal lists each stable
-host key issue ([provisioning §Stable host keys](provisioning.md#stable-host-keys))
-and says `Declare every provisioned host key in factory.json again, then plan
-again.` The refusals of an upgrade that needs a newer base generation or
+host key issue ([provisioning §Stable host keys](provisioning.md#stable-host-keys)),
+each naming the command for its key. The refusals of an upgrade that needs a newer base generation or
 changes the schema version are [upgrade's](#compatibility-refusals-d11).
 
 ## Saved plans

@@ -469,7 +469,7 @@ describe("fffactory apply (plan-apply §Apply)", () => {
     expect(result).toMatchObject({
       kind: "d11",
       refusal: {
-        capability: "host retirement and replacement",
+        capability: "host replacement",
         reasons: [`${hostAddress("builder-1")} would be replaced`],
       },
     });
@@ -482,7 +482,7 @@ describe("fffactory apply (plan-apply §Apply)", () => {
   test("D11: removing a provisioned host key is refused before Terraform plans", async () => {
     const { deps, terraform, lockStore } = applying({ hosts: ["builder-1", "builder-2"] });
     const result = await applyFactory(deps, applyRequest({ instance: declaring("builder-1") }));
-    expect(result).toMatchObject({ kind: "d11", refusal: { capability: "host retirement" } });
+    expect(result).toMatchObject({ kind: "d11", refusal: { capability: "host removal" } });
     expect(terraform.calls.map(({ call }) => call)).toEqual(["output"]);
     expect(lockStore.locks.size).toBe(0);
   });

@@ -6,23 +6,25 @@ function declaring(...keys: string[]): FactoryInstance {
   return { schema_version: 1, hosts: keys.map((key) => ({ key: key as HostKey })) };
 }
 
-const RENAMED =
-  "is provisioned but no longer declared: host keys cannot be renamed or removed. " +
-  "Restore it, and declare any new host under a new key beside it";
+/** The stable host key issue for `key`, naming the command that removes a host. */
+const renamed = (key: string) =>
+  "is provisioned but no longer declared: host keys cannot be renamed, and only " +
+  `\`fffactory worker terminate ${key}\` removes a host. Restore it, and declare any new host ` +
+  "under a new key beside it";
 
 describe("stable host keys (provisioning §Stable host keys)", () => {
   test("renaming a host key is rejected", () => {
     expect(checkStableHostKeys(["builder-1"], declaring("builder-one"))).toEqual([
-      { path: "hosts", message: `host key "builder-1" ${RENAMED}` },
+      { path: "hosts", message: `host key "builder-1" ${renamed("builder-1")}` },
     ]);
   });
 
   test("removing a provisioned host key is rejected", () => {
     expect(checkStableHostKeys(["a", "b"], declaring("a"))).toEqual([
-      { path: "hosts", message: `host key "b" ${RENAMED}` },
+      { path: "hosts", message: `host key "b" ${renamed("b")}` },
     ]);
     expect(checkStableHostKeys(["a"], { schema_version: 1 })).toEqual([
-      { path: "hosts", message: `host key "a" ${RENAMED}` },
+      { path: "hosts", message: `host key "a" ${renamed("a")}` },
     ]);
   });
 
@@ -35,12 +37,12 @@ describe("stable host keys (provisioning §Stable host keys)", () => {
     const messages = checkStableHostKeys(["c", "a", "b"], declaring("b")).map(
       (issue) => issue.message,
     );
-    expect(messages).toEqual([`host key "c" ${RENAMED}`, `host key "a" ${RENAMED}`]);
+    expect(messages).toEqual([`host key "c" ${renamed("c")}`, `host key "a" ${renamed("a")}`]);
   });
 
   test("never echoes a recorded key that is not a well-formed host key", () => {
     expect(checkStableHostKeys(["Not A Key"], declaring("a"))).toEqual([
-      { path: "hosts", message: `a provisioned host key ${RENAMED}` },
+      { path: "hosts", message: `a provisioned host key ${renamed("KEY")}` },
     ]);
   });
 });

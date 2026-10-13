@@ -257,7 +257,7 @@ describe("D11 refusals", () => {
       change("module.network.aws_subnet.public", ["delete", "create"], "aws_subnet"),
     ]);
     expect(refusal).toEqual({
-      capability: "host retirement and replacement",
+      capability: "host replacement",
       reasons: [
         `${HOST} would be replaced`,
         'module.hosts.aws_instance.host["old"] would be destroyed',
@@ -267,7 +267,7 @@ describe("D11 refusals", () => {
       instead: "Change factory.json so the plan keeps every host machine, then plan again.",
     });
     expect(describeD11Refusal(refusal as NonNullable<typeof refusal>)).toEqual([
-      "Refusing: this change needs host retirement and replacement, which fffactory does not " +
+      "Refusing: this change needs host replacement, which fffactory does not " +
         "have yet (D11; it arrives in milestone M3):",
       `  ${HOST} would be replaced`,
       '  module.hosts.aws_instance.host["old"] would be destroyed',
@@ -322,7 +322,7 @@ describe("D11 refusals", () => {
     "any other action on a host machine, %p, is refused, failing closed",
     (actions) => {
       const refusal = hostMachineRefusal([change(HOST, actions, "aws_instance")]);
-      expect(refusal?.capability).toBe("host retirement and replacement");
+      expect(refusal?.capability).toBe("host replacement");
       expect(refusal?.reasons).toHaveLength(1);
       expect(hostMachineRefusal([change(HOST, actions)])?.reasons).toHaveLength(1);
     },
@@ -346,15 +346,25 @@ describe("D11 refusals", () => {
     ).toBeUndefined();
   });
 
-  test("removing a provisioned host key is refused, naming the missing capability", () => {
+  test("removing a provisioned host key by hand is refused, naming the command that removes one", () => {
     const refusal = hostKeyRemovalRefusal([
       { path: "hosts", message: 'host key "builder-1" is provisioned but no longer declared' },
     ]);
     expect(refusal).toEqual({
-      capability: "host retirement",
+      capability: "host removal",
+      command: "fffactory worker terminate KEY",
       reasons: ['hosts: host key "builder-1" is provisioned but no longer declared'],
-      instead: "Declare every provisioned host key in factory.json again, then plan again.",
+      instead:
+        "Declare every provisioned host key in factory.json again, then remove a host with " +
+        "`fffactory worker terminate KEY`.",
     });
+    expect(describeD11Refusal(refusal as NonNullable<typeof refusal>)).toEqual([
+      "Refusing: this change needs host removal, which only `fffactory worker terminate KEY` " +
+        "does (D11):",
+      '  hosts: host key "builder-1" is provisioned but no longer declared',
+      "Nothing was applied. Declare every provisioned host key in factory.json again, then " +
+        "remove a host with `fffactory worker terminate KEY`.",
+    ]);
     expect(hostKeyRemovalRefusal([])).toBeUndefined();
   });
 });

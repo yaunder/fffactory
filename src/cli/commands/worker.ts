@@ -1,15 +1,21 @@
+import { join } from "node:path";
 import { parseArgs } from "node:util";
 import type { OperationLocation } from "../../application/apply-factory";
+import { releaseAssetsDirectory } from "../../application/asset-bundle";
+import { cacheDirectoryPath } from "../../application/cache-directory";
 import {
   credentialSelection,
   PROFILE_ENVIRONMENT_VARIABLE,
 } from "../../application/caller-identity";
 import {
   type PowerProgress,
+  type Removal,
   startWorker,
   stopWorker,
   terminateWorker,
+  type Configuration,
   type WorkerLifecycleDependencies,
+  type WorkerLifecycleRequest,
   type WorkerPower,
 } from "../../application/worker-lifecycle";
 import type { CredentialSelection } from "../../domain/aws-account";
@@ -24,16 +30,18 @@ import {
   type Refusal,
   TARGET_STATE,
   unconfirmable,
+  type WorkerCommand,
   workerCommandLine,
 } from "../../domain/worker-lifecycle";
 import { sha256Text } from "../../infrastructure/release-tarball";
 import type { CliContext, Command } from "../context";
+import { printDiagnostics } from "../diagnostics";
 import { loadInstance, printAccountRefusal } from "./selected-instance";
 
 const USAGE = [
   "Usage: fffactory worker stop KEY [--force] [--yes] [--instance PATH] [--profile NAME]",
   "       fffactory worker start KEY [--yes] [--instance PATH] [--profile NAME]",
-  "       fffactory worker terminate KEY --keep [--force] [--confirm KEY] [--instance PATH] [--profile NAME]",
+  "       fffactory worker terminate KEY [--keep] [--force] [--confirm KEY] [--instance PATH] [--profile NAME]",
   "",
   "Powers the EC2 instance of the worker factory.json declares as host KEY off or",
   "on, under the factory-wide lock and with a record of the operation in the state",
@@ -50,35 +58,41 @@ const USAGE = [
   "and succeeds; one already on its way there is only waited for. Each asks y/N at",
   "a terminal; --yes confirms in advance, and without a terminal is required.",
   "",
-  "Terminate destroys the worker's EC2 instance and root volume, then deletes its",
-  "Tailscale devices with the factory's admin client (`fffactory secret set",
-  "tailscale-admin-client`), whose secret it reads from Secrets Manager. With",
-  "--keep, the only mode yet, the host stays in factory.json and the next",
-  "`fffactory apply` creates it afresh; Terraform is not run. A running worker is",
-  "first inspected, and refused while agents are active on it or its checkouts",
-  "are unresolved or unmanaged; a stopped one is not inspected. You confirm by",
-  "typing the host key at a terminal, or with --confirm KEY. A device it could not",
-  "delete is reported, and exits 2: the terminate stands.",
+  "Terminate removes the worker: Terraform plans factory.json without the host,",
+  "and the plan may only destroy its EC2 instance and root volume (any other",
+  "pending change is refused: apply it first). Once you approve the plan,",
+  "Terraform applies exactly it, factory.json is written without the host, and",
+  "its Tailscale devices are deleted with the factory's admin client (`fffactory",
+  "secret set tailscale-admin-client`), whose secret it reads from Secrets",
+  "Manager. A host whose machine is already gone is removed the same way. The",
+  "only declared host cannot be removed. With --keep, the host stays in",
+  "factory.json and the next `fffactory apply` creates it afresh: EC2 terminates",
+  "the instance and Terraform is not run. A running worker is first inspected, and",
+  "refused while agents are active on it or its checkouts are unresolved or",
+  "unmanaged; a stopped one is not inspected. You confirm by typing the host key at",
+  "a terminal, or with --confirm KEY. A device it could not delete is reported, and",
+  "exits 2: the terminate stands.",
   "",
   "Refused, changing nothing, when KEY is not a host factory.json declares, the",
   "credentials belong to another account, this fffactory is not the release",
   "factory.json pins, another operation holds the lock, or no single EC2 instance",
-  "carries the factory ID and host key tags. Interrupting the wait leaves the",
-  "factory locked, with its record: once fffactory has exited, break the lock with",
+  "carries the factory ID and host key tags. Interrupting it leaves the factory",
+  "locked, with its record: once fffactory has exited, break the lock with",
   "`fffactory lock break`, then rerun the command.",
   "",
   "  --force          stop and terminate: act without inspecting the worker (ends any",
   "                   agents; terminate also loses unpushed work).",
   "  --yes            stop and start: confirm without asking.",
-  "  --keep           terminate: keep the host in factory.json (required).",
+  "  --keep           terminate: keep the host in factory.json, so apply creates it",
+  "                   afresh.",
   "  --confirm KEY    terminate: confirm without asking, naming the host key.",
   "  --instance PATH  Select the instance, as for `fffactory validate`.",
   "  --profile NAME   Use this AWS profile. Otherwise AWS_PROFILE, or else the",
   "                   standard AWS credential chain.",
   "",
-  "Exits 0 once the worker is stopped, started (even when it is not ready) or",
-  "terminated, 2 when it is terminated but a tailnet device remains, and 1 when",
-  "refused, declined or failed.",
+  "Exits 0 once the worker is stopped, started (even when it is not ready),",
+  "terminated or removed, 2 when it is terminated but a tailnet device remains,",
+  "and 1 when refused, declined or failed.",
 ];
 
 /** How each action is told: its verb, its participles, and its progress. */
@@ -100,7 +114,11 @@ const UNINSPECTED: Readonly<Record<PowerAction, string>> = {
   terminate: "active agents or checkouts",
 };
 
-function progressLine(event: PowerProgress): string {
+function progressLines(event: PowerProgress): readonly string[] {
+  return event.kind === "removal_plan" ? event.plan : [progressLine(event)];
+}
+
+function progressLine(event: Exclude<PowerProgress, { readonly kind: "removal_plan" }>): string {
   const wait = (action: PowerAction) =>
     `waiting for it to be ${TARGET_STATE[action]} (up to ${POWER_DEADLINE_MS / 60_000} min).`;
   switch (event.kind) {
@@ -118,6 +136,29 @@ function progressLine(event: PowerProgress): string {
       return `Waiting for ${event.hostname} to come online in the tailnet (up to ${ONLINE_DEADLINE_MS / 60_000} min).`;
     case "removing_devices":
       return `Deleting the Tailscale devices named ${event.hostname}.`;
+    default:
+      return removalLine(event);
+  }
+}
+
+/** Terminate's removal of the host, step by step. */
+function removalLine(
+  event: Extract<
+    PowerProgress,
+    {
+      readonly kind: "absent" | "planning_removal" | "applying_removal" | "configuration_written";
+    }
+  >,
+): string {
+  switch (event.kind) {
+    case "absent":
+      return `Worker ${event.key} (${event.hostname}): no EC2 instance carries its key; its machine is already gone.`;
+    case "planning_removal":
+      return `Planning the removal of host ${event.key}. Terraform's output is not shown.`;
+    case "applying_removal":
+      return "Applying the removal plan. Terraform's output is not shown; this can take several minutes.";
+    case "configuration_written":
+      return `factory.json no longer declares host ${event.key}: ${event.path}`;
   }
 }
 
@@ -168,43 +209,65 @@ function printDevices(
     context.out(`No Tailscale device named ${hostname} remained to delete.`);
 }
 
+/** What the command did, in one line. */
+function doneLine(result: Extract<WorkerPower, { readonly kind: "done" }>): string {
+  const { action, worker, changed, awaited } = result;
+  const named = `${worker.key} (${worker.hostname})`;
+  if (result.removed === true)
+    return (
+      `Removed worker ${named}: its EC2 instance and root volume are gone, and neither ` +
+      "Terraform nor factory.json records it."
+    );
+  if (awaited)
+    return `Worker ${named} is now ${TARGET_STATE[action]}: it was already on its way, and fffactory waited for it.`;
+  if (!changed)
+    return `Worker ${named} is already ${TARGET_STATE[action]}${action === "stop" ? ": nothing to do" : ""}.`;
+  if (action === "stop")
+    return (
+      `Stopped worker ${named}. Its instance, volume, tailnet device and factory.json entry ` +
+      `stay; \`fffactory worker start ${worker.key}\` brings it back.`
+    );
+  if (action === "terminate")
+    return (
+      `Terminated worker ${named}: its EC2 instance and root volume are gone. factory.json ` +
+      "keeps the host, so `fffactory apply` creates it afresh."
+    );
+  return `${WORDS[action].done} worker ${named}.`;
+}
+
 function reportDone(
   result: Extract<WorkerPower, { readonly kind: "done" }>,
   context: CliContext,
 ): number {
-  const { action, worker, changed, awaited } = result;
-  const named = `${worker.key} (${worker.hostname})`;
-  if (awaited)
-    context.out(
-      `Worker ${named} is now ${TARGET_STATE[action]}: it was already on its way, and fffactory waited for it.`,
-    );
-  else if (!changed)
-    context.out(
-      `Worker ${named} is already ${TARGET_STATE[action]}${action === "stop" ? ": nothing to do" : ""}.`,
-    );
-  else if (action === "stop")
-    context.out(
-      `Stopped worker ${named}. Its instance, volume, tailnet device and factory.json entry ` +
-        `stay; \`fffactory worker start ${worker.key}\` brings it back.`,
-    );
-  else if (action === "terminate")
-    context.out(
-      `Terminated worker ${named}: its EC2 instance and root volume are gone. factory.json ` +
-        "keeps the host, so `fffactory apply` creates it afresh.",
-    );
-  else context.out(`${WORDS[action].done} worker ${named}.`);
+  context.out(doneLine(result));
   if (result.verdict !== undefined) printVerdict(result.verdict, context);
   if (result.devices !== undefined)
-    printDevices(result.devices, result.leftover, worker.hostname, context);
+    printDevices(result.devices, result.leftover, result.worker.hostname, context);
   printRecord(result.operation, result.recordFailure, context);
   return result.leftover === undefined ? 0 : 2;
+}
+
+/** What an interrupted removal left of host `key`: Terraform may have removed it, or did. */
+const REMOVAL_LEFT: Readonly<Record<Removal, (key: HostKey) => string>> = {
+  applying: (key) =>
+    "Terraform was applying the removal and may have destroyed the machine; factory.json " +
+    `still declares host ${key}, and the rerun finishes the removal.`,
+  written: (key) =>
+    `factory.json no longer declares host ${key}, and Terraform destroyed its machine; its ` +
+    `tailnet devices may remain: check them at ${ADMIN_CONSOLE}.`,
+};
+
+/** The command a report concerns: its action, its host, and the line that reruns it. */
+interface Run {
+  readonly action: PowerAction;
+  readonly key: HostKey;
+  readonly rerun: string;
 }
 
 /** What an interrupt left: no lock, or the lock, with its record when one was written. */
 function reportInterrupted(
   result: Extract<WorkerPower, { readonly kind: "interrupted" }>,
-  action: PowerAction,
-  rerun: string,
+  { action, key, rerun }: Run,
   context: CliContext,
 ): void {
   if (!result.locked) {
@@ -213,7 +276,8 @@ function reportInterrupted(
     );
     return;
   }
-  if (result.requested && action === "terminate")
+  if (result.removal !== undefined) context.err(REMOVAL_LEFT[result.removal](key));
+  else if (result.requested && action === "terminate")
     context.err(
       "EC2 was asked to terminate the instance and may still be doing so; its tailnet " +
         `devices may remain: check them at ${ADMIN_CONSOLE}.`,
@@ -224,8 +288,10 @@ function reportInterrupted(
     result.record === undefined
       ? "the factory stays locked by this operation, which may have no operation record."
       : "the factory stays locked, with a record of this operation.";
+  // Once factory.json no longer declares the host, there is nothing to rerun.
+  const then = result.removal === "written" ? "." : `, then rerun \`${rerun}\`.`;
   context.err(
-    `Interrupted: ${left} Once fffactory has exited, break the lock with \`fffactory lock break\`, then rerun \`${rerun}\`.`,
+    `Interrupted: ${left} Once fffactory has exited, break the lock with \`fffactory lock break\`${then}`,
   );
   printRecord(result.record, undefined, context);
 }
@@ -233,11 +299,11 @@ function reportInterrupted(
 /** Reports how the command ended, and returns its exit code. */
 function report(
   result: WorkerPower,
-  action: PowerAction,
-  rerun: string,
+  run: Run,
   credentials: CredentialSelection,
   context: CliContext,
 ): number {
+  const { action } = run;
   const refusing = `Refusing to ${WORDS[action].verb} the worker`;
   switch (result.kind) {
     case "done":
@@ -263,7 +329,7 @@ function report(
       for (const line of lockRefusal(result.held, context.now())) context.err(line);
       return 1;
     case "interrupted":
-      reportInterrupted(result, action, rerun, context);
+      reportInterrupted(result, run, context);
       return 1;
     case "refused":
       printRefusal(refusing, result.refusal, context);
@@ -275,9 +341,23 @@ function report(
       return 1;
     case "failed":
       printRefusal(`${WORDS[action].doing} the worker failed`, result.refusal, context);
+      printDiagnostics(result.diagnosticsFile, context);
       printRecord(result.operation, result.recordFailure, context);
       return 1;
   }
+}
+
+/**
+ * This release's Terraform tree, materialized from its assets in the cache, as `plan` and
+ * `apply` use it: only a removal runs Terraform.
+ */
+async function terraformDirectory(context: CliContext): Promise<string> {
+  const assets = releaseAssetsDirectory(
+    cacheDirectoryPath(context.env, context.home),
+    context.release,
+  );
+  await context.assets.materialize(assets);
+  return join(assets, "terraform");
 }
 
 function dependencies(context: CliContext): WorkerLifecycleDependencies {
@@ -292,10 +372,16 @@ function dependencies(context: CliContext): WorkerLifecycleDependencies {
     prompt: context.prompt,
     secrets: context.secrets,
     tailnetAdmin: context.tailnetAdmin,
+    provisioner: context.provisioner,
+    planStore: context.planStore,
+    store: context.store,
+    terraformDirectory: () => terraformDirectory(context),
     interrupted: context.interrupted,
     sleep: context.sleep,
     sha256: sha256Text,
-    progress: (event) => context.out(progressLine(event)),
+    progress: (event) => {
+      for (const line of progressLines(event)) context.out(line);
+    },
   };
 }
 
@@ -343,19 +429,14 @@ async function power(
     context.err(`${command}: expected one host KEY`);
     return 1;
   }
-  // TODO(re-evaluate when terminate removal lands): without --keep, terminate removes the host
-  // from factory.json (#10); until then only --keep is accepted.
-  if (action === "terminate" && values.keep !== true) {
-    context.err(`${command}: removal arrives in a later release; use --keep`);
-    return 1;
-  }
   const loaded = await loadInstance(values.instance, context);
   if (!loaded) return 1;
   const credentials = credentialSelection(
     values.profile,
     context.env[PROFILE_ENVIRONMENT_VARIABLE],
   );
-  const request = {
+  const keep = values.keep === true;
+  const request: Omit<WorkerLifecycleRequest, "action"> = {
     instance: loaded.instance,
     key,
     credentials,
@@ -366,14 +447,40 @@ async function power(
     host: context.hostname,
     clock: context.now,
     randomBytes: context.randomBytes,
+    keep,
+    configuration: { path: loaded.path, text: loaded.text },
   };
-  const deps = dependencies(context);
-  const result = await USE_CASES[action](deps, request);
+  const result = await USE_CASES[action](dependencies(context), request);
+  const run: WorkerCommand = action === "terminate" && keep ? "terminate-keep" : action;
   // Only a result past the key check names the key again: it is then a declared host key.
-  return report(result, action, workerCommandLine(action, key as HostKey), credentials, context);
+  const named = key as HostKey;
+  return report(
+    result,
+    { action, key: named, rerun: workerCommandLine(run, named) },
+    credentials,
+    context,
+  );
 }
 
-const USE_CASES = { stop: stopWorker, start: startWorker, terminate: terminateWorker } as const;
+const USE_CASES: Readonly<
+  Record<
+    PowerAction,
+    (
+      deps: WorkerLifecycleDependencies,
+      request: Omit<WorkerLifecycleRequest, "action">,
+    ) => Promise<WorkerPower>
+  >
+> = {
+  stop: stopWorker,
+  start: startWorker,
+  terminate: (deps, request) =>
+    terminateWorker(
+      deps,
+      request.keep === true
+        ? { ...request, keep: true }
+        : { ...request, keep: false, configuration: request.configuration as Configuration },
+    ),
+};
 
 const ACTIONS: readonly string[] = Object.keys(USE_CASES);
 
@@ -390,7 +497,7 @@ async function worker(args: readonly string[], context: CliContext): Promise<num
 }
 
 export const workerCommand: Command = {
-  summary: "Stop, start or terminate a worker's EC2 instance, under the factory-wide lock",
+  summary: "Stop, start or terminate a worker, removing its host, under the factory-wide lock",
   usage: USAGE,
   run: worker,
   waitsOnInterrupt: true,
