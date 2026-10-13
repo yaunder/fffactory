@@ -879,6 +879,10 @@ function removing(
 /** The worker answering its inspection, its repository result and its dispatch state. */
 const CLEAN = statusAnswers(readyWorker(FACTORY, KEY, RELEASE));
 const TERMINATING = { states: ["shutting-down", "terminated"] as const, worker: CLEAN };
+/** The typed-key question for a `--keep` whose machine is already being terminated. */
+const SHUTTING_DOWN_QUESTION =
+  `Wait for EC2 instance ${ID}, already being terminated, then delete the Tailscale devices of ` +
+  `worker ${KEY} (${HOSTNAME})? Type the host key to confirm: `;
 
 describe("fffactory worker terminate --keep (worker-lifecycle §Terminate (keep))", () => {
   test("terminates an idle running worker, waits for terminated, then deletes its tailnet device", async () => {
@@ -970,12 +974,12 @@ describe("fffactory worker terminate --keep (worker-lifecycle §Terminate (keep)
     expect(w.control.mutations()).toEqual([`terminate ${ID}`]);
   });
 
-  test("a machine already being terminated is only waited for, then its devices deleted", async () => {
+  test("a machine already being terminated is waited for, then its devices deleted, once the host key is typed", async () => {
     const w = world({
       ...TERMINATING,
       inventory: { kind: "machines", machines: [machine(KEY, "shutting-down", ID)] },
       states: ["absent"],
-      prompt: fakePrompt({ interactive: true }),
+      prompt: fakePrompt({ interactive: true, answers: [KEY] }),
     });
     expect(await terminateWorker(w.deps, terminating(w, { confirm: undefined }))).toMatchObject({
       kind: "done",
@@ -985,11 +989,74 @@ describe("fffactory worker terminate --keep (worker-lifecycle §Terminate (keep)
     });
     expect(w.control.mutations()).toEqual([]);
     expect(w.controlPlane.calls).toEqual([]);
-    expect(w.prompt.asked).toEqual([]);
+    expect(w.prompt.asked).toEqual([SHUTTING_DOWN_QUESTION]);
+    // Asked before the wait: the operator is not left waiting for the question.
+    expect(stages(w)).toEqual([
+      "locating",
+      "locating",
+      "authorizing",
+      "awaiting_approval",
+      "terminating",
+      "terminating",
+      "removing_devices",
+      "unchanged",
+    ]);
+    expect(w.control.calls).toEqual([`state ${ID}`]);
     expect(records(w)[0]).toMatchObject({
       status: "succeeded",
       stages: [{ name: "terminate", status: "unchanged" }],
     });
+  });
+
+  test("a machine already being terminated: declining, or a wrong key, deletes no device", async () => {
+    for (const answer of ["y", "yes", "builder-2", ""]) {
+      const w = world({
+        ...TERMINATING,
+        inventory: { kind: "machines", machines: [machine(KEY, "shutting-down", ID)] },
+        prompt: fakePrompt({ interactive: true, answers: [answer] }),
+      });
+      expect(await terminateWorker(w.deps, terminating(w, { confirm: undefined }))).toEqual({
+        kind: "declined",
+        terminating: ID,
+        operation: expect.anything(),
+        recordFailure: undefined,
+      });
+      expect(w.prompt.asked).toEqual([SHUTTING_DOWN_QUESTION]);
+      expect(w.control.calls).toEqual([]);
+      expect(w.admin.calls).toEqual(["open"]);
+      expect(w.admin.devices().map((device) => device.id)).toEqual(["nWorker1CNTRL"]);
+      expect(records(w)[0]).toMatchObject({ status: "declined" });
+      expect(w.lockStore.locks.size).toBe(0);
+    }
+  });
+
+  test("a machine already being terminated: --confirm KEY deletes its devices unasked", async () => {
+    const w = world({
+      ...TERMINATING,
+      inventory: { kind: "machines", machines: [machine(KEY, "shutting-down", ID)] },
+      states: ["terminated"],
+      prompt: fakePrompt({ interactive: true }),
+    });
+    expect(await terminateWorker(w.deps, terminating(w))).toMatchObject({
+      kind: "done",
+      awaited: true,
+      devices: { removed: ["nWorker1CNTRL"] },
+    });
+    expect(w.prompt.asked).toEqual([]);
+    expect(w.control.mutations()).toEqual([]);
+  });
+
+  test("a machine already being terminated: no terminal and no --confirm is refused before AWS", async () => {
+    const w = world({
+      ...TERMINATING,
+      inventory: { kind: "machines", machines: [machine(KEY, "shutting-down", ID)] },
+    });
+    expect(await terminateWorker(w.deps, terminating(w, { confirm: undefined }))).toEqual({
+      kind: "unconfirmable",
+    });
+    expect(w.identity.requests).toEqual([]);
+    expect(w.control.calls).toEqual([]);
+    expect(w.admin.calls).toEqual([]);
   });
 
   test("a pending or stopping machine is refused before EC2 is asked anything", async () => {
@@ -2032,6 +2099,28 @@ describe("fffactory worker terminate (worker-lifecycle §Terminate (remove))", (
     });
     expect(w.control.mutations()).toEqual([]);
     expect(w.store.files[PATH]).toBe(WITHOUT_KEY);
+  });
+
+  test("a machine already being terminated: the typed key is asked after the plan, saying so; declining changes nothing", async () => {
+    const w = world({
+      provisioned: ["builder-2"],
+      inventory: { kind: "machines", machines: [machine(KEY, "shutting-down", ID)] },
+      states: ["terminated"],
+      prompt: fakePrompt({ interactive: true, answers: ["yes"] }),
+    });
+    expect(await terminateWorker(w.deps, removing(w, { confirm: undefined }))).toMatchObject({
+      kind: "declined",
+      terminating: ID,
+    });
+    expect(w.prompt.asked).toEqual([
+      `Remove worker ${KEY} (${HOSTNAME}) from factory.json? Its EC2 instance ${ID} was ` +
+        "already being terminated, and is now terminated. Type the host key to confirm: ",
+    ]);
+    expect(calls(w)).toEqual(["output", "plan", "showPlan"]);
+    expect(w.store.writes).toEqual([]);
+    expect(w.admin.calls).toEqual(["open"]);
+    expect(records(w)[0]).toMatchObject({ status: "declined" });
+    expect(w.lockStore.locks.size).toBe(0);
   });
 
   test("its gates still refuse a busy running worker before anything is planned", async () => {

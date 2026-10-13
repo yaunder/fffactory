@@ -441,20 +441,26 @@ const TYPE_KEY = "Type the host key to confirm: ";
 const GONE = "No EC2 instance carries its key: its machine is already gone.";
 
 /**
- * The question asked before acting on `instanceId`. Terminate removing the host says so.
- * Without an instance, its machine already gone, terminate asks only to remove the host, or
- * with `--keep` only to delete its tailnet devices.
+ * The question asked before acting on the machine located. Terminate removing the host says so.
+ * Without a machine, already gone, terminate asks only to remove the host, or with `--keep`
+ * only to delete its tailnet devices. For a machine EC2 was already terminating, `--keep` asks,
+ * before its wait, to wait and delete the devices; a removal asks, after it, to remove the host.
  */
 export function confirmationQuestion(
   command: WorkerCommand,
   worker: WorkerIdentity,
-  instanceId: string | undefined,
+  machine: Pick<Machine, "instanceId" | "state"> | undefined,
 ): string {
   const named = `worker ${worker.key} (${worker.hostname})`;
-  if (instanceId === undefined)
+  if (machine === undefined)
     return removesHost(command)
       ? `Remove ${named} from factory.json? ${GONE} ${TYPE_KEY}`
       : `Delete the Tailscale devices of ${named}? ${GONE} ${TYPE_KEY}`;
+  const { instanceId } = machine;
+  if (machine.state === "shutting-down")
+    return removesHost(command)
+      ? `Remove ${named} from factory.json? Its EC2 instance ${instanceId} was already being terminated, and is now terminated. ${TYPE_KEY}`
+      : `Wait for EC2 instance ${instanceId}, already being terminated, then delete the Tailscale devices of ${named}? ${TYPE_KEY}`;
   const action = actionOf(command);
   const asked = `${VERBS[action].name} ${named}, EC2 instance ${instanceId}`;
   if (removesHost(command))

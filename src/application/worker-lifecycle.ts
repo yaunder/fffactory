@@ -274,10 +274,15 @@ export type WorkerPower =
       readonly operation: OperationLocation | undefined;
       readonly recordFailure?: string | undefined;
     }
+  /**
+   * Not confirmed: nothing changed. `terminating` is the instance EC2 was already terminating
+   * when located, which this command neither asked for nor stopped.
+   */
   | {
       readonly kind: "declined";
       readonly operation: OperationLocation;
       readonly recordFailure: string | undefined;
+      readonly terminating?: string | undefined;
     }
   | {
       readonly kind: "failed";
@@ -656,21 +661,42 @@ async function operate(
         changed: false,
         awaited: false,
       });
-    case "await": {
-      const admin = await adminFor(deps, power, log);
-      if (deps.interrupted()) return interruptedUnder(log, progress);
-      if (admin.kind === "refused") return refusedUnder(log, admin.refusal);
-      deps.progress({ kind: "awaiting", action: power.action, instanceId: machine.instanceId });
-      return awaitTarget(deps, power, log, progress, {
-        machine,
-        changed: false,
-        awaited: true,
-        admin: admin.session,
-      });
-    }
+    case "await":
+      return awaitUnderWay(deps, power, log, progress, machine);
     case "act":
       return act(deps, power, log, progress, machine);
   }
+}
+
+/**
+ * A machine already on its way to the action's target state: waited for, unasked. Terminate
+ * first opens its admin session and, with `--keep`, asks for the typed key before the wait, so
+ * the operator is not kept waiting for the question; a removal asks after its plan instead.
+ */
+async function awaitUnderWay(
+  deps: WorkerLifecycleDependencies,
+  power: Power,
+  log: PowerLog,
+  progress: Progress,
+  machine: Machine,
+): Promise<WorkerPower> {
+  const admin = await adminFor(deps, power, log);
+  if (deps.interrupted()) return interruptedUnder(log, progress);
+  if (admin.kind === "refused") return refusedUnder(log, admin.refusal);
+  if (power.action === "terminate" && !removesHost(power.command)) {
+    const ended = await unconfirmed(deps, power, log, progress, machine);
+    if (ended !== undefined) return ended;
+    // The wait is recorded as terminate's, as after its request, not as the question's.
+    await log.stage("terminating");
+    if (deps.interrupted()) return interruptedUnder(log, progress);
+  }
+  deps.progress({ kind: "awaiting", action: power.action, instanceId: machine.instanceId });
+  return awaitTarget(deps, power, log, progress, {
+    machine,
+    changed: false,
+    awaited: true,
+    admin: admin.session,
+  });
 }
 
 /**
@@ -754,12 +780,8 @@ async function act(
       awaited: false,
       admin: admin.session,
     });
-  const confirmed = await confirmation(deps, power, log, machine.instanceId);
-  if (deps.interrupted()) return interruptedUnder(log, progress);
-  if (!confirmed) {
-    const recordFailure = await log.finish("declined", "declined");
-    return { kind: "declined", operation: log.location, recordFailure };
-  }
+  const ended = await unconfirmed(deps, power, log, progress, machine);
+  if (ended !== undefined) return ended;
   return requestTarget(deps, power, log, progress, machine, admin.session);
 }
 
@@ -914,17 +936,41 @@ async function confirmation(
   deps: WorkerLifecycleDependencies,
   power: Power,
   log: PowerLog,
-  instanceId: string | undefined,
+  machine: Machine | undefined,
 ): Promise<boolean> {
   const { request } = power;
   if (confirmationRule(confirmedInAdvance(request), deps.prompt.interactive) === "confirmed")
     return true;
   await log.stage("awaiting_approval");
-  const question = confirmationQuestion(power.command, power.worker, instanceId);
+  const question = confirmationQuestion(power.command, power.worker, machine);
   const answer = await deps.prompt.ask(question);
   return power.action === "terminate"
     ? typedKeyConfirms(answer, power.worker.key)
     : confirms(answer);
+}
+
+/**
+ * The confirmation about `machine` (undefined: already gone), or how the command ends without
+ * it: interrupted, or declined, recorded `declined` with the lock released. Undefined once
+ * confirmed.
+ */
+async function unconfirmed(
+  deps: WorkerLifecycleDependencies,
+  power: Power,
+  log: PowerLog,
+  progress: Progress,
+  machine: Machine | undefined,
+): Promise<WorkerPower | undefined> {
+  const confirmed = await confirmation(deps, power, log, machine);
+  if (deps.interrupted()) return interruptedUnder(log, progress);
+  if (confirmed) return undefined;
+  const recordFailure = await log.finish("declined", "declined");
+  return {
+    kind: "declined",
+    operation: log.location,
+    recordFailure,
+    ...(machine?.state === "shutting-down" ? { terminating: machine.instanceId } : {}),
+  };
 }
 
 interface Reaching {
@@ -1218,12 +1264,8 @@ async function terminateAbsent(
     // TODO(re-evaluate when a live worker is found with its EC2 tags stripped): refuse while a
     // tagged device with the worker's hostname is connected, since the tags alone decide the
     // machine is gone here, with no Terraform state check as removal has.
-    const confirmed = await confirmation(deps, power, log, undefined);
-    if (deps.interrupted()) return interruptedUnder(log, progress);
-    if (!confirmed) {
-      const recordFailure = await log.finish("declined", "declined");
-      return { kind: "declined", operation: log.location, recordFailure };
-    }
+    const ended = await unconfirmed(deps, power, log, progress, undefined);
+    if (ended !== undefined) return ended;
     return reached(deps, power, log, progress, {
       instanceId: undefined,
       changed: false,
@@ -1288,12 +1330,8 @@ async function planAndRemove(
     kind: "removal_plan",
     plan: describeRemovalPlan(target, planning.changes, power.worker),
   });
-  const confirmed = await confirmation(deps, power, log, removing.machine?.instanceId);
-  if (deps.interrupted()) return interruptedUnder(log, progress);
-  if (!confirmed) {
-    const recordFailure = await log.finish("declined", "declined");
-    return { kind: "declined", operation: log.location, recordFailure };
-  }
+  const ended = await unconfirmed(deps, power, log, progress, removing.machine);
+  if (ended !== undefined) return ended;
   return applyRemoval(deps, power, log, progress, removing, { ...planning, planFile });
 }
 

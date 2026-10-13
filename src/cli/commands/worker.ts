@@ -341,7 +341,11 @@ function report(
       printRecord(result.operation, result.recordFailure, context);
       return 1;
     case "declined":
-      context.err(`Not confirmed: the worker was not ${WORDS[action].past}.`);
+      context.err(
+        result.terminating === undefined
+          ? `Not confirmed: the worker was not ${WORDS[action].past}.`
+          : `Not confirmed: nothing was changed, though EC2 instance ${result.terminating} was already being terminated.`,
+      );
       printRecord(result.operation, result.recordFailure, context);
       return 1;
     case "failed":

@@ -304,10 +304,10 @@ describe("confirmation (worker-lifecycle §Confirmation)", () => {
   });
 
   test("the question names the worker, its instance and the default", () => {
-    expect(confirmationQuestion("stop", WORKER, ID)).toBe(
+    expect(confirmationQuestion("stop", WORKER, machine("running"))).toBe(
       `Stop worker builder-1 (fff-abcd1234-builder-1), EC2 instance ${ID}? [y/N] `,
     );
-    expect(confirmationQuestion("start", WORKER, ID)).toBe(
+    expect(confirmationQuestion("start", WORKER, machine("stopped"))).toBe(
       `Start worker builder-1 (fff-abcd1234-builder-1), EC2 instance ${ID}? [y/N] `,
     );
   });
@@ -584,9 +584,28 @@ describe("terminate's confirmation (worker-lifecycle §Confirmation (typed key))
   });
 
   test("the question names the worker, its instance and what is destroyed", () => {
-    expect(confirmationQuestion("terminate-keep", WORKER, ID)).toBe(
-      `Terminate worker builder-1 (fff-abcd1234-builder-1), EC2 instance ${ID}? ` +
-        "Its machine and root volume are destroyed. Type the host key to confirm: ",
+    for (const state of ["running", "stopped"] as const)
+      expect(confirmationQuestion("terminate-keep", WORKER, machine(state))).toBe(
+        `Terminate worker builder-1 (fff-abcd1234-builder-1), EC2 instance ${ID}? ` +
+          "Its machine and root volume are destroyed. Type the host key to confirm: ",
+      );
+  });
+
+  test("with --keep and the machine already being terminated, the question is to wait, then delete its devices", () => {
+    expect(confirmationQuestion("terminate-keep", WORKER, machine("shutting-down"))).toBe(
+      `Wait for EC2 instance ${ID}, already being terminated, then delete the Tailscale devices ` +
+        "of worker builder-1 (fff-abcd1234-builder-1)? Type the host key to confirm: ",
+    );
+  });
+
+  test("removing the host whose machine was already being terminated, it says so", () => {
+    expect(confirmationQuestion("terminate", WORKER, machine("running"))).toBe(
+      `Terminate worker builder-1 (fff-abcd1234-builder-1), EC2 instance ${ID}, and remove it ` +
+        "from factory.json? Its machine and root volume are destroyed. Type the host key to confirm: ",
+    );
+    expect(confirmationQuestion("terminate", WORKER, machine("shutting-down"))).toBe(
+      "Remove worker builder-1 (fff-abcd1234-builder-1) from factory.json? Its EC2 instance " +
+        `${ID} was already being terminated, and is now terminated. Type the host key to confirm: `,
     );
   });
 

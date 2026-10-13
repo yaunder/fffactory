@@ -503,6 +503,10 @@ const TERMINATE = (...more: string[]) => [
   ...more,
 ];
 const TERMINATING = { instance: withAdmin(), states: ["shutting-down", "terminated"] } as const;
+/** The typed-key question for a `--keep` whose machine is already being terminated. */
+const SHUTTING_DOWN_QUESTION =
+  `Wait for EC2 instance ${ID}, already being terminated, then delete the Tailscale devices of ` +
+  `worker ${KEY} (${HOSTNAME})? Type the host key to confirm: `;
 
 describe("fffactory worker terminate --keep (worker-lifecycle §Terminate (keep))", () => {
   test("terminates the worker, deletes its tailnet device and keeps the host", async () => {
@@ -614,6 +618,57 @@ describe("fffactory worker terminate --keep (worker-lifecycle §Terminate (keep)
     ]);
     expect(cli.err).toEqual(["Not confirmed: the worker was not terminated."]);
     expect(cli.control.mutations()).toEqual([]);
+  });
+
+  test("a machine already being terminated: the host key is typed before the wait, and the devices deleted", async () => {
+    const asked = fakePrompt({ interactive: true, answers: [KEY] });
+    const cli = setup({
+      ...TERMINATING,
+      state: "shutting-down",
+      states: ["terminated"],
+      prompt: asked,
+    });
+    expect(await run(["worker", "terminate", KEY, "--keep"], cli.context)).toBe(0);
+    expect(asked.asked).toEqual([SHUTTING_DOWN_QUESTION]);
+    expect(cli.out).toContain(
+      `Worker ${KEY} (${HOSTNAME}) is now terminated: it was already on its way, and fffactory waited for it.`,
+    );
+    expect(cli.out).toContain(`Deleted Tailscale device nWorker1CNTRL (${HOSTNAME}).`);
+    expect(cli.control.mutations()).toEqual([]);
+  });
+
+  test("a machine already being terminated: anything but the host key declines, deleting no device", async () => {
+    const asked = fakePrompt({ interactive: true, answers: ["yes"] });
+    const cli = setup({ ...TERMINATING, state: "shutting-down", prompt: asked });
+    expect(await run(["worker", "terminate", KEY, "--keep"], cli.context)).toBe(1);
+    expect(asked.asked).toEqual([SHUTTING_DOWN_QUESTION]);
+    expect(cli.err).toEqual([
+      `Not confirmed: nothing was changed, though EC2 instance ${ID} was already being terminated.`,
+    ]);
+    expect(cli.out.at(-1)).toStartWith("Operation record: s3://");
+    expect(cli.control.calls).toEqual([]);
+    expect(cli.admin.devices().map((device) => device.id)).toEqual(["nWorker1CNTRL"]);
+    expect(cli.lockStore.locks.size).toBe(0);
+  });
+
+  test("a machine already being terminated: --confirm KEY is never asked; no terminal without it is refused", async () => {
+    const asked = fakePrompt({ interactive: true });
+    const confirmed = setup({
+      ...TERMINATING,
+      state: "shutting-down",
+      states: ["terminated"],
+      prompt: asked,
+    });
+    expect(await run(TERMINATE(), confirmed.context)).toBe(0);
+    expect(asked.asked).toEqual([]);
+    expect(confirmed.admin.devices()).toEqual([]);
+    const unconfirmed = setup({ ...TERMINATING, state: "shutting-down" });
+    expect(await run(["worker", "terminate", KEY, "--keep"], unconfirmed.context)).toBe(1);
+    expect(unconfirmed.err).toEqual([
+      "Terminating a worker needs your confirmation: rerun at a terminal, or pass --confirm KEY.",
+    ]);
+    expect(unconfirmed.identity.requests).toEqual([]);
+    expect(unconfirmed.admin.calls).toEqual([]);
   });
 });
 

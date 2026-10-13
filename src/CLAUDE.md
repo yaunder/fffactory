@@ -179,7 +179,9 @@ Dependencies point inward: `domain <- application <- infrastructure, cli`, and
   never the account check, pin guard, lock or confirmation. A worker the tailnet does not
   locate refuses terminate with its own next action (`--force` once the EC2 console output
   shows a failed bootstrap), never status's recovery, which is terminate itself. Terminate opens its tailnet admin
-  session before EC2 is asked anything; a tailnet device it could not delete makes it partial,
+  session before EC2 is asked anything, and deletes no device and removes no host before its
+  typed-key confirmation, even for a machine EC2 is already terminating or one already gone
+  (with `--keep`, asked before the wait for `terminated`); a tailnet device it could not delete makes it partial,
   exit 2, never undone. With `--keep` it keeps the host in factory.json and never runs
   Terraform. Without it, it removes the host (`docs/specs/worker-lifecycle.md` §Terminate
   (remove)): the only path that may destroy a host machine or drop a recorded host key. Its
