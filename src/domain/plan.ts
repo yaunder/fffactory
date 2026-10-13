@@ -310,7 +310,7 @@ export function createdWorkers(
 
 /** The plan's line for a factory that declares no worker. */
 export const NO_WORKERS_DECLARED =
-  "Workers: none declared. Declare a host in factory.json's hosts, then apply to create it.";
+  "Workers: none declared. Declare a host in factory.json's hosts, then create it with `fffactory apply`.";
 
 /**
  * The workers stage's changes, as the operator approves them. Each worker gets the release

@@ -593,10 +593,11 @@ A host is removed with one command, `fffactory worker terminate KEY`
 (admin-tier; [worker lifecycle §Terminate (remove)](../specs/worker-lifecycle.md#terminate-remove)),
 under the factory-wide lock and one operation record:
 
-1. Gates: a running worker is inspected, and active agents, unresolved or
-   unmanaged checkouts, or a worker that cannot be inspected refuse the
-   removal unless `--force` overrides them. A stopped worker passes
-   uninspected.
+1. Gates: a running worker is inspected, and active agents, work not pushed
+   to any remote in its checkouts, worktrees or submodules (read fresh, not
+   from its last synchronization), unresolved or unmanaged checkouts, or a
+   worker whose agents or work cannot be inspected refuse the removal unless
+   `--force` overrides them. A stopped worker passes uninspected.
 2. A scoped Terraform plan of factory.json without the host, which may only
    destroy that host's machine (and stop allowing its own Paseo password); any
    other pending change is refused until it is applied.

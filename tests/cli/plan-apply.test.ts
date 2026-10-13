@@ -88,7 +88,7 @@ const ENROLLMENT_PENDING =
 
 /** The plan's line for a factory that declares no worker. */
 const NO_WORKERS =
-  "Workers: none declared. Declare a host in factory.json's hosts, then apply to create it.";
+  "Workers: none declared. Declare a host in factory.json's hosts, then create it with `fffactory apply`.";
 
 function text(hosts: string[], overrides: object = {}): string {
   return `${JSON.stringify({ ...declaring(...hosts), ...overrides }, null, 2)}\n`;

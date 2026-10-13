@@ -49,7 +49,7 @@ function change(address: string, actions: string[], type?: string): ResourceChan
 
 /** The plan's line for a factory that declares no worker. */
 const NO_WORKERS =
-  "Workers: none declared. Declare a host in factory.json's hosts, then apply to create it.";
+  "Workers: none declared. Declare a host in factory.json's hosts, then create it with `fffactory apply`.";
 
 describe("plan IDs", () => {
   test("are eight random lowercase letters or digits", () => {

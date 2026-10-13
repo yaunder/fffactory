@@ -986,7 +986,7 @@ describe("fffactory worker terminate (worker-lifecycle §Terminate (remove))", (
     expect(await run(["plan"], after())).toBe(0);
     expect(cli.out).toContain("Infrastructure: no changes.");
     expect(cli.out).toContain(
-      "Workers: none declared. Declare a host in factory.json's hosts, then apply to create it.",
+      "Workers: none declared. Declare a host in factory.json's hosts, then create it with `fffactory apply`.",
     );
     expect(await run(["status"], after())).toBe(0);
     expect(cli.out.at(-1)).toBe("Ready: no workers are declared.");

@@ -117,7 +117,7 @@ describe("fffactory upgrade (plan-apply §Upgrade)", () => {
     });
     expect(shown[0]?.slice(-2)).toEqual([
       "Infrastructure: no changes.",
-      "Workers: none declared. Declare a host in factory.json's hosts, then apply to create it.",
+      "Workers: none declared. Declare a host in factory.json's hosts, then create it with `fffactory apply`.",
     ]);
     expect(JSON.parse(store.files[PATH] ?? "")).toEqual({ ...instance, release: "0.3.0" });
     expect(lockStore.locks.size).toBe(0);

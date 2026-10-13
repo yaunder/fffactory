@@ -137,7 +137,7 @@ shows:
 
 ```text
 Infrastructure: no changes.
-Workers: none declared. Declare a host in factory.json's hosts, then apply to create it.
+Workers: none declared. Declare a host in factory.json's hosts, then create it with `fffactory apply`.
 ```
 
 Apply asks for the approval of that plan and applies it as any other, under the

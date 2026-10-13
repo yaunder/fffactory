@@ -2071,7 +2071,7 @@ describe("fffactory worker terminate (worker-lifecycle §Terminate (remove))", (
       "  AWS account: 123456789012, Region: eu-west-2",
       `  Release: ${RELEASE}`,
       "Infrastructure: no changes.",
-      "Workers: none declared. Declare a host in factory.json's hosts, then apply to create it.",
+      "Workers: none declared. Declare a host in factory.json's hosts, then create it with `fffactory apply`.",
     ]);
     expect(planned.saved.changes).toEqual([]);
     const status = await factoryStatus(
