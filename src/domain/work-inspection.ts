@@ -301,8 +301,9 @@ function unreported(inspection: WorkInspection, placed: readonly string[]): stri
  * local branch, or a stash entry. Ignored files are not work. A repository or worktree that
  * could not be read, an inspection that did not finish, or a checkout factory.json places on
  * the worker (`placed`, relative to the repository root) that the inspection does not report,
- * is uninspected: a checkout the worker did not find is never read as clean. Git is never asked
- * to fetch, so "on a remote" means as of the worker's last fetch or push.
+ * is uninspected: a checkout the worker did not find is never read as clean. "On a remote" means
+ * held by any remote-tracking ref, whatever the remote's URL, as of the worker's last fetch or
+ * push: Git is never asked to fetch.
  */
 export function workFindings(inspection: WorkInspection, placed: readonly string[]): WorkFindings {
   const found = inspection.repositories.map(repositoryFindings);

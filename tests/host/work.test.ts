@@ -5,6 +5,7 @@
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import {
+  chmod,
   lstat,
   mkdir,
   readdir,
@@ -24,7 +25,16 @@ import {
 } from "../../src/domain/work-inspection";
 import type { ApplySystem } from "../../src/host/apply";
 import { WORK_BUDGET_MS, workerWork } from "../../src/host/work";
-import { AS_FACTORY, CHECKOUT, type GitWorld, gitWorld, PASEO } from "./work-scenarios";
+import {
+  AS_FACTORY,
+  addSubmodule,
+  CHECKOUT,
+  type GitWorld,
+  gitWorld,
+  PASEO,
+  remote,
+  submoduleGit,
+} from "./work-scenarios";
 import { WORKER_HOSTNAME } from "./worker-scenarios";
 
 let world: GitWorld;
@@ -519,10 +529,267 @@ describe("host work inspect (host-protocol §work inspect)", () => {
     expect(result.complete).toBe(false);
   });
 
+  test("a file Git is told to assume unchanged makes its worktree unreadable: never read as clean", async () => {
+    const directory = await checkout();
+    git(directory, "update-index", "--assume-unchanged", "README.md");
+    await writeFile(join(directory, "README.md"), "hidden edit\n");
+    expect(git(directory, "status", "--porcelain")).toBe("");
+    expect((await inspect()).repositories).toEqual([
+      repository({ worktrees: [clean(CHECKOUT, { state: "unreadable" })] }),
+    ]);
+  });
+
+  test("a file marked skip-worktree that is on disk makes its worktree unreadable", async () => {
+    const directory = await checkout();
+    git(directory, "update-index", "--skip-worktree", "README.md");
+    await writeFile(join(directory, "README.md"), "hidden edit\n");
+    expect(git(directory, "status", "--porcelain")).toBe("");
+    expect((await inspect()).repositories).toEqual([
+      repository({ worktrees: [clean(CHECKOUT, { state: "unreadable" })] }),
+    ]);
+  });
+
+  test("a sparse checkout's files left out of the worktree are no work", async () => {
+    const directory = await checkout();
+    git(directory, "sparse-checkout", "set", "--no-cone", "/README.md");
+    await expect(lstat(join(directory, ".gitignore"))).rejects.toThrow();
+    expect((await inspect()).repositories).toEqual([repository()]);
+  });
+
+  test.skipIf(process.getuid?.() === 0)(
+    "a directory Git warns it cannot open makes its worktree unreadable: status still exits 0",
+    async () => {
+      const directory = await checkout();
+      const hidden = join(directory, "hidden");
+      await mkdir(hidden);
+      await writeFile(join(hidden, "work.txt"), "work\n");
+      await chmod(hidden, 0o000);
+      try {
+        expect((await inspect()).repositories).toEqual([
+          repository({ worktrees: [clean(CHECKOUT, { state: "unreadable" })] }),
+        ]);
+      } finally {
+        await chmod(hidden, 0o755);
+      }
+    },
+  );
+
   test("refuses to run except as root, through the activator", async () => {
     await expect(workerWork(workSystem({ isRoot: () => false })).inspectWork()).rejects.toThrow(
       "host work runs only through the activator",
     );
     expect(commands).toEqual([]);
+  });
+});
+
+describe("host work inspect: submodules (host-protocol §work inspect)", () => {
+  const SUB = `${CHECKOUT}/sub`;
+
+  /** The submodule's repository entry: in step with its remote, on `main`, unless overridden. */
+  function submodule(
+    overrides: Partial<RepositoryWork> = {},
+    worktree: Partial<WorktreeWork> = {},
+    path = SUB,
+  ): RepositoryWork {
+    return repository({ path, worktrees: [clean(path, worktree)], ...overrides });
+  }
+
+  function unreadableAt(path: string): RepositoryWork {
+    return {
+      path,
+      state: "unreadable",
+      unpushed_commits: 0,
+      unpushed_branches: [],
+      stashes: 0,
+      worktrees: [],
+    };
+  }
+
+  /** The checkout with `sub` added, committed and pushed, and the submodule's directory. */
+  async function withSubmodule(): Promise<{ directory: string; sub: string }> {
+    const directory = await checkout();
+    return { directory, sub: addSubmodule(world, directory, await remote(world, "sub")) };
+  }
+
+  test("a clean submodule in step with its remote holds no work", async () => {
+    await withSubmodule();
+    const result = await inspect();
+    expect(result.complete).toBe(true);
+    expect(result.repositories).toEqual([repository(), submodule()]);
+  });
+
+  test("a submodule commit pushed nowhere is unresolved, though the parent pushed its bump", async () => {
+    const { directory, sub } = await withSubmodule();
+    git(sub, "switch", "--quiet", "--detach");
+    await writeFile(join(sub, "work.txt"), "work\n");
+    git(sub, "add", "work.txt");
+    git(sub, "commit", "--quiet", "-m", "work");
+    git(directory, "add", "sub");
+    git(directory, "commit", "--quiet", "-m", "bump sub");
+    git(directory, "push", "--quiet", "origin", "main");
+    const result = await inspect();
+    expect(result.complete).toBe(true);
+    expect(result.repositories).toEqual([
+      repository(),
+      submodule({}, { branch: null, unpushed_commits: 1 }),
+    ]);
+    expect(workFindings(result, ["acme/widget"]).unresolved).toEqual([
+      `${SUB} (detached HEAD): 1 commit not on any remote`,
+    ]);
+  });
+
+  test("a submodule's stash entry is unresolved", async () => {
+    const { sub } = await withSubmodule();
+    await writeFile(join(sub, "sub.txt"), "stashed\n");
+    git(sub, "stash", "--quiet");
+    expect((await inspect()).repositories).toEqual([repository(), submodule({ stashes: 1 })]);
+  });
+
+  test("a submodule's local branch not on its remote is unresolved", async () => {
+    const { sub } = await withSubmodule();
+    git(sub, "switch", "--quiet", "-c", "feature");
+    await writeFile(join(sub, "feature.txt"), "feature\n");
+    git(sub, "add", "feature.txt");
+    git(sub, "commit", "--quiet", "-m", "feature");
+    git(sub, "switch", "--quiet", "main");
+    expect((await inspect()).repositories).toEqual([
+      repository(),
+      submodule({ unpushed_commits: 1, unpushed_branches: ["feature"] }),
+    ]);
+  });
+
+  test("a change in a submodule's worktree is counted there, and in the parent", async () => {
+    const { sub } = await withSubmodule();
+    await writeFile(join(sub, "untracked.txt"), "work\n");
+    expect((await inspect()).repositories).toEqual([
+      repository({ worktrees: [clean(CHECKOUT, { tracked_changes: 1 })] }),
+      submodule({}, { untracked_files: 1 }),
+    ]);
+  });
+
+  test("a nested submodule is inspected too", async () => {
+    const inner = await remote(world, "inner");
+    const outer = await remote(world, "outer");
+    addSubmodule(world, join(outside, "outer-seed"), inner, "inner");
+    const directory = await checkout();
+    const sub = addSubmodule(world, directory, outer);
+    const nested = join(sub, "inner");
+    await writeFile(join(nested, "inner.txt"), "changed\n");
+    git(nested, "commit", "--quiet", "-am", "inner work");
+    git(sub, "add", "inner");
+    git(sub, "commit", "--quiet", "-m", "bump inner");
+    git(directory, "add", "sub");
+    git(directory, "commit", "--quiet", "-m", "bump sub");
+    git(directory, "push", "--quiet", "origin", "main");
+    const result = await inspect();
+    expect(result.complete).toBe(true);
+    expect(result.repositories).toEqual([
+      repository(),
+      submodule(
+        { unpushed_commits: 1, unpushed_branches: ["main"] },
+        { branch: "main", unpushed_commits: 1 },
+      ),
+      submodule({}, { branch: null, unpushed_commits: 1 }, `${SUB}/inner`),
+    ]);
+  });
+
+  test("a submodule with its own .git directory is inspected", async () => {
+    const directory = await checkout();
+    const url = await remote(world, "sub");
+    git(outside, "clone", "--quiet", url, join(directory, "sub"));
+    const sub = addSubmodule(world, directory, url);
+    expect((await lstat(join(sub, ".git"))).isDirectory()).toBe(true);
+    await writeFile(join(sub, "sub.txt"), "changed\n");
+    git(sub, "commit", "--quiet", "-am", "work");
+    expect((await inspect()).repositories).toEqual([
+      repository({ worktrees: [clean(CHECKOUT, { tracked_changes: 1 })] }),
+      submodule({ unpushed_commits: 1, unpushed_branches: ["main"] }, { unpushed_commits: 1 }),
+    ]);
+  });
+
+  test("a submodule of a linked worktree is inspected with it", async () => {
+    const { directory } = await withSubmodule();
+    const worktree = at(`${PASEO}/abc123/serious-goose`);
+    await mkdir(join(worktree, ".."), { recursive: true });
+    git(directory, "worktree", "add", "--quiet", "-b", "epic/5", worktree, "origin/main");
+    submoduleGit(world, worktree, "submodule", "update", "--quiet", "--init");
+    const nested = join(worktree, "sub");
+    await writeFile(join(nested, "sub.txt"), "changed\n");
+    git(nested, "commit", "--quiet", "-am", "work");
+    const linked = `${PASEO}/abc123/serious-goose/sub`;
+    expect((await inspect()).repositories).toEqual([
+      repository({
+        worktrees: [
+          clean(),
+          clean(`${PASEO}/abc123/serious-goose`, { branch: "epic/5", tracked_changes: 1 }),
+        ],
+      }),
+      submodule(),
+      submodule({}, { branch: null, unpushed_commits: 1 }, linked),
+    ]);
+  });
+
+  test("files in a submodule's directory that Git does not manage are never read as clean", async () => {
+    const { directory } = await withSubmodule();
+    const fresh = await checkout("/workspace/repos/acme/fresh");
+    await writeFile(join(fresh, "sub", "work.txt"), "work\n");
+    expect(git(fresh, "status", "--porcelain")).toBe("");
+    expect(directory).not.toBe(fresh);
+    const result = await inspect();
+    expect(result.repositories).toContainEqual(unreadableAt("/workspace/repos/acme/fresh/sub"));
+  });
+
+  test("an empty, never initialized submodule directory is no work", async () => {
+    await withSubmodule();
+    await checkout("/workspace/repos/acme/fresh");
+    expect((await inspect()).repositories).toEqual([
+      repository({
+        path: "/workspace/repos/acme/fresh",
+        worktrees: [clean("/workspace/repos/acme/fresh")],
+      }),
+      repository(),
+      submodule(),
+    ]);
+  });
+
+  test("a submodule's Git directory left behind by deinit is never read as no work", async () => {
+    const { directory } = await withSubmodule();
+    submoduleGit(world, directory, "submodule", "deinit", "--quiet", "--force", "sub");
+    expect((await inspect()).repositories).toEqual([
+      repository(),
+      unreadableAt(`${CHECKOUT}/.git/modules/sub`),
+    ]);
+  });
+
+  test("a submodule whose .git leads to another repository is unreadable", async () => {
+    const { sub } = await withSubmodule();
+    const elsewhere = join(outside, "elsewhere");
+    git(outside, "clone", "--quiet", origin, elsewhere);
+    await writeFile(join(sub, ".git"), `gitdir: ${join(elsewhere, ".git")}\n`);
+    const result = await inspect();
+    expect(result.repositories).toContainEqual(unreadableAt(SUB));
+  });
+
+  test("submodules count against the repositories it reports: past them, it is incomplete", async () => {
+    // Directories holding files but no repository: each one reported, without a Git command.
+    const directory = await checkout();
+    const [head = ""] = git(directory, "rev-parse", "HEAD").split("\n");
+    const paths = Array.from({ length: 100 }, (_, index) => `m${String(index).padStart(3, "0")}`);
+    git(
+      directory,
+      "update-index",
+      "--add",
+      ...paths.flatMap((path) => ["--cacheinfo", `160000,${head},${path}`]),
+    );
+    for (const path of paths) {
+      await mkdir(join(directory, path));
+      await writeFile(join(directory, path, "work.txt"), "work\n");
+    }
+    const result = await inspect();
+    expect(result.complete).toBe(false);
+    expect(result.repositories).toEqual([
+      repository({ worktrees: [clean(CHECKOUT, { tracked_changes: 100 })] }),
+      ...paths.slice(0, 99).map((path) => unreadableAt(`${CHECKOUT}/${path}`)),
+    ]);
   });
 });

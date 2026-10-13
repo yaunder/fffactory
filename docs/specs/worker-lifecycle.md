@@ -531,8 +531,9 @@ and worktree on it ([host protocol §work inspect](host-protocol.md#work-inspect
    it, which would hold the worker's activator up to 2 min for nothing. The
    worker reads, as the runtime account and changing nothing, every checkout
    under `/workspace/repos`, every worktree under Paseo's
-   `~factory/.paseo/worktrees`, and every worktree Git lists for their
-   repositories ([host protocol §work inspect](host-protocol.md#work-inspect)).
+   `~factory/.paseo/worktrees`, every worktree Git lists for their
+   repositories, and every populated submodule of those, as a repository of
+   its own ([host protocol §work inspect](host-protocol.md#work-inspect)).
    **Unresolved work** is any of:
    - in a worktree: tracked changes, staged or not, or unmerged; untracked files
      Git does not ignore; commits reachable from its HEAD that no
@@ -542,7 +543,12 @@ and worktree on it ([host protocol §work inspect](host-protocol.md#work-inspect
      branch holds (ahead of its upstream, or on a branch with none); a stash
      entry.
 
-   Ignored files are not work. Nothing is fetched, so "on a remote" is as of the
+   Ignored files are not work, and anything inside an ignored directory,
+   a repository included, is not inspected; nor is anything reached only
+   through a symbolic link below a search root. "On a remote" means held by
+   any remote-tracking ref, whatever the remote's URL: a remote that is a
+   local path counts. Commits reachable only from the reflog, a tag or a note
+   are not counted as work. Nothing is fetched, so "on a remote" is as of the
    worker's last fetch or push: a branch merged by squash whose remote branch
    was since pruned counts as unpushed, the safe side. Unresolved work refuses
    it, `HOSTNAME holds work not pushed to any remote: terminating it would lose
@@ -550,8 +556,11 @@ and worktree on it ([host protocol §work inspect](host-protocol.md#work-inspect
    NAME): 1 untracked file, 2 commits not on any remote`; at most 20, then `...
    and N more`), next action ``Push or discard it, then rerun `fffactory worker
    terminate KEY --keep`, or pass --force to terminate it anyway.`` A
-   repository or worktree the worker could not read, an inspection it did not
-   finish within its time or limits (a search root reached through a symbolic
+   repository or worktree the worker could not read (among them one where Git
+   warned while reporting, or where a file Git is told to assume unchanged or
+   marked skip-worktree is on disk; a submodule's directory holding files but
+   no repository; and a submodule's Git directory no submodule uses), an
+   inspection it did not finish within its time or limits (a search root reached through a symbolic
    link, or a checkout deeper than it searches, among them), or a checkout
    factory.json places on the worker that the inspection does not report
    (`/workspace/repos/PATH: placed on this worker, but the work inspection did

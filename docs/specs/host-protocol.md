@@ -560,7 +560,13 @@ account `factory`, which owns the checkouts.
    like a bare repository (`HEAD`, `objects/` and `refs/`) is not inspected,
    nor searched: a clone whose remote it is would count commits pushed only
    there as on a remote, though they are lost with the worker. Any of these
-   leaves the inspection incomplete, never reads as no work.
+   leaves the inspection incomplete, never reads as no work. A symbolic link
+   to a directory below a search root, unlike a search root reached through
+   one, is not followed and reads as no work: work reachable only through it
+   is not inspected. Nothing below a working tree is searched: a repository
+   inside a checkout that is not a submodule is seen only as the untracked
+   directory `git status` reports there, so anything inside a directory Git
+   ignores, a repository included, is not inspected.
 2. **Repositories.** For each working tree not already covered by an earlier
    repository, `git worktree list --porcelain -z` names its repository's
    worktrees, wherever they are; an answer that does not list the tree itself
@@ -570,7 +576,10 @@ account `factory`, which owns the checkouts.
    (commits on local branches that no remote-tracking branch holds); when there
    are some, at most 10,000, `git rev-list --branches --not --remotes` and
    `git for-each-ref refs/heads`, naming the first 10 branches whose tip is
-   among those commits; and `git stash list` (only counted).
+   among those commits; and `git stash list` (only counted). "On a remote"
+   means held by any remote-tracking ref (`refs/remotes/`), whatever the
+   remote's URL: a remote that is a local path counts. Commits reachable only
+   from the reflog, a tag or a note are not counted as work.
 3. **Worktrees.** For each worktree the repository lists (a bare entry
    skipped): commits reachable from its HEAD that no remote-tracking branch
    holds (`git rev-list --count HEAD_ID --not --remotes`); then, unless Git
@@ -585,7 +594,33 @@ account `factory`, which owns the checkouts.
    --porcelain=v2 --untracked-files=normal --ignore-submodules=none -z`, counted
    as tracked changes (`1`, `2`, `u` entries) and untracked files (`?`), and
    whether that Git directory holds `MERGE_HEAD`, `rebase-merge`,
-   `rebase-apply`, `CHERRY_PICK_HEAD` or `REVERT_HEAD`.
+   `rebase-apply`, `CHERRY_PICK_HEAD` or `REVERT_HEAD`. A `git status` that
+   writes anything on standard error makes the worktree `unreadable`, though it
+   exits 0: it does so for a directory it could not open (`warning: could not
+   open directory`), whose files it does not count. Then `git ls-files -v
+   --stage -z` reads the index: an entry Git is told to assume unchanged (a
+   lowercase tag) or marked skip-worktree (`S`) whose file is on disk hides an
+   edit from `git status`, and makes the worktree `unreadable`. A sparse
+   checkout's skip-worktree files, absent from the worktree, are not work.
+4. **Submodules.** Each submodule (an index entry of mode `160000`) of a
+   worktree inspected in step 3 is a repository of its own, reported after
+   the repository holding it, its path the submodule's directory. A directory
+   without `.git` that is empty, or no directory, holds nothing to lose; one
+   holding files is `unreadable`: `git status` does not report files in a
+   submodule's directory that is not populated. A populated one (`.git`
+   present) is the submodule's own only when `git rev-parse --show-toplevel
+   --git-common-dir` there names that directory and a common Git directory in
+   the worktree's own Git directory's `modules/` (absorbed), or its own `.git`
+   directory; otherwise (its `.git` leads to another repository, or Git found
+   one in a parent directory) it is `unreadable`. Its worktrees are those `git
+   worktree list` names there, the first, which Git names by the submodule's
+   Git directory, being the submodule's directory itself; it is then inspected
+   as in steps 2 and 3, and its own submodules as here. A Git directory in the
+   worktree's `modules/` (at most 4 levels down) that no populated submodule
+   of it uses, left by `git submodule deinit` or by a branch without the
+   submodule, is reported `unreadable` at its path: its commits are not read,
+   but would be lost with the worker. Submodules count against the 100
+   repositories.
 
 Every Git command runs as `/usr/sbin/runuser -u factory -- /usr/bin/env -i
 HOME=/home/factory PATH=/usr/local/bin:/usr/bin:/bin LANG=C LC_ALL=C
@@ -608,9 +643,10 @@ another name still runs when such a file is compared, as `factory`, the account
 that owns the repository and whose configuration defines it: no more trust
 than the runtime account already has. No file's content or name reaches the
 document, only counts. It starts no Git command after 75 s, nor inspects more
-than 100 repositories or 100 worktrees of one; any of these, a directory it
-could not list, a search root reached through a symbolic link, a directory at
-the depth limit that holds directories, or a bare repository, leaves it
+than 100 repositories (submodules among them) or 100 worktrees of one; any of
+these, a directory it could not list, a search root reached through a symbolic
+link, a directory at the depth limit that holds directories (or, in a Git
+directory's `modules/`, at 4 levels down), or a bare repository, leaves it
 `complete: false`.
 
 ### Document, protocol version 1
@@ -645,15 +681,15 @@ the depth limit that holds directories, or a bare repository, leaves it
 
 | Field | Values |
 | --- | --- |
-| `complete` | `false` when the worker ran out of time or limits, could not list a directory, found a search root reached through a symbolic link, a directory at the depth limit holding directories, or a bare repository. |
-| `repositories[].path`, `worktrees[].path` | The working tree's absolute path, or `null` when it is not printable ASCII of at most 256 characters. A repository's is the working tree it was found through. |
-| `repositories[].state` | `inspected`, or `unreadable`: Git could not read it (its counts 0, no worktrees). |
-| `unpushed_commits` | A repository's: on any local branch; a worktree's: from its HEAD. Commits no remote-tracking branch holds. |
+| `complete` | `false` when the worker ran out of time or limits (submodules count as repositories), could not list a directory, found a search root reached through a symbolic link, a directory at the depth limit holding directories, or a bare repository. A symbolic link below a search root is not followed and does not make it `false`. |
+| `repositories[].path`, `worktrees[].path` | The working tree's absolute path, or `null` when it is not printable ASCII of at most 256 characters. A repository's is the working tree it was found through; a submodule's, its directory; an unused submodule Git directory's, that directory. |
+| `repositories[].state` | `inspected`, or `unreadable` (its counts 0, no worktrees): Git could not read it, or it is a submodule that is not the submodule's own, a submodule's directory holding files but no repository, or an unused submodule Git directory. |
+| `unpushed_commits` | A repository's: on any local branch; a worktree's: from its HEAD. Commits no remote-tracking branch holds, whatever its remote's URL. |
 | `unpushed_branches` | Local branches carrying such commits, at most 10, printable names only. |
 | `stashes` | Stash entries. |
 | `worktrees[].branch` | The branch checked out there, or `null`: a detached HEAD, or a name that is not printable ASCII without blanks of at most 200 characters. |
-| `worktrees[].state` | `inspected`, `missing` (listed by Git, its directory gone: only its commits are counted) or `unreadable` (Git could not report on it, or another repository is at its path). |
-| `tracked_changes`, `untracked_files` | Counts, 0 unless `inspected`. Ignored files are not counted. |
+| `worktrees[].state` | `inspected`, `missing` (listed by Git, its directory gone: only its commits are counted) or `unreadable` (Git could not report on it, warned while reporting, holds an index entry that hides an edit, or another repository is at its path). |
+| `tracked_changes`, `untracked_files` | Counts, 0 unless `inspected`. Ignored files are not counted, nor is anything inside an ignored directory, a repository included. |
 | `operation` | `merge`, `rebase`, `cherry_pick`, `revert`, or `null`. |
 
 The worker exits 0 with the document whatever work it found: it reports, the

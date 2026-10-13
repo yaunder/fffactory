@@ -6,7 +6,9 @@
  * taken, with no fsmonitor hook and no LFS filter (which would clean a stat-stale file into
  * `.git/lfs/objects`), never fetches, and no file's content or name reaches the document. A
  * clean filter a repository defines under another name still runs, as the runtime account, the
- * account whose repository defines it. What it cannot search to the end, it reports incomplete.
+ * account whose repository defines it. A populated submodule is inspected as a repository of its
+ * own. What it cannot search to the end, it reports incomplete; what Git cannot fully report on
+ * (a file it is told to assume unchanged, a directory it warns it cannot open), unreadable.
  */
 import type { Dirent } from "node:fs";
 import { lstat, readdir, realpath } from "node:fs/promises";
@@ -35,6 +37,10 @@ export const WORK_BUDGET_MS = 75_000;
 
 /** How deep below each root a checkout or worktree is looked for. */
 const SEARCH_DEPTH = { repositories: 4, paseoWorktrees: 3 } as const;
+/** How deep below a Git directory's `modules/` a submodule's Git directory is looked for. */
+const MODULES_DEPTH = 4;
+/** A submodule's mode in the index (a gitlink). */
+const GITLINK = "160000";
 
 /** Git as the runtime account, in a clean environment that takes no lock and never prompts. */
 const AS_FACTORY = [
@@ -96,24 +102,50 @@ class Inspection {
   /** Set once the budget is spent: no more Git commands start. */
   outOfTime = false;
   private readonly started: number;
+  /** Repositories reported so far, submodules among them. */
+  private reported = 0;
 
   constructor(private readonly system: ApplySystem) {
     this.started = system.now().getTime();
   }
 
-  /** Git's standard output, or undefined when it failed, or the budget is spent. */
-  async git(directory: string, args: readonly string[]): Promise<string | undefined> {
+  /** Whether the budget is spent, which leaves the inspection incomplete. */
+  spent(): boolean {
     if (this.system.now().getTime() - this.started >= WORK_BUDGET_MS) {
       this.outOfTime = true;
       this.complete = false;
-      return undefined;
     }
+    return this.outOfTime;
+  }
+
+  /** Whether one more repository may be reported: past `WORK_LIMITS`, it is incomplete. */
+  admit(): boolean {
+    if (this.reported === WORK_LIMITS.repositories) {
+      this.complete = false;
+      return false;
+    }
+    this.reported += 1;
+    return true;
+  }
+
+  /**
+   * Git's standard output, or undefined when it failed, or the budget is spent; with `quiet`,
+   * also when it wrote anything on standard error, as `git status` does, exiting 0, about a
+   * directory it could not open.
+   */
+  async git(
+    directory: string,
+    args: readonly string[],
+    quiet = false,
+  ): Promise<string | undefined> {
+    if (this.spent()) return undefined;
     const outcome = await this.system.run(
       [...AS_FACTORY, "-C", directory, ...args],
       WORK_GIT_TIMEOUT_MS,
       { cwd: "/", env: { PATH: "/usr/sbin:/usr/bin:/sbin:/bin", LANG: "C" } },
     );
-    return outcome.kind === "exited" && outcome.exitCode === 0 ? outcome.stdout : undefined;
+    if (outcome.kind !== "exited" || outcome.exitCode !== 0) return undefined;
+    return quiet && outcome.stderr !== "" ? undefined : outcome.stdout;
   }
 
   /** A count Git printed, or undefined. */
@@ -256,10 +288,57 @@ async function unpushedFrom(
   return inspection.count(directory, ["rev-list", "--count", head, "--not", "--remotes"]);
 }
 
-/** One worktree's work, and whether its Git directory is the repository's own. */
+/** An inspected worktree's Git directory (real) and the submodule paths its index holds. */
+interface Gitlinks {
+  readonly gitDirectory: string;
+  readonly paths: readonly string[];
+}
+
+/** One worktree's work, whether its Git directory is the repository's own, and its submodules. */
 interface Examined {
   readonly work: WorktreeWork;
   readonly owned: boolean;
+  readonly gitlinks?: Gitlinks;
+}
+
+/** One index entry as `git ls-files -v --stage -z` lists it. */
+interface IndexEntry {
+  readonly tag: string;
+  readonly mode: string;
+  readonly path: string;
+}
+
+function indexEntries(output: string): IndexEntry[] {
+  return output
+    .split("\0")
+    .filter((field) => field !== "")
+    .map((field) => {
+      const tab = field.indexOf("\t");
+      const [tag = "", mode = ""] = field.slice(0, Math.max(tab, 0)).split(" ");
+      return { tag, mode, path: field.slice(tab + 1) };
+    });
+}
+
+/**
+ * Whether an index entry hides a change from `git status`: one Git is told to assume unchanged
+ * (a lowercase tag), or one marked skip-worktree (`S`) whose file is on disk. A sparse
+ * checkout's skipped files are not on disk: nothing there to lose.
+ */
+async function hides(inspection: Inspection, worktree: string, entry: IndexEntry) {
+  if (entry.tag !== entry.tag.toUpperCase()) return true;
+  return entry.tag === "S" && (inspection.spent() || (await exists(join(worktree, entry.path))));
+}
+
+/** The worktree's submodule paths, or undefined when an entry hides a change, or Git failed. */
+async function gitlinksOf(inspection: Inspection, worktree: string) {
+  const output = await inspection.git(worktree, ["ls-files", "-v", "--stage", "-z"]);
+  if (output === undefined) return undefined;
+  const paths = new Set<string>();
+  for (const entry of indexEntries(output)) {
+    if (await hides(inspection, worktree, entry)) return undefined;
+    if (entry.mode === GITLINK) paths.add(entry.path);
+  }
+  return [...paths];
 }
 
 /**
@@ -316,26 +395,35 @@ async function worktreeWork(
   if (gitDirectory === undefined || gitDirectory === "") return unreadable();
   // Another repository at a path this one still lists: what is there is not this worktree.
   if (!ownedBy(common, await realOrSelf(gitDirectory))) return unreadable();
-  const status = await inspection.git(listed.path, [
-    "status",
-    "--porcelain=v2",
-    "--untracked-files=normal",
-    "--ignore-submodules=none",
-    "-z",
-  ]);
-  if (status === undefined) return { ...unreadable(), owned: true };
-  const { tracked, untracked } = statusCounts(status);
+  const found = await changes(inspection, listed.path);
+  if (found === undefined) return { ...unreadable(), owned: true };
   return {
     work: {
       ...base,
       state: "inspected",
-      tracked_changes: tracked,
-      untracked_files: untracked,
+      tracked_changes: found.tracked,
+      untracked_files: found.untracked,
       unpushed_commits: unpushed,
       operation: await operationIn(gitDirectory),
     },
     owned: true,
+    gitlinks: { gitDirectory: await realOrSelf(gitDirectory), paths: found.paths },
   };
+}
+
+/**
+ * A worktree's changes and submodule paths, or undefined when Git cannot fully report them: it
+ * failed, warned (about a directory it could not open), or an index entry hides a change.
+ */
+async function changes(inspection: Inspection, worktree: string) {
+  const status = await inspection.git(
+    worktree,
+    ["status", "--porcelain=v2", "--untracked-files=normal", "--ignore-submodules=none", "-z"],
+    true,
+  );
+  const paths = status === undefined ? undefined : await gitlinksOf(inspection, worktree);
+  if (status === undefined || paths === undefined) return undefined;
+  return { ...statusCounts(status), paths };
 }
 
 /** Above this many unpushed commits, the branches carrying them are counted, not named. */
@@ -469,49 +557,224 @@ async function commonDirectory(inspection: Inspection, tree: string): Promise<st
   return output === undefined || output === "" ? undefined : realOrSelf(resolve(tree, output));
 }
 
+/** The worktrees a repository lists, with their real paths. */
+interface Listing {
+  readonly listed: readonly ListedWorktree[];
+  readonly real: readonly string[];
+}
+
 /**
- * The repository `tree` belongs to, marking as `covered` the tree and every worktree it lists
- * whose Git directory is its own: any other path it lists is left to be found, and inspected,
- * as the repository it is.
+ * The repository `tree` belongs to, then its submodules', marking as `covered` the tree and
+ * every worktree it lists whose Git directory is its own: any other path it lists is left to
+ * be found, and inspected, as the repository it is.
  */
 async function repositoryAt(
   inspection: Inspection,
   tree: string,
   roots: readonly string[],
   covered: Set<string>,
-): Promise<RepositoryWork> {
+): Promise<RepositoryWork[]> {
   const path = inspection.shown(tree, roots);
   covered.add(await realOrSelf(tree));
   const found = await listing(inspection, tree);
-  if (found === undefined) return unreadableRepository(path);
-  const common = await commonDirectory(inspection, tree);
-  const sharedWork = common === undefined ? undefined : await shared(inspection, tree);
-  if (common === undefined || sharedWork === undefined) return unreadableRepository(path);
-  const worktrees = await listedWork(inspection, tree, common, found, roots, covered);
-  return { path, state: "inspected", ...sharedWork, worktrees };
+  const common = found === undefined ? undefined : await commonDirectory(inspection, tree);
+  if (found === undefined || common === undefined) return [unreadableRepository(path)];
+  return repositoryWork(inspection, { tree, path, common, found }, roots, covered);
 }
 
-/** Each worktree listed but a bare entry, marking those it owns as `covered`. */
-async function listedWork(
+/** A repository found through `tree`: its common Git directory and the worktrees it lists. */
+interface Found {
+  readonly tree: string;
+  readonly path: string | null;
+  readonly common: string;
+  readonly found: Listing;
+}
+
+/** The repository's work, then that of the submodules of its worktrees. */
+async function repositoryWork(
   inspection: Inspection,
-  tree: string,
-  common: string,
-  found: { readonly listed: readonly ListedWorktree[]; readonly real: readonly string[] },
+  repository: Found,
   roots: readonly string[],
   covered: Set<string>,
-): Promise<WorktreeWork[]> {
+): Promise<RepositoryWork[]> {
+  const sharedWork = await shared(inspection, repository.tree);
+  if (sharedWork === undefined) return [unreadableRepository(repository.path)];
+  const { worktrees, submodules } = await listedWork(inspection, repository, roots, covered);
+  return [{ path: repository.path, state: "inspected", ...sharedWork, worktrees }, ...submodules];
+}
+
+/**
+ * Each worktree listed but a bare entry, marking those it owns as `covered`, and the
+ * submodules of each inspected one.
+ */
+async function listedWork(
+  inspection: Inspection,
+  { tree, common, found }: Found,
+  roots: readonly string[],
+  covered: Set<string>,
+): Promise<{ worktrees: WorktreeWork[]; submodules: RepositoryWork[] }> {
   const worktrees: WorktreeWork[] = [];
+  const submodules: RepositoryWork[] = [];
   for (const [index, worktree] of found.listed.entries()) {
     if (worktree.bare) continue;
     if (worktrees.length === WORK_LIMITS.worktrees) {
       inspection.complete = false;
       break;
     }
-    const { work, owned } = await worktreeWork(inspection, tree, common, worktree, roots);
+    const { work, owned, gitlinks } = await worktreeWork(inspection, tree, common, worktree, roots);
     if (owned) covered.add(found.real[index] ?? worktree.path);
     worktrees.push(work);
+    if (gitlinks !== undefined)
+      submodules.push(...(await submodulesOf(inspection, worktree.path, gitlinks, roots, covered)));
   }
-  return worktrees;
+  return { worktrees, submodules };
+}
+
+/**
+ * What a submodule's directory holds: a repository (`.git`), nothing to lose (no directory, or
+ * an empty one, never initialized), or files Git does not see, which `git status` of the
+ * worktree holding it never reports.
+ */
+async function submoduleKind(directory: string): Promise<"populated" | "absent" | "unmanaged"> {
+  let names: string[];
+  try {
+    if (!(await lstat(directory)).isDirectory()) return "absent";
+    names = await readdir(directory);
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "ENOENT" ? "absent" : "unmanaged";
+  }
+  if (names.includes(".git")) return "populated";
+  return names.length === 0 ? "absent" : "unmanaged";
+}
+
+/**
+ * The submodules of an inspected worktree, each a repository of its own, counted against the
+ * repositories reported: one populated is inspected; a directory holding files but no
+ * repository is unreadable, as is a submodule Git directory in the worktree's `modules/` that
+ * no populated submodule uses (de-initialized, or removed from the branch), whose commits
+ * would be lost with the worker.
+ */
+async function submodulesOf(
+  inspection: Inspection,
+  worktree: string,
+  gitlinks: Gitlinks,
+  roots: readonly string[],
+  covered: Set<string>,
+): Promise<RepositoryWork[]> {
+  const repositories: RepositoryWork[] = [];
+  const used = new Set<string>();
+  for (const path of gitlinks.paths) {
+    const directory = join(worktree, path);
+    const kind = await submoduleKind(directory);
+    if (kind === "absent") continue;
+    if (inspection.outOfTime || !inspection.admit()) return repositories;
+    repositories.push(
+      ...(kind === "unmanaged"
+        ? [unreadableRepository(inspection.shown(directory, roots))]
+        : await submoduleAt(inspection, directory, gitlinks.gitDirectory, roots, covered, used)),
+    );
+  }
+  return [...repositories, ...(await unusedModules(inspection, gitlinks, used, roots))];
+}
+
+/** The submodule Git directories in the worktree's `modules/` not among `used`, unreadable. */
+async function unusedModules(
+  inspection: Inspection,
+  { gitDirectory }: Gitlinks,
+  used: ReadonlySet<string>,
+  roots: readonly string[],
+): Promise<RepositoryWork[]> {
+  const modules = await gitDirectories(join(gitDirectory, "modules"), MODULES_DEPTH, inspection);
+  const unused: RepositoryWork[] = [];
+  for (const module of modules.filter((found) => !used.has(found))) {
+    if (!inspection.admit()) break;
+    unused.push(unreadableRepository(inspection.shown(module, roots)));
+  }
+  return unused;
+}
+
+/**
+ * Directories below `directory` (`modules/`), at most `depth` levels down, that look like a Git
+ * directory (`bare`), below which nothing is looked for: a submodule's name may hold slashes.
+ * As for `workingTrees`, what cannot be searched to the end leaves the inspection incomplete.
+ */
+async function gitDirectories(
+  directory: string,
+  depth: number,
+  inspection: Inspection,
+  top = true,
+): Promise<string[]> {
+  let entries: Dirent[];
+  try {
+    entries = await readdir(directory, { withFileTypes: true, encoding: "utf8" });
+  } catch (error) {
+    if (!top || (error as NodeJS.ErrnoException).code !== "ENOENT") inspection.complete = false;
+    return [];
+  }
+  if (!top && bare(entries)) return [directory];
+  const names = entries.filter((entry) => entry.isDirectory()).map((entry) => entry.name);
+  if (depth === 0) {
+    if (names.length > 0) inspection.complete = false;
+    return [];
+  }
+  const found: string[] = [];
+  for (const name of names.sort())
+    found.push(...(await gitDirectories(join(directory, name), depth - 1, inspection, false)));
+  return found;
+}
+
+/**
+ * The populated submodule at `directory` of a worktree whose Git directory is `parent`, as a
+ * repository whose first worktree is `directory` itself (Git lists a submodule's Git directory
+ * there instead), then its own submodules. It is its own only when Git, from there, finds that
+ * directory its top level and a common Git directory in `parent`'s `modules/` (absorbed), or
+ * its own `.git` directory; anything else, Git found from a `.git` it cannot read, or one that
+ * leads elsewhere, is unreadable.
+ */
+async function submoduleAt(
+  inspection: Inspection,
+  directory: string,
+  parent: string,
+  roots: readonly string[],
+  covered: Set<string>,
+  used: Set<string>,
+): Promise<RepositoryWork[]> {
+  const path = inspection.shown(directory, roots);
+  const real = await realOrSelf(directory);
+  covered.add(real);
+  const common = await submoduleCommon(inspection, directory, real, parent);
+  const output =
+    common === undefined
+      ? undefined
+      : await inspection.git(directory, ["worktree", "list", "--porcelain", "-z"]);
+  const [first, ...others] = output === undefined ? [] : parseWorktrees(output);
+  if (common === undefined || first === undefined) return [unreadableRepository(path)];
+  used.add(common);
+  const found = {
+    listed: [{ ...first, path: directory, bare: false }, ...others],
+    real: [real, ...(await Promise.all(others.map((worktree) => realOrSelf(worktree.path))))],
+  };
+  return repositoryWork(inspection, { tree: directory, path, common, found }, roots, covered);
+}
+
+/** The submodule's common Git directory (real), when it is the submodule's own. */
+async function submoduleCommon(
+  inspection: Inspection,
+  directory: string,
+  real: string,
+  parent: string,
+): Promise<string | undefined> {
+  const output = await inspection.git(directory, [
+    "rev-parse",
+    "--show-toplevel",
+    "--git-common-dir",
+  ]);
+  const [top, common] = output?.split("\n") ?? [];
+  if (!top || !common || (await realOrSelf(top)) !== real) return undefined;
+  const resolved = await realOrSelf(resolve(directory, common));
+  return resolved.startsWith(`${parent}/modules/`) || resolved === join(real, ".git")
+    ? resolved
+    : undefined;
 }
 
 async function inspectWork(system: ApplySystem): Promise<WorkInspection> {
@@ -521,12 +784,8 @@ async function inspectWork(system: ApplySystem): Promise<WorkInspection> {
   const repositories: RepositoryWork[] = [];
   for (const tree of await discovered(system, inspection)) {
     if (covered.has(await realOrSelf(tree))) continue;
-    if (inspection.outOfTime) break;
-    if (repositories.length === WORK_LIMITS.repositories) {
-      inspection.complete = false;
-      break;
-    }
-    repositories.push(await repositoryAt(inspection, tree, roots, covered));
+    if (inspection.outOfTime || !inspection.admit()) break;
+    repositories.push(...(await repositoryAt(inspection, tree, roots, covered)));
   }
   const hostname = system.hostname();
   return {

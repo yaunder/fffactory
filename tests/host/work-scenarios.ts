@@ -129,3 +129,39 @@ export async function unresolvedWorker(world: GitWorld): Promise<void> {
   world.git(worktree, "add", "feature.txt");
   world.git(worktree, "commit", "--quiet", "-m", "feature");
 }
+
+/** A bare remote outside the worker, `NAME.git`, holding one commit on `main` (`NAME.txt`). */
+export async function remote(world: GitWorld, name: string): Promise<string> {
+  const url = join(world.outside, `${name}.git`);
+  world.git(world.outside, "init", "--quiet", "--bare", "--initial-branch=main", url);
+  const seed = join(world.outside, `${name}-seed`);
+  world.git(world.outside, "clone", "--quiet", url, seed);
+  await writeFile(join(seed, `${name}.txt`), `${name}\n`);
+  world.git(seed, "add", `${name}.txt`);
+  world.git(seed, "commit", "--quiet", "-m", name);
+  world.git(seed, "push", "--quiet", "origin", "main");
+  return url;
+}
+
+/** Git for submodules of local remotes, which Git refuses to clone over `file` by default. */
+export function submoduleGit(world: GitWorld, cwd: string, ...args: string[]): string {
+  return world.git(cwd, "-c", "protocol.file.allow=always", ...args);
+}
+
+/**
+ * `url` added to the clone at `directory` as the submodule `path`, absorbed (its Git directory
+ * in the clone's `.git/modules/`) and checked out on `main`, every submodule of it too, the
+ * addition committed and pushed.
+ */
+export function addSubmodule(
+  world: GitWorld,
+  directory: string,
+  url: string,
+  path = "sub",
+): string {
+  submoduleGit(world, directory, "submodule", "add", "--quiet", url, path);
+  submoduleGit(world, directory, "submodule", "update", "--quiet", "--init", "--recursive");
+  world.git(directory, "commit", "--quiet", "-m", `add ${path}`);
+  world.git(directory, "push", "--quiet", "origin", "main");
+  return join(directory, path);
+}
