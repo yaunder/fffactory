@@ -71,6 +71,7 @@ import {
   resourceChanges,
 } from "../domain/plan";
 import type { SecretMaterial } from "../domain/secrets";
+import { placedRepositories } from "../domain/repository-placement";
 import { hostName } from "../domain/resource-naming";
 import { recordedHostKeys } from "../domain/stable-host-keys";
 import { joiningTailnet, type WorkerIdentity } from "../domain/rollout";
@@ -915,7 +916,9 @@ async function terminateGates(
 /**
  * The running worker's agent activity and last repository result, then its current work: only
  * once the activity is read, since both go through the activator, which runs one operation at a
- * time. Undefined once interrupted, which asks the worker nothing more.
+ * time, and only when the activity does not already refuse, which would leave the activator
+ * held for nothing (`INSPECT_WORK_TIMEOUT_MS`). Undefined once interrupted, which asks the
+ * worker nothing more.
  */
 async function terminateInspection(
   deps: WorkerLifecycleDependencies,
@@ -934,8 +937,10 @@ async function terminateInspection(
     inspectRepositories(deps.transport, location.worker),
   ]);
   if (deps.interrupted()) return undefined;
+  if (activity.kind !== "idle") return { kind: "activity", activity };
   const work = await inspectWork(deps.transport, location.worker);
-  return { kind: "inspected", activity, repositories, work };
+  const placed = placedRepositories(power.request.instance.repositories ?? [], power.host);
+  return { kind: "inspected", repositories, work, placed: placed.map(({ path }) => path) };
 }
 
 /**

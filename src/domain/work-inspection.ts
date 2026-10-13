@@ -279,20 +279,40 @@ export interface WorkFindings {
 }
 
 /**
+ * The placed checkouts (`placed`: factory.json's paths, relative to the repository root) that
+ * the inspection reports neither as a repository nor as a worktree of one, as worker paths.
+ */
+function unreported(inspection: WorkInspection, placed: readonly string[]): string[] {
+  const reported = new Set(
+    inspection.repositories.flatMap((repository) => [
+      repository.path,
+      ...repository.worktrees.map((worktree) => worktree.path),
+    ]),
+  );
+  return placed
+    .map((path) => `${WORK_ROOTS.repositories}/${path}`)
+    .filter((path) => !reported.has(path));
+}
+
+/**
  * The rule: work is unresolved when a worktree has tracked changes (staged or not, or
  * unmerged), untracked files Git does not ignore, commits no remote-tracking branch holds, or a
  * merge, rebase, cherry-pick or revert in progress, or a repository has such commits on any
  * local branch, or a stash entry. Ignored files are not work. A repository or worktree that
- * could not be read, or an inspection that did not finish, is uninspected. Git is never asked
+ * could not be read, an inspection that did not finish, or a checkout factory.json places on
+ * the worker (`placed`, relative to the repository root) that the inspection does not report,
+ * is uninspected: a checkout the worker did not find is never read as clean. Git is never asked
  * to fetch, so "on a remote" means as of the worker's last fetch or push.
  */
-export function workFindings(inspection: WorkInspection): WorkFindings {
+export function workFindings(inspection: WorkInspection, placed: readonly string[]): WorkFindings {
   const found = inspection.repositories.map(repositoryFindings);
   const uninspected = found.flatMap((findings) => findings.uninspected);
   if (!inspection.complete)
     uninspected.push(
       "The worker did not inspect every checkout and worktree in time, or found more than it reports",
     );
+  for (const path of unreported(inspection, placed))
+    uninspected.push(`${path}: placed on this worker, but the work inspection did not report it`);
   return { unresolved: found.flatMap((findings) => findings.unresolved), uninspected };
 }
 

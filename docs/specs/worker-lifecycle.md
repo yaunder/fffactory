@@ -527,10 +527,13 @@ and worktree on it ([host protocol §work inspect](host-protocol.md#work-inspect
    or no control plane, refuses it too.
 3. Its current work (`sudo -n /usr/local/libexec/fffactory-activate work
    inspect`), asked only once the activity has been read, since the activator
-   runs one operation at a time. The worker reads, as the runtime account and
-   changing nothing, every checkout under `/workspace/repos`, every worktree
-   under Paseo's `~factory/.paseo/worktrees`, and every worktree Git lists for
-   their repositories. **Unresolved work** is any of:
+   runs one operation at a time, and never when the activity already refused
+   it, which would hold the worker's activator up to 2 min for nothing. The
+   worker reads, as the runtime account and changing nothing, every checkout
+   under `/workspace/repos`, every worktree under Paseo's
+   `~factory/.paseo/worktrees`, and every worktree Git lists for their
+   repositories ([host protocol §work inspect](host-protocol.md#work-inspect)).
+   **Unresolved work** is any of:
    - in a worktree: tracked changes, staged or not, or unmerged; untracked files
      Git does not ignore; commits reachable from its HEAD that no
      remote-tracking branch holds (a detached HEAD's too, and a worktree whose
@@ -547,18 +550,30 @@ and worktree on it ([host protocol §work inspect](host-protocol.md#work-inspect
    NAME): 1 untracked file, 2 commits not on any remote`; at most 20, then `...
    and N more`), next action ``Push or discard it, then rerun `fffactory worker
    terminate KEY --keep`, or pass --force to terminate it anyway.`` A
-   repository or worktree the worker could not read, or an inspection it did
-   not finish within its time or limits, refuses it, `HOSTNAME could not be
+   repository or worktree the worker could not read, an inspection it did not
+   finish within its time or limits (a search root reached through a symbolic
+   link, or a checkout deeper than it searches, among them), or a checkout
+   factory.json places on the worker that the inspection does not report
+   (`/workspace/repos/PATH: placed on this worker, but the work inspection did
+   not report it`; one never cloned too), refuses it, `HOSTNAME could not be
    fully inspected for unpushed work`, each listed. An inspection that could
    not be had refuses it, `HOSTNAME could not be inspected for unpushed work:
    REASON`: no answer within 2 min, SSH could not reach it, another host
    operation held the activator (rerun), an answer for another worker, or one
-   that is not a work inspection (never quoted). A worker whose activator
-   predates the work inspection (it refuses the operation as a usage error,
-   exit 64) cannot get it: a worker's activator is installed at its first boot
-   and never updated. It is refused with that reason, and the next action
-   ``Check its checkouts and worktrees for work to keep yourself, then terminate
-   it with --force: `fffactory worker terminate KEY --keep --force`.``
+   that is not a work inspection (never quoted). The repository result's own
+   refusal (step 4), when it has one, is listed with it, so that what is known
+   is seen before `--force` is named. A worker whose activator predates the work
+   inspection (it refuses the operation as a usage error, exit 64) cannot get
+   it: a worker's activator is installed at its first boot and never updated
+   (until base migration, M3, delivers a newer one). It is refused with that
+   reason, and the next action ``Log in as `factory` (`tailscale ssh
+   factory@HOSTNAME`; tailnet SSH policy must let you log in as `factory`). In
+   every checkout under /workspace/repos and ~/.paseo/worktrees, and every
+   worktree `git worktree list` shows, run `git status`, `git log --branches
+   --not --remotes` and `git stash list`, and push or copy off what you need;
+   then terminate it with --force: `fffactory worker terminate KEY --keep
+   --force`.`` (`fffactory-admin`, the operator's usual login, cannot read the
+   runtime account's home.)
 4. Its repository result: placed checkouts left unresolved at the last
    synchronization (a dirty tree, divergence, a wrong or unadopted branch)
    refuse it, `Placed repositories on HOSTNAME are unresolved: terminating it
@@ -569,7 +584,9 @@ and worktree on it ([host protocol §work inspect](host-protocol.md#work-inspect
    it, `HOSTNAME could not be inspected for checkouts: REASON`. A worker that
    has never synchronized repositories (`none`) passes.
 
-The gates are judged in that order, and the first that refuses is reported.
+The gates are judged in that order, and the first that refuses is reported,
+but for a work inspection that could not be had, which lists the repository
+result's refusal too.
 `--force` skips the inspection: `--force: the worker is not inspected for active
 agents or checkouts.` It never skips the account check, the pin guard, the
 lock, the admin client or the confirmation.

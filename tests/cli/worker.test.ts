@@ -655,7 +655,10 @@ describe("fffactory worker terminate --keep (worker-lifecycle §Terminate (keep)
     expect(cli.err).toEqual([
       `Refusing to terminate the worker: ${HOSTNAME} could not be inspected for unpushed work: its activator predates the work inspection`,
       "  A worker's activator is installed at its first boot and never updated: this worker's predates this release.",
-      `Next: Check its checkouts and worktrees for work to keep yourself, then terminate it with --force: \`fffactory worker terminate ${KEY} --keep --force\`.`,
+      `Next: Log in as \`factory\` (\`tailscale ssh factory@${HOSTNAME}\`; tailnet SSH policy must let you log in as \`factory\`). ` +
+        "In every checkout under /workspace/repos and ~/.paseo/worktrees, and every worktree `git worktree list` shows, " +
+        "run `git status`, `git log --branches --not --remotes` and `git stash list`, and push or copy off what you need; " +
+        `then terminate it with --force: \`fffactory worker terminate ${KEY} --keep --force\`.`,
     ]);
     expect(cli.control.mutations()).toEqual([]);
   });

@@ -317,7 +317,7 @@ describe("host work inspect, both sides", () => {
     expect(observation).toEqual({ kind: "inspected", inspection: parsed.document });
     expect(transport.calls.map(({ command }) => command)).toEqual([[...INSPECT_WORK_COMMAND]]);
     if (observation.kind !== "inspected") throw new Error("not inspected");
-    expect(workFindings(observation.inspection)).toEqual({
+    expect(workFindings(observation.inspection, ["acme/widget"])).toEqual({
       unresolved: [
         "/workspace/repos/acme/widget: 1 commit on local branches not on any remote (epic/5)",
         "/workspace/repos/acme/widget (branch main): 1 untracked file",

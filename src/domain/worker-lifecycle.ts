@@ -8,7 +8,8 @@
 import type { AgentActivity } from "./control-plane";
 import { type FactoryInstance, type HostKey, parseHostKey } from "./instance";
 import type { RepositoryObservation } from "./repository-placement";
-import { workFindings, type WorkObservation } from "./work-inspection";
+import { RUNTIME_ACCOUNT, RUNTIME_LOGIN_POLICY, runtimeLogin } from "./readiness";
+import { WORK_ROOTS, workFindings, type WorkObservation } from "./work-inspection";
 import type { WorkerIdentity } from "./rollout";
 import {
   ADMIN_CONSOLE,
@@ -314,20 +315,27 @@ export function stopGate(inspection: StopInspection, worker: WorkerIdentity): Re
   }
 }
 
+/** Agent activity that refuses a gated action on its own: agents active, or unreadable. */
+export type RefusingActivity = Exclude<AgentActivity, { readonly kind: "idle" }>;
+
 /**
  * What terminate saw before acting: `--force` skipped the inspection, the machine is stopped
- * (never inspected), the tailnet did not locate the running worker, or the worker's agent
- * activity, its last repository result and the current work in its checkouts and worktrees.
+ * (never inspected), the tailnet did not locate the running worker, its agent activity when
+ * that alone refuses (the work is then never asked for), or, the worker idle, its last
+ * repository result, the current work in its checkouts and worktrees, and the checkouts
+ * factory.json places there (`placed`, relative to the repository root), which the work
+ * inspection must report.
  */
 export type TerminateInspection =
   | { readonly kind: "forced" }
   | { readonly kind: "stopped" }
   | { readonly kind: "unlocated"; readonly verdict: Verdict }
+  | { readonly kind: "activity"; readonly activity: RefusingActivity }
   | {
       readonly kind: "inspected";
-      readonly activity: AgentActivity;
       readonly repositories: RepositoryObservation;
       readonly work: WorkObservation;
+      readonly placed: readonly string[];
     };
 
 /** The most lines a work refusal lists; the rest are counted. */
@@ -339,31 +347,58 @@ function bounded(lines: readonly string[]): string[] {
 }
 
 /**
- * The current work (`workFindings`): unresolved work refuses, naming each checkout or worktree
- * that holds it; work that could not be inspected, or a worker that could not be asked, refuses
- * too. A worker whose activator predates the inspection is checked by hand, then forced.
+ * What a worker whose activator predates the work inspection is checked for by hand, as the
+ * runtime account that owns its checkouts, before `--force`: what the inspection reads.
  */
-function workGate(
-  work: WorkObservation,
+function checkByHand(command: TerminateCommand, worker: WorkerIdentity): string {
+  return (
+    `Log in as \`${RUNTIME_ACCOUNT}\` (\`${runtimeLogin(worker.hostname)}\`; ${RUNTIME_LOGIN_POLICY}). ` +
+    `In every checkout under ${WORK_ROOTS.repositories} and ~/.paseo/worktrees, and every ` +
+    "worktree `git worktree list` shows, run `git status`, `git log --branches --not " +
+    "--remotes` and `git stash list`, and push or copy off what you need; then terminate it " +
+    `with --force: \`${workerCommandLine(command, worker.key)} --force\`.`
+  );
+}
+
+/**
+ * The current work could not be had: refused, with the last repository result's own refusal,
+ * when it has one (`persisted`), listed too, so the operator sees it before `--force` is named.
+ * A worker whose activator predates the inspection is checked by hand, then forced.
+ */
+function uninspectedWork(
+  work: Extract<WorkObservation, { readonly kind: "unknown" }>,
   worker: WorkerIdentity,
   command: TerminateCommand,
+  persisted: Refusal | undefined,
+): Refusal {
+  const summary = `${worker.hostname} could not be inspected for unpushed work: ${work.reason}`;
+  const known = persisted === undefined ? [] : [persisted.summary, ...persisted.details];
+  // TODO(re-evaluate when base migration lands in M3): deliver the work-inspecting activator to
+  // existing workers so terminate need not rely on a manual check and --force.
+  if (work.unsupported)
+    return refusal(summary, checkByHand(command, worker), [
+      "A worker's activator is installed at its first boot and never updated: this worker's predates this release.",
+      ...known,
+    ]);
+  return refusal(summary, orForce(command, worker.key, CHECK_STATUS, "uninspected"), known);
+}
+
+/**
+ * The current work (`workFindings`): unresolved work refuses, naming each checkout or worktree
+ * that holds it; work that could not be inspected, a placed checkout the inspection did not
+ * report, or a worker that could not be asked, refuses too; the last, listing the last
+ * repository result's refusal (`persisted`) with it.
+ */
+function workGate(
+  inspection: Extract<TerminateInspection, { readonly kind: "inspected" }>,
+  worker: WorkerIdentity,
+  command: TerminateCommand,
+  persisted: Refusal | undefined,
 ): Refusal | undefined {
+  const { work } = inspection;
   const { hostname, key } = worker;
-  if (work.kind === "unknown")
-    return work.unsupported
-      ? refusal(
-          `${hostname} could not be inspected for unpushed work: ${work.reason}`,
-          "Check its checkouts and worktrees for work to keep yourself, then terminate it " +
-            `with --force: \`${workerCommandLine(command, key)} --force\`.`,
-          [
-            "A worker's activator is installed at its first boot and never updated: this worker's predates this release.",
-          ],
-        )
-      : refusal(
-          `${hostname} could not be inspected for unpushed work: ${work.reason}`,
-          orForce(command, key, CHECK_STATUS, "uninspected"),
-        );
-  const { unresolved, uninspected } = workFindings(work.inspection);
+  if (work.kind === "unknown") return uninspectedWork(work, worker, command, persisted);
+  const { unresolved, uninspected } = workFindings(work.inspection, inspection.placed);
   if (unresolved.length > 0)
     return refusal(
       `${hostname} holds work not pushed to any remote: terminating it would lose it`,
@@ -440,12 +475,12 @@ export function terminateGate(
         worker,
         terminateUnlocatedAction(command, worker.key),
       );
-    case "inspected":
-      return (
-        activityGate(command, inspection.activity, worker) ??
-        workGate(inspection.work, worker, command) ??
-        checkoutGate(inspection.repositories, worker, command)
-      );
+    case "activity":
+      return activityGate(command, inspection.activity, worker);
+    case "inspected": {
+      const persisted = checkoutGate(inspection.repositories, worker, command);
+      return workGate(inspection, worker, command, persisted) ?? persisted;
+    }
   }
 }
 

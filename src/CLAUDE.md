@@ -176,10 +176,12 @@ Dependencies point inward: `domain <- application <- infrastructure, cli`, and
   KEY`, never `--yes`). EC2's state is the truth: factory.json keeps no power field. The gates
   of stop (active agents, a running worker it cannot inspect) and terminate (also work not
   pushed to any remote in any checkout or worktree, read fresh with `inspectWork` once the
-  activity is read, and unresolved or unmanaged checkouts in the last repository result; a
-  stopped machine passes uninspected) are skipped only by `--force`, never the account check,
-  pin guard, lock or confirmation. Work that cannot be inspected, including on a worker whose
-  activator predates `work inspect`, refuses terminate; it never reads as no work. A worker the tailnet does not
+  activity is read and only when it does not already refuse, and unresolved or unmanaged
+  checkouts in the last repository result; a stopped machine passes uninspected) are skipped
+  only by `--force`, never the account check, pin guard, lock or confirmation. Work that cannot
+  be inspected, including on a worker whose activator predates `work inspect`, and a checkout
+  factory.json places there that the inspection does not report, refuse terminate; neither
+  ever reads as no work. A worker the tailnet does not
   locate refuses terminate with its own next action (`--force` once the EC2 console output
   shows a failed bootstrap), never status's recovery, which is terminate itself. Terminate opens its tailnet admin
   session before EC2 is asked anything, and deletes no device and removes no host before its

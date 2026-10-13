@@ -1528,6 +1528,67 @@ describe("terminate's work inspection (worker-lifecycle §Gates (terminate))", (
     expect(order.indexOf("work")).toBeGreaterThan(order.indexOf("activity read"));
   });
 
+  test("is never asked while the agent activity already refuses: the activator stays free", async () => {
+    const cases: [Partial<WorldOptions>, string][] = [
+      [
+        { activity: { kind: "active", count: 1 } },
+        `1 agent is active on ${HOSTNAME}: terminating it would end it`,
+      ],
+      [
+        { noControlPlane: true },
+        `${HOSTNAME} could not be inspected for active agents: this fffactory cannot reach the worker's control plane`,
+      ],
+    ];
+    for (const [options, summary] of cases) {
+      const w = world({ ...TERMINATING, worker: DIRTIED_SINCE, ...options });
+      expect(await terminateWorker(w.deps, terminating(w))).toMatchObject({
+        kind: "refused",
+        refusal: { summary },
+      });
+      expect(w.transport.calls.map(({ command }) => command.join(" "))).toEqual([
+        expect.stringContaining("repositories"),
+      ]);
+      expect(w.control.mutations()).toEqual([]);
+    }
+  });
+
+  test("a checkout factory.json places on it that the inspection does not report refuses it", async () => {
+    // Deeper than the worker looks, its work would otherwise read as no work at all.
+    const placing = (path: string): FactoryInstance => {
+      const instance = withAdmin();
+      return {
+        ...instance,
+        repositories: [
+          { key: "deep", remote: "https://github.com/acme/deep", path, branch: "main" },
+        ],
+        hosts: (instance.hosts ?? []).map((host) =>
+          host.key === KEY ? { ...host, repositories: ["deep"] } : host,
+        ),
+      };
+    };
+    const answering = synchronizedButAnswering(workAnswer(HOSTNAME, [widget()]));
+    const w = world({ ...TERMINATING, worker: answering });
+    expect(
+      await terminateWorker(w.deps, terminating(w, { instance: placing("a/b/c/d/e") })),
+    ).toMatchObject({
+      kind: "refused",
+      refusal: {
+        summary: `${HOSTNAME} could not be fully inspected for unpushed work`,
+        details: [
+          "/workspace/repos/a/b/c/d/e: placed on this worker, but the work inspection did not report it",
+        ],
+      },
+    });
+    expect(w.control.mutations()).toEqual([]);
+    const reported = world({ ...TERMINATING, worker: answering });
+    expect(
+      await terminateWorker(
+        reported.deps,
+        terminating(reported, { instance: placing("acme/widget") }),
+      ),
+    ).toMatchObject({ kind: "done" });
+  });
+
   test("an interrupt while the worker is inspected asks it nothing more", async () => {
     const w = world({ ...TERMINATING, worker: CLEAN });
     const answer = CLEAN as Exclude<Answer, HostCommandOutcome>;

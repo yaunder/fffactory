@@ -213,7 +213,7 @@ describe("the work inspection document (host-protocol §work inspect)", () => {
 
 describe("what counts as unresolved work (worker-lifecycle §Gates (terminate))", () => {
   test("a worker with no checkouts, or only clean, pushed ones, holds none", () => {
-    expect(workFindings(inspection([]))).toEqual({ unresolved: [], uninspected: [] });
+    expect(workFindings(inspection([]), [])).toEqual({ unresolved: [], uninspected: [] });
     expect(
       workFindings(
         inspection([
@@ -226,6 +226,7 @@ describe("what counts as unresolved work (worker-lifecycle §Gates (terminate))"
             ],
           }),
         ]),
+        ["acme/widget"],
       ),
     ).toEqual({ unresolved: [], uninspected: [] });
   });
@@ -261,6 +262,7 @@ describe("what counts as unresolved work (worker-lifecycle §Gates (terminate))"
           worktrees: [worktree({ path: "/workspace/repos/acme/other", untracked_files: 1 })],
         }),
       ]),
+      ["acme/widget", "acme/other"],
     );
     expect(findings).toEqual({
       unresolved: [
@@ -289,6 +291,7 @@ describe("what counts as unresolved work (worker-lifecycle §Gates (terminate))"
           ],
           { complete: false },
         ),
+        [],
       ),
     ).toEqual({
       unresolved: [],
@@ -296,6 +299,30 @@ describe("what counts as unresolved work (worker-lifecycle §Gates (terminate))"
         "A repository whose path cannot be printed: could not be read",
         "/workspace/repos/acme/b (branch main): could not be read",
         "The worker did not inspect every checkout and worktree in time, or found more than it reports",
+      ],
+    });
+  });
+
+  test("a checkout factory.json places on the worker that the inspection does not report is uninspected", () => {
+    // A checkout deeper than the worker looks, or one never cloned: never read as clean.
+    const placed = ["acme/widget", "acme/linked", "a/b/c/d/e"];
+    expect(
+      workFindings(
+        inspection([
+          repository({
+            worktrees: [
+              worktree(),
+              // A placed checkout Git lists as a worktree of another is reported through it.
+              worktree({ path: "/workspace/repos/acme/linked", branch: "linked" }),
+            ],
+          }),
+        ]),
+        placed,
+      ),
+    ).toEqual({
+      unresolved: [],
+      uninspected: [
+        "/workspace/repos/a/b/c/d/e: placed on this worker, but the work inspection did not report it",
       ],
     });
   });
