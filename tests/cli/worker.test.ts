@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { AgentActivity } from "../../src/application/control-plane";
+import type { HostCommandOutcome } from "../../src/application/host-transport";
 import type { MachineControl } from "../../src/application/machine-control";
 import { ProvisioningFailed } from "../../src/application/provisioner";
 import { run, waitsOnInterrupt } from "../../src/cli/run";
@@ -28,6 +29,7 @@ import {
   readyWorker,
   statusAnswers,
   tailnetDevice,
+  workAnswer,
 } from "../support/fake-workers";
 import { BUCKET, declaring, FACTORY, RELEASE, WORKER_TAG } from "../support/factory-world";
 import { MemoryInstanceStore } from "../support/memory-instance-store";
@@ -59,6 +61,8 @@ interface Setup {
   readonly interruptOnSleep?: boolean;
   readonly worker?: ReturnType<typeof readyWorker>;
   readonly repositories?: "synchronized" | "unresolved";
+  /** builder-1's answer to the work inspection: no work anywhere, unless given. */
+  readonly work?: HostCommandOutcome;
   readonly admin?: Parameters<typeof fakeTailnetAdmin>[0];
   /** The EC2 inventory: the one machine carrying builder-1's key, unless given. */
   readonly machines?: readonly Machine[];
@@ -89,6 +93,9 @@ function workerTransport(options: Setup) {
     [HOSTNAME]: statusAnswers(
       options.worker ?? readyWorker(FACTORY, KEY, RELEASE),
       options.repositories ?? "synchronized",
+      [],
+      undefined,
+      options.work ?? workAnswer(HOSTNAME),
     ),
   });
 }
@@ -606,6 +613,79 @@ describe("fffactory worker terminate --keep (worker-lifecycle §Terminate (keep)
       "--force: the worker is not inspected for active agents or checkouts.",
     );
     expect(forced.control.mutations()).toEqual([`terminate ${ID}`]);
+  });
+
+  test("work made since the last synchronization refuses it, naming where; --force overrides", async () => {
+    const dirty = workAnswer(HOSTNAME, [
+      {
+        path: "/workspace/repos/acme/widget",
+        state: "inspected",
+        unpushed_commits: 0,
+        unpushed_branches: [],
+        stashes: 0,
+        worktrees: [
+          {
+            path: "/workspace/repos/acme/widget",
+            branch: "main",
+            state: "inspected",
+            tracked_changes: 0,
+            untracked_files: 1,
+            unpushed_commits: 0,
+            operation: null,
+          },
+        ],
+      },
+    ]);
+    const refused = setup({ ...TERMINATING, work: dirty });
+    expect(await run(TERMINATE(), refused.context)).toBe(1);
+    expect(refused.err).toEqual([
+      `Refusing to terminate the worker: ${HOSTNAME} holds work not pushed to any remote: terminating it would lose it`,
+      "  /workspace/repos/acme/widget (branch main): 1 untracked file",
+      `Next: Push or discard it, then rerun \`fffactory worker terminate ${KEY} --keep\`, or pass --force to terminate it anyway.`,
+    ]);
+    expect(refused.control.mutations()).toEqual([]);
+    const forced = setup({ ...TERMINATING, work: dirty });
+    expect(await run(TERMINATE("--force"), forced.context)).toBe(0);
+    expect(forced.control.mutations()).toEqual([`terminate ${ID}`]);
+  });
+
+  test("a worker whose activator predates the work inspection is refused, with the way to force it", async () => {
+    const cli = setup({ ...TERMINATING, work: { kind: "completed", exitCode: 64, stdout: "" } });
+    expect(await run(TERMINATE(), cli.context)).toBe(1);
+    expect(cli.err).toEqual([
+      `Refusing to terminate the worker: ${HOSTNAME} could not be inspected for unpushed work: its activator predates the work inspection`,
+      "  A worker's activator is installed at its first boot and never updated: this worker's predates this release.",
+      `Next: Check its checkouts and worktrees for work to keep yourself, then terminate it with --force: \`fffactory worker terminate ${KEY} --keep --force\`.`,
+    ]);
+    expect(cli.control.mutations()).toEqual([]);
+  });
+
+  test("never prints what a worker put in its answer", async () => {
+    const hostile = JSON.stringify({
+      protocol_version: 1,
+      hostname: HOSTNAME,
+      complete: true,
+      repositories: [
+        {
+          path: "/workspace/\u001b]0;pwned\u0007",
+          state: "inspected",
+          unpushed_commits: 0,
+          unpushed_branches: [],
+          stashes: 0,
+          worktrees: [],
+        },
+      ],
+    });
+    const cli = setup({
+      ...TERMINATING,
+      work: { kind: "completed", exitCode: 0, stdout: hostile },
+    });
+    expect(await run(TERMINATE(), cli.context)).toBe(1);
+    expect(cli.err[0]).toBe(
+      `Refusing to terminate the worker: ${HOSTNAME} could not be inspected for unpushed work: its answer is not a work inspection: repositories[0].path is missing or malformed`,
+    );
+    expect(all(cli)).not.toContain("pwned");
+    expect(cli.control.mutations()).toEqual([]);
   });
 
   test("at a terminal, the host key is typed; anything else declines", async () => {

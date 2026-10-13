@@ -22,7 +22,9 @@ const BOOTSTRAP = join(import.meta.dir, "../../../assets/terraform/bootstrap");
  */
 const BOOTSTRAP_OF_GENERATION: Readonly<Record<number, string>> = {
   1: "0b5940daa3375b9cc33cb299499849fc677441197099fd4b06efa1810937213b",
-  2: "81718968693c26131bef92a4a7ac7ec81cb786eca273de81620966e7ab8a8348",
+  // The activator's `work inspect` (#9) kept generation 2: only the operator's terminate relies
+  // on it, and a worker whose activator lacks it is refused as one it cannot inspect.
+  2: "d38234c8764349f3b72750366d5e26c9addab1d0b342ccc9f57035bfc274f7bb",
 };
 
 /** The bootstrap's files, as a worker receives them: every file here but CLAUDE.md. */

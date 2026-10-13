@@ -8,6 +8,7 @@
 import type { AgentActivity } from "./control-plane";
 import { type FactoryInstance, type HostKey, parseHostKey } from "./instance";
 import type { RepositoryObservation } from "./repository-placement";
+import { workFindings, type WorkObservation } from "./work-inspection";
 import type { WorkerIdentity } from "./rollout";
 import {
   ADMIN_CONSOLE,
@@ -316,7 +317,7 @@ export function stopGate(inspection: StopInspection, worker: WorkerIdentity): Re
 /**
  * What terminate saw before acting: `--force` skipped the inspection, the machine is stopped
  * (never inspected), the tailnet did not locate the running worker, or the worker's agent
- * activity and its last repository result.
+ * activity, its last repository result and the current work in its checkouts and worktrees.
  */
 export type TerminateInspection =
   | { readonly kind: "forced" }
@@ -326,7 +327,57 @@ export type TerminateInspection =
       readonly kind: "inspected";
       readonly activity: AgentActivity;
       readonly repositories: RepositoryObservation;
+      readonly work: WorkObservation;
     };
+
+/** The most lines a work refusal lists; the rest are counted. */
+export const WORK_DETAIL_LINES = 20;
+
+function bounded(lines: readonly string[]): string[] {
+  if (lines.length <= WORK_DETAIL_LINES) return [...lines];
+  return [...lines.slice(0, WORK_DETAIL_LINES), `... and ${lines.length - WORK_DETAIL_LINES} more`];
+}
+
+/**
+ * The current work (`workFindings`): unresolved work refuses, naming each checkout or worktree
+ * that holds it; work that could not be inspected, or a worker that could not be asked, refuses
+ * too. A worker whose activator predates the inspection is checked by hand, then forced.
+ */
+function workGate(
+  work: WorkObservation,
+  worker: WorkerIdentity,
+  command: TerminateCommand,
+): Refusal | undefined {
+  const { hostname, key } = worker;
+  if (work.kind === "unknown")
+    return work.unsupported
+      ? refusal(
+          `${hostname} could not be inspected for unpushed work: ${work.reason}`,
+          "Check its checkouts and worktrees for work to keep yourself, then terminate it " +
+            `with --force: \`${workerCommandLine(command, key)} --force\`.`,
+          [
+            "A worker's activator is installed at its first boot and never updated: this worker's predates this release.",
+          ],
+        )
+      : refusal(
+          `${hostname} could not be inspected for unpushed work: ${work.reason}`,
+          orForce(command, key, CHECK_STATUS, "uninspected"),
+        );
+  const { unresolved, uninspected } = workFindings(work.inspection);
+  if (unresolved.length > 0)
+    return refusal(
+      `${hostname} holds work not pushed to any remote: terminating it would lose it`,
+      orForce(command, key, "Push or discard it", "anyway"),
+      bounded([...unresolved, ...uninspected]),
+    );
+  if (uninspected.length > 0)
+    return refusal(
+      `${hostname} could not be fully inspected for unpushed work`,
+      orForce(command, key, CHECK_STATUS, "uninspected"),
+      bounded(uninspected),
+    );
+  return undefined;
+}
 
 /** Unresolved or unmanaged checkouts, or a repository result that could not be read. */
 function checkoutGate(
@@ -369,10 +420,10 @@ function checkoutGate(
 }
 
 /**
- * Terminate's gates: active agents, unresolved or unmanaged checkouts, or a running worker that
- * cannot be inspected refuse it; `--force` skips them. A stopped machine passes uninspected:
- * nothing runs on it, and unpushed work on its disk goes unreported (an accepted risk).
- * Undefined when terminate may go on.
+ * Terminate's gates: active agents, work in its checkouts or worktrees not pushed to any remote,
+ * unresolved or unmanaged checkouts, or a running worker that cannot be inspected refuse it;
+ * `--force` skips them. A stopped machine passes uninspected: nothing runs on it, and unpushed
+ * work on its disk goes unreported (an accepted risk). Undefined when terminate may go on.
  */
 export function terminateGate(
   inspection: TerminateInspection,
@@ -392,6 +443,7 @@ export function terminateGate(
     case "inspected":
       return (
         activityGate(command, inspection.activity, worker) ??
+        workGate(inspection.work, worker, command) ??
         checkoutGate(inspection.repositories, worker, command)
       );
   }

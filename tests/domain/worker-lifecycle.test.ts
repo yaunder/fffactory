@@ -2,6 +2,11 @@ import { describe, expect, test } from "bun:test";
 import type { FactoryInstance, HostKey } from "../../src/domain/instance";
 import type { RepositoryObservation } from "../../src/domain/repository-placement";
 import type { Machine } from "../../src/domain/status";
+import type {
+  RepositoryWork,
+  WorkInspection,
+  WorkObservation,
+} from "../../src/domain/work-inspection";
 import { HOST_PROTOCOL_VERSION } from "../../src/domain/host-protocol";
 import {
   adminClientMissing,
@@ -432,12 +437,206 @@ describe("what each EC2 state means for terminate (worker-lifecycle §Terminate 
   });
 });
 
+/** The work inspection of a worker holding `repositories`, read to the end. */
+function work(repositories: readonly RepositoryWork[], complete = true): WorkObservation {
+  const inspection: WorkInspection = {
+    protocol_version: HOST_PROTOCOL_VERSION,
+    hostname: WORKER.hostname,
+    complete,
+    repositories,
+  };
+  return { kind: "inspected", inspection };
+}
+
+/** No checkout on the worker holds any work. */
+const NO_WORK = work([]);
+
+/** The placed checkout, in step with its remote, but for `overrides` of its own worktree. */
+function widget(overrides: Partial<RepositoryWork["worktrees"][number]> = {}): RepositoryWork {
+  return {
+    path: "/workspace/repos/acme/widget",
+    state: "inspected",
+    unpushed_commits: 0,
+    unpushed_branches: [],
+    stashes: 0,
+    worktrees: [
+      {
+        path: "/workspace/repos/acme/widget",
+        branch: "main",
+        state: "inspected",
+        tracked_changes: 0,
+        untracked_files: 0,
+        unpushed_commits: 0,
+        operation: null,
+        ...overrides,
+      },
+    ],
+  };
+}
+
 describe("terminate's gates (worker-lifecycle §Gates (terminate))", () => {
   const IDLE = { kind: "idle" } as const;
   const synchronized = (unmanaged: readonly string[] = []): RepositoryObservation => ({
     protocol_version: HOST_PROTOCOL_VERSION,
     state: "synchronized",
     unmanaged,
+  });
+
+  test("refuse work made since the last synchronization: its result is synchronized, the checkout is not", () => {
+    // The reviewer's case: `?? uncommitted-work.txt` after a successful apply.
+    expect(
+      terminateGate(
+        {
+          kind: "inspected",
+          activity: IDLE,
+          repositories: synchronized(),
+          work: work([widget({ untracked_files: 1 })]),
+        },
+        WORKER,
+        "terminate-keep",
+      ),
+    ).toEqual({
+      summary:
+        "fff-abcd1234-builder-1 holds work not pushed to any remote: terminating it would lose it",
+      details: ["/workspace/repos/acme/widget (branch main): 1 untracked file"],
+      nextAction:
+        `Push or discard it, then rerun ${TERMINATE_RERUN}, ` +
+        "or pass --force to terminate it anyway.",
+    });
+  });
+
+  test("refuse a running worker whose work could not be inspected, saying why", () => {
+    expect(
+      terminateGate(
+        {
+          kind: "inspected",
+          activity: IDLE,
+          repositories: synchronized(),
+          work: { kind: "unknown", reason: "no answer within 2 min", unsupported: false },
+        },
+        WORKER,
+        "terminate",
+      ),
+    ).toEqual({
+      summary:
+        "fff-abcd1234-builder-1 could not be inspected for unpushed work: no answer within 2 min",
+      details: [],
+      nextAction:
+        "Check the worker with `fffactory status`, then rerun " +
+        "`fffactory worker terminate builder-1`, or pass --force to terminate it uninspected.",
+    });
+  });
+
+  test("a worker whose activator predates the work inspection is refused: it is checked by hand, then forced", () => {
+    expect(
+      terminateGate(
+        {
+          kind: "inspected",
+          activity: IDLE,
+          repositories: synchronized(),
+          work: {
+            kind: "unknown",
+            reason: "its activator predates the work inspection",
+            unsupported: true,
+          },
+        },
+        WORKER,
+        "terminate-keep",
+      ),
+    ).toEqual({
+      summary:
+        "fff-abcd1234-builder-1 could not be inspected for unpushed work: its activator predates the work inspection",
+      details: [
+        "A worker's activator is installed at its first boot and never updated: this worker's predates this release.",
+      ],
+      nextAction:
+        "Check its checkouts and worktrees for work to keep yourself, then terminate it " +
+        "with --force: `fffactory worker terminate builder-1 --keep --force`.",
+    });
+  });
+
+  test("a worktree that could not be read, or an inspection left incomplete, refuses it", () => {
+    const unreadable = widget({ state: "unreadable" });
+    expect(
+      terminateGate(
+        {
+          kind: "inspected",
+          activity: IDLE,
+          repositories: synchronized(),
+          work: work([unreadable], false),
+        },
+        WORKER,
+        "terminate-keep",
+      ),
+    ).toEqual({
+      summary: "fff-abcd1234-builder-1 could not be fully inspected for unpushed work",
+      details: [
+        "/workspace/repos/acme/widget (branch main): could not be read",
+        "The worker did not inspect every checkout and worktree in time, or found more than it reports",
+      ],
+      nextAction:
+        `Check the worker with \`fffactory status\`, then rerun ${TERMINATE_RERUN}, ` +
+        "or pass --force to terminate it uninspected.",
+    });
+  });
+
+  test("unresolved work is named first, with anything uninspected after it; at most 20 lines", () => {
+    const many = Array.from({ length: 25 }, (_, index) => ({
+      ...widget({ tracked_changes: 1 }),
+      path: `/workspace/repos/r${index}`,
+    }));
+    const refusal = terminateGate(
+      {
+        kind: "inspected",
+        activity: IDLE,
+        repositories: synchronized(),
+        work: work([widget({ state: "unreadable" }), ...many]),
+      },
+      WORKER,
+      "terminate-keep",
+    );
+    expect(refusal?.summary).toBe(
+      "fff-abcd1234-builder-1 holds work not pushed to any remote: terminating it would lose it",
+    );
+    expect(refusal?.details).toHaveLength(21);
+    expect(refusal?.details.at(0)).toBe(
+      "/workspace/repos/acme/widget (branch main): 1 changed file",
+    );
+    expect(refusal?.details.at(-1)).toBe("... and 6 more");
+  });
+
+  test("active agents are named before work, and work before the repository result", () => {
+    const dirty = work([widget({ tracked_changes: 1 })]);
+    expect(
+      terminateGate(
+        {
+          kind: "inspected",
+          activity: { kind: "active", count: 1 },
+          repositories: synchronized(),
+          work: dirty,
+        },
+        WORKER,
+        "terminate-keep",
+      )?.summary,
+    ).toBe("1 agent is active on fff-abcd1234-builder-1: terminating it would end it");
+    expect(
+      terminateGate(
+        {
+          kind: "inspected",
+          activity: IDLE,
+          repositories: {
+            protocol_version: HOST_PROTOCOL_VERSION,
+            state: "unresolved",
+            unmanaged: [],
+          },
+          work: dirty,
+        },
+        WORKER,
+        "terminate-keep",
+      )?.summary,
+    ).toBe(
+      "fff-abcd1234-builder-1 holds work not pushed to any remote: terminating it would lose it",
+    );
   });
 
   test("pass an idle worker whose checkouts are all resolved, or that has none", () => {
@@ -447,7 +646,7 @@ describe("terminate's gates (worker-lifecycle §Gates (terminate))", () => {
     ] satisfies RepositoryObservation[])
       expect(
         terminateGate(
-          { kind: "inspected", activity: IDLE, repositories },
+          { kind: "inspected", activity: IDLE, repositories, work: NO_WORK },
           WORKER,
           "terminate-keep",
         ),
@@ -466,6 +665,7 @@ describe("terminate's gates (worker-lifecycle §Gates (terminate))", () => {
           kind: "inspected",
           activity: { kind: "active", count: 2 },
           repositories: synchronized(),
+          work: NO_WORK,
         },
         WORKER,
         "terminate-keep",
@@ -490,6 +690,7 @@ describe("terminate's gates (worker-lifecycle §Gates (terminate))", () => {
             state: "unresolved",
             unmanaged: ["acme/old"],
           },
+          work: NO_WORK,
         },
         WORKER,
         "terminate-keep",
@@ -504,7 +705,12 @@ describe("terminate's gates (worker-lifecycle §Gates (terminate))", () => {
     });
     expect(
       terminateGate(
-        { kind: "inspected", activity: IDLE, repositories: synchronized(["acme/a", "acme/b"]) },
+        {
+          kind: "inspected",
+          activity: IDLE,
+          repositories: synchronized(["acme/a", "acme/b"]),
+          work: NO_WORK,
+        },
         WORKER,
         "terminate-keep",
       ),
@@ -524,6 +730,7 @@ describe("terminate's gates (worker-lifecycle §Gates (terminate))", () => {
           kind: "inspected",
           activity: { kind: "unknown", reason: "Paseo activity could not be read" },
           repositories: synchronized(),
+          work: NO_WORK,
         },
         WORKER,
         "terminate-keep",
@@ -542,7 +749,7 @@ describe("terminate's gates (worker-lifecycle §Gates (terminate))", () => {
     ] satisfies RepositoryObservation[])
       expect(
         terminateGate(
-          { kind: "inspected", activity: IDLE, repositories },
+          { kind: "inspected", activity: IDLE, repositories, work: NO_WORK },
           WORKER,
           "terminate-keep",
         ),

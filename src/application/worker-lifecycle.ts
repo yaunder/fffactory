@@ -127,6 +127,7 @@ import {
 import type { HostTransport } from "./host-transport";
 import type { InstanceStore } from "./instance-store";
 import { inspectRepositories } from "./inspect-repositories";
+import { inspectWork } from "./inspect-work";
 import { inspectWorker } from "./inspect-worker";
 import type { LockStore, StateBucket } from "./lock-store";
 import type { MachineControl, MachineRequest, MachineTarget } from "./machine-control";
@@ -883,8 +884,9 @@ async function stopInspection(
 
 /**
  * Terminate's gates (`docs/specs/worker-lifecycle.md` §Gates (terminate)): a stopped machine
- * passes uninspected; a running worker is located in the tailnet, and its agent activity and
- * last repository result read, unless `--force` skips them. Undefined when terminate may go on.
+ * passes uninspected; a running worker is located in the tailnet, and its agent activity, last
+ * repository result and current work read, unless `--force` skips them. Undefined when
+ * terminate may go on, or once interrupted.
  */
 async function terminateGates(
   deps: WorkerLifecycleDependencies,
@@ -905,17 +907,20 @@ async function terminateGates(
   // TODO(re-evaluate when dispatch gains a pause): pause dispatch on the worker before this
   // inspection, as for stop: until then an agent dispatch starts between the check and the
   // terminate ends with the machine (an accepted race, epic #5).
-  return terminateGate(
-    await terminateInspection(deps, power),
-    power.worker,
-    power.command as TerminateCommand,
-  );
+  const inspection = await terminateInspection(deps, power);
+  if (inspection === undefined) return undefined;
+  return terminateGate(inspection, power.worker, power.command as TerminateCommand);
 }
 
+/**
+ * The running worker's agent activity and last repository result, then its current work: only
+ * once the activity is read, since both go through the activator, which runs one operation at a
+ * time. Undefined once interrupted, which asks the worker nothing more.
+ */
 async function terminateInspection(
   deps: WorkerLifecycleDependencies,
   power: Power,
-): Promise<TerminateInspection> {
+): Promise<TerminateInspection | undefined> {
   const then = thenRerunWorker(power.command, power.worker.key);
   const location = locateWorker(await deps.peers.view(), power.worker, power.tag, then);
   if (location.kind === "blocked") return { kind: "unlocated", verdict: location.verdict };
@@ -928,7 +933,9 @@ async function terminateInspection(
       : deps.controlPlane.activeAgents(location.worker),
     inspectRepositories(deps.transport, location.worker),
   ]);
-  return { kind: "inspected", activity, repositories };
+  if (deps.interrupted()) return undefined;
+  const work = await inspectWork(deps.transport, location.worker);
+  return { kind: "inspected", activity, repositories, work };
 }
 
 /**

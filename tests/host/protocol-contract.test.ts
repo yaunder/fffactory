@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { inspectWork } from "../../src/application/inspect-work";
 import { inspectWorker } from "../../src/application/inspect-worker";
 import {
   HOST_PROTOCOL_VERSION,
@@ -19,10 +20,17 @@ import { enrollmentReport, parseVerification, verificationJson } from "../../src
 import { activationOutcome } from "../../src/domain/rollout";
 import { inspectionVerdict } from "../../src/domain/status";
 import { resolveWorker } from "../../src/domain/tailnet";
+import {
+  INSPECT_WORK_COMMAND,
+  parseWorkInspection,
+  workFindings,
+  workInspectionJson,
+} from "../../src/domain/work-inspection";
 import { workerApplier } from "../../src/host/apply";
 import { workerInspector } from "../../src/host/inspect";
 import { flockExclusive } from "../../src/host/install-lock";
 import { workerVerifier } from "../../src/host/verify";
+import { workerWork } from "../../src/host/work";
 import { fakeTransport, peer, TAG } from "../support/fake-workers";
 import {
   applyingSystem,
@@ -32,6 +40,7 @@ import {
   unpackedWorker,
   WORKER_HOSTNAME,
 } from "./worker-scenarios";
+import { gitWorld, unresolvedWorker } from "./work-scenarios";
 
 const FIXTURES = join(import.meta.dir, "fixtures");
 
@@ -277,5 +286,54 @@ describe("host apply and host verify, CLI side", () => {
     expect(
       enrollmentReport(parsed.document, WORKER_HOSTNAME).map(({ id, state }) => `${id}:${state}`),
     ).toEqual(["github:enrolled", "openai:pending", "anthropic:pending"]);
+  });
+});
+
+describe("host work inspect, both sides", () => {
+  test("the worker produces work-unresolved.json byte for byte for the reviewer's worker", async () => {
+    // Synchronized, then an untracked file in the checkout and a Paseo worktree's commit
+    // pushed nowhere: real Git, read as the runtime account would.
+    const world = await gitWorld();
+    try {
+      await unresolvedWorker(world);
+      const document = await workerWork(world.system()).inspectWork();
+      expect(`${workInspectionJson(document)}\n`).toBe(await fixture("work-unresolved.json"));
+    } finally {
+      await world.remove();
+    }
+  });
+
+  test("the CLI reads it back without loss, over the transport, into a refused terminate", async () => {
+    const text = await fixture("work-unresolved.json");
+    const parsed = parseWorkInspection(text);
+    if (!parsed.ok) throw new Error(`rejected: ${JSON.stringify(parsed)}`);
+    expect(`${workInspectionJson(parsed.document)}\n`).toBe(text);
+    const resolution = resolveWorker([peer(WORKER_HOSTNAME)], WORKER_HOSTNAME, TAG);
+    if (resolution.kind !== "found") throw new Error("not found");
+    const transport = fakeTransport({
+      [WORKER_HOSTNAME]: { kind: "completed", exitCode: 0, stdout: text },
+    });
+    const observation = await inspectWork(transport.transport, resolution.worker);
+    expect(observation).toEqual({ kind: "inspected", inspection: parsed.document });
+    expect(transport.calls.map(({ command }) => command)).toEqual([[...INSPECT_WORK_COMMAND]]);
+    if (observation.kind !== "inspected") throw new Error("not inspected");
+    expect(workFindings(observation.inspection)).toEqual({
+      unresolved: [
+        "/workspace/repos/acme/widget: 1 commit on local branches not on any remote (epic/5)",
+        "/workspace/repos/acme/widget (branch main): 1 untracked file",
+        "/home/factory/.paseo/worktrees/abc123/serious-goose (branch epic/5): 1 commit not on any remote",
+      ],
+      uninspected: [],
+    });
+  });
+
+  test("an addition within the major version is ignored; another major is rejected", async () => {
+    const document = JSON.parse(await fixture("work-unresolved.json"));
+    expect(parseWorkInspection(JSON.stringify({ ...document, later: [1] })).ok).toBe(true);
+    expect(
+      parseWorkInspection(
+        JSON.stringify({ ...document, protocol_version: HOST_PROTOCOL_VERSION + 1 }),
+      ),
+    ).toEqual({ ok: false, kind: "unsupported_version", version: HOST_PROTOCOL_VERSION + 1 });
   });
 });

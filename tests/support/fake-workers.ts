@@ -36,6 +36,11 @@ import {
   type DispatchInspection,
 } from "../../src/domain/dispatch-projection";
 import { ENROLLMENTS, type EnrollmentState, type Verification } from "../../src/domain/readiness";
+import {
+  type RepositoryWork,
+  type WorkInspection,
+  workInspectionJson,
+} from "../../src/domain/work-inspection";
 import type { Machine, MachineInventory } from "../../src/domain/status";
 import type { PeerView, TailnetDevice, TailnetPeer, WorkerAddress } from "../../src/domain/tailnet";
 import type { WorkerEndpoint } from "../../src/host/endpoint";
@@ -290,7 +295,28 @@ function repositoriesAnswer(
   };
 }
 
-/** A worker answering both of status's read-only host protocol commands. */
+/**
+ * `host work inspect`'s answer for `hostname`: its checkouts and worktrees as `repositories`
+ * (none by default), inspected to the end unless `complete` says otherwise.
+ */
+export function workAnswer(
+  hostname: string,
+  repositories: readonly RepositoryWork[] = [],
+  complete = true,
+): HostCommandOutcome {
+  const document: WorkInspection = {
+    protocol_version: HOST_PROTOCOL_VERSION,
+    hostname,
+    complete,
+    repositories,
+  };
+  return { kind: "completed", exitCode: 0, stdout: workInspectionJson(document) };
+}
+
+/**
+ * A worker answering status's read-only host protocol commands, and terminate's work
+ * inspection with `work` (by default: no checkout holds any work).
+ */
 export function statusAnswers(
   document: HostInspection,
   repositories: "synchronized" | "unresolved" | "none" | "unreadable" = "synchronized",
@@ -301,8 +327,10 @@ export function statusAnswers(
     blockers: [],
     changed: false,
   },
+  work: HostCommandOutcome = workAnswer(document.hostname),
 ): Answer {
   return (command) => {
+    if (command.includes("work")) return work;
     if (command.includes("dispatch")) return dispatchAnswer(dispatch);
     return command.includes("repositories")
       ? repositoriesAnswer(repositories, unmanaged)

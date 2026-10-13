@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { AgentActivity } from "../../src/application/control-plane";
+import type { HostCommandOutcome } from "../../src/application/host-transport";
 import { INSPECT_TIMEOUT_MS } from "../../src/application/inspect-worker";
 import type { MachineRequest } from "../../src/application/machine-control";
 import { factoryStatus } from "../../src/application/status";
@@ -18,6 +19,7 @@ import {
 import type { CallerObservation } from "../../src/domain/aws-account";
 import { newLockRecord } from "../../src/domain/factory-lock";
 import { INSPECT_COMMAND } from "../../src/domain/host-protocol";
+import { INSPECT_WORK_COMMAND, type RepositoryWork } from "../../src/domain/work-inspection";
 import {
   type FactoryInstance,
   type HostKey,
@@ -52,6 +54,7 @@ import {
   readyWorker,
   statusAnswers,
   tailnetDevice,
+  workAnswer,
 } from "../support/fake-workers";
 import { BUCKET, declaring, FACTORY, NOW, RELEASE, WORKER_TAG } from "../support/factory-world";
 import type { SecretReference } from "../../src/domain/instance";
@@ -906,8 +909,10 @@ describe("fffactory worker terminate --keep (worker-lifecycle §Terminate (keep)
       leftover: undefined,
     });
     expect(w.controlPlane.calls).toEqual(["activeAgents"]);
+    // The last synchronization's result, then the work in every checkout as it is now.
     expect(w.transport.calls.map(({ command }) => command.join(" "))).toEqual([
       expect.stringContaining("repositories"),
+      INSPECT_WORK_COMMAND.join(" "),
     ]);
     expect(w.control.calls).toEqual([`terminate ${ID}`, `state ${ID}`, `state ${ID}`]);
     expect(w.secrets.reads).toEqual([
@@ -1390,6 +1395,158 @@ describe("terminate's gates (worker-lifecycle §Gates (terminate))", () => {
       expect(w.progress).toContainEqual({ kind: "forced", action: "terminate" });
       expect(records(w)[0]).toMatchObject({ status: "succeeded" });
     }
+  });
+});
+
+/** builder-1's placed checkout, in step with its remote but for `overrides` of its worktree. */
+function widget(overrides: Partial<RepositoryWork["worktrees"][number]> = {}): RepositoryWork {
+  return {
+    path: "/workspace/repos/acme/widget",
+    state: "inspected",
+    unpushed_commits: 0,
+    unpushed_branches: [],
+    stashes: 0,
+    worktrees: [
+      {
+        path: "/workspace/repos/acme/widget",
+        branch: "main",
+        state: "inspected",
+        tracked_changes: 0,
+        untracked_files: 0,
+        unpushed_commits: 0,
+        operation: null,
+        ...overrides,
+      },
+    ],
+  };
+}
+
+/** builder-1 synchronized at its last apply, whose work inspection answers `work`. */
+function synchronizedButAnswering(work: HostCommandOutcome): Answer {
+  return statusAnswers(readyWorker(FACTORY, KEY, RELEASE), "synchronized", [], undefined, work);
+}
+
+/** The reviewer's worker: synchronized, then `?? uncommitted-work.txt` in its checkout. */
+const DIRTIED_SINCE = synchronizedButAnswering(
+  workAnswer(HOSTNAME, [widget({ untracked_files: 1 })]),
+);
+
+describe("terminate's work inspection (worker-lifecycle §Gates (terminate))", () => {
+  test("work made after the last synchronization refuses it without --force", async () => {
+    for (const command of ["keep", "remove"] as const) {
+      const w = world({ ...TERMINATING, worker: DIRTIED_SINCE });
+      const result = await terminateWorker(
+        w.deps,
+        command === "keep" ? terminating(w) : removing(w),
+      );
+      expect(result).toMatchObject({
+        kind: "refused",
+        refusal: {
+          summary: `${HOSTNAME} holds work not pushed to any remote: terminating it would lose it`,
+          details: ["/workspace/repos/acme/widget (branch main): 1 untracked file"],
+        },
+      });
+      expect(w.control.mutations()).toEqual([]);
+      expect(w.terraform.calls).toEqual([]);
+      expect(w.admin.calls).toEqual([]);
+      expect(records(w)[0]).toMatchObject({ status: "refused" });
+    }
+  });
+
+  test("--force terminates it all the same, uninspected", async () => {
+    const w = world({ ...TERMINATING, worker: DIRTIED_SINCE });
+    expect(await terminateWorker(w.deps, terminating(w, { force: true }))).toMatchObject({
+      kind: "done",
+      changed: true,
+    });
+    expect(w.transport.calls).toEqual([]);
+    expect(w.control.mutations()).toEqual([`terminate ${ID}`]);
+  });
+
+  test("work that cannot be inspected refuses it: an older activator, a timeout, a malformed answer", async () => {
+    const cases: [HostCommandOutcome, string][] = [
+      [
+        { kind: "completed", exitCode: 64, stdout: "" },
+        `${HOSTNAME} could not be inspected for unpushed work: its activator predates the work inspection`,
+      ],
+      [
+        { kind: "timed_out" },
+        `${HOSTNAME} could not be inspected for unpushed work: no answer within 2 min`,
+      ],
+      [
+        { kind: "completed", exitCode: 0, stdout: "{}" },
+        `${HOSTNAME} could not be inspected for unpushed work: its answer is not a work inspection: protocol_version must be an integer`,
+      ],
+      [
+        workAnswer(HOSTNAME, [widget({ state: "unreadable" })]),
+        `${HOSTNAME} could not be fully inspected for unpushed work`,
+      ],
+    ];
+    for (const [answer, summary] of cases) {
+      const w = world({ ...TERMINATING, worker: synchronizedButAnswering(answer) });
+      expect(await terminateWorker(w.deps, terminating(w))).toMatchObject({
+        kind: "refused",
+        refusal: { summary },
+      });
+      expect(w.control.mutations()).toEqual([]);
+    }
+  });
+
+  test("clean, pushed checkouts and worktrees let it go on", async () => {
+    const w = world({
+      ...TERMINATING,
+      worker: synchronizedButAnswering(workAnswer(HOSTNAME, [widget()])),
+    });
+    expect(await terminateWorker(w.deps, terminating(w))).toMatchObject({ kind: "done" });
+  });
+
+  test("is asked only once the activator is free: after the agent activity has been read", async () => {
+    const w = world({ ...TERMINATING, worker: CLEAN });
+    const order: string[] = [];
+    const answer = CLEAN as Exclude<Answer, HostCommandOutcome>;
+    const deps: WorkerLifecycleDependencies = {
+      ...w.deps,
+      controlPlane: {
+        ...w.controlPlane.controlPlane,
+        activeAgents: async () => {
+          order.push("activity started");
+          await new Promise((resolve) => setTimeout(resolve, 5));
+          order.push("activity read");
+          return { kind: "idle" };
+        },
+      },
+      transport: {
+        run: async (worker, command, options) => {
+          order.push(command.includes("work") ? "work" : "repositories");
+          return w.transport.transport
+            .run(worker, command, options)
+            .then(() => answer(command, undefined));
+        },
+      },
+    };
+    expect(await terminateWorker(deps, terminating(w))).toMatchObject({ kind: "done" });
+    expect(order.indexOf("work")).toBeGreaterThan(order.indexOf("activity read"));
+  });
+
+  test("an interrupt while the worker is inspected asks it nothing more", async () => {
+    const w = world({ ...TERMINATING, worker: CLEAN });
+    const answer = CLEAN as Exclude<Answer, HostCommandOutcome>;
+    const deps: WorkerLifecycleDependencies = {
+      ...w.deps,
+      transport: {
+        run: async (worker, command, options) => {
+          w.interrupt();
+          return w.transport.transport
+            .run(worker, command, options)
+            .then(() => answer(command, undefined));
+        },
+      },
+    };
+    expect(await terminateWorker(deps, terminating(w))).toMatchObject({ kind: "interrupted" });
+    expect(w.transport.calls.map(({ command }) => command.join(" "))).toEqual([
+      expect.stringContaining("repositories"),
+    ]);
+    expect(w.control.mutations()).toEqual([]);
   });
 });
 
