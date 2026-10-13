@@ -210,6 +210,10 @@ function workerLines(outcome: WorkerOutcome): string[] {
  * stopped worker is not a skip: it keeps the exit status 0.
  */
 function printWorkers(outcomes: readonly WorkerOutcome[], context: CliContext): number {
+  if (outcomes.length === 0) {
+    context.out("Workers: none declared.");
+    return 0;
+  }
   context.out("Workers:");
   for (const outcome of outcomes) {
     const print =
@@ -350,9 +354,15 @@ function reportApplied(
       : "Infrastructure: no changes to apply.",
   );
   const code = printWorkers(result.workers, context);
-  if (result.repositories !== undefined) printRepositories(result.repositories, context);
-  if (result.controlPlane !== undefined) printControlPlane(result.controlPlane, context);
-  if (result.dispatch !== undefined) printDispatch(result.dispatch, context);
+  // A factory that declares no worker has nothing to report per worker after the workers stage.
+  const some = <T>(outcomes: readonly T[] | undefined) =>
+    outcomes !== undefined && outcomes.length > 0 ? outcomes : undefined;
+  const repositories = some(result.repositories);
+  const controlPlane = some(result.controlPlane);
+  const dispatch = some(result.dispatch);
+  if (repositories !== undefined) printRepositories(repositories, context);
+  if (controlPlane !== undefined) printControlPlane(controlPlane, context);
+  if (dispatch !== undefined) printDispatch(dispatch, context);
   if (result.verification !== undefined) printVerification(result.verification, context);
   printRecord(result.operation, context);
   printRecordFailure(result.recordFailure, context);

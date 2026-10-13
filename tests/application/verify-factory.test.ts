@@ -202,6 +202,16 @@ describe("end-to-end verification (dispatch §End-to-end verification)", () => {
     expect(verification.workers[0]?.dispatch).toBe("not_requested");
   });
 
+  test("a factory that declares no worker is ready, and says so", () => {
+    expect(
+      verifyFactory({ workers: [], repositories: [], controlPlane: [], dispatch: [] }),
+    ).toEqual({
+      ready: true,
+      workers: [],
+      summary: "The factory is ready: it declares no workers",
+    });
+  });
+
   test("a worker missing from a later stage is reported unknown, not ready", () => {
     const verification = verifyFactory(
       request({ repositories: [], controlPlane: [], dispatch: [] }),

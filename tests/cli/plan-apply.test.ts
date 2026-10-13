@@ -86,6 +86,10 @@ const ENROLLMENT_PENDING =
   `  installed  builder-1 (${B1}): release 0.3.0 installed and verified; enrollment pending: ` +
   "GitHub, OpenAI Codex, Claude Code";
 
+/** The plan's line for a factory that declares no worker. */
+const NO_WORKERS =
+  "Workers: none declared. Declare a host in factory.json's hosts, then apply to create it.";
+
 function text(hosts: string[], overrides: object = {}): string {
   return `${JSON.stringify({ ...declaring(...hosts), ...overrides }, null, 2)}\n`;
 }
@@ -209,6 +213,23 @@ describe("fffactory plan (plan-apply §Plan)", () => {
       ...CONTROL_PLANE,
       ...REPOSITORIES,
       ...DISPATCH,
+      "Saved as plan aaaaaaaa, until 2026-09-30T13:00:00.000Z. To apply exactly it:",
+      "  fffactory apply --plan-id aaaaaaaa",
+    ]);
+    expect(planStore.saved.size).toBe(1);
+  });
+
+  test("an empty factory plans only its shared infrastructure, saying no worker is declared", async () => {
+    const { context, out, err, planStore } = cli({ declared: [] });
+    expect(await run(["plan"], context)).toBe(0);
+    expect(err).toEqual([]);
+    expect(out).toEqual([
+      INSTANCE_LINE,
+      ...HEADER,
+      "Infrastructure changes:",
+      `  + ${NETWORK}`,
+      "  1 to add, 0 to change, 0 to destroy.",
+      NO_WORKERS,
       "Saved as plan aaaaaaaa, until 2026-09-30T13:00:00.000Z. To apply exactly it:",
       "  fffactory apply --plan-id aaaaaaaa",
     ]);
@@ -553,6 +574,38 @@ describe("fffactory apply (plan-apply §Apply)", () => {
     expect(out).toContain(ENROLLMENT_PENDING);
     expect(prompt.asked).toHaveLength(1);
     expect(terraform.calls.some(({ call }) => call === "applyPlan")).toBe(false);
+  });
+
+  test("an empty factory applies its shared infrastructure, installs nothing and exits 0", async () => {
+    const queue = fakeWorkflowQueue();
+    const { context, out, err, terraform, lockStore, fleet } = cli({
+      declared: [],
+      interactive: true,
+      answers: ["yes"],
+      controlPlane: fakeControlPlane("healthy", { kind: "idle" }).controlPlane,
+      workflowQueue: queue.queue,
+    });
+    expect(await run(["apply"], context)).toBe(0);
+    expect(err).toEqual([]);
+    expect(
+      out.slice(out.indexOf("Applied: the factory's infrastructure matches factory.json.")),
+    ).toEqual([
+      "Applied: the factory's infrastructure matches factory.json.",
+      "Workers: none declared.",
+      "End-to-end verification: The factory is ready: it declares no workers",
+      expect.stringMatching(/^Operation record: s3:\/\/fff-abcd1234-state\/.+\.json$/),
+    ]);
+    expect(terraform.world.network).toBe(true);
+    expect(fleet.transport.calls).toEqual([]);
+    expect(lockStore.locks.size).toBe(0);
+    // Rerun: nothing to change, nothing to install, still ready.
+    expect(
+      await run(["apply"], {
+        ...context,
+        prompt: fakePrompt({ interactive: true, answers: ["yes"] }).prompt,
+      }),
+    ).toBe(0);
+    expect(out).toContain("Infrastructure: no changes to apply.");
   });
 
   test("a skipped worker exits 2 with its next action", async () => {

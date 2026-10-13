@@ -328,6 +328,22 @@ describe("guardrails over the shipped Terraform modules (provisioning §Guardrai
     ).toBe(true);
   });
 
+  test("an empty factory's projection passes the hosts variable: no validation requires a host", async () => {
+    const parsed = parseFactoryInstance({ ...example, hosts: [] });
+    if (!parsed.valid) throw new Error("the empty example instance is invalid");
+    const projection = projectFactoryVariables(parsed.instance, []);
+    expect(projection.ok && projection.variables.hosts).toEqual({});
+    const path = join(MODULES, "factory", "variables.tf");
+    const hosts = parseHcl(await readFile(path, "utf8"), path).blocks.find(
+      (block) => block.type === "variable" && block.labels[0] === "hosts",
+    );
+    const conditions = (hosts?.body.blocks ?? [])
+      .filter((block) => block.type === "validation")
+      .map((block) => block.body.attributes.find(({ name }) => name === "condition")?.expression);
+    expect(conditions.length).toBeGreaterThan(0);
+    for (const condition of conditions) expect(condition).not.toContain("length(var.hosts)");
+  });
+
   test("the projection supplies exactly each root module's variables", async () => {
     const parsed = parseFactoryInstance(example);
     if (!parsed.valid) throw new Error("the example instance is invalid");

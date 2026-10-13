@@ -5,7 +5,8 @@ import { INSPECT_TIMEOUT_MS } from "../../src/application/inspect-worker";
 import type { MachineRequest } from "../../src/application/machine-control";
 import { factoryStatus } from "../../src/application/status";
 import { stateBucketOf } from "../../src/application/factory-lock";
-import { planInfrastructure } from "../../src/application/plan-factory";
+import { applyFactory } from "../../src/application/apply-factory";
+import { planFactory, planInfrastructure } from "../../src/application/plan-factory";
 import { ProvisioningFailed } from "../../src/application/provisioner";
 import { withoutHost } from "../../src/domain/host-removal";
 import {
@@ -21,8 +22,10 @@ import { newLockRecord } from "../../src/domain/factory-lock";
 import { INSPECT_COMMAND } from "../../src/domain/host-protocol";
 import { INSPECT_WORK_COMMAND, type RepositoryWork } from "../../src/domain/work-inspection";
 import {
+  assessCompleteness,
   type FactoryInstance,
   type HostKey,
+  parseFactoryInstance,
   type Release,
   serializeInstance,
 } from "../../src/domain/instance";
@@ -56,7 +59,15 @@ import {
   tailnetDevice,
   workAnswer,
 } from "../support/fake-workers";
-import { BUCKET, declaring, FACTORY, NOW, RELEASE, WORKER_TAG } from "../support/factory-world";
+import {
+  BUCKET,
+  declaring,
+  FACTORY,
+  NOW,
+  RELEASE,
+  WORKER_TAG,
+  workerFleet,
+} from "../support/factory-world";
 import type { SecretReference } from "../../src/domain/instance";
 import { MemoryLockStore } from "../support/memory-lock-store";
 import { fakeFactoryWorld, SECRETS_POLICY } from "../support/fake-provisioner";
@@ -1804,6 +1815,81 @@ describe("terminate's interruption (worker-lifecycle §Interruption)", () => {
 const WITHOUT_KEY = serializeInstance(withoutHost(withAdmin(), KEY as HostKey));
 const calls = (w: World) => w.terraform.calls.map(({ call }) => call);
 
+/** A Paseo password reference of the only host. */
+const PASEO_ONLY = paseoPassword("paseo-password-builder-1");
+
+/**
+ * factory.json declaring builder-1 alone, with its own Paseo password, a repository placed on
+ * it and dispatch requested there: the standard single-worker factory.
+ */
+function onlyHost(): FactoryInstance {
+  const both = withAdmin();
+  const [host] = both.hosts ?? [];
+  if (host === undefined) throw new Error("withAdmin declares builder-1");
+  return {
+    ...both,
+    repositories: [
+      {
+        key: "widget",
+        remote: "https://github.com/acme/widget",
+        path: "acme/widget",
+        branch: "main",
+      },
+    ],
+    hosts: [
+      {
+        ...host,
+        paseo_password_secret: PASEO_ONLY,
+        repositories: ["widget"],
+        dispatch: { enabled: false },
+      },
+    ],
+  };
+}
+
+/** builder-1 with nothing unpushed in the one checkout placed on it. */
+const CLEAN_PLACED = () => synchronizedButAnswering(workAnswer(HOSTNAME, [widget()]));
+
+/** A world whose only host terminate has removed: an empty factory. */
+async function emptied(): Promise<World> {
+  const only = onlyHost();
+  const w = world({
+    worker: CLEAN_PLACED(),
+    provisioned: [KEY],
+    configuration: serializeInstance(only),
+  });
+  const result = await terminateWorker(w.deps, removing(w, { instance: only }));
+  if (result.kind !== "done") throw new Error(`expected done, got ${result.kind}`);
+  return w;
+}
+
+/** What plan reaches in `w`: its Terraform, state bucket and plan store, and no machine. */
+function planPorts(w: World) {
+  return {
+    lockStore: w.lockStore,
+    provisioner: w.terraform.provisioner,
+    planStore: w.planStore,
+    machines: fakeMachineInventory({ kind: "machines", machines: [] }).machines,
+    peers: w.deps.peers,
+    transport: w.deps.transport,
+    sha256: sha256Text,
+  };
+}
+
+function emptyPlanRequest(instance: FactoryInstance) {
+  return {
+    account: { allowed: true, verdict: { kind: "match", caller: FAKE_CALLER } } as const,
+    instancePath: PATH,
+    instance,
+    configurationSha256: "a".repeat(64),
+    credentials: { source: "chain" } as const,
+    release: RELEASE,
+    assetsSha256: "b".repeat(64),
+    terraformDirectory: TERRAFORM,
+    randomBytes: (count: number) => new Uint8Array(count),
+  };
+}
+
 describe("fffactory worker terminate (worker-lifecycle §Terminate (remove))", () => {
   test("destroys the machine with a scoped Terraform plan, writes factory.json without the host and deletes its device, under one lock and record", async () => {
     const w = world({ worker: CLEAN });
@@ -1936,18 +2022,109 @@ describe("fffactory worker terminate (worker-lifecycle §Terminate (remove))", (
     expect(records(w)[0]).toMatchObject({ status: "refused" });
   });
 
-  test("the only declared host is refused before anything reaches AWS", async () => {
-    const both = withAdmin();
-    const only = { ...both, hosts: (both.hosts ?? []).slice(0, 1) };
-    const w = world();
-    expect(await terminateWorker(w.deps, removing(w, { instance: only }))).toMatchObject({
-      kind: "refused",
-      refusal: { summary: expect.stringContaining("is the only host factory.json declares") },
-      operation: undefined,
+  test("the last host is removed like any other, leaving an empty factory with its shared infrastructure", async () => {
+    const only = onlyHost();
+    const w = world({
+      worker: CLEAN_PLACED(),
+      provisioned: [KEY],
+      configuration: serializeInstance(only),
+      secretArns: [AUTH, PASEO_ONLY],
     });
-    expect(w.identity.requests).toEqual([]);
-    expect(w.lockStore.calls).toEqual([]);
+    const result = await terminateWorker(w.deps, removing(w, { instance: only }));
+    expect(result).toMatchObject({
+      kind: "done",
+      removed: true,
+      devices: { kind: "listed", removed: ["nWorker1CNTRL"] },
+    });
+    // The scoped plan destroys the machine and leaves the hosts' policy the auth key alone.
+    expect(calls(w)).toEqual(["output", "plan", "showPlan", "applyPlan", "output"]);
+    const [, plan] = w.terraform.calls;
+    expect(plan?.call === "plan" && plan.request.variables).toMatchObject({
+      hosts: {},
+      paseo_password_secret_arns: {},
+    });
+    expect([...w.terraform.world.hosts]).toEqual([]);
+    expect(w.terraform.world.network).toBe(true);
+    expect(w.terraform.world.secretArns).toEqual([AUTH]);
+    expect(w.store.files[PATH]).toBe(serializeInstance(withoutHost(only, KEY as HostKey)));
+    const written = JSON.parse(w.store.files[PATH] as string) as FactoryInstance;
+    expect(written.hosts).toEqual([]);
+    expect(written.repositories).toEqual(only.repositories);
+    expect(parseFactoryInstance(written).valid).toBe(true);
+    expect(assessCompleteness(written)).toEqual({ complete: true, missing: [] });
+    expect(w.lockStore.locks.size).toBe(0);
+    expect(records(w)[0]).toMatchObject({ status: "succeeded" });
   });
+
+  test("an empty factory plans no hosts and no changes, and status lists no worker", async () => {
+    const w = await emptied();
+    const instance = JSON.parse(w.store.files[PATH] as string) as FactoryInstance;
+    const planned = await planFactory(planPorts(w), {
+      ...emptyPlanRequest(instance),
+      now: NOW,
+    });
+    if (planned.kind !== "planned") throw new Error(`expected planned, got ${planned.kind}`);
+    expect(planned.plan).toEqual([
+      "Factory plan:",
+      `  Configuration: ${PATH}`,
+      `  Factory: Test factory (${FACTORY})`,
+      "  AWS account: 123456789012, Region: eu-west-2",
+      `  Release: ${RELEASE}`,
+      "Infrastructure: no changes.",
+      "Workers: none declared. Declare a host in factory.json's hosts, then apply to create it.",
+    ]);
+    expect(planned.saved.changes).toEqual([]);
+    const status = await factoryStatus(
+      {
+        identity: w.deps.identity,
+        machines: fakeMachineInventory({ kind: "machines", machines: [] }).machines,
+        peers: w.deps.peers,
+        transport: w.deps.transport,
+        sha256: sha256Text,
+      },
+      { instance, credentials: { source: "chain" } },
+    );
+    expect(status).toMatchObject({ kind: "report", report: { status: "ready", workers: [] } });
+  });
+
+  for (const key of ["builder-3", KEY])
+    test(`a replacement declared afterwards (${key}) is a plain create of its own instance type, never D11`, async () => {
+      const w = await emptied();
+      const empty = JSON.parse(w.store.files[PATH] as string) as FactoryInstance;
+      const instance: FactoryInstance = {
+        ...empty,
+        hosts: [{ key: key as HostKey, instance_type: "m7i.2xlarge", root_volume_gib: 128 }],
+      };
+      const fleet = workerFleet([key]);
+      const approvals: (readonly string[])[] = [];
+      const result = await applyFactory(
+        {
+          ...fleet.deps,
+          lockStore: w.lockStore,
+          provisioner: w.terraform.provisioner,
+          planStore: w.planStore,
+          approval: {
+            approve: async (plan) => {
+              approvals.push(plan);
+              return true;
+            },
+          },
+          interrupted: () => false,
+        },
+        { ...emptyPlanRequest(instance), host: "operator-laptop", clock: () => NOW },
+      );
+      expect(result).toMatchObject({ kind: "applied", infrastructure: "applied" });
+      expect(result.kind === "applied" && result.workers.map((w) => `${w.key} ${w.kind}`)).toEqual([
+        `${key} installed`,
+      ]);
+      expect(approvals[0]).toContain(`  + module.hosts.aws_instance.host["${key}"]`);
+      expect(approvals[0]).toContain("  1 to add, 0 to change, 0 to destroy.");
+      const plans = w.terraform.calls.filter((call) => call.call === "plan");
+      expect(plans.at(-1)?.request.variables.hosts).toEqual({
+        [key]: { instance_type: "m7i.2xlarge", root_volume_gib: 128 },
+      });
+      expect([...w.terraform.world.hosts]).toEqual([key]);
+    });
 
   test("the host key is typed after the plan is shown; anything else declines, applying nothing", async () => {
     const w = world({ worker: CLEAN, prompt: fakePrompt({ interactive: true, answers: ["yes"] }) });

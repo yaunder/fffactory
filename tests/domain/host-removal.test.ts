@@ -4,7 +4,6 @@ import {
   failedAfterRemoval,
   HOST_SECRETS_POLICY,
   type HostRemoval,
-  lastHostRefusal,
   recordedKeysUnreadable,
   removalApplyFailed,
   removalConfigurationChanged,
@@ -15,11 +14,14 @@ import {
   removalUnwritten,
   withoutHost,
 } from "../../src/domain/host-removal";
-import type {
-  FactoryId,
-  FactoryInstance,
-  HostKey,
-  SecretReference,
+import {
+  assessCompleteness,
+  type FactoryId,
+  type FactoryInstance,
+  type HostKey,
+  parseFactoryInstance,
+  type SecretReference,
+  serializeInstance,
 } from "../../src/domain/instance";
 import type { PlanTarget, ResourceChange } from "../../src/domain/plan";
 import type { Release } from "../../src/domain/instance";
@@ -107,20 +109,41 @@ describe("removing one host from factory.json (worker-lifecycle §Terminate (rem
     expect(instance.hosts).toHaveLength(2);
   });
 
-  test("the only declared host is refused: a factory keeps a worker", () => {
-    const only: FactoryInstance = { schema_version: 1, hosts: [{ key: KEY }] };
-    expect(lastHostRefusal(only, KEY)).toEqual({
-      summary:
-        "builder-1 is the only host factory.json declares: a factory keeps at least one worker",
-      details: [],
-      nextAction:
-        "Declare its replacement in factory.json and create it with `fffactory apply` first, " +
-        "then rerun `fffactory worker terminate builder-1`; or keep the host with " +
-        "`fffactory worker terminate builder-1 --keep`, so the next apply creates it afresh.",
-    });
-    expect(
-      lastHostRefusal({ schema_version: 1, hosts: [{ key: KEY }, { key: "b" as HostKey }] }, KEY),
-    ).toBeUndefined();
+  test("the last host leaves an empty factory: valid, complete, its repositories still declared", () => {
+    const instance = {
+      schema_version: 1,
+      release: "0.3.0",
+      factory_id: "fff-abcd1234",
+      name: "Test factory",
+      aws: { account_id: "123456789012", region: "eu-west-2" },
+      state_backend: { bucket: "fff-abcd1234-state" },
+      network: {
+        vpc_cidr: "10.42.0.0/16",
+        public_subnet_cidr: "10.42.1.0/24",
+        availability_zone: "eu-west-2a",
+      },
+      tailscale: { tag: "tag:factory", auth_key_secret: AUTH },
+      repositories: [
+        { key: "product", remote: "https://github.com/yaunder/product", path: "p", branch: "main" },
+      ],
+      hosts: [
+        {
+          key: KEY,
+          instance_type: "t3.large",
+          root_volume_gib: 64,
+          paseo_password_secret: PASEO_1,
+          repositories: ["product"],
+          dispatch: { enabled: false },
+        },
+      ],
+    } as unknown as FactoryInstance;
+    const removed = withoutHost(instance, KEY);
+    // The host's placements and dispatch settings are its own entry's: they go with it.
+    expect(removed.hosts).toEqual([]);
+    expect(removed.repositories).toEqual(instance.repositories);
+    const parsed = parseFactoryInstance(JSON.parse(serializeInstance(removed)));
+    expect(parsed.valid).toBe(true);
+    expect(assessCompleteness(removed)).toEqual({ complete: true, missing: [] });
   });
 });
 

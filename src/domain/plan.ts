@@ -308,19 +308,24 @@ export function createdWorkers(
   return workers.filter(({ key }) => created.has(hostMachineAddress(key))).map(({ key }) => key);
 }
 
+/** The plan's line for a factory that declares no worker. */
+export const NO_WORKERS_DECLARED =
+  "Workers: none declared. Declare a host in factory.json's hosts, then apply to create it.";
+
 /**
  * The workers stage's changes, as the operator approves them. Each worker gets the release
  * and its host configuration and is verified, whatever it runs now: every step is
  * idempotent, so the stage depends only on factory.json and the release, which a saved plan
  * is bound to. Rerunning apply converges what remains. A worker whose machine is `stopped`
- * is skipped: apply never starts it.
+ * is skipped: apply never starts it. A factory that declares no worker, as once `fffactory
+ * worker terminate` removed its last, says so, and how to add one.
  */
 export function describeWorkers(
   workers: readonly PlannedWorker[],
   release: Release,
   stopped: readonly HostKey[] = [],
 ): string[] {
-  if (workers.length === 0) return [];
+  if (workers.length === 0) return [NO_WORKERS_DECLARED];
   return [
     "Worker changes, one worker at a time:",
     ...workers.map(({ key, hostname }) =>

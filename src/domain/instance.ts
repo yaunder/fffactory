@@ -363,8 +363,13 @@ const REQUIRED_FOR_COMPLETENESS: readonly (readonly [string, (i: FactoryInstance
 
 const REQUIRED_HOST_FIELDS = ["instance_type", "root_volume_gib"] as const;
 
+/**
+ * The host fields still needed: `hosts` itself while it is absent, then each declared host's
+ * machine and enabled dispatch fields. An empty list is complete: a factory may declare no
+ * worker, as when `fffactory worker terminate` removed its last one.
+ */
 function missingHostFields(hosts: readonly Host[] | undefined): string[] {
-  if (!hosts || hosts.length === 0) return ["hosts"];
+  if (!hosts) return ["hosts"];
   const dispatchFields = ["cron", "timezone", "provider", "model", "mode", "cwd"] as const;
   return hosts.flatMap((host, index) => [
     ...REQUIRED_HOST_FIELDS.filter((field) => host[field] === undefined).map((field) =>

@@ -109,16 +109,11 @@ variable "paseo_password_secret_arns" {
 }
 
 variable "hosts" {
-  description = "Stable hosts from factory.json, keyed by host key."
+  description = "Stable hosts from factory.json, keyed by host key. Empty for a factory with no worker: its shared infrastructure stays."
   type = map(object({
     instance_type   = string
     root_volume_gib = number
   }))
-
-  validation {
-    condition     = length(var.hosts) > 0
-    error_message = "Declare at least one host."
-  }
 
   validation {
     condition     = alltrue([for key in keys(var.hosts) : can(regex("^[a-z][a-z0-9]*(-[a-z0-9]+)*$", key)) && length(key) <= 32])

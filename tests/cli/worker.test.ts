@@ -956,15 +956,55 @@ describe("fffactory worker terminate (worker-lifecycle §Terminate (remove))", (
     );
   });
 
-  test("the only declared host is refused before anything reaches AWS", async () => {
+  test("the last host is removed, leaving an empty factory that validates, plans and reports as such", async () => {
     const both = withAdmin();
-    const cli = setup({ instance: { ...both, hosts: (both.hosts ?? []).slice(0, 1) } });
-    expect(await run(REMOVE(), cli.context)).toBe(1);
-    expect(cli.err[0]).toBe(
-      `Refusing to terminate the worker: ${KEY} is the only host factory.json declares: a ` +
-        "factory keeps at least one worker",
+    const cli = setup({
+      instance: { ...both, hosts: (both.hosts ?? []).slice(0, 1) },
+      provisioned: [KEY],
+    });
+    expect(await run(REMOVE(), cli.context)).toBe(0);
+    expect(cli.err).toEqual([]);
+    expect(cli.out).toContain(`factory.json no longer declares host ${KEY}: ${PATH}`);
+    const written = JSON.parse(cli.store.files[PATH] as string) as FactoryInstance;
+    expect(written.hosts).toEqual([]);
+    expect([...cli.terraform.world.hosts]).toEqual([]);
+    expect(cli.admin.calls).toEqual(["open", "devices", "remove nWorker1CNTRL"]);
+    expect(cli.lockStore.locks.size).toBe(0);
+
+    const after = (more: Partial<typeof cli.context> = {}) => {
+      cli.out.length = 0;
+      cli.err.length = 0;
+      return {
+        ...cli.context,
+        machines: fakeMachineInventory({ kind: "machines", machines: [] }).machines,
+        tailnet: fakeTailnet(peers()).tailnet,
+        ...more,
+      };
+    };
+    expect(await run(["validate"], after())).toBe(0);
+    expect(cli.out.at(-1)).toBe("Complete: nothing further is needed.");
+    expect(await run(["plan"], after())).toBe(0);
+    expect(cli.out).toContain("Infrastructure: no changes.");
+    expect(cli.out).toContain(
+      "Workers: none declared. Declare a host in factory.json's hosts, then apply to create it.",
     );
-    expect(cli.identity.requests).toEqual([]);
+    expect(await run(["status"], after())).toBe(0);
+    expect(cli.out.at(-1)).toBe("Ready: no workers are declared.");
+
+    // A replacement of another size is a plain create, never refused as a removed key.
+    cli.store.files[PATH] = JSON.stringify({
+      ...written,
+      hosts: [{ key: "builder-3", instance_type: "m7i.2xlarge", root_volume_gib: 128 }],
+    });
+    // Another plan ID than the first plan's, which is still saved.
+    const randomBytes = (count: number) => new Uint8Array(count).fill(1);
+    expect(await run(["plan"], after({ randomBytes }))).toBe(0);
+    expect(cli.out).toContain('  + module.hosts.aws_instance.host["builder-3"]');
+    expect(cli.out).toContain("  1 to add, 0 to change, 0 to destroy.");
+    const planned = cli.terraform.calls.filter((entry) => entry.call === "plan").at(-1);
+    expect(planned?.request.variables.hosts).toEqual({
+      "builder-3": { instance_type: "m7i.2xlarge", root_volume_gib: 128 },
+    });
   });
 
   test("interrupted while Terraform applies: factory.json still declares the host, and the rerun finishes", async () => {

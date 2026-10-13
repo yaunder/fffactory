@@ -35,7 +35,11 @@ function refusal(summary: string, nextAction: string, details: readonly string[]
 
 const rerun = (key: HostKey) => `\`${workerCommandLine("terminate", key)}\``;
 
-/** The instance without host `key`, by own entries; every other field and host as it was. */
+/**
+ * The instance without host `key`, by own entries; every other field and host as it was. The
+ * host's repository placements and dispatch settings are its own entry's, so they go with it;
+ * removing the last host leaves `hosts` an empty list, a complete factory with no worker.
+ */
 export function withoutHost(instance: FactoryInstance, key: HostKey): FactoryInstance {
   return Object.fromEntries(
     Object.entries(instance).map(([field, value]) =>
@@ -44,20 +48,6 @@ export function withoutHost(instance: FactoryInstance, key: HostKey): FactoryIns
         : [field, value],
     ),
   ) as unknown as FactoryInstance;
-}
-
-/**
- * Removing the only declared host is refused: a complete factory.json declares a worker, and
- * the factory's Terraform needs one.
- */
-export function lastHostRefusal(instance: FactoryInstance, key: HostKey): Refusal | undefined {
-  if ((instance.hosts ?? []).some((host) => host.key !== key)) return undefined;
-  return refusal(
-    `${key} is the only host factory.json declares: a factory keeps at least one worker`,
-    "Declare its replacement in factory.json and create it with `fffactory apply` first, then " +
-      `rerun ${rerun(key)}; or keep the host with \`${workerCommandLine("terminate-keep", key)}\`, ` +
-      "so the next apply creates it afresh.",
-  );
 }
 
 /**

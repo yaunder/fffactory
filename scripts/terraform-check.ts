@@ -12,7 +12,11 @@
  *    factory ID and no name of one factory's plans to appear in the other's;
  * 4. the user data check: every planned host's user data, rendered by Terraform's
  *    `templatefile`, must equal the rendering the bootstrap tests run
- *    (`tests/support/user-data.ts`), so those tests exercise what hosts boot with.
+ *    (`tests/support/user-data.ts`), so those tests exercise what hosts boot with;
+ * 5. the empty factory check: the factory root planned from the example without hosts, as
+ *    `fffactory worker terminate` leaves a factory whose last host it removed, plans no
+ *    instance and keeps the shared infrastructure, its hosts' policy allowing only the
+ *    Tailscale enrollment key.
  *
  * The plans run against no AWS account. An override file, added only to this script's copy
  * of the modules, keeps state local and gives the AWS provider documentation example keys,
@@ -103,13 +107,15 @@ ${endpoints}
 
 type RootModule = (typeof ROOT_MODULES)[number];
 
-async function exampleVariables(factoryId: FactoryId, root: RootModule) {
+/** The example's projection for `factoryId`, or, with `empty`, that of the example without hosts. */
+async function exampleVariables(factoryId: FactoryId, root: RootModule, empty = false) {
   const example = JSON.parse(await readFile(join(ROOT, "examples/factory.json"), "utf8"));
   const bucket = `${factoryId}-${example.state_backend.bucket.slice(example.factory_id.length + 1)}`;
   const parsed = parseFactoryInstance({
     ...example,
     factory_id: factoryId,
     state_backend: { bucket },
+    ...(empty ? { hosts: [] } : {}),
   });
   if (!parsed.valid) throw new Error("examples/factory.json is not a valid instance");
   const projection = project(root, parsed.instance);
@@ -135,15 +141,51 @@ type Json = Record<string, unknown>;
 const isJson = (value: unknown): value is Json =>
   typeof value === "object" && value !== null && !Array.isArray(value);
 
-/** The planned `aws_instance.host` resources of a plan's modules, depth first. */
-function plannedHosts(module: unknown): Json[] {
+/** The planned resources of a plan's modules of `type` named `name`, depth first. */
+function plannedResources(module: unknown, type: string, name: string): Json[] {
   if (!isJson(module)) return [];
   const own = (Array.isArray(module.resources) ? module.resources : []).filter(
     (resource): resource is Json =>
-      isJson(resource) && resource.type === "aws_instance" && resource.name === "host",
+      isJson(resource) && resource.type === type && resource.name === name,
   );
   const children = Array.isArray(module.child_modules) ? module.child_modules : [];
-  return [...own, ...children.flatMap(plannedHosts)];
+  return [...own, ...children.flatMap((child) => plannedResources(child, type, name))];
+}
+
+/** The planned `aws_instance.host` resources of a plan's modules, depth first. */
+function plannedHosts(module: unknown): Json[] {
+  return plannedResources(module, "aws_instance", "host");
+}
+
+/** The root module of a JSON plan's planned values. */
+function plannedRoot(json: unknown): unknown {
+  return isJson(json) && isJson(json.planned_values) ? json.planned_values.root_module : undefined;
+}
+
+/**
+ * What is wrong with the empty factory's plan: a host planned, the shared infrastructure
+ * missing, or a secret-reading policy allowing anything but the Tailscale enrollment key.
+ */
+function emptyFactoryProblems(json: unknown, variables: Record<string, unknown>): string[] {
+  const root = plannedRoot(json);
+  const problems: string[] = [];
+  if (plannedHosts(root).length > 0) problems.push("the plan holds a host");
+  for (const [type, name] of [
+    ["aws_vpc", "factory"],
+    ["aws_iam_role", "host"],
+    ["aws_iam_instance_profile", "host"],
+  ])
+    if (plannedResources(root, type as string, name as string).length !== 1)
+      problems.push(`the plan does not keep ${type}.${name}`);
+  const [policy] = plannedResources(root, "aws_iam_role_policy", "read_secrets");
+  const document = isJson(policy?.values) ? policy.values.policy : undefined;
+  const statements =
+    typeof document === "string" ? [JSON.parse(document).Statement].flat() : undefined;
+  const resources = statements?.flatMap((statement: Json) => [statement.Resource].flat());
+  const auth = variables.tailscale_auth_key_secret_arn;
+  if (resources === undefined || resources.length !== 1 || resources[0] !== auth)
+    problems.push("the hosts' policy does not allow exactly the Tailscale enrollment key");
+  return problems;
 }
 
 /** Every host whose planned user data differs from the bootstrap tests' rendering. */
@@ -151,8 +193,7 @@ function userDataProblems(plans: readonly Plan[]): string[] {
   return plans
     .filter((plan) => plan.root === "factory")
     .flatMap(({ factoryId, variables, json }) => {
-      const root = isJson(json) && isJson(json.planned_values) ? json.planned_values : {};
-      const hosts = plannedHosts(root.root_module);
+      const hosts = plannedHosts(plannedRoot(json));
       if (hosts.length === 0) return [`${factoryId}: the plan holds no hosts`];
       return hosts.flatMap((host) => {
         const values = isJson(host.values) ? host.values : {};
@@ -271,6 +312,35 @@ async function main(): Promise<number> {
       return 1;
     }
     console.log("user data: every planned host boots with the bootstrap tests' rendering");
+
+    const [factoryId] = FACTORY_IDS as [FactoryId];
+    const directory = join(tree, "factory");
+    const at = session(directory, `plan-factory-${factoryId}`);
+    const inputs = join(work, `factory-${factoryId}-empty.tfvars.json`);
+    const planFile = join(work, `factory-${factoryId}-empty.tfplan`);
+    const variables = await exampleVariables(factoryId, "factory", true);
+    await writeFile(inputs, JSON.stringify(variables), { mode: 0o600 });
+    await run(
+      at,
+      [
+        "plan",
+        "-input=false",
+        "-no-color",
+        "-refresh=false",
+        `-var-file=${inputs}`,
+        `-out=${planFile}`,
+      ],
+      timeout,
+    );
+    const { stdout } = await run(at, ["show", "-json", "-no-color", planFile], timeout);
+    const empty = emptyFactoryProblems(JSON.parse(stdout), { ...variables });
+    if (empty.length > 0) {
+      console.error(`Empty factory check failed:\n${empty.map((p) => `  ${p}`).join("\n")}`);
+      return 1;
+    }
+    console.log(
+      "empty factory: no host is planned; the network and host identity stay, its policy allowing only the enrollment key",
+    );
     return 0;
   } finally {
     server.stop(true);

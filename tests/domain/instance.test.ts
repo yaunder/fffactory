@@ -385,6 +385,18 @@ describe("assessCompleteness", () => {
     expect(assessCompleteness(parsed(document))).toEqual({ complete: true, missing: [] });
   });
 
+  test("an empty host list is complete: a factory may declare no worker", () => {
+    expect(assessCompleteness(parsed({ ...completeDocument(), hosts: [] }))).toEqual({
+      complete: true,
+      missing: [],
+    });
+  });
+
+  test("an absent host list is still needed: an empty one declares no worker on purpose", () => {
+    const { hosts: _hosts, ...document } = completeDocument();
+    expect(assessCompleteness(parsed(document))).toEqual({ complete: false, missing: ["hosts"] });
+  });
+
   test("lists machine fields missing from a declared host", () => {
     const document = { ...completeDocument(), hosts: [{ key: "a" }] };
     expect(assessCompleteness(parsed(document)).missing).toEqual([

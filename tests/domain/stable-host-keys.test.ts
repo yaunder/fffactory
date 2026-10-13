@@ -26,6 +26,15 @@ describe("stable host keys (provisioning §Stable host keys)", () => {
     expect(checkStableHostKeys(["a"], { schema_version: 1 })).toEqual([
       { path: "hosts", message: `host key "a" ${renamed("a")}` },
     ]);
+    expect(checkStableHostKeys(["a"], declaring())).toEqual([
+      { path: "hosts", message: `host key "a" ${renamed("a")}` },
+    ]);
+  });
+
+  test("an empty factory records and declares no key; a removed key may be declared again", () => {
+    expect(checkStableHostKeys([], declaring())).toEqual([]);
+    // Once terminate removed it, Terraform no longer records the key: declaring it again is new.
+    expect(checkStableHostKeys([], declaring("a"))).toEqual([]);
   });
 
   test("keeping every provisioned key and adding new ones is accepted", () => {

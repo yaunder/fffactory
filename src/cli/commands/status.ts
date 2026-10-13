@@ -101,7 +101,14 @@ function needsAttention(entry: { readonly status: WorkerState }): boolean {
   return entry.status !== "ready" && entry.status !== "stopped";
 }
 
+/** The workers section of a factory that declares none, as `worker terminate` can leave it. */
+const NO_WORKERS = [
+  "  none declared",
+  "  Next: Declare a host in factory.json's hosts, then create it with `fffactory apply`.",
+];
+
 function readyLine(workers: readonly WorkerStatus[]): string {
+  if (workers.length === 0) return `${RESULTS.ready}: no workers are declared.`;
   const stopped = workers.filter((worker) => worker.status === "stopped").length;
   if (stopped === 0) return `${RESULTS.ready}: all ${workers.length} workers are ready.`;
   const running = workers.length - stopped;
@@ -128,7 +135,7 @@ export function statusText(target: StatusTarget, report: StatusReport, release: 
     ...report.inventories.flatMap(checkLines),
     "",
     "Workers:",
-    ...(report.workers.length === 0 ? ["  none declared"] : report.workers.flatMap(workerLines)),
+    ...(report.workers.length === 0 ? NO_WORKERS : report.workers.flatMap(workerLines)),
     "",
     resultLine(report),
   ];
@@ -227,10 +234,13 @@ export const statusCommand: Command = {
     "A worker whose EC2 instance is stopped is shown as stopped, with the command",
     "that starts it, and is not connected to.",
     "",
-    "Exits 0 when every worker is ready on the pinned release or stopped, 2 when",
-    "something is missing, offline, drifting, unhealthy or pending, and 1 when",
-    "status itself failed: invalid arguments, an unusable factory.json, another AWS",
-    "account, or an inventory or worker it could not inspect.",
+    "A factory that declares no worker is reported as such, with how to add one.",
+    "",
+    "Exits 0 when every worker is ready on the pinned release or stopped, or none",
+    "is declared, 2 when something is missing, offline, drifting, unhealthy or",
+    "pending, and 1 when status itself failed: invalid arguments, an unusable",
+    "factory.json, another AWS account, or an inventory or worker it could not",
+    "inspect.",
   ],
   run: status,
   waitsOnInterrupt: true,

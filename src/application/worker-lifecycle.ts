@@ -41,7 +41,6 @@ import {
 import {
   describeRemovalPlan,
   failedAfterRemoval,
-  lastHostRefusal,
   recordedKeysUnreadable,
   removalApplyFailed,
   removalConfigurationChanged,
@@ -422,7 +421,6 @@ function localChecks(deps: WorkerLifecycleDependencies, request: WorkerLifecycle
       operation: undefined,
     };
   const removal = removalCheck(request, command, host.key);
-  if (removal.kind === "refused") return removal;
   return {
     kind: "checked",
     power: {
@@ -430,7 +428,7 @@ function localChecks(deps: WorkerLifecycleDependencies, request: WorkerLifecycle
       bucket: location.bucket,
       action: request.action,
       command,
-      removal: removal.removal,
+      removal,
       worker: { key: host.key, hostname: hostName(factoryId, host.key) },
       host,
       factoryId,
@@ -443,26 +441,19 @@ function localChecks(deps: WorkerLifecycleDependencies, request: WorkerLifecycle
 }
 
 /**
- * What terminate removing the host works from: factory.json as read and without the host. The
- * only declared host is refused: a factory keeps a worker.
+ * What terminate removing the host works from: factory.json as read and without the host, which
+ * may leave it declaring none.
  */
 function removalCheck(
   request: WorkerLifecycleRequest,
   command: WorkerCommand,
   key: HostKey,
-):
-  | { readonly kind: "removal"; readonly removal: HostRemovalPlan | undefined }
-  | Extract<WorkerPower, { readonly kind: "refused" }> {
-  if (!removesHost(command)) return { kind: "removal", removal: undefined };
-  const last = lastHostRefusal(request.instance, key);
-  if (last !== undefined) return { kind: "refused", refusal: last, operation: undefined };
+): HostRemovalPlan | undefined {
+  if (!removesHost(command)) return undefined;
   const { configuration } = request;
   if (configuration === undefined)
     throw new Error("terminate without --keep needs factory.json's path and text");
-  return {
-    kind: "removal",
-    removal: { configuration, remaining: withoutHost(request.instance, key) },
-  };
+  return { configuration, remaining: withoutHost(request.instance, key) };
 }
 
 async function powerWorker(

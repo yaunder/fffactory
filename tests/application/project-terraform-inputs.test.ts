@@ -89,6 +89,25 @@ describe("factory.json projected into the factory root module's variables", () =
     });
   });
 
+  test("an empty factory projects no hosts and no Paseo passwords: only the shared infrastructure", () => {
+    const projection = projectFactoryVariables(withHosts([]), []);
+    expect(projection).toEqual({
+      ok: true,
+      variables: expect.objectContaining({
+        tailscale_auth_key_secret_arn: TAILSCALE,
+        paseo_password_secret_arns: {},
+        hosts: {},
+      }),
+    });
+  });
+
+  test("an empty factory whose state still records a host is refused (D11)", () => {
+    expect(projectFactoryVariables(withHosts([]), ["builder-1"])).toEqual({
+      ok: false,
+      issues: [{ path: "hosts", message: expect.stringContaining('host key "builder-1"') }],
+    });
+  });
+
   test("an incomplete instance is refused with every missing field", () => {
     expect(
       projectFactoryVariables(instance({ schema_version: 1, factory_id: "example" }), []),

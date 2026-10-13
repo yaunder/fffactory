@@ -85,6 +85,41 @@ describe("fffactory status exit codes", () => {
     expect(out.at(-1)).toBe("Ready: all 2 workers are ready.");
   });
 
+  test("an empty factory exits 0, saying no worker is declared and how to add one", async () => {
+    const transport = ready();
+    const { context, out, err } = harness(
+      store({ hosts: [] }),
+      {},
+      {
+        machines: fakeMachineInventory({ kind: "machines", machines: [] }).machines,
+        tailnet: fakeTailnet(peers()).tailnet,
+        transport: transport.transport,
+      },
+    );
+    expect(await run(["status"], context)).toBe(0);
+    expect(err).toEqual([]);
+    expect(out.slice(-5)).toEqual([
+      "Workers:",
+      "  none declared",
+      "  Next: Declare a host in factory.json's hosts, then create it with `fffactory apply`.",
+      "",
+      "Ready: no workers are declared.",
+    ]);
+    expect(transport.calls).toEqual([]);
+    const json = harness(
+      store({ hosts: [] }),
+      {},
+      {
+        machines: fakeMachineInventory({ kind: "machines", machines: [] }).machines,
+        tailnet: fakeTailnet(peers()).tailnet,
+      },
+    );
+    expect(await run(["status", "--json"], json.context)).toBe(0);
+    const document = JSON.parse(json.out.join("\n"));
+    expect(document).toMatchObject({ status: "ready", workers: [] });
+    expect(schemaAccepts(document)).toBe(true);
+  });
+
   test("an offline worker exits 2 with an unknown release", async () => {
     const { context, out } = offlineScenario();
     expect(await run(["status"], context)).toBe(2);

@@ -47,6 +47,10 @@ function change(address: string, actions: string[], type?: string): ResourceChan
   return type === undefined ? { address, actions } : { address, type, actions };
 }
 
+/** The plan's line for a factory that declares no worker. */
+const NO_WORKERS =
+  "Workers: none declared. Declare a host in factory.json's hosts, then apply to create it.";
+
 describe("plan IDs", () => {
   test("are eight random lowercase letters or digits", () => {
     expect(newPlanId((count) => new Uint8Array(count))).toBe("aaaaaaaa");
@@ -136,6 +140,16 @@ describe("the plan's presentation", () => {
       "Infrastructure changes:",
       `  + ${HOST}`,
       "  1 to add, 0 to change, 0 to destroy.",
+      NO_WORKERS,
+    ]);
+  });
+
+  test("an empty factory's plan says it declares no worker, and how to add one", () => {
+    expect(describePlan(TARGET, [], [], { schema_version: 1, hosts: [] })).toEqual([
+      "Factory plan:",
+      ...describeTarget(TARGET),
+      "Infrastructure: no changes.",
+      NO_WORKERS,
     ]);
   });
 
@@ -152,7 +166,7 @@ describe("the plan's presentation", () => {
       "  ~ builder-1 (fff-abcd1234-builder-1): install release 0.3.0 and its host configuration, then verify it",
       "  ~ builder-2 (fff-abcd1234-builder-2): install release 0.3.0 and its host configuration, then verify it",
     ]);
-    expect(describeWorkers([], "0.3.0" as Release)).toEqual([]);
+    expect(describeWorkers([], "0.3.0" as Release)).toEqual([NO_WORKERS]);
     expect(
       describeRepositories(workers, {
         schema_version: 1,

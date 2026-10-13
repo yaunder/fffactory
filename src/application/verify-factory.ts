@@ -170,7 +170,7 @@ function verifyWorker(
 
 /**
  * The end-to-end verdict: every declared worker joined across the stages, and the factory total,
- * ready once every worker but the stopped ones is.
+ * ready once every worker but the stopped ones is, and so when it declares none.
  */
 export function verifyFactory(request: VerifyFactoryRequest): FactoryVerification {
   const repositories = byKey(request.repositories);
@@ -188,9 +188,11 @@ export function verifyFactory(request: VerifyFactoryRequest): FactoryVerificatio
   const notReady = workers.filter((worker) => !worker.ready).length - stopped;
   const ready = notReady === 0;
   const verified =
-    stopped === 0
-      ? "every worker is verified end to end"
-      : `every worker but the ${stopped} stopped is verified end to end`;
+    workers.length === 0
+      ? "it declares no workers"
+      : stopped === 0
+        ? "every worker is verified end to end"
+        : `every worker but the ${stopped} stopped is verified end to end`;
   return {
     ready,
     workers,
