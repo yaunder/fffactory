@@ -385,7 +385,12 @@ Last, it plans the factory root for `fff-aaaa1111` from the example without
 hosts, an empty factory ([plan-apply §An empty factory](plan-apply.md#an-empty-factory)):
 the plan must hold no instance, keep the VPC, the hosts' role and instance
 profile, and its secret-reading policy must allow exactly the Tailscale
-enrollment key. The plans reach no AWS account: an override file in the script's copy only keeps
+enrollment key. Then it checks terminate's scoped removal rule against
+Terraform's real removal plans
+([worker lifecycle §Terminate (remove)](worker-lifecycle.md#terminate-remove)):
+from local states synthesized from its own plans of the example with several
+hosts and with one, it plans each removal with `-refresh=false` and judges
+the JSON plan with `removalPlanRefusal`. The plans reach no AWS account: an override file in the script's copy only keeps
 state local, gives the provider AWS's documentation example keys, skips its
 account and credential checks, and points every endpoint at a local
 stand-in that answers only the image parameter lookup.
@@ -817,7 +822,8 @@ factory IDs sharing no name) and `tests/assets/terraform/guardrails.test.ts`
 the required provider version, each projection matches its root module's
 variables, and no validation of the `hosts` variable requires a host).
 `scripts/terraform-check.ts` runs the modules' `fmt`, `validate`, namespacing
-plans and the empty factory's plan with the managed Terraform in CI.
+plans, the empty factory's plan and the removal plans with the managed
+Terraform in CI.
 First apply and lock: `tests/domain/backend-bootstrap.test.ts` (resource
 changes read, unreadable plans, the create-only rule, the presentation; the
 readiness rule, the TLS-only policy check, the unready bucket's refusal and

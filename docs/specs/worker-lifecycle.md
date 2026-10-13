@@ -296,6 +296,27 @@ The removal, under the same lock and record:
    ```
 
    A plan that cannot be read is refused too.
+
+   The rule is checked against Terraform's own removal plans, not only
+   hand-written JSON: `scripts/terraform-check.ts` (CI's `Terraform modules`
+   job) plans removals with the managed Terraform and the shipped modules from
+   isolated fixtures, reaching no AWS account and reading no factory state. A
+   fixture's state is synthesized from Terraform's own plans of the example
+   with several hosts (two with their own Paseo passwords, one without, one
+   sharing another's) or with one: each resource as planned, its values unknown
+   until apply filled with fake but well-formed IDs and ARNs, until Terraform
+   plans no change for it. Each removal is planned as step 1 plans it (the
+   recorded keys from the state's outputs, factory.json without the host
+   projected, `plan -detailed-exitcode` with the state lock, though with
+   `-refresh=false`, and the plan read back with `showPlan`), and the real
+   JSON plan judged by `removalPlanRefusal`. Removing a host with its own
+   password plans exactly the instance's `delete` and the policy's in-place
+   `update`, the policy then allowing the enrollment key and the remaining
+   hosts' passwords; removing one without a password, or sharing one, only the
+   `delete`; removing the last host leaves the policy allowing only the
+   enrollment key. Each is allowed. Refused: the same plan judged with another
+   instance listed, or none, and removals planned together with another host's
+   instance type or the subnet's CIDR block changed.
 3. Show the plan, reusing the plan review's words:
 
    ```text
@@ -885,6 +906,12 @@ actions and an unreadable plan fail closed; a plan that does not destroy the
 machine EC2 lists, or destroys one it does not; the policy update dropping
 exactly the removed Paseo password and any other policy change refused; the
 plan as shown; the failures' words);
+`scripts/terraform-check.ts` with `scripts/terraform-removal-check.ts` and
+`scripts/terraform-state-fixture.ts` (the rule against Terraform's real
+removal plans from synthesized fixture states: a host with its own password,
+without one, sharing one, and the last host allowed, each plan exactly the
+removal's changes; another instance listed, none listed, and another host's or
+the network's change planned together refused);
 `tests/application/worker-lifecycle.test.ts` (a removal recorded step by step,
 its plan file removed, factory.json written by `InstanceStore`; afterwards the
 infrastructure plan shows no change and status no longer lists the host;

@@ -16,14 +16,19 @@
  * 5. the empty factory check: the factory root planned from the example without hosts, as
  *    `fffactory worker terminate` leaves a factory whose last host it removed, plans no
  *    instance and keeps the shared infrastructure, its hosts' policy allowing only the
- *    Tailscale enrollment key.
+ *    Tailscale enrollment key;
+ * 6. the removal plan check (`terraform-removal-check.ts`): `worker terminate`'s scoped
+ *    removal rule, `removalPlanRefusal`, judges Terraform's real removal plans, each planned
+ *    from a local state for several hosts or one that `terraform-state-fixture.ts`
+ *    synthesizes from Terraform's own plans, with no AWS account and no factory state.
  *
  * The plans run against no AWS account. An override file, added only to this script's copy
  * of the modules, keeps state local and gives the AWS provider documentation example keys,
  * skips its account and credential checks, and points every endpoint it could call at a
  * local stand-in that answers only the Amazon Linux image parameter lookup. Downloads the
  * managed Terraform (into the FFFactory cache) and the AWS provider when they are not cached.
- * Spec: docs/specs/provisioning.md §Resources and namespacing.
+ * Spec: docs/specs/provisioning.md §Resources and namespacing; the removal plans,
+ * docs/specs/worker-lifecycle.md §Terminate (remove).
  */
 import { cp, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
@@ -37,7 +42,10 @@ import {
 import { type FactoryId, type FactoryInstance, parseFactoryInstance } from "../src/domain/instance";
 import { SUPPORTED_TERRAFORM } from "../src/domain/managed-terraform";
 import { managedTerraform } from "../src/infrastructure/terraform/installer";
-import { CLI_CONFIGURATION } from "../src/infrastructure/terraform/provisioner";
+import {
+  CLI_CONFIGURATION,
+  terraformProvisioner,
+} from "../src/infrastructure/terraform/provisioner";
 import {
   namespaceProblems,
   plannedNames,
@@ -45,6 +53,8 @@ import {
 } from "../src/infrastructure/terraform/resource-names";
 import { type TerraformSession, terraformRunner } from "../src/infrastructure/terraform/runner";
 import { renderUserData } from "../tests/support/user-data";
+import { removalPlanProblems } from "./terraform-removal-check";
+import { resourceSchemas } from "./terraform-state-fixture";
 
 const ROOT = resolve(import.meta.dir, "..");
 const ROOT_MODULES = ["factory", "backend"] as const;
@@ -82,11 +92,14 @@ function standIn() {
   });
 }
 
-function override(endpoint: string): string {
+/** The override of the check's copy; its local state at `statePath` when given. */
+function override(endpoint: string, statePath?: string): string {
   const endpoints = ENDPOINTS.map((service) => `    ${service} = "${endpoint}"`).join("\n");
+  const backend =
+    statePath === undefined ? "{}" : `{\n    path = ${JSON.stringify(statePath)}\n  }`;
   return `# Written by scripts/terraform-check.ts into its own copy; never shipped.
 terraform {
-  backend "local" {}
+  backend "local" ${backend}
 }
 
 provider "aws" {
@@ -229,6 +242,50 @@ function namespacingProblems(plans: readonly Plan[]): string[] {
   return problems;
 }
 
+/**
+ * The removal plan check (`terraform-removal-check.ts`) in a copy of its own, whose factory
+ * root keeps its synthesized state locally; true when every case holds.
+ */
+async function removalCheck(
+  work: string,
+  endpoint: string,
+  session: (directory: string, data: string) => TerraformSession,
+  cache: string,
+): Promise<boolean> {
+  const tree = join(work, "removal-terraform");
+  const statePath = join(work, "removal.tfstate");
+  await cp(join(ROOT, "assets/terraform"), tree, { recursive: true });
+  await writeFile(join(tree, "factory/fffactory_check_override.tf"), override(endpoint, statePath));
+  const at = session(join(tree, "factory"), "removal");
+  await run(at, ["init", "-input=false", "-no-color", "-lockfile=readonly"], {
+    timeoutMs: 10 * MINUTES,
+  });
+  const example = JSON.parse(await readFile(join(ROOT, "examples/factory.json"), "utf8"));
+  const { report, problems } = await removalPlanProblems({
+    run,
+    provisioner: terraformProvisioner({
+      cacheDirectory: cache,
+      terraform: managedTerraform(),
+      run,
+    }),
+    tree,
+    statePath,
+    session: at,
+    work,
+    fixture: {
+      schemas: await resourceSchemas(run, at),
+      accountId: example.aws.account_id,
+      region: example.aws.region,
+    },
+    example,
+    factoryId: FACTORY_IDS[0] as FactoryId,
+  });
+  for (const line of report) console.log(line);
+  if (problems.length === 0) return true;
+  console.error(`Removal plan check failed:\n${problems.map((p) => `  ${p}`).join("\n")}`);
+  return false;
+}
+
 async function main(): Promise<number> {
   const cache = cacheDirectoryPath(process.env, homedir());
   const executable = await managedTerraform().install(cache);
@@ -340,6 +397,10 @@ async function main(): Promise<number> {
     }
     console.log(
       "empty factory: no host is planned; the network and host identity stay, its policy allowing only the enrollment key",
+    );
+    if (!(await removalCheck(work, `http://127.0.0.1:${server.port}`, session, cache))) return 1;
+    console.log(
+      "removal plans: Terraform's plans of each removal are exactly the removal's, and removalPlanRefusal allows and refuses them as fffactory must",
     );
     return 0;
   } finally {

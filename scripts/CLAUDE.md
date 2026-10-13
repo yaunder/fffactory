@@ -16,6 +16,15 @@
   bootstrap tests use (`tests/support/user-data.ts`), and plans the factory root without
   hosts, an empty factory: no instance, the shared infrastructure kept, the hosts' policy
   allowing only the Tailscale enrollment key.
+- `terraform-check.ts` last checks `worker terminate`'s scoped removal rule against real
+  Terraform removal plans (`terraform-removal-check.ts`): states for several hosts and for
+  one, synthesized offline by `terraform-state-fixture.ts` (each `-refresh=false` plan's
+  resources written into a local state, unknown values filled with fake but well-formed IDs,
+  until Terraform plans no resource change; that last plan, changing only outputs, applied
+  with no API call), each removal planned as fffactory plans it but with `-refresh=false`,
+  its JSON judged by `removalPlanRefusal`. Its provisioner calls (`showPlan`, `output`) run in the
+  FFFactory cache, as fffactory's do. Add a case there whenever the rule or the modules
+  change what a removal plans.
 - `repository-skills.sh` (`just repository-skills`, part of `check-all`, and CI's
   "Factory code validation" job in `.github/workflows/repository-checks.yml`) checks the
   absence of checkout-local repository skills, AGENTS.md's capability routing and the
