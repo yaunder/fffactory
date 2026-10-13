@@ -17,7 +17,11 @@ import {
 } from "node:fs/promises";
 import { join } from "node:path";
 import { HOST_PROTOCOL_VERSION } from "../../src/domain/protocol-fields";
-import type { RepositoryWork, WorktreeWork } from "../../src/domain/work-inspection";
+import {
+  type RepositoryWork,
+  type WorktreeWork,
+  workFindings,
+} from "../../src/domain/work-inspection";
 import type { ApplySystem } from "../../src/host/apply";
 import { WORK_BUDGET_MS, workerWork } from "../../src/host/work";
 import { AS_FACTORY, CHECKOUT, type GitWorld, gitWorld, PASEO } from "./work-scenarios";
@@ -229,6 +233,69 @@ describe("host work inspect (host-protocol §work inspect)", () => {
     );
   });
 
+  /**
+   * The stale registration: `a` added a worktree at `b`, `b` was removed without `git worktree
+   * prune`, and an independent clone made there, with a branch commit pushed nowhere and a stash
+   * entry. Git does not mark `a`'s entry prunable, since `b/.git` exists.
+   */
+  async function staleRegistration(b: string): Promise<string> {
+    const a = await checkout("/workspace/repos/a");
+    await mkdir(join(b, ".."), { recursive: true });
+    git(a, "worktree", "add", "--quiet", "-b", "old", b, "origin/main");
+    await rm(b, { recursive: true, force: true });
+    git(outside, "clone", "--quiet", origin, b);
+    git(b, "switch", "--quiet", "-c", "feature");
+    await writeFile(join(b, "feature.txt"), "feature\n");
+    git(b, "add", "feature.txt");
+    git(b, "commit", "--quiet", "-m", "feature");
+    git(b, "switch", "--quiet", "main");
+    await writeFile(join(b, "README.md"), "stashed\n");
+    git(b, "stash", "--quiet");
+    expect(git(a, "worktree", "list", "--porcelain")).not.toContain("prunable");
+    return a;
+  }
+
+  test("a stale worktree registration never hides an independent clone at its path", async () => {
+    await staleRegistration(at("/workspace/repos/b"));
+    const result = await inspect();
+    expect(result.complete).toBe(true);
+    expect(result.repositories).toEqual([
+      repository({
+        path: "/workspace/repos/a",
+        worktrees: [
+          clean("/workspace/repos/a"),
+          clean("/workspace/repos/b", { branch: "old", state: "unreadable" }),
+        ],
+      }),
+      repository({
+        path: "/workspace/repos/b",
+        unpushed_commits: 1,
+        unpushed_branches: ["feature"],
+        stashes: 1,
+        worktrees: [clean("/workspace/repos/b")],
+      }),
+    ]);
+    expect(workFindings(result, ["a", "b"]).unresolved).toEqual([
+      "/workspace/repos/b: 1 commit on local branches not on any remote (feature)",
+      "/workspace/repos/b: 1 stash entry",
+    ]);
+  });
+
+  test("a stale worktree registration of a clone outside the roots never reads as clean", async () => {
+    const b = join(outside, "b");
+    await staleRegistration(b);
+    const result = await inspect();
+    expect(result.repositories).toEqual([
+      repository({
+        path: "/workspace/repos/a",
+        worktrees: [clean("/workspace/repos/a"), clean(b, { branch: "old", state: "unreadable" })],
+      }),
+    ]);
+    expect(workFindings(result, ["a"]).uninspected).toEqual([
+      `${b} (branch old): could not be read`,
+    ]);
+  });
+
   test("a repository with no remote at all has every commit unpushed", async () => {
     const directory = at("/workspace/repos/local/only");
     await mkdir(directory, { recursive: true });
@@ -303,6 +370,20 @@ describe("host work inspect (host-protocol §work inspect)", () => {
     world = await gitWorld();
     await checkout(`${PASEO}/a/b/c/d`);
     expect((await inspect()).complete).toBe(false);
+  });
+
+  test("a bare repository under the roots leaves it incomplete: commits pushed only there are not safe", async () => {
+    const mirror = at("/workspace/repos/acme/mirror.git");
+    await mkdir(join(mirror, ".."), { recursive: true });
+    git(outside, "clone", "--quiet", "--bare", origin, mirror);
+    const directory = await checkout();
+    git(directory, "remote", "set-url", "origin", mirror);
+    await writeFile(join(directory, "README.md"), "pushed to the mirror\n");
+    git(directory, "commit", "--quiet", "-am", "mirrored");
+    git(directory, "push", "--quiet", "origin", "main");
+    const result = await inspect();
+    expect(result.complete).toBe(false);
+    expect(result.repositories).toEqual([repository()]);
   });
 
   test("a directory at the depth limit without subdirectories leaves it complete", async () => {

@@ -10,7 +10,7 @@
  */
 import type { Dirent } from "node:fs";
 import { lstat, readdir, realpath } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { HOST_PROTOCOL_VERSION, TOKEN } from "../domain/protocol-fields";
 import { RUNTIME_ACCOUNT } from "../domain/readiness";
 import {
@@ -137,8 +137,8 @@ class Inspection {
  * worktree, below which nothing is looked for. Symbolic links are never followed. A root that
  * does not exist holds none; any other directory that cannot be read, even one gone since its
  * parent listed it (a name that is not UTF-8 reads back as another), or one at the depth limit
- * that is no working tree but holds directories, which could hold one, leaves the inspection
- * incomplete.
+ * that is no working tree but holds directories, which could hold one, or a bare repository,
+ * leaves the inspection incomplete.
  */
 async function workingTrees(
   directory: string,
@@ -154,6 +154,10 @@ async function workingTrees(
     return [];
   }
   if (entries.some((entry) => entry.name === ".git")) return [directory];
+  if (bare(entries)) {
+    inspection.complete = false;
+    return [];
+  }
   const names = entries
     .filter((entry) => entry.isDirectory())
     .map((entry) => entry.name)
@@ -166,6 +170,21 @@ async function workingTrees(
   for (const name of names)
     found.push(...(await workingTrees(join(directory, name), depth - 1, inspection, false)));
   return found;
+}
+
+/**
+ * Whether a directory's entries look like a bare repository's (`HEAD`, `objects/`, `refs/`). It
+ * is not inspected: a clone whose remote it is would count commits pushed only there as safe.
+ */
+function bare(entries: readonly Dirent[]): boolean {
+  const named = (name: string) => entries.find((entry) => entry.name === name);
+  const head = named("HEAD");
+  return (
+    head !== undefined &&
+    !head.isDirectory() &&
+    named("objects")?.isDirectory() === true &&
+    named("refs")?.isDirectory() === true
+  );
 }
 
 function parseWorktrees(output: string): ListedWorktree[] {
@@ -237,12 +256,28 @@ async function unpushedFrom(
   return inspection.count(directory, ["rev-list", "--count", head, "--not", "--remotes"]);
 }
 
+/** One worktree's work, and whether its Git directory is the repository's own. */
+interface Examined {
+  readonly work: WorktreeWork;
+  readonly owned: boolean;
+}
+
+/**
+ * Whether `gitDirectory` (real) is the repository's: its common directory `common` (real), or a
+ * linked worktree's directory in its `worktrees/`. A path Git still lists after the worktree was
+ * removed without `git worktree prune`, where another repository has since been made, is not.
+ */
+function ownedBy(common: string, gitDirectory: string): boolean {
+  return gitDirectory === common || dirname(gitDirectory) === join(common, "worktrees");
+}
+
 async function worktreeWork(
   inspection: Inspection,
   repository: string,
+  common: string,
   listed: ListedWorktree,
   roots: readonly string[],
-): Promise<WorktreeWork> {
+): Promise<Examined> {
   const branchName = listed.branch?.startsWith("refs/heads/")
     ? listed.branch.slice("refs/heads/".length)
     : undefined;
@@ -251,24 +286,36 @@ async function worktreeWork(
     branch: branchName === undefined ? null : printableBranch(branchName),
   };
   const unpushed = await unpushedFrom(inspection, repository, listed.head);
-  const unreadable = (): WorktreeWork => ({
-    ...base,
-    state: "unreadable",
-    tracked_changes: 0,
-    untracked_files: 0,
-    unpushed_commits: unpushed ?? 0,
-    operation: null,
+  const unreadable = (): Examined => ({
+    work: {
+      ...base,
+      state: "unreadable",
+      tracked_changes: 0,
+      untracked_files: 0,
+      unpushed_commits: unpushed ?? 0,
+      operation: null,
+    },
+    owned: false,
   });
   if (unpushed === undefined) return unreadable();
   if (listed.prunable || !(await exists(listed.path)))
     return {
-      ...base,
-      state: "missing",
-      tracked_changes: 0,
-      untracked_files: 0,
-      unpushed_commits: unpushed,
-      operation: null,
+      work: {
+        ...base,
+        state: "missing",
+        tracked_changes: 0,
+        untracked_files: 0,
+        unpushed_commits: unpushed,
+        operation: null,
+      },
+      owned: false,
     };
+  const gitDirectory = (
+    await inspection.git(listed.path, ["rev-parse", "--absolute-git-dir"])
+  )?.trim();
+  if (gitDirectory === undefined || gitDirectory === "") return unreadable();
+  // Another repository at a path this one still lists: what is there is not this worktree.
+  if (!ownedBy(common, await realOrSelf(gitDirectory))) return unreadable();
   const status = await inspection.git(listed.path, [
     "status",
     "--porcelain=v2",
@@ -276,19 +323,18 @@ async function worktreeWork(
     "--ignore-submodules=none",
     "-z",
   ]);
-  const gitDirectory = (
-    await inspection.git(listed.path, ["rev-parse", "--absolute-git-dir"])
-  )?.trim();
-  if (status === undefined || gitDirectory === undefined || gitDirectory === "")
-    return unreadable();
+  if (status === undefined) return { ...unreadable(), owned: true };
   const { tracked, untracked } = statusCounts(status);
   return {
-    ...base,
-    state: "inspected",
-    tracked_changes: tracked,
-    untracked_files: untracked,
-    unpushed_commits: unpushed,
-    operation: await operationIn(gitDirectory),
+    work: {
+      ...base,
+      state: "inspected",
+      tracked_changes: tracked,
+      untracked_files: untracked,
+      unpushed_commits: unpushed,
+      operation: await operationIn(gitDirectory),
+    },
+    owned: true,
   };
 }
 
@@ -417,7 +463,17 @@ async function listing(inspection: Inspection, tree: string) {
   return real.includes(await realOrSelf(tree)) ? { listed, real } : undefined;
 }
 
-/** The repository `tree` belongs to, marking every worktree it lists as `covered`. */
+/** The repository's common Git directory, real, as Git finds it from `tree`, or undefined. */
+async function commonDirectory(inspection: Inspection, tree: string): Promise<string | undefined> {
+  const output = (await inspection.git(tree, ["rev-parse", "--git-common-dir"]))?.trim();
+  return output === undefined || output === "" ? undefined : realOrSelf(resolve(tree, output));
+}
+
+/**
+ * The repository `tree` belongs to, marking as `covered` the tree and every worktree it lists
+ * whose Git directory is its own: any other path it lists is left to be found, and inspected,
+ * as the repository it is.
+ */
 async function repositoryAt(
   inspection: Inspection,
   tree: string,
@@ -425,20 +481,37 @@ async function repositoryAt(
   covered: Set<string>,
 ): Promise<RepositoryWork> {
   const path = inspection.shown(tree, roots);
+  covered.add(await realOrSelf(tree));
   const found = await listing(inspection, tree);
   if (found === undefined) return unreadableRepository(path);
-  for (const real of found.real) covered.add(real);
-  const common = await shared(inspection, tree);
-  if (common === undefined) return unreadableRepository(path);
+  const common = await commonDirectory(inspection, tree);
+  const sharedWork = common === undefined ? undefined : await shared(inspection, tree);
+  if (common === undefined || sharedWork === undefined) return unreadableRepository(path);
+  const worktrees = await listedWork(inspection, tree, common, found, roots, covered);
+  return { path, state: "inspected", ...sharedWork, worktrees };
+}
+
+/** Each worktree listed but a bare entry, marking those it owns as `covered`. */
+async function listedWork(
+  inspection: Inspection,
+  tree: string,
+  common: string,
+  found: { readonly listed: readonly ListedWorktree[]; readonly real: readonly string[] },
+  roots: readonly string[],
+  covered: Set<string>,
+): Promise<WorktreeWork[]> {
   const worktrees: WorktreeWork[] = [];
-  for (const worktree of found.listed.filter((entry) => !entry.bare)) {
+  for (const [index, worktree] of found.listed.entries()) {
+    if (worktree.bare) continue;
     if (worktrees.length === WORK_LIMITS.worktrees) {
       inspection.complete = false;
       break;
     }
-    worktrees.push(await worktreeWork(inspection, tree, worktree, roots));
+    const { work, owned } = await worktreeWork(inspection, tree, common, worktree, roots);
+    if (owned) covered.add(found.real[index] ?? worktree.path);
+    worktrees.push(work);
   }
-  return { path, state: "inspected", ...common, worktrees };
+  return worktrees;
 }
 
 async function inspectWork(system: ApplySystem): Promise<WorkInspection> {

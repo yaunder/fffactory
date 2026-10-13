@@ -556,12 +556,16 @@ account `factory`, which owns the checkouts.
    `sync-repositories.sh` refuses a symlinked repository root. A directory at
    the depth limit that is no working tree but holds directories is not
    searched further: a checkout could be below it (factory.json places
-   checkouts at any depth). Either leaves the inspection incomplete, never
-   reads as no work.
-2. **Repositories.** For each working tree not already listed by an earlier
+   checkouts at any depth). A directory that is no working tree but looks
+   like a bare repository (`HEAD`, `objects/` and `refs/`) is not inspected,
+   nor searched: a clone whose remote it is would count commits pushed only
+   there as on a remote, though they are lost with the worker. Any of these
+   leaves the inspection incomplete, never reads as no work.
+2. **Repositories.** For each working tree not already covered by an earlier
    repository, `git worktree list --porcelain -z` names its repository's
    worktrees, wherever they are; an answer that does not list the tree itself
-   (Git found a repository in a parent directory) makes it unreadable. Then,
+   (Git found a repository in a parent directory) makes it unreadable. `git
+   rev-parse --git-common-dir` names the repository's own Git directory. Then,
    once per repository: `git rev-list --count --branches --not --remotes`
    (commits on local branches that no remote-tracking branch holds); when there
    are some, at most 10,000, `git rev-list --branches --not --remotes` and
@@ -570,12 +574,18 @@ account `factory`, which owns the checkouts.
 3. **Worktrees.** For each worktree the repository lists (a bare entry
    skipped): commits reachable from its HEAD that no remote-tracking branch
    holds (`git rev-list --count HEAD_ID --not --remotes`); then, unless Git
-   marks it prunable or its directory is gone (`missing`), `git status
+   marks it prunable or its directory is gone (`missing`), its own Git
+   directory (`git rev-parse --absolute-git-dir`), which must be the
+   repository's Git directory or one in its `worktrees/`. Git still lists a
+   worktree removed without `git worktree prune` when another repository has
+   since been made at its path, and does not mark it prunable; such an entry
+   is `unreadable` (only its recorded HEAD counted), and that path is not
+   covered by this repository: found under a search root, it is inspected as
+   the repository it is. Every other worktree is covered. Then `git status
    --porcelain=v2 --untracked-files=normal --ignore-submodules=none -z`, counted
    as tracked changes (`1`, `2`, `u` entries) and untracked files (`?`), and
-   whether its own Git directory (`git rev-parse --absolute-git-dir`) holds
-   `MERGE_HEAD`, `rebase-merge`, `rebase-apply`, `CHERRY_PICK_HEAD` or
-   `REVERT_HEAD`.
+   whether that Git directory holds `MERGE_HEAD`, `rebase-merge`,
+   `rebase-apply`, `CHERRY_PICK_HEAD` or `REVERT_HEAD`.
 
 Every Git command runs as `/usr/sbin/runuser -u factory -- /usr/bin/env -i
 HOME=/home/factory PATH=/usr/local/bin:/usr/bin:/bin LANG=C LC_ALL=C
@@ -599,8 +609,9 @@ that owns the repository and whose configuration defines it: no more trust
 than the runtime account already has. No file's content or name reaches the
 document, only counts. It starts no Git command after 75 s, nor inspects more
 than 100 repositories or 100 worktrees of one; any of these, a directory it
-could not list, a search root reached through a symbolic link, or a directory at
-the depth limit that holds directories, leaves it `complete: false`.
+could not list, a search root reached through a symbolic link, a directory at
+the depth limit that holds directories, or a bare repository, leaves it
+`complete: false`.
 
 ### Document, protocol version 1
 
@@ -634,14 +645,14 @@ the depth limit that holds directories, leaves it `complete: false`.
 
 | Field | Values |
 | --- | --- |
-| `complete` | `false` when the worker ran out of time or limits, could not list a directory, found a search root reached through a symbolic link, or a directory at the depth limit holding directories. |
+| `complete` | `false` when the worker ran out of time or limits, could not list a directory, found a search root reached through a symbolic link, a directory at the depth limit holding directories, or a bare repository. |
 | `repositories[].path`, `worktrees[].path` | The working tree's absolute path, or `null` when it is not printable ASCII of at most 256 characters. A repository's is the working tree it was found through. |
 | `repositories[].state` | `inspected`, or `unreadable`: Git could not read it (its counts 0, no worktrees). |
 | `unpushed_commits` | A repository's: on any local branch; a worktree's: from its HEAD. Commits no remote-tracking branch holds. |
 | `unpushed_branches` | Local branches carrying such commits, at most 10, printable names only. |
 | `stashes` | Stash entries. |
 | `worktrees[].branch` | The branch checked out there, or `null`: a detached HEAD, or a name that is not printable ASCII without blanks of at most 200 characters. |
-| `worktrees[].state` | `inspected`, `missing` (listed by Git, its directory gone: only its commits are counted) or `unreadable`. |
+| `worktrees[].state` | `inspected`, `missing` (listed by Git, its directory gone: only its commits are counted) or `unreadable` (Git could not report on it, or another repository is at its path). |
 | `tracked_changes`, `untracked_files` | Counts, 0 unless `inspected`. Ignored files are not counted. |
 | `operation` | `merge`, `rebase`, `cherry_pick`, `revert`, or `null`. |
 
@@ -751,7 +762,9 @@ classification), `tests/infrastructure/tailscale-peers.test.ts`,
 `tests/cli/host.test.ts`, `tests/cli/status-executable.test.ts`,
 `tests/host/work.test.ts` (`host work inspect` over real Git repositories in a
 temporary worker: each kind of work, ignored files, missing and unreadable
-worktrees, nothing written, the time budget; `tests/host/work-scenarios.ts`),
+worktrees, a stale worktree registration over an independent clone inside and
+outside the roots, a bare repository, nothing written, the time budget;
+`tests/host/work-scenarios.ts`),
 `tests/host/protocol-contract.test.ts`'s `work-unresolved.json` (the worker
 produces it byte for byte from real Git, the CLI reads it back over the
 transport), `tests/domain/work-inspection.test.ts`,
