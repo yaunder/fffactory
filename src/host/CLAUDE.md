@@ -39,10 +39,12 @@ over SSH as `fffactory-admin` (`docs/specs/host-protocol.md`). Rules:
   repository and Paseo commands. Inspection checks the schedule before reporting active.
 - `host work inspect` runs only through the activator's fixed `work inspect` operation and
   shares that lock. It lists directories as root but runs every Git command as `factory`
-  (`runuser`, `env -i`) with `GIT_OPTIONAL_LOCKS=0` and no fsmonitor, so it writes no index,
-  lock or ref and never fetches. Its document carries counts and printable paths and branch
-  names only (`printablePath`, `printableBranch`), never a file's name or content. It bounds
-  itself (`WORK_BUDGET_MS`, `WORK_LIMITS`) and says `complete: false` rather than guess.
+  (`runuser`, `env -i`) with `GIT_OPTIONAL_LOCKS=0`, no fsmonitor and no LFS filter, so it
+  writes no index, lock, ref or LFS object and never fetches. Its document carries counts and
+  printable paths and branch names only (`printablePath`, `printableBranch`), never a file's
+  name or content. It bounds itself (`WORK_BUDGET_MS`, `WORK_LIMITS`, its search depth) and
+  says `complete: false` rather than guess: a search root reached through a symbolic link, or
+  a directory at the depth limit holding directories, is incomplete, never no work.
 - A step's output goes only to its log under `WORKER_PATHS.logs`, written by the step itself as
   it runs (`ProcessOptions.output`), never collected and written afterwards; a verifier's tool
   output goes nowhere. Documents carry fffactory's own words and states, never a tool's output.

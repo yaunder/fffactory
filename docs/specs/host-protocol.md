@@ -550,7 +550,14 @@ account `factory`, which owns the checkouts.
    `/home/factory/.paseo/worktrees`, where Paseo creates its worktrees
    ([SDLC §Worktree ownership](../../SDLC.md#worktree-ownership)), at most 3
    levels down; nothing below a working tree, and no symbolic link, is
-   followed. Directories are listed as root, without reading any file.
+   followed. Directories are listed as root, without reading any file. A
+   search root reached through a symbolic link (the root itself or any
+   directory above it, such as `/home/factory/.paseo`) is not searched, as
+   `sync-repositories.sh` refuses a symlinked repository root. A directory at
+   the depth limit that is no working tree but holds directories is not
+   searched further: a checkout could be below it (factory.json places
+   checkouts at any depth). Either leaves the inspection incomplete, never
+   reads as no work.
 2. **Repositories.** For each working tree not already listed by an earlier
    repository, `git worktree list --porcelain -z` names its repository's
    worktrees, wherever they are; an answer that does not list the tree itself
@@ -573,13 +580,27 @@ account `factory`, which owns the checkouts.
 Every Git command runs as `/usr/sbin/runuser -u factory -- /usr/bin/env -i
 HOME=/home/factory PATH=/usr/local/bin:/usr/bin:/bin LANG=C LC_ALL=C
 GIT_OPTIONAL_LOCKS=0 GIT_TERMINAL_PROMPT=0 git --no-pager -c
-core.fsmonitor=false -C DIRECTORY ...`, each within 20 s. It changes nothing:
-optional locks off, `git status` neither refreshes nor writes the index and
-takes no lock file; nothing fetches, prunes or writes a ref; no fsmonitor hook
-runs. No file's content or name reaches the document, only counts. It starts no
-Git command after 75 s, nor inspects more than 100 repositories or 100 worktrees
-of one; any of these, or a directory it could not list, leaves it `complete:
-false`.
+core.fsmonitor=false -c filter.lfs.process= -c filter.lfs.clean= -c
+filter.lfs.required=false -C DIRECTORY ...`, each within 20 s. It changes
+nothing: optional locks off, `git status` neither refreshes nor writes the index
+and takes no lock file; nothing fetches, prunes or writes a ref; no fsmonitor
+hook runs. Workers install Git LFS system-wide (`git lfs install --system`),
+whose clean filter `git status` would run on a file whose stat no longer
+matches the index, writing it into `.git/lfs/objects`; the LFS filter is
+disabled instead, so Git compares such a file as it is on disk with the
+pointer it committed, and it reads as changed: the safe side. An LFS file
+whose stat matches the index reads as it is. One is stat-stale when it was
+touched since a Git command last refreshed the index, or written within the
+same second as the index, as a fresh clone or checkout leaves it until the
+next `git status` refreshes it; `git status` as `factory` in that checkout
+clears it. A clean filter a repository's own configuration defines under
+another name still runs when such a file is compared, as `factory`, the account
+that owns the repository and whose configuration defines it: no more trust
+than the runtime account already has. No file's content or name reaches the
+document, only counts. It starts no Git command after 75 s, nor inspects more
+than 100 repositories or 100 worktrees of one; any of these, a directory it
+could not list, a search root reached through a symbolic link, or a directory at
+the depth limit that holds directories, leaves it `complete: false`.
 
 ### Document, protocol version 1
 
@@ -613,7 +634,7 @@ false`.
 
 | Field | Values |
 | --- | --- |
-| `complete` | `false` when the worker ran out of time or limits, or could not list a directory. |
+| `complete` | `false` when the worker ran out of time or limits, could not list a directory, found a search root reached through a symbolic link, or a directory at the depth limit holding directories. |
 | `repositories[].path`, `worktrees[].path` | The working tree's absolute path, or `null` when it is not printable ASCII of at most 256 characters. A repository's is the working tree it was found through. |
 | `repositories[].state` | `inspected`, or `unreadable`: Git could not read it (its counts 0, no worktrees). |
 | `unpushed_commits` | A repository's: on any local branch; a worktree's: from its HEAD. Commits no remote-tracking branch holds. |
@@ -645,8 +666,15 @@ not a work inspection.
 | `timed_out` (2 min) and every other transport outcome | unknown, in fffactory's words |
 
 The CLI runs it only after reading the worker's agent activity, which goes
-through the same activator lock. An unknown inspection refuses terminate; it
-never reads as no work.
+through the same activator lock, and only when that activity does not already
+refuse terminate (agents active, or activity unreadable), which would hold the
+activator for nothing. An unknown inspection refuses terminate; it never reads
+as no work. Nor does a checkout the worker did not find: every checkout
+factory.json places on the worker (`/workspace/repos/PATH`) must be reported,
+as a repository or as a worktree of one, or the inspection reads as
+incomplete, `/workspace/repos/PATH: placed on this worker, but the work
+inspection did not report it` (`workFindings`). A placed checkout not cloned
+yet refuses too: the CLI cannot tell it from one the worker missed.
 
 ## Layer mapping
 

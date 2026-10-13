@@ -291,6 +291,90 @@ describe("host work inspect (host-protocol §work inspect)", () => {
     expect((await inspect()).repositories).toEqual([]);
   });
 
+  test("a checkout deeper than it looks leaves it incomplete: never read as no work", async () => {
+    // factory.json may place a checkout at any depth (`a/b/c/d/e`); the search stops at four.
+    const directory = await checkout("/workspace/repos/a/b/c/d/e");
+    await writeFile(join(directory, "uncommitted-work.txt"), "work\n");
+    const deep = await inspect();
+    expect(deep.complete).toBe(false);
+    expect(deep.repositories).toEqual([]);
+    // So does a Paseo worktree below its three levels.
+    await world.remove();
+    world = await gitWorld();
+    await checkout(`${PASEO}/a/b/c/d`);
+    expect((await inspect()).complete).toBe(false);
+  });
+
+  test("a directory at the depth limit without subdirectories leaves it complete", async () => {
+    await mkdir(at("/workspace/repos/a/b/c/d"), { recursive: true });
+    await writeFile(at("/workspace/repos/a/b/c/d/notes.txt"), "notes\n");
+    await checkout("/workspace/repos/a/b/c/widget");
+    const result = await inspect();
+    expect(result.complete).toBe(true);
+    expect(result.repositories.map((found) => found.path)).toEqual([
+      "/workspace/repos/a/b/c/widget",
+    ]);
+  });
+
+  test("a search root reached through a symbolic link is not followed: it leaves it incomplete", async () => {
+    // As sync-repositories.sh refuses a symlinked repository root.
+    for (const [linked, target] of [
+      ["/workspace/repos", "/workspace/repos"],
+      ["/home/factory/.paseo", PASEO],
+    ] as const) {
+      await world.remove();
+      world = await gitWorld();
+      const elsewhere = join(world.outside, "elsewhere");
+      await mkdir(elsewhere, { recursive: true });
+      await mkdir(join(at(linked), ".."), { recursive: true });
+      await symlink(elsewhere, at(linked));
+      await checkout(target);
+      const result = await inspect();
+      expect(result.complete).toBe(false);
+      expect(result.repositories).toEqual([]);
+    }
+  });
+
+  test("never runs a repository's LFS filter: what it would clean is compared as it is", async () => {
+    // `git lfs install --system` on workers: `git status` would run the clean filter on a file
+    // whose stat is stale, writing into `.git/lfs/objects`.
+    const directory = await checkout();
+    const marker = join(outside, "filter-ran");
+    await writeFile(join(directory, ".git/info/attributes"), "* filter=lfs\n");
+    git(directory, "config", "filter.lfs.clean", `echo clean >> ${marker}; cat`);
+    git(directory, "config", "filter.lfs.process", `echo process >> ${marker}; exit 1`);
+    git(directory, "config", "filter.lfs.required", "true");
+    const later = new Date(Date.now() + 60_000);
+    await utimes(join(directory, "README.md"), later, later);
+    expect((await inspect()).repositories).toEqual([repository()]);
+    await expect(lstat(marker)).rejects.toThrow();
+  });
+
+  test.skipIf(Bun.which("git-lfs") === null)(
+    "with Git LFS, an LFS file reads as unchanged, and as changed once its stat is stale, writing nothing",
+    async () => {
+      const directory = await checkout();
+      git(directory, "lfs", "install", "--local");
+      git(directory, "lfs", "track", "*.bin");
+      await writeFile(join(directory, "data.bin"), "large\n".repeat(1000));
+      git(directory, "add", ".gitattributes", "data.bin");
+      git(directory, "commit", "--quiet", "-m", "lfs");
+      git(directory, "push", "--quiet", "--no-verify", "origin", "main");
+      // The file older than the index, which a later Git command refreshed: not racily clean.
+      const earlier = new Date(Date.now() - 60_000);
+      await utimes(join(directory, "data.bin"), earlier, earlier);
+      git(directory, "status", "--porcelain");
+      await rm(join(directory, ".git/lfs"), { recursive: true, force: true });
+      expect((await inspect()).repositories).toEqual([repository()]);
+      const later = new Date(Date.now() + 60_000);
+      await utimes(join(directory, "data.bin"), later, later);
+      expect((await inspect()).repositories).toEqual([
+        repository({ worktrees: [clean(CHECKOUT, { tracked_changes: 1 })] }),
+      ]);
+      await expect(lstat(join(directory, ".git/lfs"))).rejects.toThrow();
+    },
+  );
+
   test("changes nothing: no index refresh, no lock file, no fetch", async () => {
     const directory = await checkout();
     // A newer modification time without a change in content: `git status` would normally
@@ -308,6 +392,7 @@ describe("host work inspect (host-protocol §work inspect)", () => {
     for (const argv of commands) {
       expect(argv).toContain("GIT_OPTIONAL_LOCKS=0");
       expect(argv).toContain("core.fsmonitor=false");
+      expect(argv).toContain("filter.lfs.process=");
       for (const mutating of ["fetch", "pull", "gc", "prune", "update-index", "commit"])
         expect(argv).not.toContain(mutating);
     }

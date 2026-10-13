@@ -3,7 +3,10 @@
  * current state of every checkout under the repository root, every Paseo worktree, and every
  * worktree Git lists for their repositories, read fresh as the runtime account. It changes
  * nothing: Git runs with optional locks off, so no index is refreshed and no lock file is
- * taken, never fetches, and no file's content or name reaches the document.
+ * taken, with no fsmonitor hook and no LFS filter (which would clean a stat-stale file into
+ * `.git/lfs/objects`), never fetches, and no file's content or name reaches the document. A
+ * clean filter a repository defines under another name still runs, as the runtime account, the
+ * account whose repository defines it. What it cannot search to the end, it reports incomplete.
  */
 import type { Dirent } from "node:fs";
 import { lstat, readdir, realpath } from "node:fs/promises";
@@ -52,6 +55,15 @@ const AS_FACTORY = [
   // An fsmonitor hook is a program the repository names: never run one.
   "-c",
   "core.fsmonitor=false",
+  // Workers install Git LFS system-wide. Its filter, run on a file whose stat no longer matches
+  // the index, writes the file into `.git/lfs/objects`; without it, Git compares the file as it
+  // is, so such a file reads as changed (the safe side), and every other LFS file as it is.
+  "-c",
+  "filter.lfs.process=",
+  "-c",
+  "filter.lfs.clean=",
+  "-c",
+  "filter.lfs.required=false",
 ] as const;
 
 /** The marker files of an operation left in progress, in a worktree's own Git directory. */
@@ -124,7 +136,8 @@ class Inspection {
  * Directories below `directory`, at most `depth` levels down, holding a `.git`: a checkout or a
  * worktree, below which nothing is looked for. Symbolic links are never followed. A root that
  * does not exist holds none; any other directory that cannot be read, even one gone since its
- * parent listed it (a name that is not UTF-8 reads back as another), leaves the inspection
+ * parent listed it (a name that is not UTF-8 reads back as another), or one at the depth limit
+ * that is no working tree but holds directories, which could hold one, leaves the inspection
  * incomplete.
  */
 async function workingTrees(
@@ -141,12 +154,15 @@ async function workingTrees(
     return [];
   }
   if (entries.some((entry) => entry.name === ".git")) return [directory];
-  if (depth === 0) return [];
-  const found: string[] = [];
   const names = entries
     .filter((entry) => entry.isDirectory())
     .map((entry) => entry.name)
     .sort();
+  if (depth === 0) {
+    if (names.length > 0) inspection.complete = false;
+    return [];
+  }
+  const found: string[] = [];
   for (const name of names)
     found.push(...(await workingTrees(join(directory, name), depth - 1, inspection, false)));
   return found;
@@ -352,19 +368,41 @@ async function realOrSelf(path: string): Promise<string> {
   }
 }
 
+/**
+ * Whether `root` (a path on the worker) is reached through no symbolic link: `readdir`, as root,
+ * would follow one wherever it points. Absent (from its first missing component on) is fine.
+ * Anything else, a link or a component that cannot be read, is not.
+ */
+async function unlinked(system: ApplySystem, root: string): Promise<boolean> {
+  let path = system.root;
+  for (const component of root.split("/").filter((part) => part !== "")) {
+    path = join(path, component);
+    try {
+      if ((await lstat(path)).isSymbolicLink()) return false;
+    } catch (error) {
+      return (error as NodeJS.ErrnoException).code === "ENOENT";
+    }
+  }
+  return true;
+}
+
+/** The working trees under one search root; one reached through a link leaves it incomplete. */
+async function searched(
+  system: ApplySystem,
+  inspection: Inspection,
+  root: string,
+  depth: number,
+): Promise<string[]> {
+  if (await unlinked(system, root)) return workingTrees(join(system.root, root), depth, inspection);
+  inspection.complete = false;
+  return [];
+}
+
 /** Every checkout under the repository root, then every Paseo worktree, in path order. */
 async function discovered(system: ApplySystem, inspection: Inspection): Promise<string[]> {
   return [
-    ...(await workingTrees(
-      join(system.root, WORK_ROOTS.repositories),
-      SEARCH_DEPTH.repositories,
-      inspection,
-    )),
-    ...(await workingTrees(
-      join(system.root, WORK_ROOTS.paseoWorktrees),
-      SEARCH_DEPTH.paseoWorktrees,
-      inspection,
-    )),
+    ...(await searched(system, inspection, WORK_ROOTS.repositories, SEARCH_DEPTH.repositories)),
+    ...(await searched(system, inspection, WORK_ROOTS.paseoWorktrees, SEARCH_DEPTH.paseoWorktrees)),
   ];
 }
 
