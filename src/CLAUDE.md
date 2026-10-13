@@ -200,8 +200,8 @@ Dependencies point inward: `domain <- application <- infrastructure, cli`, and
   a rerun finishes it: a host whose machine is already gone is removed without gates, and with
   `--keep` only has its devices deleted (an unreadable EC2 inventory is refused, never taken for
   a machine gone). The last declared host is removed like any other, leaving an empty factory:
-  `hosts: []` is complete, and plan, apply and status say no worker is declared and exit 0.
-  Next actions rerun the command as given
+  `hosts: []` is complete, and plan, apply and status say no worker is declared and exit 0
+  (status once its inventories are ready). Next actions rerun the command as given
   (`WorkerCommand`), never with `--keep` added or dropped. Waits for a machine state or the
   tailnet go through the injected `sleep` and check `interrupted` after every sleep.
 - The Tailscale API is reached only through `TailnetAdmin` (`infrastructure/tailscale-api-admin.ts`),

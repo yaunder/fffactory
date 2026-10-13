@@ -630,8 +630,11 @@ Tailscale devices
 ([worker lifecycle §Terminate (remove)](docs/specs/worker-lifecycle.md#terminate-remove)).
 Apply any other pending change first: the removal plan refuses one. Until
 milestone M3, a plan that would destroy or replace a worker any other way is
-refused too: there is no guided replacement or snapshot, and the
-failed-first-boot recovery above is the only replacement path. A worker's root
+refused too: there is no guided replacement or snapshot. To replace or resize a
+worker, remove it with `fffactory worker terminate KEY` (the last worker too,
+leaving an empty factory), declare its replacement with the size you want, and
+run `fffactory apply`; the failed-first-boot recovery above rebuilds one in
+place. A worker's root
 volume, with its credentials, checkouts and any uncommitted work, is deleted
 with its instance: treat Git as the durability boundary. Second workers, a
 rollout policy and the companion skill are M3 items
