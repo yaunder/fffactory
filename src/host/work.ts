@@ -377,6 +377,9 @@ async function worktreeWork(
     owned: false,
   });
   if (unpushed === undefined) return unreadable();
+  // TODO(re-evaluate when a worker's agents initialise submodules in Paseo worktrees): a missing
+  // worktree's own `.git/worktrees/<id>/modules/` can still hold submodule commits pushed
+  // nowhere; report each Git directory there as unreadable, as `unusedModules` does.
   if (listed.prunable || !(await exists(listed.path)))
     return {
       work: {
