@@ -669,9 +669,10 @@ async function operate(
 }
 
 /**
- * A machine already on its way to the action's target state: waited for, unasked. Terminate
- * first opens its admin session and, with `--keep`, asks for the typed key before the wait, so
- * the operator is not kept waiting for the question; a removal asks after its plan instead.
+ * A machine already on its way to the action's target state: waited for. Stop and start are
+ * not asked. Terminate first opens its admin session and, with `--keep`, asks for the typed key
+ * before the wait, so the operator is not kept waiting for the question; a removal asks after
+ * its plan instead.
  */
 async function awaitUnderWay(
   deps: WorkerLifecycleDependencies,
@@ -683,9 +684,11 @@ async function awaitUnderWay(
   const admin = await adminFor(deps, power, log);
   if (deps.interrupted()) return interruptedUnder(log, progress);
   if (admin.kind === "refused") return refusedUnder(log, admin.refusal);
-  if (power.action === "terminate" && !removesHost(power.command)) {
-    const ended = await unconfirmed(deps, power, log, progress, machine);
-    if (ended !== undefined) return ended;
+  if (power.action === "terminate") {
+    if (!removesHost(power.command)) {
+      const ended = await unconfirmed(deps, power, log, progress, machine);
+      if (ended !== undefined) return ended;
+    }
     // The wait is recorded as terminate's, as after its request, not as the question's.
     await log.stage("terminating");
     if (deps.interrupted()) return interruptedUnder(log, progress);

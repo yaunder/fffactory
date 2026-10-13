@@ -2099,6 +2099,11 @@ describe("fffactory worker terminate (worker-lifecycle §Terminate (remove))", (
     });
     expect(w.control.mutations()).toEqual([]);
     expect(w.store.files[PATH]).toBe(WITHOUT_KEY);
+    // The wait is recorded as terminate's, as with --keep, before the removal is planned.
+    const recorded = stages(w);
+    expect(
+      recorded.slice(recorded.indexOf("authorizing"), recorded.indexOf("planning") + 1),
+    ).toEqual(["authorizing", "terminating", "terminating", "planning"]);
   });
 
   test("a machine already being terminated: the typed key is asked after the plan, saying so; declining changes nothing", async () => {
