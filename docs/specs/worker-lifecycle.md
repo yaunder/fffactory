@@ -588,7 +588,7 @@ The gates are judged in that order, and the first that refuses is reported,
 but for a work inspection that could not be had, which lists the repository
 result's refusal too.
 `--force` skips the inspection: `--force: the worker is not inspected for active
-agents or checkouts.` It never skips the account check, the pin guard, the
+agents, current work or checkouts.` It never skips the account check, the pin guard, the
 lock, the admin client or the confirmation.
 
 A worker whose machine is `stopped` passes uninspected, without `--force`: no

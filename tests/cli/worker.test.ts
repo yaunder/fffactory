@@ -610,7 +610,7 @@ describe("fffactory worker terminate --keep (worker-lifecycle §Terminate (keep)
     const forced = setup({ ...TERMINATING, activity: { kind: "active", count: 1 } });
     expect(await run(TERMINATE("--force"), forced.context)).toBe(0);
     expect(forced.out).toContain(
-      "--force: the worker is not inspected for active agents or checkouts.",
+      "--force: the worker is not inspected for active agents, current work or checkouts.",
     );
     expect(forced.control.mutations()).toEqual([`terminate ${ID}`]);
   });

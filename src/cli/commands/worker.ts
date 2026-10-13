@@ -111,7 +111,7 @@ const WORDS: Readonly<
 /** What `--force` skipped, for each action that has gates: start has none. */
 const UNINSPECTED: Readonly<Record<Exclude<PowerAction, "start">, string>> = {
   stop: "active agents",
-  terminate: "active agents or checkouts",
+  terminate: "active agents, current work or checkouts",
 };
 
 function progressLines(event: PowerProgress): readonly string[] {
