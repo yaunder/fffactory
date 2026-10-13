@@ -190,10 +190,11 @@ Dependencies point inward: `domain <- application <- infrastructure, cli`, and
   ARN. The plan is shown, approved with the typed key, applied exactly, and the recorded keys
   read again; only then is factory.json written (`InstanceStore.write`), and only while it is
   still the text read, then the devices deleted. Every partial state names its next action, and
-  a rerun finishes it: a host whose machine is already gone is removed without gates. The only
-  declared host is refused. Next actions rerun the command as given (`WorkerCommand`), never
-  with `--keep` added or dropped. Waits for a machine state or the tailnet go through the
-  injected `sleep` and check `interrupted` after every sleep.
+  a rerun finishes it: a host whose machine is already gone is removed without gates, and with
+  `--keep` only has its devices deleted (an unreadable EC2 inventory is refused, never taken for
+  a machine gone). The only declared host is refused. Next actions rerun the command as given
+  (`WorkerCommand`), never with `--keep` added or dropped. Waits for a machine state or the
+  tailnet go through the injected `sleep` and check `interrupted` after every sleep.
 - The Tailscale API is reached only through `TailnetAdmin` (`infrastructure/tailscale-api-admin.ts`),
   as the factory's admin client (`tailscale.admin_client_secret`): each request within its
   deadline and following no redirect, failures named by HTTP status or network code, no answer

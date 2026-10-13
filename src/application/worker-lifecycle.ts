@@ -218,7 +218,7 @@ export type PowerProgress =
       readonly state: Machine["state"];
     }
   /** `--force`: the gates were skipped. */
-  | { readonly kind: "forced"; readonly action: PowerAction }
+  | { readonly kind: "forced"; readonly action: Exclude<PowerAction, "start"> }
   /** Terminate: the machine is stopped, so the worker is not inspected. */
   | { readonly kind: "uninspected_stopped" }
   /** EC2 was asked to change the machine; the command now waits for the target state. */
@@ -229,7 +229,7 @@ export type PowerProgress =
   | { readonly kind: "waiting_online"; readonly hostname: string }
   /** Terminate deletes the terminated worker's tailnet devices. */
   | { readonly kind: "removing_devices"; readonly hostname: string }
-  /** Terminate removing the host: no EC2 instance carries its key, so its machine is gone. */
+  /** Terminate: no EC2 instance carries the host key, so its machine is already gone. */
   | { readonly kind: "absent"; readonly key: HostKey; readonly hostname: string }
   /** Terminate removing the host: Terraform plans its removal. */
   | { readonly kind: "planning_removal"; readonly key: HostKey }
@@ -293,8 +293,8 @@ export type WorkerPower =
    * `verdict`, as status words it; a worker not ready is not start's failure. Terminate adds how
    * deleting the worker's tailnet devices went, and `leftover`, what it left behind, when it did:
    * the terminate stands, and is partial. A terminate that `removed` the host also destroyed its
-   * machine with Terraform and wrote factory.json without it; `instanceId` is undefined when no
-   * EC2 instance carried its key.
+   * machine with Terraform and wrote factory.json without it. `instanceId` is undefined when no
+   * EC2 instance carried the key: the machine was already gone.
    */
   | {
       readonly kind: "done";
@@ -637,7 +637,7 @@ async function operate(
   if (deps.interrupted()) return interruptedUnder(log, progress);
   const selection = selectMachine(inventory, power.worker.key, power.command);
   if (selection.kind === "refused") return refusedUnder(log, selection.refusal);
-  if (selection.kind === "absent") return removeAbsent(deps, power, log, progress);
+  if (selection.kind === "absent") return terminateAbsent(deps, power, log, progress);
   const { machine } = selection;
   await log.machine(machine.instanceId, machine.state);
   deps.progress({
@@ -651,7 +651,11 @@ async function operate(
     case "refused":
       return refusedUnder(log, step.refusal);
     case "done":
-      return reached(deps, power, log, progress, { machine, changed: false, awaited: false });
+      return reached(deps, power, log, progress, {
+        instanceId: machine.instanceId,
+        changed: false,
+        awaited: false,
+      });
     case "await": {
       const admin = await adminFor(deps, power, log);
       if (deps.interrupted()) return interruptedUnder(log, progress);
@@ -829,7 +833,7 @@ async function stopGates(
   await log.stage("inspecting");
   // TODO(re-evaluate when dispatch gains a pause): pause dispatch on the worker before this
   // activity check, and resume it if the stop does not go ahead. Until then dispatch may start
-  // an agent between the check and the stop, which then ends it (accepted race, D5).
+  // an agent between the check and the stop, which then ends it (an accepted race, epic #5).
   return stopGate(await stopInspection(deps, power), power.worker);
 }
 
@@ -875,7 +879,7 @@ async function terminateGates(
   await log.stage("inspecting");
   // TODO(re-evaluate when dispatch gains a pause): pause dispatch on the worker before this
   // inspection, as for stop: until then an agent dispatch starts between the check and the
-  // terminate ends with the machine (accepted race, D5).
+  // terminate ends with the machine (an accepted race, epic #5).
   return terminateGate(
     await terminateInspection(deps, power),
     power.worker,
@@ -1012,8 +1016,14 @@ function onwards(
   progress: Progress,
   reaching: Reaching,
 ): Promise<WorkerPower> {
-  if (!removesHost(power.command)) return reached(deps, power, log, progress, reaching);
-  const { machine, awaited, admin } = reaching;
+  const { machine, changed, awaited, admin } = reaching;
+  if (!removesHost(power.command))
+    return reached(deps, power, log, progress, {
+      instanceId: machine.instanceId,
+      changed,
+      awaited,
+      admin,
+    });
   return removeHost(deps, power, log, progress, { machine, destroys: false, awaited, admin });
 }
 
@@ -1035,6 +1045,9 @@ const ENDED: Readonly<Record<PowerAction, StageStatus>> = {
   terminate: "terminated",
 };
 
+/** The machine in the target state: its instance, undefined for terminate's machine already gone. */
+type Reached = Omit<Reaching, "machine"> & { readonly instanceId: string | undefined };
+
 /**
  * The machine is in the target state: stop is done; start goes on to the worker's readiness,
  * terminate to deleting its tailnet devices, which, left incomplete, make it partial.
@@ -1044,7 +1057,7 @@ async function reached(
   power: Power,
   log: PowerLog,
   progress: Progress,
-  { machine, changed, awaited, admin }: Reaching,
+  { instanceId, changed, awaited, admin }: Reached,
 ): Promise<WorkerPower> {
   let verdict: Verdict | undefined;
   if (power.action === "start") {
@@ -1063,7 +1076,7 @@ async function reached(
     kind: "done",
     action: power.action,
     worker: power.worker,
-    instanceId: machine.instanceId,
+    instanceId,
     changed,
     awaited,
     ...(verdict === undefined ? {} : { verdict }),
@@ -1184,8 +1197,12 @@ interface Removing {
   readonly admin: TailnetAdminSession | undefined;
 }
 
-/** Terminate removing a host whose machine EC2 no longer lists: no gates, nothing to inspect. */
-async function removeAbsent(
+/**
+ * Terminate for a host whose machine EC2 no longer lists, as an interrupted or timed-out
+ * terminate leaves it: no gates, nothing to inspect. With `--keep`, once confirmed, only its
+ * tailnet devices are deleted; otherwise the host is removed.
+ */
+async function terminateAbsent(
   deps: WorkerLifecycleDependencies,
   power: Power,
   log: PowerLog,
@@ -1195,6 +1212,25 @@ async function removeAbsent(
   const admin = await adminFor(deps, power, log);
   if (deps.interrupted()) return interruptedUnder(log, progress);
   if (admin.kind === "refused") return refusedUnder(log, admin.refusal);
+  if (!removesHost(power.command)) {
+    // No machine is destroyed, but fffactory cannot tell what took it away: the operator
+    // confirms the devices' deletion, as for a removal whose machine is gone.
+    // TODO(re-evaluate when a live worker is found with its EC2 tags stripped): refuse while a
+    // tagged device with the worker's hostname is connected, since the tags alone decide the
+    // machine is gone here, with no Terraform state check as removal has.
+    const confirmed = await confirmation(deps, power, log, undefined);
+    if (deps.interrupted()) return interruptedUnder(log, progress);
+    if (!confirmed) {
+      const recordFailure = await log.finish("declined", "declined");
+      return { kind: "declined", operation: log.location, recordFailure };
+    }
+    return reached(deps, power, log, progress, {
+      instanceId: undefined,
+      changed: false,
+      awaited: false,
+      admin: admin.session,
+    });
+  }
   return removeHost(deps, power, log, progress, {
     machine: undefined,
     destroys: false,

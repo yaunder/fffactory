@@ -76,10 +76,14 @@ Every command goes in this order, and stops at the first refusal:
 8. Locate the one EC2 instance carrying the tags `fffactory:factory-id` = the
    factory ID and `fffactory:host-key` = `KEY`, in every state but
    `terminated` (`DescribeInstances`, as [status](status.md#inventories) lists
-   them). None, several (each listed) or an inventory that could not be read is
-   refused: fffactory never guesses. Terminate without `--keep` takes none as
-   the machine already gone, and removes the host
-   ([Terminate (remove)](#terminate-remove)).
+   them). Several (each listed) or an inventory that could not be read is
+   refused: fffactory never guesses, and never takes an unreadable inventory for
+   a machine gone. None is refused for stop and start, `No EC2 instance carries
+   the host key KEY`, next action ``There is no machine to stop: `fffactory
+   apply` provisions the worker.`` (or `start`). Terminate takes none as the
+   machine already gone: without `--keep` it removes the host ([Terminate
+   (remove)](#terminate-remove)); with `--keep` it deletes the worker's tailnet
+   devices ([Terminate (keep)](#terminate-keep)).
 9. The gates: stop's ([Gates](#gates)) or terminate's ([Gates
    (terminate)](#gates-terminate)).
 10. Terminate: read the admin client from Secrets Manager and exchange it for a
@@ -357,6 +361,7 @@ What terminate does depends on the instance's state when it is located:
 | `running` | Runs the [gates](#gates-terminate), opens the [admin client](#tailnet-device-removal), asks for [confirmation](#confirmation-typed-key), calls `TerminateInstances`, waits for `terminated`, then deletes the worker's tailnet devices. |
 | `stopped` | The same, but passes the gates uninspected ([Gates (terminate)](#gates-terminate)). |
 | `shutting-down` | Already on its way: no gates and no question; opens the admin client, waits for `terminated`, then deletes the devices, and says so as stop does (`is now terminated: it was already on its way, ...`). |
+| No instance carries the key | The machine is already gone, as an interrupted or timed-out terminate leaves it once EC2 lists the instance `terminated`: `Worker KEY (HOSTNAME): no EC2 instance carries its key; its machine is already gone.`, no gates and no EC2 call; opens the admin client, asks for the [typed key](#confirmation-typed-key), then deletes the devices: ``Worker KEY (HOSTNAME) has no machine left to terminate. factory.json keeps the host, so `fffactory apply` creates it afresh.`` It ends `unchanged`, exit 0, or `partial`, exit 2, when a device remains. |
 | `pending` | Refused: wait until it is running, then rerun. |
 | `stopping` | Refused: wait until it has stopped, then rerun. |
 
@@ -373,7 +378,8 @@ state still holds the instance until the next plan refreshes it: refresh drops
 the terminated instance, and the next `fffactory apply` plans the host as a
 plain create, which the D11 refusals allow
 ([plan-apply §Refusals](plan-apply.md#refusals-until-lifecycle-work-lands-d11)),
-and waits for its first boot (D3b). Until then [status](status.md#workers)
+and waits for its first boot
+([plan-apply §Waiting for a new worker](plan-apply.md#waiting-for-a-new-worker)). Until then [status](status.md#workers)
 reports the host `Not provisioned`, since EC2 lists no instance carrying its
 key. This is the recovery for a [failed first boot](worker-bootstrap.md#failed-first-boot),
 with `--force`: a worker that never joined the tailnet cannot be inspected.
@@ -493,7 +499,7 @@ not inspected for active agents.` says so. It never skips the account check,
 the pin guard, the lock or the confirmation. Stopping an already stopped or
 stopping worker runs no gates.
 
-Accepted race (D5): dispatch may start an agent between the activity check and
+Accepted race ([epic #5](https://github.com/yaunder/fffactory/issues/5)): dispatch may start an agent between the activity check and
 the stop, which then ends it. It is marked in `application/worker-lifecycle.ts`
 until dispatch gains a pause.
 
@@ -536,7 +542,7 @@ pin guard, the lock, the admin client or the confirmation.
 A worker whose machine is `stopped` passes uninspected, without `--force`: no
 agent runs on it, and it cannot be reached. **Accepted risk:** unpushed work on
 a stopped worker's disk is not reported, and is destroyed with it. A machine
-already `shutting-down` runs no gates. The race stop accepts (D5) applies to
+already `shutting-down` runs no gates. The race stop accepts ([Gates](#gates)) applies to
 terminate too, marked in the same place.
 
 ## Confirmation
@@ -565,7 +571,10 @@ by y/N or `--yes`:
   (HOSTNAME), EC2 instance ID, and remove it from factory.json? ...`, after the
   removal plan is shown, and for a machine already gone `Remove worker KEY
   (HOSTNAME) from factory.json? No EC2 instance carries its key: its machine is
-  already gone. Type the host key to confirm: `. Only the host key itself, exactly (blank space
+  already gone. Type the host key to confirm: `; with `--keep`, for a machine
+  already gone, `Delete the Tailscale devices of worker KEY (HOSTNAME)? No EC2
+  instance carries its key: its machine is already gone. Type the host key to
+  confirm: `. Only the host key itself, exactly (blank space
   around it aside), confirms; `y`, `yes`, another key, or no answer declines:
   `Not confirmed: the worker was not terminated.`, exit 1, recorded `declined`.
 - `--confirm KEY` confirms without asking, for use without a terminal. Any
@@ -576,8 +585,12 @@ by y/N or `--yes`:
 
 The question comes after the gates and the admin client, and for a removal
 after its plan: a terminate that would be refused is never asked about. With
-`--keep`, a machine already shutting down is not asked about either; a removal
-always is, since it also changes factory.json.
+`--keep`, a machine already shutting down is not asked about either: a
+terminate is under way. A machine already gone is asked about, with or without
+`--keep`: fffactory cannot tell what took it away (an earlier terminate, or the
+EC2 console, or a machine never provisioned), and deleting the devices, or
+removing the host, is what is left. A removal always is, since it also changes
+factory.json.
 
 ## Operation record
 
@@ -597,7 +610,7 @@ when the plan is applied), `writing` (factory.json) and `removing_devices`:
 | --- | --- | --- |
 | `stopped`, `started`, `terminated` | `succeeded` | This command changed the machine's state. |
 | `removed` | `succeeded` | Terminate removed the host: Terraform, factory.json and its devices. |
-| `unchanged` | `succeeded` | The machine was already in, or on its way to, the target state. |
+| `unchanged` | `succeeded` | The machine was already in, or on its way to, the target state; or, terminating with `--keep`, already gone. |
 | `partial` | `partial` | Terminate: the machine is terminated, but a tailnet device remains ([Tailnet device removal](#tailnet-device-removal)); `failure` holds the summary. |
 | `refused` | `refused` | No single instance, a state it refuses, a gate, terminate's admin client, the removal plan's rule, or factory.json changed before the apply. |
 | `declined` | `declined` | The question was not confirmed. |
@@ -607,8 +620,9 @@ The record also carries `machine`: `{"key", "hostname", "instance_id",
 "state"}`, the instance once located, with its state when located, then the
 state that ended the wait: the target state, the state of a machine being
 terminated or gone (`absent`), or at the deadline the last state a read found.
-A removal whose Terraform destroyed the instance records it `terminated`; one
-whose machine was already gone records none.
+A removal whose Terraform destroyed the instance records it `terminated`; a
+terminate whose machine was already gone, with or without `--keep`, records
+none.
 `failure`
 names why, in fffactory's words. A record whose final write fails does not
 change the outcome: `The operation record could not be finished: REASON` on
@@ -638,9 +652,14 @@ starting. Terminate says instead `EC2 was asked to terminate the instance and
 may still be doing so; its tailnet devices may remain: check them at
 https://login.tailscale.com/admin/machines.`, and deletes no more devices; its
 rerun is `fffactory worker terminate KEY --keep`, which waits for a machine
-still shutting down, then deletes the devices (`fffactory worker terminate
-KEY`, removing the host, waits for it too, then removes the host). At the confirmation question, an
-interrupt wins over the answer.
+still shutting down, then deletes the devices, or, once EC2 lists the instance
+`terminated` (and so no instance carries the key), takes the machine as already
+gone and deletes the devices, asking for the typed key again ([Terminate
+(keep)](#terminate-keep)). A `--keep` that timed out waiting for `terminated`
+is finished by the same rerun. `fffactory worker terminate KEY`, removing the
+host, waits for a machine still shutting down too, or finds it gone, then
+removes the host. At the confirmation question, an interrupt wins over the
+answer.
 
 A removal interrupted while Terraform applies its plan (Terraform is stopped
 gracefully, [plan-apply §Interruption](plan-apply.md#interruption)) says
@@ -718,8 +737,10 @@ reports and exit codes, AWS's message never printed, an argument that is not a
 key never echoed, a missing worker's stop refusal, the arguments and help).
 
 Terminate: `tests/domain/worker-lifecycle.test.ts` (each state, the wait for
-`terminated` or `absent`, each gate and the stopped pass, the typed key and
-`--confirm`, the admin client's refusals, the device removal's outcome) and
+`terminated` or `absent`, no instance taken as a machine gone only to
+terminate and never from an unreadable inventory, each gate and the stopped
+pass, the typed key and `--confirm`, the question for a `--keep` whose machine
+is gone, the admin client's refusals, the device removal's outcome) and
 `tests/domain/tailnet.test.ts` (tagged devices with the hostname selected,
 untagged ones reported, the tag compared exactly);
 `tests/application/worker-lifecycle.test.ts` (a terminate recorded step by step;
@@ -727,7 +748,10 @@ the admin client missing, an undeclared key, another account, a pin mismatch, a
 held lock, a wrong `--confirm`, a wrong typed key, an unreadable secret and a
 refused client, all before any mutation; each gate refused and `--force`
 overriding it; a stopped worker passing uninspected; a machine already
-shutting down waited for; only tagged devices deleted, an untagged one
+shutting down waited for; a machine already gone: no gates and no EC2 call,
+its devices deleted after the typed key, `unchanged` or partial, the admin
+client still required, an unreadable inventory refused, and an interrupted
+`--keep` finished by its rerun; only tagged devices deleted, an untagged one
 reported, a deletion or listing failure leaving the terminate partial; the
 secret in no record, progress or result; status reporting the host not
 provisioned afterwards; an interrupt during the wait and between deletions),
@@ -739,7 +763,9 @@ body, secret or token, the deadline, an expired token renewed once (only on
 HTTP 401) and the call retried, a redirect refused with its target never
 asked), the Secrets Manager read in
 `tests/infrastructure/aws-secrets-manager-store.test.ts`, and the terminate
-reports, exit 2 and an unechoed `--confirm` in `tests/cli/worker.test.ts`.
+reports, exit 2, an unechoed `--confirm`, and a machine already gone, its
+devices deleted with exit 0 or 2 and an interrupted `--keep`'s rerun finishing
+it, in `tests/cli/worker.test.ts`.
 That the next plan creates a terminated worker afresh is
 `tests/domain/plan.test.ts` (`a worker terminated outside fffactory plans as a
 create`).

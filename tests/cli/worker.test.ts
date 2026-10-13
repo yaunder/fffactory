@@ -341,7 +341,7 @@ describe("refusals before any EC2 mutation (worker-lifecycle §Order)", () => {
     expect(await run(["worker", "stop", KEY, "--yes"], context)).toBe(1);
     expect(cli.err).toEqual([
       `Refusing to stop the worker: No EC2 instance carries the host key ${KEY}`,
-      `Next: Provision it with \`fffactory apply\`, then rerun \`fffactory worker stop ${KEY}\`.`,
+      "Next: There is no machine to stop: `fffactory apply` provisions the worker.",
     ]);
     expect(cli.out.at(-1)).toStartWith("Operation record: s3://");
   });
@@ -614,6 +614,59 @@ describe("fffactory worker terminate --keep (worker-lifecycle §Terminate (keep)
     ]);
     expect(cli.err).toEqual(["Not confirmed: the worker was not terminated."]);
     expect(cli.control.mutations()).toEqual([]);
+  });
+});
+
+describe("fffactory worker terminate --keep, the machine already gone (worker-lifecycle §Terminate (keep))", () => {
+  test("deletes its tailnet devices and keeps the host, exit 0", async () => {
+    const cli = setup({ instance: withAdmin(), machines: [] });
+    expect(await run(TERMINATE(), cli.context)).toBe(0);
+    expect(cli.err).toEqual([]);
+    expect(cli.out).toEqual([
+      `Instance: ${PATH} (nearest .fffactory/factory.json)`,
+      `Worker ${KEY} (${HOSTNAME}): no EC2 instance carries its key; its machine is already gone.`,
+      `Deleting the Tailscale devices named ${HOSTNAME}.`,
+      `Worker ${KEY} (${HOSTNAME}) has no machine left to terminate. factory.json keeps the ` +
+        "host, so `fffactory apply` creates it afresh.",
+      `Deleted Tailscale device nWorker1CNTRL (${HOSTNAME}).`,
+      expect.stringMatching(/^Operation record: s3:\/\/fff-abcd1234-state\/.+\.json$/),
+    ]);
+    expect(cli.control.calls).toEqual([]);
+    expect(cli.store.writes).toEqual([]);
+  });
+
+  test("a device it could not delete exits 2, naming the admin console and the apply", async () => {
+    const cli = setup({
+      instance: withAdmin(),
+      machines: [],
+      admin: {
+        devices: [tailnetDevice("nWorker1CNTRL", HOSTNAME, [WORKER_TAG])],
+        failing: { nWorker1CNTRL: "Tailscale answered HTTP 500" },
+      },
+    });
+    expect(await run(TERMINATE(), cli.context)).toBe(2);
+    expect(cli.err.at(-1)).toBe(
+      `Next: Remove the remaining devices named ${HOSTNAME} at https://login.tailscale.com/admin/machines ` +
+        "yourself (one without the factory's tag only if it was this worker), then run " +
+        "`fffactory apply`, which creates the worker afresh.",
+    );
+  });
+
+  test("the rerun an interrupted terminate --keep names finishes deleting the devices", async () => {
+    const cli = setup({ ...TERMINATING, states: ["shutting-down"], interruptOnSleep: true });
+    expect(await run(TERMINATE(), cli.context)).toBe(1);
+    expect(cli.err.at(-1)).toEndWith(`then rerun \`fffactory worker terminate ${KEY} --keep\`.`);
+    expect(cli.admin.devices().map((device) => device.id)).toEqual(["nWorker1CNTRL"]);
+    // `fffactory lock break`; EC2 has since terminated the instance, which it no longer lists.
+    cli.lockStore.locks.clear();
+    const rerun = {
+      ...cli.context,
+      interrupted: () => false,
+      machines: fakeMachineInventory({ kind: "machines", machines: [] }).machines,
+    };
+    expect(await run(TERMINATE(), rerun)).toBe(0);
+    expect(cli.out).toContain(`Deleted Tailscale device nWorker1CNTRL (${HOSTNAME}).`);
+    expect(cli.admin.devices()).toEqual([]);
   });
 });
 

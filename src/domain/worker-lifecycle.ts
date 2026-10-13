@@ -111,14 +111,14 @@ export function hostKeyRefusal(argument: string, instance: FactoryInstance): Ref
 
 export type MachineSelection =
   | { readonly kind: "found"; readonly machine: Machine }
-  /** Terminate removing the host: no instance carries its key, so its machine is gone. */
+  /** Terminate, with or without `--keep`: no instance carries its key, so its machine is gone. */
   | { readonly kind: "absent" }
   | { readonly kind: "refused"; readonly refusal: Refusal };
 
 /**
  * The one instance carrying `key`: several, or an inventory that could not be read, is refused,
- * never guessed. None is refused too, except to terminate removing the host, for which the
- * machine is already gone (`absent`).
+ * never guessed. None is refused too for stop and start, which have no machine to act on; to
+ * terminate, it is a machine already gone (`absent`), as an interrupted terminate leaves it.
  */
 export function selectMachine(
   inventory: MachineInventory,
@@ -135,12 +135,16 @@ export function selectMachine(
     );
   const machines = inventory.machines.filter((machine) => machine.hostKey === key);
   const [only] = machines;
-  if (only === undefined && removesHost(command)) return { kind: "absent" };
+  const action = actionOf(command);
+  if (only === undefined && action === "terminate") return { kind: "absent" };
   if (only === undefined)
-    return refused(
-      `No EC2 instance carries the host key ${key}`,
-      "Provision it with `fffactory apply`",
-    );
+    return {
+      kind: "refused",
+      refusal: refusal(
+        `No EC2 instance carries the host key ${key}`,
+        `There is no machine to ${action}: \`fffactory apply\` provisions the worker.`,
+      ),
+    };
   if (machines.length > 1)
     return refused(
       `${machines.length} EC2 instances carry the host key ${key}; fffactory never guesses which is the worker`,
@@ -434,9 +438,12 @@ const VERBS: Readonly<Record<PowerAction, { readonly name: string; readonly doin
 
 const TYPE_KEY = "Type the host key to confirm: ";
 
+const GONE = "No EC2 instance carries its key: its machine is already gone.";
+
 /**
- * The question asked before acting on `instanceId`. Terminate removing the host says so, and
- * without an instance, its machine already gone, asks only to remove the host.
+ * The question asked before acting on `instanceId`. Terminate removing the host says so.
+ * Without an instance, its machine already gone, terminate asks only to remove the host, or
+ * with `--keep` only to delete its tailnet devices.
  */
 export function confirmationQuestion(
   command: WorkerCommand,
@@ -445,7 +452,9 @@ export function confirmationQuestion(
 ): string {
   const named = `worker ${worker.key} (${worker.hostname})`;
   if (instanceId === undefined)
-    return `Remove ${named} from factory.json? No EC2 instance carries its key: its machine is already gone. ${TYPE_KEY}`;
+    return removesHost(command)
+      ? `Remove ${named} from factory.json? ${GONE} ${TYPE_KEY}`
+      : `Delete the Tailscale devices of ${named}? ${GONE} ${TYPE_KEY}`;
   const action = actionOf(command);
   const asked = `${VERBS[action].name} ${named}, EC2 instance ${instanceId}`;
   if (removesHost(command))

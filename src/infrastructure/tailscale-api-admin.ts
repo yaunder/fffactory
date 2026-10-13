@@ -7,6 +7,7 @@ import type {
 } from "../application/tailnet-admin";
 import type { SecretMaterial } from "../domain/secrets";
 import type { TailnetDevice } from "../domain/tailnet";
+import { isRecord } from "../domain/validation";
 
 /** Tailscale's API. */
 export const TAILSCALE_API = "https://api.tailscale.com";
@@ -34,18 +35,12 @@ export interface TailscaleApiAdminOptions {
   readonly timeoutMs?: number;
 }
 
-type Fields = Readonly<Record<string, unknown>>;
-
-function isRecord(value: unknown): value is Fields {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
 function text(value: unknown): string {
   return typeof value === "string" ? value : "";
 }
 
 /** One listed device; a field of the wrong type reads as absent, so it can never match. */
-function deviceOf(value: Fields): TailnetDevice {
+function deviceOf(value: Readonly<Record<string, unknown>>): TailnetDevice {
   const nodeId = text(value.nodeId);
   return {
     id: nodeId === "" ? text(value.id) : nodeId,

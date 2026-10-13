@@ -213,11 +213,11 @@ not finish in time. The dispatch stage never fails a skipped worker: it reports
 it `skipped` and sends it nothing. A deferred worker also bypasses the
 control-plane stage, but one skipped for another reason that the tailnet still
 locates goes through the control-plane stage, which may fail it (exit 1). Exit
-0 means every worker is ready but for the accounts a human enrolls: fffactory
-cannot enroll them, so pending enrollment still counts as installed, and the
-worker's lines name each step. A failed install leaves that worker on the
-requested release, active and unhealthy; its next action names the failed
-step's log, and a rerun repairs it.
+0 means every worker is ready or stopped, but for the accounts a human
+enrolls: fffactory cannot enroll them, so pending enrollment still counts as
+installed, and the worker's lines name each step. A failed install leaves that
+worker on the requested release, active and unhealthy; its next action names
+the failed step's log, and a rerun repairs it.
 
 `plan` inspects each existing worker through the read-only host protocol to
 derive its Paseo changes. A worker created by the Terraform plan is known to
@@ -262,7 +262,7 @@ that tailnet policy lets this device see the factory's tag; if the console
 output shows the bootstrap failed, terminate it uninspected with `fffactory
 worker terminate KEY --keep --force`, or if it is still running wait for it,
 then rerun apply. A failure, not a skip, because
-apply's exit 0 must mean every worker is ready, and a machine that never came
+apply's exit 0 must mean every worker is ready or stopped, and a machine that never came
 up needs the operator; it does not stop the rollout, because no install step
 ran on it (the release may have been uploaded and unpacked there, but `host
 apply` refused it) and the next worker cannot repeat it.
@@ -765,7 +765,10 @@ release factory.json pins, it moves the pin to the running release and applies
 the factory's complete plan for it, as apply does, under one approval and the
 one factory-wide lock (`upgradeFactory`, `src/application/upgrade.ts`). The
 running release's own embedded bundle is what the workers stage installs, so
-the upgrade installs the running release on every declared worker.
+the upgrade installs the running release on every declared worker that is not
+stopped. A stopped worker is sent nothing, as apply sends it nothing
+([Stopped workers](#stopped-workers)): it gets the release once it is started
+with `fffactory worker start KEY` and `fffactory apply` runs.
 
 It needs a terminal: without one it is refused before anything else,
 `Upgrading needs your approval of the pin move and the plan: rerun at a
@@ -863,8 +866,8 @@ nothing more of the record is written after an interrupt. The lock's and the rec
 `release` the running release. A lock an interrupted upgrade left is broken
 with `fffactory lock break`, which the pin guard does not refuse.
 
-The exit status is apply's: 0 once every worker is installed, 2 when a worker
-was skipped, 1 when anything failed or was refused.
+The exit status is apply's: 0 once every worker is installed and verified, or
+stopped, 2 when a worker was skipped, 1 when anything failed or was refused.
 
 ### Compatibility refusals (D11)
 
@@ -1039,8 +1042,8 @@ only after naming the worker and the lock it keeps),
 before its tools stop, and at the grace's end at the latest; a command that
 does not wait exiting once its tools stop, without waiting for it; each
 signal's status; a second signal at once; sleeps woken),
-`tests/cli/run.test.ts` (only apply, upgrade, doctor and status wait on an
-interrupt; `host`, `secret` and `lock` do not), `tests/cli/main.test.ts`
+`tests/cli/run.test.ts` (only apply, upgrade, doctor, status and worker wait
+on an interrupt; `host`, `secret` and `lock` do not), `tests/cli/main.test.ts`
 (doctor's interrupt notice, which offers no second interrupt), and
 `tests/assets/terraform/guardrails.test.ts` (the factory root's backend key is
 `FACTORY_STATE_KEY`, and it outputs `host_keys`).

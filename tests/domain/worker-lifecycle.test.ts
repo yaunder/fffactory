@@ -102,16 +102,33 @@ describe("the target machine (worker-lifecycle §Order)", () => {
     });
   });
 
-  test("none is refused: there is nothing to act on", () => {
-    expect(selectMachine({ kind: "machines", machines: [] }, KEY, "stop")).toEqual({
-      kind: "refused",
-      refusal: {
-        summary: "No EC2 instance carries the host key builder-1",
-        details: [],
-        nextAction:
-          "Provision it with `fffactory apply`, then rerun `fffactory worker stop builder-1`.",
-      },
-    });
+  test("none is refused for stop and start: there is no machine to act on, which apply provisions", () => {
+    for (const action of ["stop", "start"] as const)
+      expect(selectMachine({ kind: "machines", machines: [] }, KEY, action)).toEqual({
+        kind: "refused",
+        refusal: {
+          summary: "No EC2 instance carries the host key builder-1",
+          details: [],
+          nextAction: `There is no machine to ${action}: \`fffactory apply\` provisions the worker.`,
+        },
+      });
+  });
+
+  test("none is, to terminate with or without --keep, a machine already gone", () => {
+    const none = { kind: "machines" as const, machines: [machine("running", "other")] };
+    expect(selectMachine(none, KEY, "terminate")).toEqual({ kind: "absent" });
+    expect(selectMachine(none, KEY, "terminate-keep")).toEqual({ kind: "absent" });
+  });
+
+  test("an inventory that could not be read is never taken for a machine gone", () => {
+    for (const command of ["terminate", "terminate-keep"] as const)
+      expect(
+        selectMachine(
+          { kind: "unavailable", reason: "EC2 DescribeInstances failed: AccessDenied" },
+          KEY,
+          command,
+        ).kind,
+      ).toBe("refused");
   });
 
   test("several are refused, each listed: fffactory never guesses", () => {
@@ -570,6 +587,13 @@ describe("terminate's confirmation (worker-lifecycle §Confirmation (typed key))
     expect(confirmationQuestion("terminate-keep", WORKER, ID)).toBe(
       `Terminate worker builder-1 (fff-abcd1234-builder-1), EC2 instance ${ID}? ` +
         "Its machine and root volume are destroyed. Type the host key to confirm: ",
+    );
+  });
+
+  test("with --keep and the machine already gone, the question is only to delete its devices", () => {
+    expect(confirmationQuestion("terminate-keep", WORKER, undefined)).toBe(
+      "Delete the Tailscale devices of worker builder-1 (fff-abcd1234-builder-1)? No EC2 " +
+        "instance carries its key: its machine is already gone. Type the host key to confirm: ",
     );
   });
 

@@ -1021,6 +1021,130 @@ describe("fffactory worker terminate --keep (worker-lifecycle §Terminate (keep)
   });
 });
 
+describe("terminate --keep with the machine already gone (worker-lifecycle §Terminate (keep))", () => {
+  const GONE = { inventory: { kind: "machines", machines: [] }, view: OFFLINE } as const;
+
+  test("no gates and no EC2 call: its tagged devices are deleted, and it succeeds unchanged", async () => {
+    const w = world({
+      ...GONE,
+      admin: {
+        devices: [
+          tailnetDevice("nWorker1CNTRL", HOSTNAME, [WORKER_TAG]),
+          tailnetDevice("nOther1CNTRL", `${FACTORY}-builder-2`, [WORKER_TAG]),
+        ],
+      },
+    });
+    const result = await terminateWorker(w.deps, terminating(w));
+    expect(result).toMatchObject({
+      kind: "done",
+      action: "terminate",
+      instanceId: undefined,
+      changed: false,
+      awaited: false,
+      devices: { kind: "listed", removed: ["nWorker1CNTRL"], failed: [], untagged: [] },
+      leftover: undefined,
+    });
+    expect(result).not.toHaveProperty("removed");
+    expect(w.control.calls).toEqual([]);
+    expect(w.controlPlane.calls).toEqual([]);
+    expect(w.transport.calls).toEqual([]);
+    expect(w.tailnet.reads()).toBe(0);
+    expect(calls(w)).toEqual([]);
+    expect(w.store.writes).toEqual([]);
+    expect(w.admin.calls).toEqual(["open", "devices", "remove nWorker1CNTRL"]);
+    expect(w.admin.devices().map((device) => device.id)).toEqual(["nOther1CNTRL"]);
+    expect(w.progress).toEqual([
+      { kind: "absent", key: KEY, hostname: HOSTNAME },
+      { kind: "removing_devices", hostname: HOSTNAME },
+    ]);
+    expect(stages(w)).toEqual(["locating", "authorizing", "removing_devices", "unchanged"]);
+    expect(records(w)[0]).toMatchObject({
+      operation: "worker-terminate",
+      status: "succeeded",
+      failure: null,
+    });
+    expect(records(w)[0]).not.toHaveProperty("machine");
+    expect(w.lockStore.locks.size).toBe(0);
+  });
+
+  test("a device it could not delete leaves it partial, naming the apply that follows", async () => {
+    const w = world({
+      ...GONE,
+      admin: {
+        devices: [tailnetDevice("nWorker1CNTRL", HOSTNAME, [WORKER_TAG])],
+        failing: { nWorker1CNTRL: "Tailscale answered HTTP 500" },
+      },
+    });
+    expect(await terminateWorker(w.deps, terminating(w))).toMatchObject({
+      kind: "done",
+      instanceId: undefined,
+      leftover: {
+        summary: `Not every Tailscale device named ${HOSTNAME} was deleted`,
+        nextAction: expect.stringContaining("then run `fffactory apply`"),
+      },
+    });
+    expect(records(w)[0]).toMatchObject({ status: "partial" });
+    expect(w.lockStore.locks.size).toBe(0);
+  });
+
+  test("at a terminal it asks for the host key before deleting anything; anything else declines", async () => {
+    const w = world({ ...GONE, prompt: fakePrompt({ interactive: true, answers: ["yes"] }) });
+    expect(await terminateWorker(w.deps, terminating(w, { confirm: undefined }))).toMatchObject({
+      kind: "declined",
+    });
+    expect(w.prompt.asked).toEqual([
+      `Delete the Tailscale devices of worker ${KEY} (${HOSTNAME})? No EC2 instance carries ` +
+        "its key: its machine is already gone. Type the host key to confirm: ",
+    ]);
+    expect(w.admin.calls).toEqual(["open"]);
+    expect(records(w)[0]).toMatchObject({ status: "declined" });
+  });
+
+  test("the admin client is still required, and still opened before anything is deleted", async () => {
+    const w = world({ ...GONE, secretReadFails: new Error("AccessDeniedException") });
+    expect(await terminateWorker(w.deps, terminating(w))).toMatchObject({ kind: "refused" });
+    expect(w.admin.calls).toEqual([]);
+    expect(records(w)[0]).toMatchObject({ status: "refused" });
+  });
+
+  test("an EC2 inventory that cannot be read is refused, never taken for a machine gone", async () => {
+    const w = world({
+      inventory: { kind: "unavailable", reason: "EC2 DescribeInstances failed: AccessDenied" },
+    });
+    expect(await terminateWorker(w.deps, terminating(w))).toMatchObject({
+      kind: "refused",
+      refusal: { summary: "EC2 DescribeInstances failed: AccessDenied" },
+    });
+    expect(w.secrets.reads).toEqual([]);
+    expect(w.admin.calls).toEqual([]);
+  });
+
+  test("an interrupted terminate --keep is finished by its rerun, which deletes the devices", async () => {
+    let w: World | undefined;
+    w = world({ ...TERMINATING, states: ["shutting-down"], onSleep: () => w?.interrupt() });
+    expect(await terminateWorker(w.deps, terminating(w))).toMatchObject({
+      kind: "interrupted",
+      requested: true,
+    });
+    expect(w.admin.devices().map((device) => device.id)).toEqual(["nWorker1CNTRL"]);
+    // `fffactory lock break`; EC2 has since terminated the instance, which it no longer lists.
+    w.lockStore.locks.clear();
+    const rerun: WorkerLifecycleDependencies = {
+      ...w.deps,
+      interrupted: () => false,
+      machines: fakeMachineInventory({ kind: "machines", machines: [] }).machines,
+    };
+    expect(await terminateWorker(rerun, terminating(w))).toMatchObject({
+      kind: "done",
+      instanceId: undefined,
+      devices: { removed: ["nWorker1CNTRL"] },
+      leftover: undefined,
+    });
+    expect(w.admin.devices()).toEqual([]);
+    expect(w.lockStore.locks.size).toBe(0);
+  });
+});
+
 describe("refusals before any mutation (worker-lifecycle §Terminate (keep))", () => {
   test("without the admin client, before anything reaches AWS", async () => {
     const w = world();

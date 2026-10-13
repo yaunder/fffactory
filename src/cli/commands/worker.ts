@@ -67,11 +67,12 @@ const USAGE = [
   "Manager. A host whose machine is already gone is removed the same way. The",
   "only declared host cannot be removed. With --keep, the host stays in",
   "factory.json and the next `fffactory apply` creates it afresh: EC2 terminates",
-  "the instance and Terraform is not run. A running worker is first inspected, and",
-  "refused while agents are active on it or its checkouts are unresolved or",
-  "unmanaged; a stopped one is not inspected. You confirm by typing the host key at",
-  "a terminal, or with --confirm KEY. A device it could not delete is reported, and",
-  "exits 2: the terminate stands.",
+  "the instance and Terraform is not run. With a machine already gone, as an",
+  "interrupted terminate leaves it, only its devices are deleted. A running worker",
+  "is first inspected, and refused while agents are active on it or its checkouts",
+  "are unresolved or unmanaged; a stopped one is not inspected. You confirm by",
+  "typing the host key at a terminal, or with --confirm KEY. A device it could not",
+  "delete is reported, and exits 2: the terminate stands.",
   "",
   "Refused, changing nothing, when KEY is not a host factory.json declares, the",
   "credentials belong to another account, this fffactory is not the release",
@@ -107,10 +108,9 @@ const WORDS: Readonly<
   terminate: { verb: "terminate", done: "Terminated", past: "terminated", doing: "Terminating" },
 };
 
-/** What `--force` skipped, for each action that has gates. */
-const UNINSPECTED: Readonly<Record<PowerAction, string>> = {
+/** What `--force` skipped, for each action that has gates: start has none. */
+const UNINSPECTED: Readonly<Record<Exclude<PowerAction, "start">, string>> = {
   stop: "active agents",
-  start: "active agents",
   terminate: "active agents or checkouts",
 };
 
@@ -217,6 +217,11 @@ function doneLine(result: Extract<WorkerPower, { readonly kind: "done" }>): stri
     return (
       `Removed worker ${named}: its EC2 instance and root volume are gone, and neither ` +
       "Terraform nor factory.json records it."
+    );
+  if (action === "terminate" && result.instanceId === undefined)
+    return (
+      `Worker ${named} has no machine left to terminate. factory.json keeps the host, so ` +
+      "`fffactory apply` creates it afresh."
     );
   if (awaited)
     return `Worker ${named} is now ${TARGET_STATE[action]}: it was already on its way, and fffactory waited for it.`;
