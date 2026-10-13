@@ -276,31 +276,39 @@ async function worktreeWork(
   };
 }
 
-/** Local branches whose tip no remote-tracking branch holds, the first few printable ones. */
+/** Above this many unpushed commits, the branches carrying them are counted, not named. */
+const NAMING_LIMIT = 10_000;
+
+/**
+ * Local branches whose tip no remote-tracking branch holds, the first few printable ones: the
+ * tips among the unpushed commits, in two commands however many branches there are.
+ */
 async function unpushedBranches(
   inspection: Inspection,
   directory: string,
+  unpushed: number,
 ): Promise<string[] | undefined> {
-  const refs = await inspection.git(directory, [
+  if (unpushed === 0 || unpushed > NAMING_LIMIT) return [];
+  const commits = await inspection.git(directory, ["rev-list", "--branches", "--not", "--remotes"]);
+  const tips = await inspection.git(directory, [
     "for-each-ref",
-    "--format=%(refname)",
+    "--format=%(objectname) %(refname)",
     "refs/heads",
   ]);
-  if (refs === undefined) return undefined;
+  if (commits === undefined || tips === undefined) return undefined;
+  return namedTips(tips, new Set(commits.split("\n")));
+}
+
+/** The printable names of the branches in `for-each-ref` output whose tip is in `ahead`. */
+function namedTips(tips: string, ahead: ReadonlySet<string>): string[] {
   const named: string[] = [];
-  for (const ref of refs.split("\n").filter((line) => line.startsWith("refs/heads/"))) {
-    if (named.length === WORK_LIMITS.namedBranches) break;
+  for (const line of tips.split("\n")) {
+    const space = line.indexOf(" ");
+    const ref = line.slice(space + 1);
+    if (!ref.startsWith("refs/heads/") || !ahead.has(line.slice(0, space))) continue;
     const name = printableBranch(ref.slice("refs/heads/".length));
-    if (name === null) continue;
-    const ahead = await inspection.count(directory, [
-      "rev-list",
-      "--count",
-      ref,
-      "--not",
-      "--remotes",
-    ]);
-    if (ahead === undefined) return undefined;
-    if (ahead > 0) named.push(name);
+    if (name !== null) named.push(name);
+    if (named.length === WORK_LIMITS.namedBranches) break;
   }
   return named;
 }
@@ -315,7 +323,7 @@ async function shared(inspection: Inspection, directory: string) {
     "--remotes",
   ]);
   if (unpushed === undefined) return undefined;
-  const branches = unpushed > 0 ? await unpushedBranches(inspection, directory) : [];
+  const branches = await unpushedBranches(inspection, directory, unpushed);
   const stashes = await inspection.git(directory, ["stash", "list", "--format=%H"]);
   if (branches === undefined || stashes === undefined) return undefined;
   return {

@@ -556,9 +556,10 @@ account `factory`, which owns the checkouts.
    worktrees, wherever they are; an answer that does not list the tree itself
    (Git found a repository in a parent directory) makes it unreadable. Then,
    once per repository: `git rev-list --count --branches --not --remotes`
-   (commits on local branches that no remote-tracking branch holds); for each
-   local branch, until 10 are named, the same count from its tip; and
-   `git stash list` (only counted).
+   (commits on local branches that no remote-tracking branch holds); when there
+   are some, at most 10,000, `git rev-list --branches --not --remotes` and
+   `git for-each-ref refs/heads`, naming the first 10 branches whose tip is
+   among those commits; and `git stash list` (only counted).
 3. **Worktrees.** For each worktree the repository lists (a bare entry
    skipped): commits reachable from its HEAD that no remote-tracking branch
    holds (`git rev-list --count HEAD_ID --not --remotes`); then, unless Git

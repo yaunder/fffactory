@@ -143,6 +143,22 @@ describe("host work inspect (host-protocol §work inspect)", () => {
     ]);
   });
 
+  test("names at most 10 branches carrying unpushed commits, and counts every commit", async () => {
+    const directory = await checkout();
+    for (let index = 0; index < 12; index += 1) {
+      git(directory, "switch", "--quiet", "-c", `wip-${String(index).padStart(2, "0")}`, "main");
+      await writeFile(join(directory, `wip-${index}.txt`), "wip\n");
+      git(directory, "add", ".");
+      git(directory, "commit", "--quiet", "-m", `wip ${index}`);
+    }
+    git(directory, "switch", "--quiet", "main");
+    const [found] = (await inspect()).repositories;
+    expect(found?.unpushed_commits).toBe(12);
+    expect(found?.unpushed_branches).toEqual(
+      Array.from({ length: 10 }, (_, index) => `wip-${String(index).padStart(2, "0")}`),
+    );
+  });
+
   test("a stash entry is work", async () => {
     const directory = await checkout();
     await writeFile(join(directory, "README.md"), "stashed\n");
