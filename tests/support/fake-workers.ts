@@ -478,6 +478,9 @@ export function fakeWorker(
       changed: false,
     }),
     inspectDispatch: async () => ({ protocol_version: 1, state: "none" }),
+    inspectWork: async () => {
+      throw new Error("host work inspect was not expected");
+    },
     isRoot: () => false,
     ...overrides,
   };

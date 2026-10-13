@@ -10,6 +10,7 @@ import {
   dispatchInspectionExitCode,
   dispatchInspectionJson,
 } from "../../domain/dispatch-projection";
+import { workInspectionJson } from "../../domain/work-inspection";
 import type { CliContext, Command } from "../context";
 
 const USAGE = [
@@ -19,6 +20,7 @@ const USAGE = [
   "       fffactory host repositories (--json | --apply)",
   "       fffactory host control-plane (activity | install | reload | restart)",
   "       fffactory host dispatch (adoption | reconcile | inspect)",
+  "       fffactory host work inspect",
   "",
   "The worker side of the host protocol. The operator's fffactory runs these on a",
   "worker over SSH as fffactory-admin; there is no need to run them yourself.",
@@ -34,6 +36,9 @@ const USAGE = [
   "                  has enrolled. Changes nothing.",
   "  repositories    Read the last repository result (--json), or as root reconcile",
   "                  the manifest on standard input (--apply).",
+  "  work inspect    As root, run by the activator: report, as the factory account,",
+  "                  the uncommitted, unpushed and stashed work in every checkout",
+  "                  and worktree. Reads only; changes nothing.",
 ];
 
 function jsonOnly(args: readonly string[]): boolean {
@@ -146,9 +151,19 @@ async function dispatch(args: readonly string[], context: CliContext): Promise<n
   return action === "adoption" ? adoption(context) : dispatchStateAction(action, context);
 }
 
+/** The current work in every checkout and worktree, read as the runtime account. */
+async function work(args: readonly string[], context: CliContext): Promise<number> {
+  const [action, ...rest] = args;
+  parseArgs({ args: rest, options: {}, strict: true, allowPositionals: false });
+  if (action !== "inspect") throw new Error("name a work action: inspect");
+  if (!context.worker.isRoot()) throw new Error("host work runs only through the activator");
+  context.out(workInspectionJson(await context.worker.inspectWork()));
+  return 0;
+}
+
 const SUBCOMMANDS: Readonly<
   Record<string, (args: readonly string[], context: CliContext) => Promise<number>>
-> = { inspect, apply, verify, repositories, "control-plane": controlPlane, dispatch };
+> = { inspect, apply, verify, repositories, "control-plane": controlPlane, dispatch, work };
 
 async function host(args: readonly string[], context: CliContext): Promise<number> {
   const [subcommand, ...rest] = args;
