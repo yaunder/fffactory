@@ -174,11 +174,17 @@ export function assessUpgrade(
 /** A pin that is only a release's numbers, which cannot hold anything else, may be shown. */
 const PLAIN_RELEASE = /^\d+\.\d+\.\d+$/;
 
-/** What an upgrade's plan shows first: the pin it moves, approved with the plan. */
-export function describePinMove(from: string, to: Release): string[] {
-  const shown = PLAIN_RELEASE.test(from) ? from : "the release it pins now";
-  return [
-    `Upgrade: factory.json's release pin moves from ${shown} to ${to}. It is written once you ` +
-      "approve this plan, before anything is applied.",
-  ];
+/**
+ * The pin an upgrade moves, shown first with its plan and approved with it. `from` is the pin
+ * factory.json holds only when it is a plain release; otherwise it is `unshown`, never echoed:
+ * it is a configuration value.
+ */
+export interface PinMove {
+  readonly from: Release | "unshown";
+  readonly to: Release;
+}
+
+/** The pin move from factory.json's pin `from` to the running release `to`. */
+export function pinMove(from: string, to: Release): PinMove {
+  return { from: PLAIN_RELEASE.test(from) ? (from as Release) : "unshown", to };
 }

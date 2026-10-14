@@ -2,6 +2,7 @@ import { parseArgs } from "node:util";
 import { planFactory } from "../../application/plan-factory";
 import type { CliContext, Command } from "../context";
 import { sha256Text } from "../../infrastructure/release-tarball";
+import { describePlan, describeReview } from "../presentation/plan";
 import { planningBasis, printPlanRefusal } from "./planning";
 
 const USAGE = [
@@ -70,14 +71,14 @@ async function plan(args: readonly string[], context: CliContext): Promise<numbe
   );
   switch (result.kind) {
     case "bootstrap_first":
-      for (const line of result.plan) context.out(line);
+      for (const line of describeReview(result.review)) context.out(line);
       context.out(
         "The factory itself is planned once the state bucket exists: `fffactory apply` asks " +
           "you to approve this bootstrap first, then plans the factory for its own approval.",
       );
       return 0;
     case "planned": {
-      for (const line of result.plan) context.out(line);
+      for (const line of describePlan(result.review)) context.out(line);
       const { saved } = result;
       context.out(
         `Saved as plan ${saved.plan_id}, until ${saved.expires_at}. To apply exactly it:`,

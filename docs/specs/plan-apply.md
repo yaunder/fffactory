@@ -181,7 +181,8 @@ and is verified, whatever it runs now: the steps are idempotent, so rerunning
 apply converges what remains. The stage's changes therefore depend only on
 factory.json's text and the release, which a saved plan is bound to; they are
 shown after the infrastructure's, one line per worker, and approved with them.
-`declaredWorkers` and `describeWorkers` (`src/domain/plan.ts`) make them.
+`declaredWorkers` (`src/domain/plan.ts`) makes them, and `describeWorkers`
+(`src/cli/presentation/plan.ts`) shows them.
 
 Under the lock, after the infrastructure stage (applied, or with no changes
 skipped: no Terraform apply runs), `applyWorkers`
@@ -956,19 +957,31 @@ refused (D11).
 
 ## Layer mapping
 
+The plan an operator approves reaches the CLI as data: a `PlanReview`
+(`src/domain/plan.ts`), either a factory plan (its target, infrastructure
+changes, every declared worker with its placed repositories, control-plane
+changes, dispatch settings, the workers skipped as stopped and, for an upgrade,
+the pin move) or backend bootstrap's (its target, bucket and creations). The
+`Approval` port takes that review, and `planFactory`, `applyFactory`,
+`bootstrapBackend` and `upgradeFactory` return or pass reviews and typed
+refusals: each saved plan's staleness is a `StaleReason`, an unreadable or
+non-create plan an `UnexpectedPlan`, an unready state bucket an `UnreadyBucket`.
+Only `src/cli/presentation/` lays any of them out as text, so what each command
+prints is unchanged by where the plan was made.
+
 | Layer | Module | Responsibility |
 | --- | --- | --- |
-| Domain | `src/domain/plan.ts` | Plan IDs, the CLI/pin match guard, reading a JSON plan's resource changes, the plan's presentation (stopped workers skipped), the D11 refusals, the refusal to resize a stopped or stopping worker, or any while the EC2 inventory cannot be read (`resizeRefusal`), the saved plan record, its freshness rule (`stoppedStaleness` too), `FACTORY_STATE_KEY`, `PLAN_TTL_MS`. Pure. |
-| Domain | `src/domain/release-compatibility.ts` | `RELEASE_COMPATIBILITY`, release precedence, upgrade's assessment of the pin, the schema version check, the base generation and schema D11 refusals, the pin move's preview. Pure. |
+| Domain | `src/domain/plan.ts` | Plan IDs, the CLI/pin match guard, reading a JSON plan's resource changes, `ChangeKind` and `changeTally`, `PlanReview` (`factoryPlanReview`), `UnexpectedPlan`, the D11 refusals, the refusal to resize a stopped or stopping worker, or any while the EC2 inventory cannot be read (`resizeRefusal`), the saved plan record, its freshness rule as `StaleReason`s (`planStaleness`, `stateStaleness`, `stoppedStaleness`), `FACTORY_STATE_KEY`, `PLAN_TTL_MS`. Pure; no text layout. |
+| Domain | `src/domain/release-compatibility.ts` | `RELEASE_COMPATIBILITY`, release precedence, upgrade's assessment of the pin, the schema version check, the base generation and schema D11 refusals, the `PinMove` an upgrade shows (`pinMove`: a pin that is not a plain release is never carried). Pure. |
 | Domain | `src/domain/operation.ts` | The operation record, its key, stage transitions (upgrade's `pin` stage too), workers, repositories and control-plane outcomes. Pure. |
 | Domain | `src/domain/repository-placement.ts` | The per-worker repository manifest, fixed worker protocol commands, and completed-result parser. Pure. |
 | Domain | `src/domain/stable-host-keys.ts` | `recordedHostKeys`, reading the factory root's `host_keys` output. |
 | Application | `src/application/plan-factory.ts` | `checkPlannable`, `planInfrastructure`, `planFactory`, `declaredMachines` (the one inventory read: the stopped workers and the resize guard). |
-| Application | `src/application/apply-factory.ts` | `applyFactory`: saved-plan freshness, the lock, infrastructure, workers, repository and control-plane stages, operation records, interruption. |
+| Application | `src/application/apply-factory.ts` | `applyFactory`: saved-plan freshness (the state bucket gone, and a worker's Paseo state changed, as `StaleReason`s too), the review approved, the lock, infrastructure, workers, repository and control-plane stages, operation records, interruption; `PinUpdate`, upgrade's pin write beside the `PinMove` it shows. |
 | Application | `src/application/plan-control-plane.ts` | Derives Paseo changes and saved live observations from worker inspections. |
 | Application | `src/application/apply-workers.ts` | `applyWorkers`: the workers stage ([host protocol §apply](host-protocol.md#apply)). |
 | Application | `src/application/apply-repositories.ts` | `applyRepositories`: projects each approved worker manifest through the fixed repository host protocol and records synchronized, unresolved, and unmanaged results. |
-| Application | `src/application/upgrade.ts` | `upgradeFactory`: the refusals, then apply's operation with the pin move written under the lock once approved. |
+| Application | `src/application/upgrade.ts` | `upgradeFactory`: the refusals, then apply's operation with the pin move shown in the review and written under the lock once approved. |
 | Application | `src/application/set-secret.ts` | The CLI/pin match guard on `secret set`. |
 | Domain | `src/domain/rollout.ts` | A worker's outcome (`stoppedOutcome` too), the rollout rule, and the first boot wait's rules: its deadline, poll and report intervals, which tailnet states are still joining, a bootstrap refusal to wait for, and the timed-out failure. Pure. |
 | Application | `src/application/plan-store.ts` | The `PlanStore` port, with `digest` for the check under the lock, and `planStoreDirectory`. |
@@ -976,19 +989,26 @@ refused (D11).
 | Application | `src/application/lock-store.ts` | `writeOperation` and `stateRevision` on the state bucket port. |
 | Infrastructure | `src/infrastructure/plan-store.ts` | `filesystemPlanStore`: private plan directories, the plan file's digest, pruning. |
 | Infrastructure | `src/infrastructure/aws-s3-lock-store.ts` | PutObject of operation records; HeadObject of the state object. |
-| CLI adapter | `src/cli/commands/plan.ts`, `src/cli/commands/apply.ts`, `src/cli/commands/upgrade.ts`, `src/cli/commands/planning.ts` | The commands, the approval at the terminal, and what they share. |
+| CLI adapter | `src/cli/presentation/plan.ts` | Every plan review, refusal and stale reason as text: `describePlan` (with `describeTarget`, `describeInfrastructure`, the `+ ~ -` glyphs, `describeWorkers`, `describeControlPlane`, `describeRepositories`, `describeDispatch`), `describePinMove`, `describeBootstrapPlan`, `describeReview`, `describeRemovalPlan`, `describeD11Refusal`, `describeStoppedResizeRefusal`, `describeUnexpectedPlan`, `staleRefusal` and `describeStaleReason`, and `unreadyBucketRefusal` with the AWS CLI commands that complete the bucket. |
+| CLI adapter | `src/cli/commands/plan.ts`, `src/cli/commands/apply.ts`, `src/cli/commands/upgrade.ts`, `src/cli/commands/planning.ts` | The commands, the approval at the terminal (`operatorApproval` shows the review), and what they share. |
 | CLI adapter | `src/cli/diagnostics.ts`, `src/cli/run.ts` | The path of a failed Terraform command's diagnostics, printed with the failure. |
 | CLI adapter | `src/cli/interrupts.ts` | `interruptible`: the interrupt notice and flag, the sleep an interrupt wakes, stopping running tools, then, for a command that waits on an interrupt, waiting `RETURN_GRACE_MS` at most for it to return, before exiting with 128 plus the signal's number; a second signal kills and exits at once. |
 | CLI adapter | `src/cli/run.ts`, `src/cli/context.ts` | `waitsOnInterrupt`: only `apply`, `upgrade`, `doctor`, `status` and `worker` (`Command.waitsOnInterrupt`) are waited for. |
 | CLI adapter | `src/cli/main.ts` | Wires `terraformProvisioner`, `filesystemPlanStore`, and `interruptible` over the process, waiting on an interrupt as `waitsOnInterrupt` says for the command run. |
 
-Tests: `tests/domain/plan.test.ts` (plan IDs, the pin guard, presentation, both
-D11 refusals, unknown host machine actions refused, the record round trip and
-unreadable records, every staleness reason, the workers whose machine a plan
-creates, stopped workers shown skipped, the resize of a stopped or stopping
-worker, or of any with the inventory unreadable, refused and an unreadable
-change failing closed, `stopped_workers` round-tripping and every stopped
-staleness reason), `tests/domain/rollout.test.ts` (a stopped worker neither
+Tests: `tests/domain/plan.test.ts` (plan IDs, the pin guard, change kinds and
+their tally, a factory review carrying every stage, both D11 refusals, unknown
+host machine actions refused, the record round trip and unreadable records,
+every staleness reason as a `StaleReason`, the workers whose machine a plan
+creates, the resize of a stopped or stopping worker, or of any with the
+inventory unreadable, refused and an unreadable change failing closed,
+`stopped_workers` round-tripping and every stopped staleness reason),
+`tests/domain/release-compatibility.test.ts` (the pin move never carrying a pin
+that is not a plain release), `tests/cli/presentation/plan.test.ts` (each review
+and refusal as text: the target, changes and tally, every stage with stopped
+workers shown skipped, the pin move, backend bootstrap's plan, an unready
+bucket's guidance, both D11 refusals, the resize refusals, every `StaleReason`'s
+words, the removal plan), `tests/domain/rollout.test.ts` (a stopped worker neither
 stopping the rollout nor making it partial, the first boot's deadline, the
 tailnet states still joining, the bootstrap refusal waited for, the timed-out
 failure and the rollout going on after it), `tests/domain/operation.test.ts`,
@@ -1011,6 +1031,7 @@ be finished, after applying or after a failure; a saved plan applied exactly,
 refused after factory.json changes, from another release or with other assets,
 expired, after the state changed, unknown, damaged, whose record no longer
 matches its Terraform plan, unreadable, replacing a host, without its bucket,
+for another factory.json or account, after a worker's Paseo state changed,
 or whose Terraform plan file was swapped after it was loaded or after it was
 read back; a lock taken after bootstrap and never after an interrupt
 (`tests/application/bootstrap-backend.test.ts`); the workers stage after the
@@ -1084,7 +1105,9 @@ on an interrupt; `host`, `secret` and `lock` do not), `tests/cli/main.test.ts`
 Upgrade: `tests/domain/release-compatibility.test.ts` (release precedence, the
 pin assessment: an upgrade, nothing to upgrade, a downgrade, no pin, the base
 generation refusal and a pin at the generation's release; the schema version
-check before validation; the preview never echoing a prerelease pin),
+check before validation; the pin move never carrying a prerelease pin),
+`tests/cli/presentation/plan.test.ts` (the pin move's preview naming both
+releases and never echoing a prerelease pin),
 `tests/domain/plan.test.ts` (the guard's wording for an earlier and a later pin),
 `tests/application/upgrade.test.ts` (the pin move shown with the plan for the
 running release, written under the lock once approved and before Terraform

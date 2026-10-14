@@ -6,6 +6,9 @@
  * remove a host key is refused, naming `fffactory worker terminate KEY`, the only command that
  * removes a host (`host-removal.ts`); until host replacement lands in milestone M3, one that
  * would destroy or replace a host machine is refused, naming the capability it needs (D11).
+ *
+ * The plan an operator approves is a `PlanReview`, data only: `cli/presentation/plan.ts` lays it
+ * out as text, as it does each refusal and `StaleReason`.
  */
 import { type RandomBytes, randomAlphanumeric } from "./initialization";
 import {
@@ -23,6 +26,8 @@ import { hostName } from "./resource-naming";
 import { isRecord } from "./validation";
 import { CHANGE_TYPES, type ChangeType } from "./change-classification";
 import type { DispatchSchedule } from "./dispatch-projection";
+import type { BootstrapContext } from "./backend-bootstrap";
+import type { PinMove } from "./release-compatibility";
 
 export const PLAN_SCHEMA_VERSION = 1;
 
@@ -149,49 +154,45 @@ export interface PlanTarget {
   readonly release: Release;
 }
 
-export function describeTarget(target: PlanTarget): string[] {
-  const factory =
-    target.name === undefined ? target.factoryId : `${target.name} (${target.factoryId})`;
-  return [
-    `  Configuration: ${target.instancePath}`,
-    `  Factory: ${factory}`,
-    `  AWS account: ${target.accountId}, Region: ${target.region}`,
-    `  Release: ${target.release}`,
-  ];
-}
+/**
+ * What a change does to its resource. Terraform plans a replacement as two actions in either
+ * order; anything else (a `forget`, an action fffactory does not know) is `other`.
+ */
+export type ChangeKind = "create" | "update" | "delete" | "replace" | "other";
 
-/** Terraform's symbol for each kind of change, and what it counts as. */
-const KINDS: Readonly<
-  Record<string, { readonly symbol: string; readonly add: number; readonly change: number }>
-> = {
-  create: { symbol: "+", add: 1, change: 0 },
-  update: { symbol: "~", add: 0, change: 1 },
-  delete: { symbol: "-", add: 0, change: 0 },
-  "delete,create": { symbol: "-/+", add: 1, change: 0 },
-  "create,delete": { symbol: "+/-", add: 1, change: 0 },
+const KINDS: Readonly<Record<string, ChangeKind>> = {
+  create: "create",
+  update: "update",
+  delete: "delete",
+  "delete,create": "replace",
+  "create,delete": "replace",
 };
 
-function describeChange({ address, actions }: ResourceChange): string {
-  const kind = KINDS[actions.join()];
-  return kind === undefined
-    ? `  ${address} (${actions.join(", ")})`
-    : `  ${kind.symbol} ${address}`;
+export function changeKind({ actions }: ResourceChange): ChangeKind {
+  return KINDS[actions.join()] ?? "other";
 }
 
-/** The infrastructure changes a plan makes, as the operator approves them. */
-export function describeInfrastructure(changes: readonly ResourceChange[]): string[] {
+/** How many changes change something, and how many resources each adds, changes or destroys. */
+export interface ChangeTally {
+  readonly changing: number;
+  readonly add: number;
+  readonly change: number;
+  readonly destroy: number;
+}
+
+/**
+ * The tally of the changes that change something: a creation or replacement adds a resource,
+ * an in-place update changes one, and any change that deletes destroys one.
+ */
+export function changeTally(changes: readonly ResourceChange[]): ChangeTally {
   const changing = changes.filter(changesSomething);
-  if (changing.length === 0) return ["Infrastructure: no changes."];
-  const count = (measure: (change: ResourceChange) => number) =>
-    changing.reduce((total, change) => total + measure(change), 0);
-  const added = count(({ actions }) => KINDS[actions.join()]?.add ?? 0);
-  const changed = count(({ actions }) => KINDS[actions.join()]?.change ?? 0);
-  const destroyed = count(({ actions }) => (actions.includes("delete") ? 1 : 0));
-  return [
-    "Infrastructure changes:",
-    ...changing.map(describeChange),
-    `  ${added} to add, ${changed} to change, ${destroyed} to destroy.`,
-  ];
+  const count = (measure: (change: ResourceChange) => boolean) => changing.filter(measure).length;
+  return {
+    changing: changing.length,
+    add: count((change) => ["create", "replace"].includes(changeKind(change))),
+    change: count((change) => changeKind(change) === "update"),
+    destroy: count(({ actions }) => actions.includes("delete")),
+  };
 }
 
 /** A worker the workers stage installs: its stable key and namespaced hostname. */
@@ -242,46 +243,6 @@ export function plannedDispatch(
   });
 }
 
-/** A later stage's line for a worker whose machine is stopped: it is sent nothing. */
-function skippedStopped({ key, hostname }: PlannedWorker): string {
-  return `  = ${key} (${hostname}): skipped: stopped`;
-}
-
-export function describeDispatch(
-  plans: readonly PlannedDispatch[],
-  stopped: readonly HostKey[] = [],
-): string[] {
-  if (plans.length === 0) return [];
-  return [
-    "Dispatch changes, after every readiness gate:",
-    ...plans.map((plan) => {
-      const { key, hostname, requested, schedule } = plan;
-      if (stopped.includes(key)) return skippedStopped(plan);
-      return requested && schedule !== null
-        ? `  ~ ${key} (${hostname}): install the dispatcher and skill, then reconcile ${schedule.cron} ${schedule.timezone} with ${schedule.provider}/${schedule.model}, mode ${schedule.mode}, cwd ${schedule.cwd}`
-        : `  ~ ${key} (${hostname}): remove the factory dispatch schedule if it exists`;
-    }),
-    "End-to-end verification: observe each worker's release, repositories, Paseo and actual dispatch schedule.",
-  ];
-}
-
-export function describeControlPlane(
-  plans: readonly PlannedControlPlane[],
-  stopped: readonly HostKey[] = [],
-): string[] {
-  if (plans.length === 0) return [];
-  return [
-    "Control-plane changes, before worker activation:",
-    ...plans.map((plan) => {
-      const { key, hostname, changes } = plan;
-      if (stopped.includes(key)) return skippedStopped(plan);
-      return changes.length === 0
-        ? `  = ${key} (${hostname}): Paseo is unchanged`
-        : `  ~ ${key} (${hostname}): ${changes.join(", ")}`;
-    }),
-  ];
-}
-
 /** The workers factory.json declares, in its order, which is the order they are updated. */
 export function declaredWorkers(instance: FactoryInstance, factoryId: FactoryId): PlannedWorker[] {
   return (instance.hosts ?? []).map(({ key }) => ({ key, hostname: hostName(factoryId, key) }));
@@ -308,76 +269,91 @@ export function createdWorkers(
   return workers.filter(({ key }) => created.has(hostMachineAddress(key))).map(({ key }) => key);
 }
 
-/** The plan's line for a factory that declares no worker. */
-export const NO_WORKERS_DECLARED =
-  "Workers: none declared. Declare a host in factory.json's hosts, then create it with `fffactory apply`.";
-
-/**
- * The workers stage's changes, as the operator approves them. Each worker gets the release
- * and its host configuration and is verified, whatever it runs now: every step is
- * idempotent, so the stage depends only on factory.json and the release, which a saved plan
- * is bound to. Rerunning apply converges what remains. A worker whose machine is `stopped`
- * is skipped: apply never starts it. A factory that declares no worker, as once `fffactory
- * worker terminate` removed its last, says so, and how to add one.
- */
-export function describeWorkers(
-  workers: readonly PlannedWorker[],
-  release: Release,
-  stopped: readonly HostKey[] = [],
-): string[] {
-  if (workers.length === 0) return [NO_WORKERS_DECLARED];
-  return [
-    "Worker changes, one worker at a time:",
-    ...workers.map(({ key, hostname }) =>
-      stopped.includes(key)
-        ? `  = ${key} (${hostname}): skipped: stopped; start it with \`fffactory worker start ${key}\`, then apply again to install it`
-        : `  ~ ${key} (${hostname}): install release ${release} and its host configuration, then verify it`,
-    ),
-  ];
+/** The repositories factory.json places on a worker, which the repositories stage reconciles. */
+export interface PlannedRepositories extends PlannedWorker {
+  readonly placed: readonly string[];
 }
 
-/** The repository-stage mutations included in the approved plan. */
-export function describeRepositories(
+/** Each worker's placed repositories, in the workers' order. */
+function plannedRepositories(
   workers: readonly PlannedWorker[],
   instance: FactoryInstance,
-  stopped: readonly HostKey[] = [],
-): string[] {
-  if (workers.length === 0) return [];
+): PlannedRepositories[] {
   const byKey = new Map((instance.hosts ?? []).map((host) => [host.key, host]));
-  return [
-    "Repository changes, one worker at a time:",
-    ...workers.map((worker) => {
-      const { key, hostname } = worker;
-      if (stopped.includes(key)) return skippedStopped(worker);
-      const count = byKey.get(key)?.repositories?.length ?? 0;
-      return `  ~ ${key} (${hostname}): reconcile ${count} placed ${count === 1 ? "repository" : "repositories"} as factory; preserve and report unmanaged checkouts`;
-    }),
-  ];
+  return workers.map(({ key, hostname }) => ({
+    key,
+    hostname,
+    placed: [...(byKey.get(key)?.repositories ?? [])],
+  }));
 }
 
 /**
- * The whole plan an operator approves: its target, then its infrastructure changes, then
- * each worker's install and later stages, those of the `stopped` workers skipped.
+ * The whole factory plan an operator approves, as data: its target, its infrastructure
+ * changes, then each declared worker's install and later stages, those of the `stopped`
+ * workers skipped. Each worker's install is idempotent, so the workers stage depends only on
+ * factory.json and the release, which a saved plan is bound to; a worker whose machine is
+ * stopped is skipped, and apply never starts it. An upgrade's review also carries the pin move
+ * it approves.
  */
-export function describePlan(
-  target: PlanTarget,
-  changes: readonly ResourceChange[],
-  workers: readonly PlannedWorker[] = [],
-  instance?: FactoryInstance,
-  controlPlane: readonly PlannedControlPlane[] = [],
-  dispatch: readonly PlannedDispatch[] = [],
-  stopped: readonly HostKey[] = [],
-): string[] {
-  return [
-    "Factory plan:",
-    ...describeTarget(target),
-    ...describeInfrastructure(changes),
-    ...describeWorkers(workers, target.release, stopped),
-    ...describeControlPlane(controlPlane, stopped),
-    ...(instance === undefined ? [] : describeRepositories(workers, instance, stopped)),
-    ...describeDispatch(dispatch, stopped),
-  ];
+export interface FactoryPlanReview {
+  readonly kind: "factory";
+  readonly target: PlanTarget;
+  readonly changes: readonly ResourceChange[];
+  /** Every declared worker, in the order they are updated; none for an empty factory. */
+  readonly workers: readonly PlannedWorker[];
+  readonly repositories: readonly PlannedRepositories[];
+  readonly controlPlane: readonly PlannedControlPlane[];
+  readonly dispatch: readonly PlannedDispatch[];
+  readonly stopped: readonly HostKey[];
+  readonly pinMove?: PinMove;
 }
+
+/** Backend bootstrap's plan: the bucket it creates, and every resource it creates. */
+export interface BootstrapPlanReview {
+  readonly kind: "backend_bootstrap";
+  readonly target: BootstrapContext;
+  readonly creates: readonly string[];
+}
+
+/** A plan as the operator approves it (the `Approval` port's input). */
+export type PlanReview = FactoryPlanReview | BootstrapPlanReview;
+
+export interface FactoryPlanReviewInput {
+  readonly target: PlanTarget;
+  readonly changes: readonly ResourceChange[];
+  readonly instance: FactoryInstance;
+  readonly controlPlane: readonly PlannedControlPlane[];
+  readonly dispatch: readonly PlannedDispatch[];
+  readonly stopped: readonly HostKey[];
+  readonly pinMove?: PinMove | undefined;
+}
+
+/** The review of a factory plan of `instance`: every declared worker and its repositories. */
+export function factoryPlanReview(input: FactoryPlanReviewInput): FactoryPlanReview {
+  const workers = declaredWorkers(input.instance, input.target.factoryId);
+  return {
+    kind: "factory",
+    target: input.target,
+    changes: input.changes,
+    workers,
+    repositories: plannedRepositories(workers, input.instance),
+    controlPlane: input.controlPlane,
+    dispatch: input.dispatch,
+    stopped: input.stopped,
+    ...(input.pinMove === undefined ? {} : { pinMove: input.pinMove }),
+  };
+}
+
+/**
+ * Why Terraform's plan is not one fffactory can apply: it, or the host keys the state
+ * records, cannot be read, or a backend bootstrap plan does more than create, or creates
+ * nothing.
+ */
+export type UnexpectedPlan =
+  | { readonly kind: "unreadable_plan" }
+  | { readonly kind: "unreadable_host_keys" }
+  | { readonly kind: "not_create"; readonly change: ResourceChange }
+  | { readonly kind: "creates_nothing" };
 
 /**
  * A change a lifecycle capability not yet built would need, refused until it lands (D11), or
@@ -458,18 +434,6 @@ export function hostKeyRemovalRefusal(issues: readonly Issue[]): D11Refusal | un
   };
 }
 
-export function describeD11Refusal(refusal: D11Refusal): string[] {
-  const missing =
-    refusal.command === undefined
-      ? "which fffactory does not have yet (D11; it arrives in milestone M3):"
-      : `which only \`${refusal.command}\` does (D11):`;
-  return [
-    `Refusing: this change needs ${refusal.capability}, ${missing}`,
-    ...refusal.reasons.map((reason) => `  ${reason}`),
-    `Nothing was applied. ${refusal.instead}`,
-  ];
-}
-
 /**
  * Whether a JSON plan's change sets another instance type. One it cannot read, or whose new
  * type is not known until apply, is taken as one, failing closed.
@@ -530,34 +494,6 @@ export function resizeRefusal(plan: unknown, guard: ResizeGuard): ResizeGuard | 
       ? { inventory: "read", workers: resizedStoppedWorkers(plan, guard.workers) }
       : { inventory: "unreadable", workers: resizedStoppedWorkers(plan, guard.workers) };
   return refused.workers.length === 0 ? undefined : refused;
-}
-
-/** Why `action` is refused for the resized guarded workers, and what to do first. */
-export function describeStoppedResizeRefusal(action: string, refusal: ResizeGuard): string[] {
-  const updated = ({ key, hostname }: PlannedWorker) =>
-    `  ${key} (${hostname}): ${hostMachineAddress(key)} would be updated in place`;
-  const starts = " a stopped instance to change its type:";
-  if (refusal.inventory === "unreadable")
-    return [
-      `Refusing to ${action}: the plan changes the instance type of a worker the EC2 ` +
-        `inventory could not be read to check is not stopped, and Terraform starts${starts}`,
-      ...refusal.workers.map(updated),
-      "Nothing was applied. Plan again once the EC2 inventory can be read.",
-    ];
-  const { workers } = refusal;
-  const commands = workers.map(({ key }) => `\`fffactory worker start ${key}\``).join(" and ");
-  const one = workers.length === 1;
-  const once = workers.some(({ machine }) => machine === "stopping")
-    ? ` once ${one ? "it has" : "they have"} stopped`
-    : "";
-  const stopping = (worker: PoweredDownWorker) =>
-    worker.machine === "stopping" ? ", and it is stopping" : "";
-  return [
-    `Refusing to ${action}: the plan changes the instance type of a stopped worker, and ` +
-      `Terraform starts${starts}`,
-    ...workers.map((worker) => `${updated(worker)}${stopping(worker)}`),
-    `Nothing was applied. Start ${one ? "it" : "each"} first with ${commands}${once}, then plan again.`,
-  ];
 }
 
 /**
@@ -803,33 +739,56 @@ export function parseSavedPlan(
 }
 
 /**
+ * Why a saved plan is no longer the plan to apply, with what its refusal names: never a
+ * configuration value, only what the plan's record or the factory's identity holds.
+ */
+export type StaleReason =
+  /** Its lifetime ended. */
+  | { readonly kind: "expired"; readonly expiresAt: string }
+  /** It was planned for another factory.json, `instancePath`. */
+  | { readonly kind: "other_instance"; readonly instancePath: string }
+  | { readonly kind: "configuration_changed" }
+  /** It was planned by fffactory `release`, not the running one. */
+  | { readonly kind: "other_release"; readonly release: Release }
+  /** The same release, but other release assets. */
+  | { readonly kind: "other_assets" }
+  /** It was planned in AWS account `accountId`, not the caller's. */
+  | { readonly kind: "other_account"; readonly accountId: string }
+  /** The factory's Terraform state is not the revision it was planned against. */
+  | { readonly kind: "state_changed" }
+  /** The state bucket it was planned against no longer exists. */
+  | { readonly kind: "state_bucket_missing" }
+  /** The EC2 inventory could not be read to check that worker `key` is still stopped. */
+  | { readonly kind: "inventory_unreadable"; readonly key: HostKey }
+  /** Worker `key` was stopped when it was planned, and is not now. */
+  | { readonly kind: "worker_started"; readonly key: HostKey }
+  /** Worker `key` is stopped now, and was not when it was planned. */
+  | { readonly kind: "worker_stopped"; readonly key: HostKey }
+  /** The Paseo state the plan's control-plane changes were made from changed on the worker. */
+  | { readonly kind: "paseo_changed"; readonly key: HostKey; readonly hostname: string };
+
+/**
  * Why a saved plan may no longer be applied in `current`, before the state is read: every
  * reason, or none when it is fresh. The same factory.json text, release and assets, and
  * account, within the plan's lifetime, are required.
  */
-export function planStaleness(plan: SavedPlan, current: PlanCircumstances): string[] {
-  const reasons: [boolean, string][] = [
-    [current.now.getTime() > Date.parse(plan.expires_at), `it expired at ${plan.expires_at}`],
+export function planStaleness(plan: SavedPlan, current: PlanCircumstances): StaleReason[] {
+  const reasons: [boolean, StaleReason][] = [
+    [
+      current.now.getTime() > Date.parse(plan.expires_at),
+      { kind: "expired", expiresAt: plan.expires_at },
+    ],
     [
       current.instancePath !== plan.instance_path,
-      `it was planned for another factory.json, ${plan.instance_path}`,
+      { kind: "other_instance", instancePath: plan.instance_path },
     ],
-    [
-      current.configurationSha256 !== plan.configuration_sha256,
-      "factory.json changed after it was planned",
-    ],
-    [
-      current.release !== plan.release,
-      `it was planned by fffactory ${plan.release}, not this release`,
-    ],
+    [current.configurationSha256 !== plan.configuration_sha256, { kind: "configuration_changed" }],
+    [current.release !== plan.release, { kind: "other_release", release: plan.release }],
     [
       current.release === plan.release && current.assetsSha256 !== plan.assets_sha256,
-      "it was planned with other release assets than this fffactory's",
+      { kind: "other_assets" },
     ],
-    [
-      current.accountId !== plan.account_id,
-      `it was planned in AWS account ${plan.account_id}, not this one`,
-    ],
+    [current.accountId !== plan.account_id, { kind: "other_account", accountId: plan.account_id }],
   ];
   return reasons.filter(([stale]) => stale).map(([, reason]) => reason);
 }
@@ -838,9 +797,12 @@ export function planStaleness(plan: SavedPlan, current: PlanCircumstances): stri
  * Why a saved plan may no longer be applied once the factory lock is held: the factory's
  * Terraform state is not the revision it was planned against (or appeared or vanished).
  */
-export function stateStaleness(plan: SavedPlan, revision: string | undefined): string | undefined {
+export function stateStaleness(
+  plan: SavedPlan,
+  revision: string | undefined,
+): StaleReason | undefined {
   if ((revision ?? null) === plan.state_revision) return undefined;
-  return "the factory's Terraform state changed after it was planned";
+  return { kind: "state_changed" };
 }
 
 /**
@@ -852,27 +814,17 @@ export function stateStaleness(plan: SavedPlan, revision: string | undefined): s
 export function stoppedStaleness(
   plan: SavedPlan,
   stopped: readonly HostKey[] | undefined,
-): string[] {
+): StaleReason[] {
   const planned = plan.stopped_workers;
   if (stopped === undefined)
-    return planned.map(
-      (key) => `the EC2 inventory could not be read to check that worker ${key} is still stopped`,
-    );
+    return planned.map((key) => ({ kind: "inventory_unreadable", key }) as const);
   return [
     ...planned
       .filter((key) => !stopped.includes(key))
-      .map((key) => `worker ${key} was stopped when it was planned, and is not now`),
+      .map((key) => ({ kind: "worker_started", key }) as const),
     ...stopped
       .filter((key) => !planned.includes(key))
-      .map((key) => `worker ${key} is stopped now, and was not when it was planned`),
-  ];
-}
-
-export function staleRefusal(planId: string, reasons: readonly string[]): string[] {
-  return [
-    `Refusing to apply plan ${planId}: it is no longer the plan to apply:`,
-    ...reasons.map((reason) => `  ${reason}`),
-    "Nothing was applied. Review a new plan with `fffactory plan`.",
+      .map((key) => ({ kind: "worker_stopped", key }) as const),
   ];
 }
 

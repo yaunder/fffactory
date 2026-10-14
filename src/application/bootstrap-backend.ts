@@ -8,11 +8,10 @@
 import type { CredentialSelection } from "../domain/aws-account";
 import {
   bootstrapPlanVerdict,
-  describeBootstrapPlan,
-  missingHardening,
-  unreadyBucketRefusal,
+  type UnreadyBucket,
+  unreadyBucket,
 } from "../domain/backend-bootstrap";
-import { resourceChanges } from "../domain/plan";
+import { type BootstrapPlanReview, resourceChanges, type UnexpectedPlan } from "../domain/plan";
 import type { HeldLock } from "../domain/factory-lock";
 import type { RandomBytes } from "../domain/initialization";
 import type { FactoryInstance, Issue, Release } from "../domain/instance";
@@ -64,11 +63,11 @@ export type BackendBootstrap =
   | { readonly kind: "present"; readonly bucket: StateBucket }
   /**
    * The bucket exists without every setting backend bootstrap applies: an interrupted
-   * bootstrap. `refusal` names what it lacks and how to complete it. Nothing is changed.
+   * bootstrap. `bucket` is where it is and what it lacks. Nothing is changed.
    */
-  | { readonly kind: "unready"; readonly refusal: readonly string[] }
+  | { readonly kind: "unready"; readonly bucket: UnreadyBucket }
   /** The plan would do something other than create, or could not be read. Nothing applied. */
-  | { readonly kind: "unexpected_plan"; readonly unexpected: readonly string[] }
+  | { readonly kind: "unexpected_plan"; readonly unexpected: readonly UnexpectedPlan[] }
   | { readonly kind: "declined" }
   | { readonly kind: "created"; readonly bucket: StateBucket }
   /** The bucket does not exist, and the request did not allow bootstrapping it. */
@@ -79,9 +78,9 @@ const OTHER_ACCOUNT: Issue = {
   message: "is not the account the account check allowed",
 };
 
-function unexpected(...reasons: string[]): {
+function unexpected(...reasons: UnexpectedPlan[]): {
   readonly kind: "unexpected_plan";
-  readonly unexpected: readonly string[];
+  readonly unexpected: readonly UnexpectedPlan[];
 } {
   return { kind: "unexpected_plan", unexpected: reasons };
 }
@@ -90,7 +89,7 @@ export type StateBucketState =
   | { readonly kind: "missing" }
   | { readonly kind: "present" }
   /** It exists without every setting backend bootstrap applies: an interrupted bootstrap. */
-  | { readonly kind: "unready"; readonly refusal: readonly string[] };
+  | { readonly kind: "unready"; readonly bucket: UnreadyBucket };
 
 /**
  * Whether the state bucket exists, and if it does, whether it has every setting backend
@@ -101,9 +100,8 @@ export async function stateBucketState(
   bucket: StateBucket,
 ): Promise<StateBucketState> {
   if (!(await lockStore.bucketExists(bucket))) return { kind: "missing" };
-  const readiness = await lockStore.bucketReadiness(bucket);
-  if (missingHardening(readiness).length === 0) return { kind: "present" };
-  return { kind: "unready", refusal: unreadyBucketRefusal(bucket, readiness) };
+  const unready = unreadyBucket(bucket, await lockStore.bucketReadiness(bucket));
+  return unready === undefined ? { kind: "present" } : { kind: "unready", bucket: unready };
 }
 
 export interface BootstrapPlanRequest {
@@ -118,11 +116,11 @@ export interface BootstrapPlanRequest {
 
 export type BootstrapPlanning =
   /** The plan would do something other than create, or could not be read. */
-  | { readonly kind: "unexpected_plan"; readonly unexpected: readonly string[] }
-  /** The plan, saved at `saved.planFile`, and the lines an operator approves it from. */
+  | { readonly kind: "unexpected_plan"; readonly unexpected: readonly UnexpectedPlan[] }
+  /** The plan, saved at `saved.planFile`, and the review an operator approves it from. */
   | {
       readonly kind: "planned";
-      readonly plan: readonly string[];
+      readonly review: BootstrapPlanReview;
       readonly saved: SavedPlanRequest;
     };
 
@@ -144,13 +142,16 @@ export async function planBackendBootstrap(
   };
   await provisioner.plan({ ...saved, variables: { ...request.variables } });
   const changes = resourceChanges(await provisioner.showPlan(saved));
-  if (changes === undefined) return unexpected("Terraform's plan could not be read");
+  if (changes === undefined) return unexpected({ kind: "unreadable_plan" });
   const verdict = bootstrapPlanVerdict(changes);
-  if (!verdict.ok) return unexpected(...verdict.unexpected);
-  if (verdict.creates.length === 0)
-    return unexpected("the plan creates nothing, though the state bucket does not exist");
-  const plan = describeBootstrapPlan(
-    {
+  if (!verdict.ok)
+    return unexpected(
+      ...verdict.unexpected.map((change) => ({ kind: "not_create", change }) as const),
+    );
+  if (verdict.creates.length === 0) return unexpected({ kind: "creates_nothing" });
+  const review: BootstrapPlanReview = {
+    kind: "backend_bootstrap",
+    target: {
       instancePath: request.instancePath,
       name: request.instance.name,
       factoryId: bucket.factoryId,
@@ -159,9 +160,9 @@ export async function planBackendBootstrap(
       release: request.release,
       bucket: bucket.bucket,
     },
-    verdict.creates,
-  );
-  return { kind: "planned", plan, saved };
+    creates: verdict.creates,
+  };
+  return { kind: "planned", review, saved };
 }
 
 /**
@@ -194,7 +195,7 @@ export async function bootstrapBackend(
     variables: projection.variables,
   });
   if (planning.kind !== "planned") return planning;
-  if (!(await approval.approve(planning.plan))) return { kind: "declined" };
+  if (!(await approval.approve(planning.review))) return { kind: "declined" };
   await provisioner.applyPlan(planning.saved);
   return { kind: "created", bucket };
 }

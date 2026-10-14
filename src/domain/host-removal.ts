@@ -1,18 +1,16 @@
 /**
  * `fffactory worker terminate KEY`'s removal of a host (`docs/specs/worker-lifecycle.md`
- * §Terminate (remove)): factory.json without the host, the scoped removal plan's rule, the plan
- * shown for approval, and the words of the removal's refusals and failures. The removal plan is
- * the only plan allowed to destroy a host machine; every other plan keeps the D11 refusals
- * (`plan.ts`). Pure: `application/worker-lifecycle.ts` plans, applies and writes.
+ * §Terminate (remove)): factory.json without the host, the scoped removal plan's rule, and the
+ * words of the removal's refusals and failures. The plan shown for approval is laid out by the
+ * CLI (`cli/presentation/plan.ts`). The removal plan is the only plan allowed to destroy a host
+ * machine; every other plan keeps the D11 refusals (`plan.ts`). Pure:
+ * `application/worker-lifecycle.ts` plans, applies and writes.
  */
 import type { FactoryInstance, HostKey, Issue, SecretReference } from "./instance";
 import {
   changesSomething,
-  describeInfrastructure,
-  describeTarget,
   hostMachineAddress,
   isHostMachine,
-  type PlanTarget,
   type ResourceChange,
   resourceChanges,
 } from "./plan";
@@ -251,21 +249,6 @@ export function removalPlanRefusal(plan: unknown, removal: HostRemoval): Refusal
       )(`Check the instance carrying the host key ${key} in the EC2 console`),
     );
   return undefined;
-}
-
-/** The removal plan, as the operator approves it with the host key. */
-export function describeRemovalPlan(
-  target: PlanTarget,
-  changes: readonly ResourceChange[],
-  worker: WorkerIdentity,
-): string[] {
-  return [
-    "Removal plan:",
-    ...describeTarget(target),
-    ...describeInfrastructure(changes),
-    `factory.json: remove host ${worker.key}.`,
-    `Tailnet: delete the devices named ${worker.hostname} that carry the factory's tag.`,
-  ];
 }
 
 /** The host keys the factory's Terraform state records cannot be read: nothing is planned. */

@@ -14,7 +14,12 @@ import type { FactoryPlanRequest, PlanRefusal } from "../../application/plan-fac
 import { requireExpectedAccount } from "../../application/require-expected-account";
 import { accountExpectation } from "../../domain/aws-account";
 import { lockRefusal } from "../../domain/factory-lock";
-import { describeD11Refusal, describeStoppedResizeRefusal } from "../../domain/plan";
+import {
+  describeD11Refusal,
+  describeStoppedResizeRefusal,
+  describeUnexpectedPlan,
+  unreadyBucketRefusal,
+} from "../presentation/plan";
 import { sha256Hex } from "../../infrastructure/release-tarball";
 import type { CliContext } from "../context";
 import {
@@ -89,11 +94,11 @@ function refusalLines(
     case "stopped_resize":
       return describeStoppedResizeRefusal(action, refusal);
     case "unready":
-      return refusal.refusal;
+      return unreadyBucketRefusal(refusal.bucket);
     case "unexpected_plan":
       return [
         `Refusing to ${action}: Terraform's plan is not one fffactory can apply:`,
-        ...refusal.unexpected.map((reason) => `  ${reason}`),
+        ...refusal.unexpected.map((reason) => `  ${describeUnexpectedPlan(reason)}`),
       ];
     case "locked":
       return lockRefusal(refusal.held, now);

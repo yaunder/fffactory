@@ -535,7 +535,9 @@ account than `aws.account_id`. Then:
    before approval, listing each offending resource as `ADDRESS (ACTIONS)`,
    and nothing is applied;
 5. the plan is shown for its own approval, through the `Approval` port
-   (`src/application/approval.ts`):
+   (`src/application/approval.ts`), which takes it as a backend bootstrap
+   `PlanReview` that the CLI lays out
+   (`src/cli/presentation/plan.ts`):
 
    ```text
    Backend bootstrap: the state bucket fff-abcd1234-state does not exist yet.
@@ -762,9 +764,10 @@ N s`, never an AWS or SDK message.
 | Application | `src/application/project-terraform-inputs.ts` | factory.json projected into each root module's variables. |
 | Infrastructure | `src/infrastructure/terraform/resource-names.ts` | `NAMED_RESOURCES`, and the namespacing check over a Terraform JSON plan. |
 | Infrastructure | `assets/terraform/` | The Terraform modules and their provider lockfiles. |
-| Domain | `src/domain/backend-bootstrap.ts` | Reading a JSON plan's resource changes, the create-only rule and the bootstrap plan's presentation; the state bucket's readiness rule, its TLS-only policy check and the unready bucket's refusal. Pure. |
+| Domain | `src/domain/backend-bootstrap.ts` | The create-only rule (`bootstrapPlanVerdict`, each offending change as a `ResourceChange`) and `BootstrapContext`; the state bucket's readiness rule, its TLS-only policy and its check, and `UnreadyBucket` (where the bucket is, what S3 reports and each setting it lacks). Pure; no text layout. |
 | Domain | `src/domain/factory-lock.ts` | The lock record, its key and break-log key, parsing, staleness, the holder presentation and refusal, and the break confirmation rule. Pure. |
-| Application | `src/application/bootstrap-backend.ts` | `bootstrapBackend` and `beginFactoryOperation`. |
+| Application | `src/application/bootstrap-backend.ts` | `bootstrapBackend` and `beginFactoryOperation`: the bootstrap plan approved as a `PlanReview`, an unready bucket returned as its `UnreadyBucket`. |
+| CLI adapter | `src/cli/presentation/plan.ts` | The bootstrap plan as shown (`describeBootstrapPlan`), and the unready bucket's refusal (`unreadyBucketRefusal`): what it lacks, the AWS CLI commands that complete it, and the warning that `put-bucket-policy` replaces the whole policy. |
 | Application | `src/application/factory-lock.ts` | `stateBucketOf`, `lockHolder`, `acquireFactoryLock`, `releaseFactoryLock`, `settleFactoryLock`, `withFactoryLock`, `breakFactoryLock`. |
 | Application | `src/application/lock-store.ts`, `src/application/approval.ts`, `src/application/operator-prompt.ts` | The `LockStore`, `Approval` and `OperatorPrompt` ports. |
 | Infrastructure | `src/infrastructure/aws-s3-lock-store.ts` | `s3LockStore`: HeadBucket, the bucket's versioning, public access block, encryption and policy, conditional PutObject, GetObject and DeleteObject by version, PutObject of [operation records](plan-apply.md#operation-records) and HeadObject of the Terraform state, always with `ExpectedBucketOwner`. |
@@ -825,9 +828,12 @@ variables, and no validation of the `hosts` variable requires a host).
 plans, the empty factory's plan and the removal plans with the managed
 Terraform in CI.
 First apply and lock: `tests/domain/backend-bootstrap.test.ts` (resource
-changes read, unreadable plans, the create-only rule, the presentation; the
-readiness rule, the TLS-only policy check, the unready bucket's refusal and
-its commands),
+changes read, unreadable plans, the create-only rule; the readiness rule, the
+TLS-only policy check and policy, the unready bucket's location, readiness and
+missing settings in bootstrap's order),
+`tests/cli/presentation/plan.test.ts` (the bootstrap plan as shown, refused
+plans with each reason; the unready bucket's guidance, its commands in
+bootstrap's order and the whole-policy warning),
 `tests/domain/factory-lock.test.ts` (keys, record round trip, unreadable
 records, holder and breaker recorded in printable ASCII, age and staleness,
 holder lines, refusal, confirmation by token only, the break entry), `tests/application/bootstrap-backend.test.ts` (an

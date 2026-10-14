@@ -3,7 +3,9 @@
 `bun test` suites mirroring `src/`, plus `assets/` for the release assets:
 `domain/` (pure, no fakes), `application/` (use cases against in-memory ports
 from `support/`), `infrastructure/` (real temporary directories), `cli/`
-(in-process `run` through `support/cli-harness.ts`, and the spawned `main.ts`).
+(in-process `run` through `support/cli-harness.ts`, and the spawned `main.ts`;
+`cli/presentation/` checks the text laid out from domain data, pure like `domain/`,
+while `application/` tests assert that data, never its text).
 Each test maps to a section of a spec in `docs/specs/`. Areas with their own rules:
 
 - [`host/`](host/CLAUDE.md): the worker side of the host protocol, and its shared contract

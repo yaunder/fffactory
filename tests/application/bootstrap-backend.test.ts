@@ -6,9 +6,9 @@ import {
   bootstrapBackend,
 } from "../../src/application/bootstrap-backend";
 import type { AllowedAccount } from "../../src/application/require-expected-account";
-import { unreadyBucketRefusal } from "../../src/domain/backend-bootstrap";
 import { newLockRecord } from "../../src/domain/factory-lock";
 import type { FactoryId, FactoryInstance, Release } from "../../src/domain/instance";
+import type { PlanReview, UnexpectedPlan } from "../../src/domain/plan";
 import { FAKE_CALLER } from "../support/doctor-fakes";
 import { fakeProvisioner } from "../support/fake-provisioner";
 import { MemoryLockStore, READY_BUCKET } from "../support/memory-lock-store";
@@ -51,12 +51,12 @@ function request(overrides: Partial<BackendBootstrapRequest> = {}): BackendBoots
   };
 }
 
-/** Approval that records what it was shown and answers `answer`. */
+/** Approval that records the reviews it was shown and answers `answer`. */
 function approval(answer: boolean) {
-  const shown: (readonly string[])[] = [];
+  const shown: PlanReview[] = [];
   const port: Approval = {
-    approve: async (plan) => {
-      shown.push(plan);
+    approve: async (review) => {
+      shown.push(review);
       return answer;
     },
   };
@@ -90,12 +90,14 @@ describe("backend bootstrap", () => {
     const readiness = { ...READY_BUCKET, versioning: undefined, tlsOnly: false };
     store.readiness.set(BUCKET, readiness);
     const result = await bootstrapBackend(deps, request());
+    // Where the bucket is and what it lacks, as data: the CLI words how to complete it.
     expect(result).toEqual({
       kind: "unready",
-      refusal: unreadyBucketRefusal(
-        { bucket: BUCKET, accountId: "123456789012", region: "eu-west-2" },
+      bucket: {
+        location: { bucket: BUCKET, accountId: "123456789012", region: "eu-west-2" },
         readiness,
-      ),
+        missing: ["versioning", "tls_only_policy"],
+      },
     });
     expect(terraform.calls).toEqual([]);
     expect(approver.shown).toEqual([]);
@@ -129,16 +131,22 @@ describe("backend bootstrap", () => {
       { call: "applyPlan", request: { ...target, planFile: "/tmp/op/backend.tfplan" } },
     ]);
     expect(approver.shown).toEqual([
-      [
-        `Backend bootstrap: the state bucket ${BUCKET} does not exist yet.`,
-        "  Configuration: /work/.fffactory/factory.json",
-        "  Factory: Test factory (fff-abcd1234)",
-        "  AWS account: 123456789012, Region: eu-west-2",
-        "  Release: 0.3.0",
-        "Terraform will create:",
-        "  + module.state_bucket.aws_s3_bucket.state",
-        "  + module.state_bucket.aws_s3_bucket_versioning.state",
-      ],
+      {
+        kind: "backend_bootstrap",
+        target: {
+          instancePath: "/work/.fffactory/factory.json",
+          name: "Test factory",
+          factoryId: "fff-abcd1234" as FactoryId,
+          accountId: "123456789012",
+          region: "eu-west-2",
+          release: "0.3.0" as Release,
+          bucket: BUCKET,
+        },
+        creates: [
+          "module.state_bucket.aws_s3_bucket.state",
+          "module.state_bucket.aws_s3_bucket_versioning.state",
+        ],
+      },
     ]);
     expect(store.buckets.has(BUCKET)).toBe(true);
   });
@@ -149,7 +157,7 @@ describe("backend bootstrap", () => {
     expect(terraform.calls.map(({ call }) => call)).toEqual(["plan", "showPlan"]);
   });
 
-  test.each([
+  test.each<[string, unknown, UnexpectedPlan[]]>([
     [
       "a plan that would change or replace anything",
       {
@@ -158,14 +166,10 @@ describe("backend bootstrap", () => {
           { address: "a.y", change: { actions: ["delete", "create"] } },
         ],
       },
-      ["a.y (delete, create)"],
+      [{ kind: "not_create", change: { address: "a.y", actions: ["delete", "create"] } }],
     ],
-    ["an unreadable plan", { resource_changes: "nope" }, ["Terraform's plan could not be read"]],
-    [
-      "a plan that creates nothing",
-      { resource_changes: [] },
-      ["the plan creates nothing, though the state bucket does not exist"],
-    ],
+    ["an unreadable plan", { resource_changes: "nope" }, [{ kind: "unreadable_plan" }]],
+    ["a plan that creates nothing", { resource_changes: [] }, [{ kind: "creates_nothing" }]],
   ])("%s is refused before approval", async (_, shown, unexpected) => {
     const { deps, terraform, approver } = world({ shown });
     expect(await bootstrapBackend(deps, request())).toEqual({

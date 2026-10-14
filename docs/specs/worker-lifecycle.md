@@ -815,7 +815,7 @@ what status prints of a worker.
 | --- | --- | --- |
 | Domain | `src/domain/worker-lifecycle.ts` | The host key check, the one target machine, what each EC2 state means for an action (`powerStep`), the gates of stop and terminate (`stopGate`, `terminateGate`, the stopped pass, the current work and the repository result), the confirmation rules (y/N, the typed key, `--confirm`), the admin client's refusals, the device removal's outcome (`deviceRemovalRefusal`), the waits' bounds and steps, the words of every refusal and next action. Pure. |
 | Domain | `src/domain/work-inspection.ts` | The work inspection's document, its parser, the fixed command, and what counts as unresolved work (`workFindings`). Pure. |
-| Domain | `src/domain/host-removal.ts` | Terminate's removal: factory.json without the host by own entries (`withoutHost`; the last host leaves `hosts` empty), the scoped removal rule over Terraform's JSON plan (`removalPlanRefusal`, the secret-reading policy's allowed update included), the removal plan as shown, and the words of its refusals and failures. Pure. |
+| Domain | `src/domain/host-removal.ts` | Terminate's removal: factory.json without the host by own entries (`withoutHost`; the last host leaves `hosts` empty), the scoped removal rule over Terraform's JSON plan (`removalPlanRefusal`, the secret-reading policy's allowed update included), and the words of its refusals and failures. Pure; the removal plan as shown is the CLI's. |
 | Domain | `src/domain/plan.ts`, `src/domain/stable-host-keys.ts` | The D11 refusal of a host removed by hand, naming `fffactory worker terminate KEY`. |
 | Domain | `src/domain/tailnet.ts` | `selectWorkerDevices`: the devices terminate deletes (the reported hostname, never the MagicDNS label, and the factory's tag) and the untagged ones it reports. |
 | Domain | `src/domain/operation.ts` | `startStageOperation`, `withMachine` and the lifecycle stage's statuses. |
@@ -827,7 +827,7 @@ what status prints of a worker.
 | Infrastructure | `src/infrastructure/ec2-machine-control.ts` | `ec2MachineControl` over `StopInstances`, `StartInstances`, `TerminateInstances` and `DescribeInstances` (AWS SDK for JavaScript v3, imported on first use), each call within 15 s (`EC2_CONTROL_TIMEOUT_MS`), failures by error name, a request past its deadline `unanswered`. |
 | Infrastructure | `src/infrastructure/aws-secrets-manager-store.ts` | `GetSecretValue` by ARN, within 30 s. |
 | Infrastructure | `src/infrastructure/tailscale-api-admin.ts` | `tailscaleApiAdmin`: the token exchange, the device list and deletion over HTTPS with `fetch`, each within 15 s, no redirects, failures by HTTP status or network code. |
-| CLI adapter | `src/cli/commands/worker.ts` | Arguments, progress, the removal plan, the reports, Terraform's diagnostics path, the exit code; `waitsOnInterrupt`; this release's Terraform tree, materialized only when a removal runs. |
+| CLI adapter | `src/cli/commands/worker.ts` | Arguments, progress, the removal plan (the `removal_plan` progress event carries its target, Terraform's changes and the worker, which `describeRemovalPlan` in `src/cli/presentation/plan.ts` lays out before the typed host key is asked for), the reports, Terraform's diagnostics path, the exit code; `waitsOnInterrupt`; this release's Terraform tree, materialized only when a removal runs. |
 
 Tests: `tests/domain/worker-lifecycle.test.ts` (the host key check, an argument
 never echoed, the one machine, every state for each action, each gate, a
@@ -911,7 +911,7 @@ delete passes, and extra creates, updates, other deletes, replaces, unknown
 actions and an unreadable plan fail closed; a plan that does not destroy the
 machine EC2 lists, or destroys one it does not; the policy update dropping
 exactly the removed Paseo password and any other policy change refused; the
-plan as shown; the failures' words);
+failures' words); `tests/cli/presentation/plan.test.ts` (the plan as shown);
 `scripts/terraform-check.ts` with `scripts/terraform-removal-check.ts` and
 `scripts/terraform-state-fixture.ts` (the rule against Terraform's real
 removal plans from synthesized fixture states: a host with its own password,
@@ -938,8 +938,8 @@ diagnostics path, a machine already gone, the last host removed and the empty
 factory validated, planned and reported, then a replacement of another size
 planned as a create, both interruptions).
 The D11 refusal of a host removed by hand naming the command:
-`tests/domain/stable-host-keys.test.ts`, `tests/domain/plan.test.ts` and
-`tests/cli/plan-apply.test.ts`.
+`tests/domain/stable-host-keys.test.ts`, `tests/domain/plan.test.ts`,
+`tests/cli/presentation/plan.test.ts` and `tests/cli/plan-apply.test.ts`.
 
 Introduced by [#6](https://github.com/yaunder/fffactory/issues/6); terminate
 `--keep` by [#9](https://github.com/yaunder/fffactory/issues/9); terminate

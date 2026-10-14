@@ -1,6 +1,5 @@
 import { parseArgs } from "node:util";
 import { type Upgrade, upgradeFactory } from "../../application/upgrade";
-import { describeD11Refusal } from "../../domain/plan";
 import {
   assessUpgrade,
   schemaVersionChange,
@@ -9,6 +8,7 @@ import {
 import type { CliContext, Command } from "../context";
 import { sha256Text } from "../../infrastructure/release-tarball";
 import { operatorApproval, progressLine, reportApply } from "./apply";
+import { describeD11Refusal } from "../presentation/plan";
 import { basisOf } from "./planning";
 import { printIssues, selectInstance, validatedInstance } from "./selected-instance";
 

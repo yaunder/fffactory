@@ -10,7 +10,7 @@ import type { DispatchOutcome } from "../../application/apply-dispatch";
 import type { RepositoryOutcome } from "../../application/apply-repositories";
 import type { FactoryVerification } from "../../application/verify-factory";
 import type { Approval } from "../../application/approval";
-import { isPlanId, staleRefusal } from "../../domain/plan";
+import { isPlanId } from "../../domain/plan";
 import {
   enrollmentReport,
   PASEO_CLIENTS,
@@ -22,6 +22,7 @@ import { FIRST_BOOT_DEADLINE_MS, type WorkerOutcome } from "../../domain/rollout
 import type { CliContext, Command } from "../context";
 import { sha256Text } from "../../infrastructure/release-tarball";
 import { printDiagnostics } from "../diagnostics";
+import { describeReview, staleRefusal } from "../presentation/plan";
 import { planningBasis, printPlanRefusal } from "./planning";
 
 const USAGE = [
@@ -71,8 +72,8 @@ const APPROVAL_QUESTION = 'Apply this plan? Only "yes" applies it: ';
 const APPLYING = "Applying. Terraform's output is not shown; this can take several minutes.";
 
 /**
- * Shows each plan and asks the operator to approve exactly it. A saved plan was approved by
- * naming its ID, so it is shown and applied without asking.
+ * Shows each plan's review and asks the operator to approve exactly it. A saved plan was
+ * approved by naming its ID, so it is shown and applied without asking.
  */
 export function operatorApproval(
   planId: string | undefined,
@@ -80,8 +81,8 @@ export function operatorApproval(
   question = APPROVAL_QUESTION,
 ): Approval {
   return {
-    approve: async (plan) => {
-      for (const line of plan) context.out(line);
+    approve: async (review) => {
+      for (const line of describeReview(review)) context.out(line);
       if (planId !== undefined) {
         context.out(`Applying saved plan ${planId}, approved by naming its ID.`);
         context.out(APPLYING);
