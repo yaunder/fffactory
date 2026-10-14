@@ -765,7 +765,8 @@ N s`, never an AWS or SDK message.
 | Infrastructure | `src/infrastructure/terraform/resource-names.ts` | `NAMED_RESOURCES`, and the namespacing check over a Terraform JSON plan. |
 | Infrastructure | `assets/terraform/` | The Terraform modules and their provider lockfiles. |
 | Domain | `src/domain/backend-bootstrap.ts` | The create-only rule (`bootstrapPlanVerdict`, each offending change as a `ResourceChange`) and `BootstrapContext`; the state bucket's readiness rule, its TLS-only policy and its check, and `UnreadyBucket` (where the bucket is, what S3 reports and each setting it lacks). Pure; no text layout. |
-| Domain | `src/domain/factory-lock.ts` | The lock record, its key and break-log key, parsing, staleness, the holder presentation and refusal, and the break confirmation rule. Pure. |
+| Domain | `src/domain/factory-lock.ts` | The lock record, its key and break-log key, parsing, staleness (`isStale`, `lockAge`, `formatDuration`), and the break confirmation rule (`confirmsBreak`). Pure; no text layout. |
+| CLI adapter | `src/cli/presentation/lock.ts` | The holder lines (`describeHeldLock`) and the lock refusal (`lockRefusal`). |
 | Application | `src/application/bootstrap-backend.ts` | `bootstrapBackend` and `beginFactoryOperation`: the bootstrap plan approved as a `PlanReview`, an unready bucket returned as its `UnreadyBucket`. |
 | CLI adapter | `src/cli/presentation/plan.ts` | The bootstrap plan as shown (`describeBootstrapPlan`), and the unready bucket's refusal (`unreadyBucketRefusal`): what it lacks, the AWS CLI commands that complete it, and the warning that `put-bucket-policy` replaces the whole policy. |
 | Application | `src/application/factory-lock.ts` | `stateBucketOf`, `lockHolder`, `acquireFactoryLock`, `releaseFactoryLock`, `settleFactoryLock`, `withFactoryLock`, `breakFactoryLock`. |
@@ -836,14 +837,15 @@ plans with each reason; the unready bucket's guidance, its commands in
 bootstrap's order and the whole-policy warning),
 `tests/domain/factory-lock.test.ts` (keys, record round trip, unreadable
 records, holder and breaker recorded in printable ASCII, age and staleness,
-holder lines, refusal, confirmation by token only, the break entry), `tests/application/bootstrap-backend.test.ts` (an
+confirmation by token only, the break entry), `tests/cli/presentation/lock.test.ts`
+(holder lines, a stale and an unreadable lock, the refusal), `tests/application/bootstrap-backend.test.ts` (an
 existing bucket skipped, a half-bootstrapped one refused before any plan or
 lock, a missing one planned, shown, approved and applied, a
 declined, non-create, unreadable or empty plan never applied, refusals before
 AWS, another account refused, the lock acquired after bootstrap, a concurrent
 operation refused with its holder), `tests/application/factory-lock.test.ts`
 (against `tests/support/memory-lock-store.ts`, a versioned in-memory lock
-store: a concurrent apply refused with the holder shown, racing acquisitions,
+store: a concurrent apply refused with the holder's record, racing acquisitions,
 unreadable and vanishing locks, a retried write finding its own lock, an
 unprintable host name, one lock across every stage, release after
 failure, an interrupted operation keeping the lock, an unconfirmed break changing and logging nothing, a confirmed break

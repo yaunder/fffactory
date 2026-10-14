@@ -18,6 +18,7 @@ import { MemoryInstanceStore } from "../support/memory-instance-store";
 
 const CWD = "/work/repo";
 const NEAREST = "/work/repo/.fffactory/factory.json";
+const HOME_INSTANCE = "/home/operator/.fffactory/factory.json";
 const CACHE = "/home/operator/.cache/fffactory";
 const RELEASE = "0.3.0" as Release;
 const EXAMPLE = await Bun.file("examples/factory.json").text();
@@ -104,6 +105,32 @@ describe("doctor configuration check", () => {
       summary: `${NEAREST} (nearest .fffactory/factory.json) is valid and complete`,
     });
   });
+
+  test.each([
+    ["--instance", { flag: "/flag/factory.json" }, "/flag/factory.json", "--instance"],
+    [
+      "FFFACTORY_INSTANCE",
+      { environment: "/env/factory.json" },
+      "/env/factory.json",
+      "FFFACTORY_INSTANCE",
+    ],
+    ["nearest", {}, NEAREST, "nearest .fffactory/factory.json"],
+    ["home", {}, HOME_INSTANCE, "~/.fffactory/factory.json"],
+  ] as const)(
+    "the published summary names a %s selection in its fixed words",
+    async (_source, selection, at, described) => {
+      const report = await doctor(
+        dependencies({ store: new MemoryInstanceStore({ [at]: EXAMPLE }) }),
+        {
+          selection: { ...selection, cwd: CWD, home: "/home/operator" },
+          cacheDirectory: CACHE,
+          release: RELEASE,
+          credentials: { source: "chain" },
+        },
+      );
+      expect(check(report, "instance").summary).toBe(`${at} (${described}) is valid and complete`);
+    },
+  );
 
   test("no instance is not ready and says to run fffactory init", async () => {
     const result = check(await inspect({ store: new MemoryInstanceStore() }), "instance");

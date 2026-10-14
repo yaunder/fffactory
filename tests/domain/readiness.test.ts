@@ -9,6 +9,7 @@ import {
   pendingEnrollmentLines,
   type Verification,
   verificationJson,
+  workerEnrollment,
   workerReadiness,
 } from "../../src/domain/readiness";
 
@@ -113,6 +114,53 @@ describe("the enrollment the CLI reports", () => {
       `Claude Code: ${describeNextAction(enrollmentNextAction("anthropic", HOST))}`,
       PASEO_CLIENTS,
     ]);
+  });
+});
+
+describe("a worker's enrollment, grouped (readiness §Where it is reported)", () => {
+  test("logs in once as the runtime account, then each account still to enroll in order", () => {
+    const report = enrollmentReport(
+      verification({
+        hostname: "attacker",
+        enrollment: [
+          { id: "github", state: "pending" },
+          { id: "openai", state: "enrolled" },
+          { id: "anthropic", state: "unknown" },
+        ],
+      }),
+      HOST,
+    );
+    expect(workerEnrollment(report, HOST)).toEqual({
+      hostname: HOST,
+      login: `tailscale ssh factory@${HOST}`,
+      requirement: "tailnet_ssh_as_runtime",
+      accounts: [
+        {
+          id: "github",
+          title: "GitHub",
+          commands: [
+            "gh auth login --hostname github.com --git-protocol https --web",
+            "gh auth status",
+          ],
+        },
+        {
+          id: "anthropic",
+          title: "Claude Code",
+          commands: ["claude auth login", "claude auth status"],
+        },
+      ],
+    });
+  });
+
+  test("a fully enrolled worker has no account to enroll", () => {
+    const enrollment = ENROLLMENTS.map(({ id }) => ({ id, state: "enrolled" as const }));
+    const report = enrollmentReport(verification({ enrollment }), HOST);
+    expect(workerEnrollment(report, HOST)).toEqual({
+      hostname: HOST,
+      login: `tailscale ssh factory@${HOST}`,
+      requirement: "tailnet_ssh_as_runtime",
+      accounts: [],
+    });
   });
 });
 

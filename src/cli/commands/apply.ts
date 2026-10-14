@@ -11,18 +11,12 @@ import type { RepositoryOutcome } from "../../application/apply-repositories";
 import type { FactoryVerification } from "../../application/verify-factory";
 import type { Approval } from "../../application/approval";
 import { isPlanId } from "../../domain/plan";
-import {
-  enrollmentReport,
-  PASEO_CLIENTS,
-  pendingEnrollment,
-  pendingEnrollmentLines,
-  type Verification,
-} from "../../domain/readiness";
 import { FIRST_BOOT_DEADLINE_MS, type WorkerOutcome } from "../../domain/rollout";
 import type { CliContext, Command } from "../context";
 import { sha256Text } from "../../infrastructure/release-tarball";
 import { printDiagnostics } from "../diagnostics";
 import { describeReview, staleRefusal } from "../presentation/plan";
+import { workerLines } from "../presentation/workers";
 import { planningBasis, printPlanRefusal } from "./planning";
 
 const USAGE = [
@@ -156,54 +150,6 @@ function reportInterrupted(
       breakThenRerun(reporting),
   );
   printRecord(result.record, context);
-}
-
-const LABELS: Readonly<Record<WorkerOutcome["kind"], string>> = {
-  installed: "installed",
-  skipped: "skipped",
-  failed: "failed",
-  not_attempted: "not tried",
-  stopped: "stopped",
-};
-const LABEL_WIDTH = Math.max(...Object.values(LABELS).map((label) => label.length));
-const INDENT = " ".repeat(2 + LABEL_WIDTH + 2);
-
-/**
- * What an installed worker still waits for: nothing, or accounts to enroll and how, in steps
- * the CLI names for `hostname`, the worker it resolved, never in the worker's own words.
- */
-function installedLines(release: string, verification: Verification, hostname: string): string[] {
-  const report = enrollmentReport(verification, hostname);
-  const pending = pendingEnrollment(report);
-  if (pending.length === 0)
-    return [
-      `release ${release} installed and verified; every account is enrolled`,
-      `${INDENT}${PASEO_CLIENTS}`,
-    ];
-  return [
-    `release ${release} installed and verified; enrollment pending: ${pending
-      .map((entry) => entry.title)
-      .join(", ")}`,
-    ...pendingEnrollmentLines(report).map((line) => `${INDENT}${line}`),
-  ];
-}
-
-function workerLines(outcome: WorkerOutcome): string[] {
-  const head = `  ${LABELS[outcome.kind].padEnd(LABEL_WIDTH)}  ${outcome.key} (${outcome.hostname}): `;
-  switch (outcome.kind) {
-    case "installed": {
-      const [first = "", ...rest] = installedLines(
-        outcome.release,
-        outcome.verification,
-        outcome.hostname,
-      );
-      return [head + first, ...rest];
-    }
-    case "not_attempted":
-      return [`${head}the rollout stopped at the failure above`];
-    default:
-      return [head + outcome.summary, `${INDENT}Next: ${outcome.nextAction}`];
-  }
 }
 
 /**

@@ -13,7 +13,7 @@ import {
 import type { FactoryPlanRequest, PlanRefusal } from "../../application/plan-factory";
 import { requireExpectedAccount } from "../../application/require-expected-account";
 import { accountExpectation } from "../../domain/aws-account";
-import { lockRefusal } from "../../domain/factory-lock";
+import { lockRefusal } from "../presentation/lock";
 import {
   describeD11Refusal,
   describeStoppedResizeRefusal,

@@ -1,8 +1,7 @@
 import type { AccountRequirement } from "../../application/require-expected-account";
 import {
-  describeSource,
   INSTANCE_ENVIRONMENT_VARIABLE,
-  type InstanceResolution,
+  type FoundInstance,
   resolveInstance,
 } from "../../application/resolve-instance";
 import { validateInstance } from "../../application/validate-instance";
@@ -12,9 +11,8 @@ import {
   type CredentialSelection,
 } from "../../domain/aws-account";
 import type { FactoryInstance, Issue } from "../../domain/instance";
+import { instanceLine } from "../presentation/instance-source";
 import type { CliContext } from "../context";
-
-type Found = Extract<InstanceResolution, { readonly found: true }>;
 
 /**
  * Resolves the instance a command acts on and prints which it is, or prints why there is
@@ -24,7 +22,7 @@ type Found = Extract<InstanceResolution, { readonly found: true }>;
 export async function selectInstance(
   flag: string | undefined,
   context: CliContext,
-): Promise<Found | undefined> {
+): Promise<FoundInstance | undefined> {
   const resolution = await resolveInstance(context.store, {
     flag,
     environment: context.env[INSTANCE_ENVIRONMENT_VARIABLE],
@@ -35,7 +33,7 @@ export async function selectInstance(
     context.err(resolution.message);
     return undefined;
   }
-  context.out(`Instance: ${resolution.path} (${describeSource(resolution.source)})`);
+  context.out(instanceLine(resolution));
   return resolution;
 }
 

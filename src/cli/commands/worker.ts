@@ -19,7 +19,7 @@ import {
   type WorkerPower,
 } from "../../application/worker-lifecycle";
 import type { CredentialSelection } from "../../domain/aws-account";
-import { lockRefusal } from "../../domain/factory-lock";
+import { lockRefusal } from "../presentation/lock";
 import type { HostKey } from "../../domain/instance";
 import { ADMIN_CONSOLE, type Verdict } from "../../domain/status";
 import {

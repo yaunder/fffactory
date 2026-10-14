@@ -990,6 +990,8 @@ prints is unchanged by where the plan was made.
 | Infrastructure | `src/infrastructure/plan-store.ts` | `filesystemPlanStore`: private plan directories, the plan file's digest, pruning. |
 | Infrastructure | `src/infrastructure/aws-s3-lock-store.ts` | PutObject of operation records; HeadObject of the state object. |
 | CLI adapter | `src/cli/presentation/plan.ts` | Every plan review, refusal and stale reason as text: `describePlan` (with `describeTarget`, `describeInfrastructure`, the `+ ~ -` glyphs, `describeWorkers`, `describeControlPlane`, `describeRepositories`, `describeDispatch`), `describePinMove`, `describeBootstrapPlan`, `describeReview`, `describeRemovalPlan`, `describeD11Refusal`, `describeStoppedResizeRefusal`, `describeUnexpectedPlan`, `staleRefusal` and `describeStaleReason`, and `unreadyBucketRefusal` with the AWS CLI commands that complete the bucket. |
+| CLI adapter | `src/cli/presentation/workers.ts` | Apply's workers as text (`workerLines`): each outcome under its aligned label, and an installed worker's enrollment rendered from its `WorkerEnrollment` ([readiness §Where it is reported](readiness.md#where-it-is-reported)). |
+| CLI adapter | `src/cli/presentation/lock.ts` | A held lock and the lock refusal as text (`describeHeldLock`, `lockRefusal`; [provisioning §Lock](provisioning.md#lock)). |
 | CLI adapter | `src/cli/commands/plan.ts`, `src/cli/commands/apply.ts`, `src/cli/commands/upgrade.ts`, `src/cli/commands/planning.ts` | The commands, the approval at the terminal (`operatorApproval` shows the review), and what they share. |
 | CLI adapter | `src/cli/diagnostics.ts`, `src/cli/run.ts` | The path of a failed Terraform command's diagnostics, printed with the failure. |
 | CLI adapter | `src/cli/interrupts.ts` | `interruptible`: the interrupt notice and flag, the sleep an interrupt wakes, stopping running tools, then, for a command that waits on an interrupt, waiting `RETURN_GRACE_MS` at most for it to return, before exiting with 128 plus the signal's number; a second signal kills and exits at once. |
@@ -1072,7 +1074,9 @@ the plan file's digest as it is now),
 `tests/infrastructure/aws-s3-lock-store.test.ts` (records and state revisions,
 stubbed and against `tests/support/stub-s3.ts`),
 `tests/infrastructure/terminal-prompt.test.ts` (Ctrl-C cancels an echoed
-question), `tests/cli/plan-apply.test.ts` (output, exit codes and every refusal
+question), `tests/cli/presentation/workers.test.ts` (each worker outcome's
+lines, an installed worker's pending accounts or full enrollment),
+`tests/cli/plan-apply.test.ts` (output, exit codes and every refusal
 in process, the workers' lines and exit codes 0, 2 and 1; an empty factory
 planning its shared infrastructure alone with `Workers: none declared.`, and
 applying it, then nothing, with exit 0; a stopped worker

@@ -78,8 +78,21 @@ a new state value for this document's readers.
 
 ### Where it is reported
 
+Human output renders a worker's enrollment from its `WorkerEnrollment`
+(`workerEnrollment`): the worker's `hostname`, the one `login` that reaches the
+runtime account, the `requirement` that login carries
+(`tailnet_ssh_as_runtime`: tailnet SSH policy must let the operator log in as
+`factory`), and each account still to enroll, in the order above, as its `id`,
+`title` and `commands`. It is the structure the CLI lays out
+(`src/cli/presentation/`), and it publishes nothing. The published wording is
+unchanged and stays in the domain: status's `details` (`pendingEnrollmentLines`,
+each account as `describeNextAction`'s sentence) and its `--json`
+`next_action` (`summary`, `login`, `commands`), whose `summary` ends with the
+tailnet-policy caveat.
+
 - `fffactory apply` lists each installed worker's pending accounts with their
-  exact steps ([plan and apply §The workers stage](plan-apply.md#the-workers-stage)).
+  exact steps, rendered from its `WorkerEnrollment`
+  ([plan and apply §The workers stage](plan-apply.md#the-workers-stage)).
 - `fffactory status` shows a software-ready worker with enrollment pending as
   not ready (exit 2), each pending account's steps as details, and the
   structured next actions in `--json`
@@ -121,16 +134,19 @@ keeps dispatch pending and surfaces the same GitHub next action named above.
 
 | Layer | Module | Responsibility |
 | --- | --- | --- |
-| Domain | `src/domain/readiness.ts` | `ENROLLMENTS`, `PASEO_CLIENTS`, enrollment states, `enrollmentNextAction`, `enrollmentReport`, `describeNextAction`, `workerReadiness`, the verify document and its parser. Pure. |
+| Domain | `src/domain/readiness.ts` | `ENROLLMENTS`, `PASEO_CLIENTS`, enrollment states, `enrollmentNextAction`, `enrollmentReport`, `WorkerEnrollment` and `workerEnrollment`, the published wording (`describeNextAction`, `pendingEnrollmentLines`), `workerReadiness`, the verify document and its parser. Pure. |
+| CLI adapter | `src/cli/presentation/workers.ts` | Apply's enrollment lines, rendered from a `WorkerEnrollment`. |
 | Worker | `src/host/verify.ts` | `workerVerifier`: the checks and enrollment checks, over the injected process runner. |
 | Domain | `src/domain/status.ts` | The enrollment verdict status shows. |
 | Domain | `src/domain/dispatch-readiness.ts` | The dispatch gates and the dispatch progression ([dispatch](dispatch.md)). Pure. |
 
 Tests: `tests/domain/readiness.test.ts` (each next action, named for the
 resolved hostname and never the worker's; an unreported account unknown;
-Paseo clients mentioned, never counted; the readiness progression, the
+Paseo clients mentioned, never counted; a worker's enrollment grouped as a
+`WorkerEnrollment`, one login and each pending account in order; the readiness progression, the
 document's round trip, every malformed field, instructions a worker sends
-never read, additions ignored), `tests/host/verify.test.ts` (including a worker
+never read, additions ignored), `tests/cli/presentation/workers.test.ts`
+(apply's enrollment lines from a `WorkerEnrollment`), `tests/host/verify.test.ts` (including a worker
 the real verifier finds healthy and fully enrolled judged ready by status), `tests/domain/status.test.ts` and
 `tests/cli/status.test.ts` (enrollment pending with exact steps, in text and
 JSON), and the container cases of `tests/bootstrap/host-apply.test.sh`

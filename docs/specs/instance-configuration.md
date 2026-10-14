@@ -246,14 +246,17 @@ pass the same selection and the factory Region.
 | Layer | Module | Responsibility |
 | --- | --- | --- |
 | Domain | `src/domain/instance.ts`, `src/domain/validation.ts`, `src/domain/initialization.ts` | `FactoryInstance`, `FactoryId`, `HostKey`, `Release`, secret references, validation rules, completeness report, factory ID generation from injected random bytes, and the gap-filling merge. Pure. |
-| Application | `src/application/resolve-instance.ts`, `src/application/validate-instance.ts`, `src/application/init-instance.ts`, `src/application/instance-store.ts` | Discovery precedence, reading and validating a document, initialization, the `InstanceStore` port. |
+| Application | `src/application/resolve-instance.ts`, `src/application/validate-instance.ts`, `src/application/init-instance.ts`, `src/application/instance-store.ts` | Discovery precedence, reading and validating a document, initialization, the `InstanceStore` port. `describeSource`, each discovery source's words, is published wording: doctor's JSON `summary` embeds it, so it stays here. |
+| CLI adapter | `src/cli/presentation/instance-source.ts` | `instanceLine`, the `Instance: PATH (SOURCE)` line commands print, in `describeSource`'s words. |
 | Infrastructure | `src/infrastructure/filesystem-instance-store.ts` | Filesystem `InstanceStore`, including the atomic write. |
 | CLI adapter | `src/cli/` | Argument parsing, output and exit codes; `src/cli/release.ts` holds the release version. |
 
 Tests: `tests/domain/instance.test.ts`, `tests/domain/instance-schema.test.ts`
 (JSON Schema agrees with the domain), `tests/domain/initialization.test.ts`,
 `tests/application/resolve-instance.test.ts`,
-`tests/application/validate-instance.test.ts`,
+`tests/application/doctor.test.ts` (each source's words in doctor's summary),
+`tests/cli/presentation/instance-source.test.ts` (the instance line for each
+source), `tests/application/validate-instance.test.ts`,
 `tests/application/init-instance.test.ts`,
 `tests/infrastructure/filesystem-instance-store.test.ts`, `tests/cli/`.
 `tests/cli/init-offline.test.ts` proves `init` is offline two ways: it runs
