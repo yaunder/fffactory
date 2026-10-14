@@ -13,57 +13,82 @@ Each test maps to a section of a spec in `docs/specs/`. Areas with their own rul
 - [`bootstrap/`](bootstrap/CLAUDE.md): the worker bootstrap's shell tests, run as root in
   Amazon Linux 2023 containers by `just bootstrap-test`, never by `bun test`.
 
-Tests read no AWS account or factory state and never depend on the operator's
-own `.fffactory/`. `support/aws-isolation-preload.ts`, preloaded by
-`bunfig.toml`, strips every `AWS_*` variable from the test process, disables
-instance metadata and points it and every AWS endpoint at a closed local port;
-`infrastructure/aws-isolation.test.ts` proves it. A spawned `fffactory` gets an
-explicit environment built on `isolatedAwsEnvironment` from
-`support/aws-isolation.ts`, never the inherited one. Test AWS through a fake
-`CallerIdentity` or `VpcQuotaProbe` (`support/doctor-fakes.ts`), the versioned
-in-memory `support/memory-lock-store.ts` and `support/memory-plan-store.ts`, the fakes in
-`support/fake-secrets.ts` (Secrets Manager and the operator prompt) and
+Tests read no AWS account or factory state and never depend on the operator's own
+`.fffactory/`. `support/aws-isolation-preload.ts`, preloaded by `bunfig.toml`, strips
+every `AWS_*` variable from the test process, disables instance metadata and points it
+and every AWS endpoint at a closed local port; `infrastructure/aws-isolation.test.ts`
+proves it. A spawned `fffactory` gets an explicit environment built on
+`isolatedAwsEnvironment` from `support/aws-isolation.ts`, never the inherited one. Test
+AWS through a fake `CallerIdentity` or `VpcQuotaProbe` (`support/doctor-fakes.ts`), the
+versioned in-memory `support/memory-lock-store.ts` and `support/memory-plan-store.ts`,
+the fakes in `support/fake-secrets.ts` (Secrets Manager and the operator prompt) and
 `support/fake-provisioner.ts` (a scripted `fakeProvisioner`, and `fakeFactoryWorld`, a
 factory whose Terraform state changes as plans apply and whose apply can be stopped part
-way; `support/factory-world.ts` builds the plan and apply fixtures on it), stubbed SDK
-calls, or the real SDK pointed at `support/stub-sts.ts`, `support/stub-vpc-quota.ts`
-(EC2 and Service Quotas), `support/stub-s3.ts` (a versioned, never-versioned or suspended
-bucket with conditional writes and bootstrap's settings, some of them lackable, `forcePathStyle`) or `support/stub-secrets-manager.ts`, with AWS's documentation
-example keys and account `123456789012`. The terminal prompt runs over a `PassThrough`
-stand-in terminal, never the test's own. A secret-handling test searches every output
-line, file and argument for the value it used. Spawn a CLI that talks to a stub in the
-test process with the asynchronous `support/spawn-cli.ts`, which can also feed its
-standard input: a synchronous spawn blocks the stub.
+way, which can replace a host or change its instance type in place (`resize`), and whose
+`showPlan` gives every change a `before` and an `after` as `terraform show -json` does;
+`support/factory-world.ts` builds the plan and apply fixtures on it), stubbed SDK calls,
+or the real SDK pointed at `support/stub-sts.ts`, `support/stub-vpc-quota.ts` (EC2 and
+Service Quotas), `support/stub-s3.ts` (a versioned, never-versioned or suspended bucket
+with conditional writes and bootstrap's settings, some of them lackable,
+`forcePathStyle`) or `support/stub-secrets-manager.ts` (which also answers `GetSecretValue`), with AWS's documentation example
+keys and account `123456789012`. The terminal prompt runs over a `PassThrough` stand-in
+terminal, never the test's own. A secret-handling test searches every output line, file
+and argument for the value it used. Spawn a CLI that talks to a stub in the test process
+with the asynchronous `support/spawn-cli.ts`, which can also feed its standard input: a
+synchronous spawn blocks the stub.
 
 Tests never run the host's `ssh` or `tailscale`, or reach a worker or tailnet: use the
 fakes in `support/doctor-fakes.ts` and `support/fake-workers.ts` (the EC2 inventory, the
 peer view, an SSH transport scripted per worker hostname, this machine as a worker), an
 injected `ProcessRunner`, or stand-in scripts on a private `PATH` holding only the real
-tools they need (`cli/main.test.ts`, `cli/status-executable.test.ts`, which also points EC2
-at `support/stub-ec2-instances.ts`). The workers stage runs
-against `support/fake-workers.ts`'s scripted transport, whose `installableWorker` answers the
-upload and the activator, and `support/factory-world.ts`'s `workerFleet`. Digests there are
+tools they need (`cli/main.test.ts`, `cli/status-executable.test.ts`, which also points
+EC2 at `support/stub-ec2-instances.ts`, which also answers `StopInstances`,
+`StartInstances` and `TerminateInstances`). `worker stop|start|terminate` run against
+`fake-workers.ts`'s `fakeMachineControl`, whose state reads follow a script and which
+records every call, so a test can assert EC2 was never asked to change anything
+(`mutations`), and terminate against its `fakeTailnetAdmin`, a tailnet of `tailnetDevice`s
+recording every call and the secret each `open` got, and `fake-secrets.ts`'s
+`fakeSecretStore` reading the admin client by its ARN. Terminate's work inspection answers
+through the same scripted transport: `statusAnswers` answers it, by default with no work, or
+with `workAnswer`'s document or any outcome a test gives. Terminate removing the host plans and
+applies against `fakeFactoryWorld` (whose network exists once it is given hosts or applied,
+and stays when its last host is removed, as an empty factory's does; which plans deleting a
+provisioned key no longer declared,
+its `before` naming the instance the state holds (`instanceIds`), records it no longer once
+applied, and, given the secrets the hosts' policy allows (`secretArns`), plans that policy's
+in-place update as Terraform renders it) and writes factory.json to `MemoryInstanceStore`.
+Tests never reach Tailscale's API: `infrastructure/tailscale-api-admin.test.ts` sends real
+HTTP to
+`support/stub-tailscale-api.ts`, a local stand-in for the token exchange, the device list
+and deletion that echoes refused requests back, so a test can assert no body, token or
+secret reaches a reason; its `expireTokens` expires the tokens granted so far, and
+`redirectTo` answers every request with a redirect. The workers stage
+runs against `support/fake-workers.ts`'s scripted transport, whose `installableWorker`
+answers the upload and the activator, and `support/factory-world.ts`'s `workerFleet`,
+whose EC2 inventory lists no machine until a test sets `machines.inventory` (a stopped
+worker, or an inventory that cannot be read) and counts its reads. Digests there are
 real: the fleet digests projections as the CLI does, and an `installableWorker` keeps the
-projection its activator was streamed (`projections`) and from then on reports that text's
-SHA-256 as its configuration, so a plan or `status` after an apply sees exactly the drift, or
-the clean rerun, a real worker would. `status`'s unit tests (`application/status.test.ts`) do
-not: they still digest with `FAKE_SHA256`, which gives every text the same constant, so they
-cannot see a projection that drifted. `declaring` takes a host with a Paseo password reference
-(`PASEO_PASSWORD_ARN`), `requestingDispatch` places a repository and requests dispatch on the
-host, and `currentWorker` is a worker already current for the plan. The control-plane and
-dispatch stages run against `support/fake-control-plane.ts`: a `ControlPlane` answering health
-and agent activity as given, and a `WorkflowQueue` that counts adoption checks and records every
-projection reconciled, so a test can assert a skipped worker was sent nothing.
-Nothing sleeps for real: a new worker's first boot is waited out with `fakeTailnet`'s view
-changing read by read, and `fakeTime`'s clock, which moves only when the stage sleeps (or `workerFleet`'s recorded
-sleeps); the CLI harness's `sleep` returns at once. The one real sleep is
+projection its activator was streamed (`projections`) and from then on reports that
+text's SHA-256 as its configuration, so a plan or `status` after an apply sees exactly
+the drift, or the clean rerun, a real worker would. `status`'s unit tests
+(`application/status.test.ts`) do not: they still digest with `FAKE_SHA256`, which gives
+every text the same constant, so they cannot see a projection that drifted. `declaring`
+takes a host with a Paseo password reference (`PASEO_PASSWORD_ARN`), `requestingDispatch`
+places a repository and requests dispatch on the host, and `currentWorker` is a worker
+already current for the plan. The control-plane and dispatch stages run against
+`support/fake-control-plane.ts`: a `ControlPlane` answering health and agent activity as
+given, and a `WorkflowQueue` that counts adoption checks and records every projection
+reconciled, so a test can assert a skipped worker was sent nothing. Nothing sleeps for
+real: a new worker's first boot is waited out with `fakeTailnet`'s view changing read by
+read, and `fakeTime`'s clock, which moves only when the stage sleeps (or `workerFleet`'s
+recorded sleeps); the CLI harness's `sleep` returns at once. The one real sleep is
 `support/apply-first-boot-main.ts`'s, an apply over the in-memory factory with
-`cli/interrupts.ts` wired to its own process, which `cli/apply-interrupted.test.ts` cuts short
-with SIGINT once apply says it waits: `main.ts` run from source has no worker executable,
-so it never reaches the wait. `cli/interrupts.ts` itself is tested over a stand-in process
-(`cli/interrupts.test.ts`). Expected JSON output lives in
-`cli/fixtures/` and is compared byte for byte; biome leaves `**/fixtures/**/*.json` alone,
-since its formatting would not be `JSON.stringify`'s.
+`cli/interrupts.ts` wired to its own process, which `cli/apply-interrupted.test.ts` cuts
+short with SIGINT once apply says it waits: `main.ts` run from source has no worker
+executable, so it never reaches the wait. `cli/interrupts.ts` itself is tested over a
+stand-in process (`cli/interrupts.test.ts`). Expected JSON output lives in
+`cli/fixtures/` and is compared byte for byte; biome leaves `**/fixtures/**/*.json`
+alone, since its formatting would not be `JSON.stringify`'s.
 
 Tests that spawn processes wait
 with the deadline-bounded polling in `support/processes.ts`, never a fixed

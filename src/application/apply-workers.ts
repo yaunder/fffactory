@@ -14,6 +14,11 @@
  * boots (`docs/specs/plan-apply.md` §Waiting for a new worker): until it joins the tailnet and
  * its bootstrap finishes, within `FIRST_BOOT_DEADLINE_MS`, so one apply provisions, installs
  * and verifies it.
+ *
+ * A worker the approved plan skips as stopped (`fffactory worker stop`), its machine stopped
+ * in the EC2 inventory apply read under the lock, is sent nothing and is not a skip: apply never
+ * starts it (`docs/specs/plan-apply.md` §Stopped workers). With an inventory that could not be
+ * listed the plan names none, and the tailnet judges every worker, as before.
  */
 import { activateCommand, UPLOAD_COMMAND } from "../domain/host-protocol";
 import { type HostProjection, hostProjectionJson } from "../domain/host-projection";
@@ -36,6 +41,7 @@ import {
   joiningTailnet,
   rolloutContinues,
   skipped,
+  stoppedOutcome,
   type WorkerIdentity,
   type WorkerOutcome,
 } from "../domain/rollout";
@@ -94,6 +100,8 @@ export interface WorkersStageRequest {
   readonly deferred?: ReadonlySet<HostKey>;
   /** The workers whose machine this apply's infrastructure stage created: their first boot is waited for. */
   readonly created: readonly HostKey[];
+  /** The workers the approved plan skips because their machine is stopped: sent nothing. */
+  readonly stopped: readonly HostKey[];
 }
 
 export type WorkersStage =
@@ -320,7 +328,7 @@ async function nextLocation(
   if (deps.interrupted()) return undefined;
   const view = await deps.peers.view();
   if (deps.interrupted()) return undefined;
-  return locateWorker(view, worker.hostname, request.tag, thenRerunApply);
+  return locateWorker(view, worker, request.tag, thenRerunApply);
 }
 
 /**
@@ -364,7 +372,8 @@ async function attempt(
   delivery: Delivery,
   request: WorkersStageRequest,
 ): Promise<WorkerOutcome | Interruption> {
-  const location = locateWorker(view, worker.hostname, request.tag, thenRerunApply);
+  if (request.stopped.includes(worker.key)) return stoppedOutcome(worker);
+  const location = locateWorker(view, worker, request.tag, thenRerunApply);
   if (request.deferred?.has(worker.key) === true)
     return skipped(worker, preActivationDeferral(worker.hostname));
   if (request.created.includes(worker.key))
@@ -374,16 +383,21 @@ async function attempt(
   return install(deps, worker, location.worker, delivery, request);
 }
 
-/** Every worker skipped: this fffactory has nothing to install. */
-function noWorkerExecutable(workers: readonly WorkerIdentity[]): WorkersStage {
+/** Every worker skipped, but for stopped ones: this fffactory has nothing to install. */
+function noWorkerExecutable(
+  workers: readonly WorkerIdentity[],
+  stopped: readonly HostKey[],
+): WorkersStage {
   return {
     kind: "done",
     outcomes: workers.map((worker) =>
-      skipped(worker, {
-        summary:
-          "This fffactory carries no worker executable: it runs from source, not from a built release",
-        nextAction: thenRerunApply("Install the workers with a built fffactory (`just build`)"),
-      }),
+      stopped.includes(worker.key)
+        ? stoppedOutcome(worker)
+        : skipped(worker, {
+            summary:
+              "This fffactory carries no worker executable: it runs from source, not from a built release",
+            nextAction: thenRerunApply("Install the workers with a built fffactory (`just build`)"),
+          }),
     ),
   };
 }
@@ -412,13 +426,17 @@ export async function applyWorkers(
     projection: new TextEncoder().encode(hostProjectionJson(projection)),
   }));
   const release = await deps.assets.workerRelease();
-  if (release === undefined) return noWorkerExecutable(workers.map(({ worker }) => worker));
+  if (release === undefined)
+    return noWorkerExecutable(
+      workers.map(({ worker }) => worker),
+      request.stopped,
+    );
   const view = await deps.peers.view();
   const outcomes: WorkerOutcome[] = [];
   for (const { worker, projection } of workers) {
     if (deps.interrupted()) return { kind: "interrupted", outcomes, installing: undefined };
-    const stopped = outcomes.some((outcome) => !rolloutContinues(outcome));
-    const outcome: WorkerOutcome | Interruption = stopped
+    const halted = outcomes.some((outcome) => !rolloutContinues(outcome));
+    const outcome: WorkerOutcome | Interruption = halted
       ? { ...worker, kind: "not_attempted" }
       : await attempt(deps, worker, view, { release, projection }, request);
     if ("interrupted" in outcome) return interruptedAt(outcomes, outcome);

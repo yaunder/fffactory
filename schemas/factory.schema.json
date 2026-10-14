@@ -45,7 +45,11 @@
       "additionalProperties": false,
       "properties": {
         "tag": { "type": "string", "pattern": "^tag:[A-Za-z][A-Za-z0-9-]*$" },
-        "auth_key_secret": { "$ref": "#/$defs/secretReference" }
+        "auth_key_secret": { "$ref": "#/$defs/secretReference" },
+        "admin_client_secret": {
+          "description": "The operator-only Tailscale OAuth client (devices:core) that deletes the factory's devices. Workers never receive it.",
+          "$ref": "#/$defs/secretReference"
+        }
       }
     },
     "repositories": { "type": "array", "items": { "$ref": "#/$defs/repository" } },

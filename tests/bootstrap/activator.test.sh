@@ -26,7 +26,7 @@ assert_nothing_unpacked() {
 test_no_arguments_is_a_usage_error() {
   run "$ACTIVATE"
   assert_status 64
-  assert_contains "$(cat "$ERR")" "usage: fffactory-activate TARBALL SHA256 | repositories | control-plane ACTION | dispatch ACTION"
+  assert_contains "$(cat "$ERR")" "usage: fffactory-activate TARBALL SHA256 | repositories | control-plane ACTION | dispatch ACTION | work inspect"
   assert_nothing_unpacked
 }
 
@@ -175,6 +175,27 @@ test_runs_only_fixed_dispatch_actions_through_the_active_release() {
     run "$ACTIVATE" dispatch "$action"
     assert_status 64
   done
+}
+
+test_runs_only_the_fixed_work_inspection_through_the_active_release() {
+  run "$ACTIVATE" "$WORK/release.tar.gz" "$(digest_of "$WORK/release.tar.gz")"
+  assert_status 0
+  rm -f /tmp/host-apply.record
+  run env CALLER_SECRET=leak "$ACTIVATE" work inspect
+  assert_status 0
+  local record
+  record="$(cat /tmp/host-apply.record)"
+  assert_contains "$record" "args=host work inspect" "work endpoint record"
+  assert_contains "$record" "uid=0" "work endpoint record"
+  assert_contains "$record" "self=/opt/fffactory/current/bin/fffactory" "work endpoint record"
+  assert_not_contains "$record" "CALLER_SECRET" "work endpoint environment"
+
+  for action in arbitrary 'inspect --all' ''; do
+    run "$ACTIVATE" work "$action"
+    assert_status 64
+  done
+  run "$ACTIVATE" work inspect extra
+  assert_status 64
 }
 
 test_staging_left_by_a_killed_activation_is_removed() {

@@ -103,6 +103,40 @@ describe("fffactory secret set", () => {
     expect(out.join("\n")).not.toContain(previous);
   });
 
+  test("stores the Tailscale admin client and writes only its ARN", async () => {
+    const prompt = fakePrompt({ interactive: true, answers: [VALUE] });
+    const { context, out, err, store, secrets, everything } = setup({ prompt });
+    expect(await run(["secret", "set", "tailscale-admin-client"], context)).toBe(0);
+    const arn =
+      "arn:aws:secretsmanager:eu-west-2:123456789012:secret:fff-abcd1234/tailscale-admin-client-AbCdEf";
+    expect(err).toEqual([]);
+    expect(prompt.hidden).toEqual([
+      "Tailscale admin client of factory fff-abcd1234 (input is hidden): ",
+    ]);
+    expect(out.slice(1)).toEqual([
+      "Stored the Tailscale admin client of factory fff-abcd1234 in Secrets Manager as fff-abcd1234/tailscale-admin-client (a new secret).",
+      `tailscale.admin_client_secret now refers to it: ${arn}`,
+    ]);
+    expect(secrets.writes.map(({ value }) => value)).toEqual([VALUE]);
+    expect(JSON.parse(store.files[PATH] ?? "").tailscale).toEqual({
+      tag: "tag:factory",
+      admin_client_secret: arn,
+    });
+    expect(everything()).not.toContain(VALUE);
+  });
+
+  test("refuses --host for the Tailscale admin client", async () => {
+    const { context, err, secrets, store } = setup();
+    expect(
+      await run(["secret", "set", "tailscale-admin-client", "--host", "builder-1"], context),
+    ).toBe(1);
+    expect(err).toEqual([
+      "fffactory secret set: tailscale-admin-client belongs to the whole factory and takes no --host",
+    ]);
+    expect(secrets.writes).toEqual([]);
+    expect(store.writes).toEqual([]);
+  });
+
   test("stores a host's Paseo password", async () => {
     const { context, out } = setup();
     expect(await run(["secret", "set", "paseo-password", "--host", "builder-1"], context)).toBe(0);
@@ -161,6 +195,7 @@ describe("fffactory secret set", () => {
     let store: MemoryInstanceStore | undefined;
     const inner = fakeSecretStore().store;
     const secrets: SecretStore = {
+      read: inner.read,
       write: async (request) => {
         if (store) store.files[PATH] = '{"schema_version": 2}';
         return inner.write(request);
@@ -222,6 +257,8 @@ describe("fffactory secret set", () => {
     expect(help.out[0]).toBe(
       "Usage: fffactory secret set NAME [--host KEY] [--instance PATH] [--profile NAME]",
     );
+    expect(help.out).toContain("  tailscale-admin-client");
+    expect(help.out.join("\n")).toContain("(tailscale.admin_client_secret)");
   });
 });
 

@@ -86,12 +86,13 @@ export interface Verification {
  * Tailscale SSH as the runtime account: the tailnet vouches for the host key, and the
  * credential is saved for `factory`, where agents use it, never for root.
  */
-function login(hostname: string): string {
+export function runtimeLogin(hostname: string): string {
   return `tailscale ssh ${RUNTIME_ACCOUNT}@${hostname}`;
 }
 
 /** Logging in as `factory` is tailnet SSH policy's to allow, an administrator's step. */
-const POLICY = `(tailnet SSH policy must let you log in as \`${RUNTIME_ACCOUNT}\`)`;
+export const RUNTIME_LOGIN_POLICY = `tailnet SSH policy must let you log in as \`${RUNTIME_ACCOUNT}\``;
+const POLICY = `(${RUNTIME_LOGIN_POLICY})`;
 
 /**
  * The exact steps that enroll `id` on the worker `hostname`. Only the CLI makes them, from the
@@ -102,7 +103,7 @@ export function enrollmentNextAction(id: EnrollmentId, hostname: string): NextAc
     case "github":
       return {
         summary: `Authenticate GitHub as ${RUNTIME_ACCOUNT} on ${hostname} ${POLICY}`,
-        login: login(hostname),
+        login: runtimeLogin(hostname),
         commands: [
           "gh auth login --hostname github.com --git-protocol https --web",
           "gh auth status",
@@ -111,13 +112,13 @@ export function enrollmentNextAction(id: EnrollmentId, hostname: string): NextAc
     case "openai":
       return {
         summary: `Log in to OpenAI Codex as ${RUNTIME_ACCOUNT} on ${hostname} ${POLICY}`,
-        login: login(hostname),
+        login: runtimeLogin(hostname),
         commands: ["codex login --device-auth", "codex login status"],
       };
     case "anthropic":
       return {
         summary: `Log in to Claude Code as ${RUNTIME_ACCOUNT} on ${hostname} ${POLICY}`,
-        login: login(hostname),
+        login: runtimeLogin(hostname),
         commands: ["claude auth login", "claude auth status"],
       };
   }

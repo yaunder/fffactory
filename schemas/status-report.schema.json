@@ -24,6 +24,10 @@
   },
   "$defs": {
     "status": { "enum": ["ready", "not_ready", "error"] },
+    "worker_status": {
+      "description": "A check's status, or stopped: the worker's machine is stopped, which keeps the report ready.",
+      "enum": ["ready", "not_ready", "error", "stopped"]
+    },
     "release": { "type": "string", "pattern": "^\\d+\\.\\d+\\.\\d+(-[0-9A-Za-z.-]+)?$" },
     "verdict": {
       "type": "object",
@@ -65,7 +69,7 @@
       "properties": {
         "key": { "type": "string", "pattern": "^[a-z][a-z0-9-]*$" },
         "hostname": { "type": "string", "minLength": 1 },
-        "status": { "$ref": "#/$defs/status" },
+        "status": { "$ref": "#/$defs/worker_status" },
         "summary": { "type": "string", "minLength": 1 },
         "details": { "type": "array", "items": { "type": "string" } },
         "next_action": { "type": ["string", "null"] },

@@ -8,12 +8,24 @@
 - `terraform-check.ts` (`just terraform-check`, CI's Terraform job) checks `assets/terraform`
   with the managed Terraform only: `fmt`, `validate` against the shipped lockfiles, and plans
   of both root modules for two factory IDs whose JSON must keep every name in its own
-  namespace. Its plans reach
-  no AWS: an override in its private copy gives the provider example keys and points every
-  endpoint at a local stand-in. It downloads Terraform and the provider, so `check-all` does
-  not run it.
+  namespace. Its plans reach no AWS: an override in its private copy gives the provider
+  example keys and points every endpoint at a local stand-in, and Terraform runs with
+  `AWS_CONFIG_FILE` and `AWS_SHARED_CREDENTIALS_FILE` at `/dev/null` and
+  `AWS_EC2_METADATA_DISABLED=true`, so no local AWS profile or credential can be read. It
+  downloads Terraform and the provider, so `check-all` does not run it.
 - `terraform-check.ts` also compares each planned host's `user_data` with the rendering the
-  bootstrap tests use (`tests/support/user-data.ts`).
+  bootstrap tests use (`tests/support/user-data.ts`), and plans the factory root without
+  hosts, an empty factory: no instance, the shared infrastructure kept, the hosts' policy
+  allowing only the Tailscale enrollment key.
+- `terraform-check.ts` last checks `worker terminate`'s scoped removal rule against real
+  Terraform removal plans (`terraform-removal-check.ts`): states for several hosts and for
+  one, synthesized offline by `terraform-state-fixture.ts` (each `-refresh=false` plan's
+  resources written into a local state, unknown values filled with fake but well-formed IDs,
+  until Terraform plans no resource change; that last plan, changing only outputs, applied
+  with no API call), each removal planned as fffactory plans it but with `-refresh=false`,
+  its JSON judged by `removalPlanRefusal`. Its provisioner calls (`showPlan`, `output`) run in the
+  FFFactory cache, as fffactory's do. Add a case there whenever the rule or the modules
+  change what a removal plans.
 - `repository-skills.sh` (`just repository-skills`, part of `check-all`, and CI's
   "Factory code validation" job in `.github/workflows/repository-checks.yml`) checks the
   absence of checkout-local repository skills, AGENTS.md's capability routing and the

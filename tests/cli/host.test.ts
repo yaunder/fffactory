@@ -11,6 +11,7 @@ import { verificationJson } from "../../src/domain/readiness";
 import { repositoryInspectionJson } from "../../src/domain/repository-placement";
 import { activityJson, controlPlaneActionJson } from "../../src/domain/control-plane";
 import { dispatchAdoptionJson, dispatchInspectionJson } from "../../src/domain/dispatch-projection";
+import { type WorkInspection, workInspectionJson } from "../../src/domain/work-inspection";
 import { harness } from "../support/cli-harness";
 import { fakeWorker, inspection, verification } from "../support/fake-workers";
 import { MemoryInstanceStore } from "../support/memory-instance-store";
@@ -43,6 +44,8 @@ describe("fffactory host inspect", () => {
       ["host", "dispatch"],
       ["host", "dispatch", "arbitrary"],
       ["host", "dispatch", "inspect", "extra"],
+      ["host", "work"],
+      ["host", "work", "inspect", "extra"],
       ["host", "remove"],
     ]) {
       const { context, out } = harness(new MemoryInstanceStore());
@@ -67,6 +70,41 @@ describe("fffactory host inspect", () => {
       "       fffactory host control-plane (activity | install | reload | restart)",
     );
     expect(out).toContain("       fffactory host dispatch (adoption | reconcile | inspect)");
+    expect(out).toContain("       fffactory host work inspect");
+  });
+});
+
+describe("fffactory host work (host protocol §work inspect)", () => {
+  const document: WorkInspection = {
+    protocol_version: 1,
+    hostname: HOST,
+    complete: true,
+    repositories: [],
+  };
+
+  test("prints the work inspection as root, exit 0 whatever work it found", async () => {
+    const worker = fakeWorker(inspection(HOST), {
+      isRoot: () => true,
+      inspectWork: async () => document,
+    });
+    const cli = harness(new MemoryInstanceStore(), {}, { worker });
+    expect(await run(["host", "work", "inspect"], cli.context)).toBe(0);
+    expect(cli.out).toEqual([workInspectionJson(document)]);
+  });
+
+  test("runs only through the root activator, and only its inspect action", async () => {
+    for (const [args, root] of [
+      [["host", "work", "inspect"], false],
+      [["host", "work", "clean"], true],
+    ] as const) {
+      const worker = fakeWorker(inspection(HOST), {
+        isRoot: () => root,
+        inspectWork: async () => document,
+      });
+      const cli = harness(new MemoryInstanceStore(), {}, { worker });
+      expect(await run([...args], cli.context)).toBe(1);
+      expect(cli.out).toEqual([]);
+    }
   });
 });
 

@@ -63,7 +63,7 @@ chain. Every such command first refuses unless the caller is in factory.json's
 | [2. Create the instance](#2-create-the-instance) | Agent | `fffactory init` | `Created PATH.` and a new factory ID. |
 | [3. Declare the factory](#3-declare-the-factory) | Agent, with the operator's choices | edit factory.json, `fffactory validate` | Only `tailscale.auth_key_secret` is still needed. |
 | [4. Check the workstation](#4-check-the-workstation) | Agent | `fffactory doctor` | Every check is ready but the instance check. |
-| [5. Prepare the tailnet](#5-prepare-the-tailnet) | Human (tailnet admin) | Tailscale admin console | Tag, grant, SSH rule and auth key exist. |
+| [5. Prepare the tailnet](#5-prepare-the-tailnet) | Human (tailnet admin) | Tailscale admin console | Tag, grant, SSH rule and auth key exist, and the admin client if you create it. |
 | [6. Store the secrets](#6-store-the-secrets) | Human | `fffactory secret set` | `validate` reports `Complete` and `doctor` exits 0. |
 | [7. Bootstrap and provision](#7-bootstrap-and-provision) | Human (approves at a terminal) | `fffactory plan`, `fffactory apply` | apply exits 0; the worker is installed, enrollment pending. |
 | [8. Enroll the worker's accounts](#8-enroll-the-workers-accounts) | Human | `tailscale ssh factory@HOSTNAME`, then each login | Each login's status command succeeds. |
@@ -262,11 +262,31 @@ Every worker that first-boots reads it, including one recreated after a failed
 first boot ([step 7](#7-bootstrap-and-provision)). Keep its value only until step 6 stores it;
 never put it in a file in a repository or in factory.json.
 
-**Done when** the policy is saved and the key is generated.
+Optionally, create the factory's **admin client**, a Tailscale OAuth client
+that only the operator's `fffactory` uses, never a worker. `fffactory worker
+terminate` deletes a terminated worker's Tailscale devices with it, and refuses
+without it, so create it before you need to replace or remove a worker. On the
+admin console's **Trust credentials** page, create an OAuth credential with
+the **`devices:core`** scope (read and write) and only that scope, and select
+factory.json's tag as its tag. Copy its client secret (`tskey-client-…`):
+the console shows it only once.
+
+`devices:core` is the narrowest scope that can remove a device, and it cannot
+be limited to the factory's devices. Tailscale requires a tag for it, which
+constrains the tags of the auth keys the client creates, not which devices it
+can see or remove: it reads the list of every device in the tailnet, and
+whoever holds its secret can remove any of them. Treat it as admin-tier, like
+the AWS credentials that can destroy the factory, and keep the client secret
+only until step 6 stores it. Workers keep only their join-only auth key.
+
+**Done when** the policy is saved and the key is generated, and the admin
+client is created if you chose to.
 
 **Otherwise:** the admin console refuses a policy that does not validate:
 fix the entry it names and save again. A key generated without these options
-cannot be changed: revoke it and generate a new one.
+cannot be changed: revoke it and generate a new one. A lost admin client
+secret cannot be shown again: revoke the client and create a new one, then
+store its secret in step 6.
 
 ## 6. Store the secrets
 
@@ -276,16 +296,24 @@ cannot be changed: revoke it and generate a new one.
 ```bash
 fffactory secret set tailscale-auth-key --profile NAME
 fffactory secret set paseo-password --host KEY --profile NAME
+fffactory secret set tailscale-admin-client --profile NAME   # if you created the admin client
 fffactory validate
 fffactory doctor --profile NAME
 ```
 
 Each `secret set` asks for the value with a hidden prompt (`DESCRIPTION
 (input is hidden): `), stores it in Secrets Manager in the factory's account
-and Region as `FACTORY_ID/tailscale-auth-key` or `FACTORY_ID/KEY/paseo-password`,
-and writes only the ARN into factory.json. A value is never an argument;
+and Region as `FACTORY_ID/tailscale-auth-key`, `FACTORY_ID/KEY/paseo-password`
+or `FACTORY_ID/tailscale-admin-client`, and writes only the ARN into
+factory.json (`tailscale.auth_key_secret`, `hosts[].paseo_password_secret`,
+`tailscale.admin_client_secret`). A value is never an argument;
 without a terminal it is read from standard input, such as `fffactory secret
 set tailscale-auth-key < key.txt`.
+
+The admin client's value is its client secret alone, and factory.json is
+complete without it; only `fffactory worker terminate` reads it, with your
+credentials. Workers' IAM role cannot read it: fffactory never gives it to a
+worker ([secrets §The Tailscale admin client](docs/specs/secrets.md#the-tailscale-admin-client)).
 
 The Paseo password is the one every Paseo client of that worker types in
 [step 10](#10-enroll-paseo-clients): choose a strong, unique one and keep it in
@@ -346,11 +374,15 @@ Pending enrollment is expected here: fffactory never enrolls an account.
 
 - Exit 1 with `Its first boot did not finish within 15 min`: read the bootstrap
   in the instance's EC2 console output, and check that the tailnet policy lets
-  this device see the factory's tag. If the bootstrap failed, terminate the
-  instance in the EC2 console, wait until it is terminated, remove its stale
-  device in the Tailscale admin console if one remains (a second device with
-  the same hostname is refused as `duplicate`), and rerun `fffactory apply`,
-  which creates it afresh ([worker bootstrap §Failed first boot](docs/specs/worker-bootstrap.md#failed-first-boot)).
+  this device see the factory's tag. If the console output shows the bootstrap
+  failed, terminate the worker with `fffactory worker terminate KEY --keep
+  --force`. `--force` is needed: a worker that never joined the tailnet cannot
+  be inspected, and it says you read the console output. It destroys the instance,
+  deletes any stale device with the worker's hostname (a second device with
+  that name is refused as `duplicate`) and keeps the host in factory.json; it
+  needs the admin client ([step 5](#5-prepare-the-tailnet)). Then rerun
+  `fffactory apply`, which creates the worker afresh
+  ([worker bootstrap §Failed first boot](docs/specs/worker-bootstrap.md#failed-first-boot)).
 - An install or verification failure leaves the worker on the new release,
   unhealthy: its next action names the failed step's log; rerun `fffactory
   apply` once the cause is fixed.
@@ -590,10 +622,20 @@ operation that may still be running
 
 ### Not available yet
 
-Until milestone M3, a plan that removes or renames a host key, or that would
-destroy or replace a worker, is refused (D11): there is no retirement or
-guided replacement, and the failed-first-boot recovery above is the only
-replacement path. A worker's root volume, with its credentials, checkouts and
-any uncommitted work, is deleted with its instance: treat Git as the
-durability boundary. Second workers, a rollout policy and the companion skill
-are M3 items ([design §Milestones](docs/designs/fffactory-v2.md#milestones)).
+Removing a host by editing factory.json, or renaming a host key, is refused
+(D11): remove a worker with `fffactory worker terminate KEY`, which shows a
+Terraform plan that may only destroy that worker's instance, and once you type
+the host key applies it, writes factory.json without the host and deletes its
+Tailscale devices
+([worker lifecycle §Terminate (remove)](docs/specs/worker-lifecycle.md#terminate-remove)).
+Apply any other pending change first: the removal plan refuses one. Until
+milestone M3, a plan that would destroy or replace a worker any other way is
+refused too: there is no guided replacement or snapshot. To replace or resize a
+worker, remove it with `fffactory worker terminate KEY` (the last worker too,
+leaving an empty factory), declare its replacement with the size you want, and
+run `fffactory apply`; the failed-first-boot recovery above rebuilds one in
+place. A worker's root
+volume, with its credentials, checkouts and any uncommitted work, is deleted
+with its instance: treat Git as the durability boundary. Second workers, a
+rollout policy and the companion skill are M3 items
+([design §Milestones](docs/designs/fffactory-v2.md#milestones)).

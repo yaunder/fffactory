@@ -1,6 +1,6 @@
 /**
- * A local stand-in for Secrets Manager's CreateSecret and PutSecretValue, so tests exercise
- * the real AWS SDK without reaching AWS. Point a client at `endpoint`, or a spawned CLI at
+ * A local stand-in for Secrets Manager's CreateSecret, PutSecretValue and GetSecretValue, so
+ * tests exercise the real AWS SDK without reaching AWS. Point a client at `endpoint`, or a spawned CLI at
  * it with `AWS_ENDPOINT_URL_SECRETS_MANAGER`.
  */
 
@@ -59,8 +59,20 @@ export function stubSecretsManager(options: StubSecretsManagerOptions = {}): Stu
     PutSecretValue: put,
   };
 
+  /** The current value of the secret named, or referred to by its ARN. */
+  function get(secretId: string): Response {
+    const name = [...secrets.keys()].find((known) => known === secretId || arn(known) === secretId);
+    const value = name === undefined ? undefined : secrets.get(name)?.at(-1);
+    if (name === undefined || value === undefined) return failure("ResourceNotFoundException");
+    return Response.json(
+      { ARN: arn(name), Name: name, VersionId: "stub", SecretString: value },
+      { headers: JSON_TYPE },
+    );
+  }
+
   function handle(operation: string, body: Record<string, unknown>): Response {
     if (options.error) return failure(options.error);
+    if (operation === "GetSecretValue") return get(String(body.SecretId ?? ""));
     const run = OPERATIONS[operation];
     if (!run) return failure("InvalidAction");
     const name = String(body.Name ?? body.SecretId ?? "");

@@ -1,0 +1,36 @@
+{
+  "protocol_version": 1,
+  "hostname": "fff-aaaa1111-builder-1",
+  "complete": true,
+  "repositories": [
+    {
+      "path": "/workspace/repos/acme/widget",
+      "state": "inspected",
+      "unpushed_commits": 1,
+      "unpushed_branches": [
+        "epic/5"
+      ],
+      "stashes": 0,
+      "worktrees": [
+        {
+          "path": "/workspace/repos/acme/widget",
+          "branch": "main",
+          "state": "inspected",
+          "tracked_changes": 0,
+          "untracked_files": 1,
+          "unpushed_commits": 0,
+          "operation": null
+        },
+        {
+          "path": "/home/factory/.paseo/worktrees/abc123/serious-goose",
+          "branch": "epic/5",
+          "state": "inspected",
+          "tracked_changes": 0,
+          "untracked_files": 0,
+          "unpushed_commits": 1,
+          "operation": null
+        }
+      ]
+    }
+  ]
+}

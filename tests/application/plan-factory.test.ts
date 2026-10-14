@@ -16,7 +16,7 @@ import {
   TERRAFORM,
   workerFleet,
 } from "../support/factory-world";
-import { appliedRecord, installableWorker } from "../support/fake-workers";
+import { appliedRecord, installableWorker, machine } from "../support/fake-workers";
 import { hostAddress, NETWORK, STATE_BUCKET_ADDRESS } from "../support/fake-provisioner";
 import { READY_BUCKET } from "../support/memory-lock-store";
 
@@ -82,6 +82,7 @@ describe("fffactory plan (plan-apply §Plan)", () => {
             schedule: null,
           },
         ],
+        stopped_workers: [],
       },
     });
     const target = {
@@ -246,7 +247,8 @@ describe("fffactory plan (plan-apply §Plan)", () => {
     expect(result).toMatchObject({
       kind: "d11",
       refusal: {
-        capability: "host retirement",
+        capability: "host removal",
+        command: "fffactory worker terminate KEY",
         reasons: [expect.stringContaining('host key "builder-2" is provisioned')],
       },
     });
@@ -261,7 +263,7 @@ describe("fffactory plan (plan-apply §Plan)", () => {
     expect(await planFactory(deps, planRequest())).toEqual({
       kind: "d11",
       refusal: {
-        capability: "host retirement and replacement",
+        capability: "host replacement",
         reasons: [`${hostAddress("builder-1")} would be replaced`],
         instead: "Change factory.json so the plan keeps every host machine, then plan again.",
       },
@@ -295,6 +297,93 @@ describe("fffactory plan (plan-apply §Plan)", () => {
       "`terraform plan` exited with status 1",
     );
     expect(planStore.directories.size).toBe(0);
+  });
+
+  test("a stopped worker's install is shown skipped, and saved with the plan (plan-apply §Stopped workers)", async () => {
+    const { deps, fleet, planStore } = factory({ hosts: ["builder-1", "builder-2"] });
+    fleet.machines.inventory = {
+      kind: "machines",
+      machines: [
+        machine("builder-1", "running", "i-0000000000000000a"),
+        machine("builder-2", "stopped", "i-0000000000000000b"),
+      ],
+    };
+    const result = await planFactory(
+      deps,
+      planRequest({ instance: declaring("builder-1", "builder-2") }),
+    );
+    expect(result).toMatchObject({ kind: "planned", saved: { stopped_workers: ["builder-2"] } });
+    if (result.kind !== "planned") return;
+    expect(result.plan).toContain(
+      "  = builder-2 (fff-abcd1234-builder-2): skipped: stopped; start it with `fffactory worker start builder-2`, then apply again to install it",
+    );
+    expect(result.plan).toContain(
+      "  ~ builder-1 (fff-abcd1234-builder-1): install release 0.3.0 and its host configuration, then verify it",
+    );
+    expect(planStore.saved.get("fff-abcd1234/aaaaaaaa")?.stopped_workers).toEqual([
+      "builder-2" as HostKey,
+    ]);
+    expect(fleet.machines.reads).toBe(1);
+    // Never inspected, even while the tailnet still shows it online: it is sent nothing.
+    expect(result.saved.control_plane?.[1]).toEqual({
+      key: "builder-2" as HostKey,
+      hostname: "fff-abcd1234-builder-2",
+      observation: "stopped",
+      changes: [],
+    });
+    expect(fleet.transport.calls.map(({ worker }) => worker.hostname)).not.toContain(
+      "fff-abcd1234-builder-2",
+    );
+  });
+
+  test("an instance type change on a stopped worker is refused, naming the start command, and never saved", async () => {
+    const { deps, fleet, terraform, planStore } = factory({ hosts: ["builder-1"] });
+    terraform.world.resize.add("builder-1");
+    fleet.machines.inventory = { kind: "machines", machines: [machine("builder-1", "stopped")] };
+    expect(await planFactory(deps, planRequest())).toEqual({
+      kind: "stopped_resize",
+      inventory: "read",
+      workers: [
+        { key: "builder-1" as HostKey, hostname: "fff-abcd1234-builder-1", machine: "stopped" },
+      ],
+    });
+    expect(planStore.directories.size).toBe(0);
+    // A stopping one too: the provider waits for it to stop, then starts it.
+    fleet.machines.inventory = { kind: "machines", machines: [machine("builder-1", "stopping")] };
+    expect(await planFactory(deps, planRequest())).toMatchObject({
+      kind: "stopped_resize",
+      workers: [{ key: "builder-1" as HostKey, machine: "stopping" }],
+    });
+    expect(planStore.directories.size).toBe(0);
+    // A running worker's resize is planned as before: Terraform stops and starts it.
+    fleet.machines.inventory = { kind: "machines", machines: [machine("builder-1", "running")] };
+    const running = await planFactory(deps, planRequest());
+    expect(running).toMatchObject({ kind: "planned" });
+    if (running.kind === "planned")
+      expect(running.plan).toContain(`  ~ ${hostAddress("builder-1")}`);
+  });
+
+  test("an EC2 inventory it cannot read refuses any resize, failing closed", async () => {
+    const { deps, fleet, terraform, planStore } = factory({ hosts: ["builder-1"] });
+    terraform.world.resize.add("builder-1");
+    fleet.machines.inventory = { kind: "unavailable", reason: "EC2 DescribeInstances failed: x" };
+    expect(await planFactory(deps, planRequest())).toEqual({
+      kind: "stopped_resize",
+      inventory: "unreadable",
+      workers: [{ key: "builder-1" as HostKey, hostname: "fff-abcd1234-builder-1" }],
+    });
+    expect(planStore.directories.size).toBe(0);
+  });
+
+  test("an EC2 inventory it cannot read plans every install, as before", async () => {
+    const { deps, fleet } = factory({ hosts: ["builder-1"] });
+    fleet.machines.inventory = { kind: "unavailable", reason: "EC2 DescribeInstances failed: x" };
+    const result = await planFactory(deps, planRequest());
+    expect(result).toMatchObject({ kind: "planned", saved: { stopped_workers: [] } });
+    if (result.kind === "planned")
+      expect(result.plan).toContain(
+        "  ~ builder-1 (fff-abcd1234-builder-1): install release 0.3.0 and its host configuration, then verify it",
+      );
   });
 
   test("plans long expired are pruned first", async () => {

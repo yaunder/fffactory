@@ -17,6 +17,7 @@ import { secretsManagerStore } from "../infrastructure/aws-secrets-manager-store
 import { stsCallerIdentity } from "../infrastructure/aws-sts-caller-identity";
 import { awsVpcQuotaProbe } from "../infrastructure/aws-vpc-quota-probe";
 import { ec2MachineInventory } from "../infrastructure/ec2-inventory";
+import { ec2MachineControl } from "../infrastructure/ec2-machine-control";
 import { filesystemCacheDirectory } from "../infrastructure/filesystem-cache-directory";
 import { filesystemInstanceStore } from "../infrastructure/filesystem-instance-store";
 import {
@@ -29,6 +30,7 @@ import { filesystemPlanStore } from "../infrastructure/plan-store";
 import { sshTransport } from "../infrastructure/ssh-transport";
 import { paseoControlPlane } from "../infrastructure/paseo-control-plane";
 import { ffflowGithubWorkflowQueue } from "../infrastructure/ffflow-github-workflow-queue";
+import { tailscaleApiAdmin } from "../infrastructure/tailscale-api-admin";
 import { tailscalePeers } from "../infrastructure/tailscale-peers";
 import { terminalPrompt } from "../infrastructure/terminal-prompt";
 import { managedTerraform } from "../infrastructure/terraform/installer";
@@ -92,7 +94,9 @@ await interrupts.run(
       }),
       planStore: filesystemPlanStore(planStoreDirectory(cacheDirectory)),
       machines: ec2MachineInventory(),
+      machineControl: ec2MachineControl(),
       tailnet: tailscalePeers(),
+      tailnetAdmin: tailscaleApiAdmin(),
       transport,
       controlPlane: paseoControlPlane(transport),
       workflowQueue: ffflowGithubWorkflowQueue(transport),

@@ -4,7 +4,9 @@
  * root's Terraform), the workers stage (`applyWorkers`), then repository reconciliation.
  * Every stage is in the approved plan and the same lock and operation record. Workers first wait
  * for any worker whose machine the infrastructure stage created to finish its first boot. On
- * a first apply, backend bootstrap comes first with its own approval.
+ * a first apply, backend bootstrap comes first with its own approval. A worker whose machine
+ * is stopped is sent nothing by any stage, and does not make the operation partial
+ * (`docs/specs/plan-apply.md` §Stopped workers).
  *
  * Without a plan ID, apply plans afresh under the lock and asks for approval. With one, it
  * applies that saved plan only while it is fresh: the same factory.json text, release and
@@ -51,6 +53,7 @@ import {
   newPlanId,
   type PlannedWorker,
   type PlannedControlPlane,
+  resizeRefusal,
   type PlannedDispatch,
   type PlanTarget,
   planStaleness,
@@ -58,6 +61,7 @@ import {
   resourceChanges,
   type SavedPlan,
   stateStaleness,
+  stoppedStaleness,
   plannedDispatch,
 } from "../domain/plan";
 import { rolloutResult, skipped, type WorkerIdentity, type WorkerOutcome } from "../domain/rollout";
@@ -84,6 +88,8 @@ import { type FactoryLock, type Interrupted, settleFactoryLock } from "./factory
 import {
   checkPlannable,
   circumstances,
+  declaredMachines,
+  type DeclaredMachines,
   type FactoryPlanDependencies,
   type FactoryPlanRequest,
   factoryTarget,
@@ -272,50 +278,64 @@ async function swappedPlanFile(
 
 /**
  * The saved plan's changes, read from the Terraform plan file that will be applied, only
- * while the state is the revision it was planned against and the file is still the one
- * loaded before the lock, making the changes its record shows.
+ * while the state is the revision it was planned against, the same workers are stopped, and
+ * the file is still the one loaded before the lock, making the changes its record shows.
+ * The resize refusal goes by `machines`, read now: a worker may have stopped since.
  */
 async function savedChanges(
   deps: FactoryApplyDependencies,
   saved: SavedPlan,
   terraformDirectory: string,
   locked: LockedApply,
+  machines: DeclaredMachines,
 ): Promise<InfrastructureChanges> {
   const { lock } = locked;
   const stale = stateStaleness(saved, await deps.lockStore.stateRevision(lock.bucket));
   if (stale !== undefined) return { kind: "stale", planId: saved.plan_id, reasons: [stale] };
+  const restarted = stoppedStaleness(
+    saved,
+    machines.stopped?.map(({ key }) => key),
+  );
+  if (restarted.length > 0) return { kind: "stale", planId: saved.plan_id, reasons: restarted };
   const swapped = await swappedPlanFile(deps, locked);
   if (swapped !== undefined) return swapped;
-  const shown = resourceChanges(
-    await deps.provisioner.showPlan({
-      ...factoryTarget(lock.bucket, terraformDirectory),
-      planFile: locked.files.factory,
-    }),
-  );
+  const plan = await deps.provisioner.showPlan({
+    ...factoryTarget(lock.bucket, terraformDirectory),
+    planFile: locked.files.factory,
+  });
+  const shown = resourceChanges(plan);
   if (shown === undefined)
     return { kind: "unexpected_plan", unexpected: ["Terraform's plan could not be read"] };
   const changes = shown.filter(changesSomething);
   if (!sameChanges(changes, saved.changes)) return { kind: "damaged_plan", planId: saved.plan_id };
   const lost = hostMachineRefusal(changes);
   if (lost !== undefined) return { kind: "d11", refusal: lost };
+  const resized = resizeRefusal(plan, machines.resizeGuard);
+  if (resized !== undefined) return { kind: "stopped_resize", ...resized };
   return { kind: "ready", changes };
 }
 
-/** The infrastructure stage's changes: the saved plan's while it is fresh, or a fresh plan's. */
+/**
+ * The infrastructure stage's changes: the saved plan's while it is fresh, or a fresh plan's;
+ * either refused when it changes the instance type of a worker stopped or stopping now, or of
+ * any worker while the EC2 inventory cannot be read.
+ */
 async function infrastructureChanges(
   deps: FactoryApplyDependencies,
   instance: FactoryInstance,
   terraformDirectory: string,
   locked: LockedApply,
+  machines: DeclaredMachines,
 ): Promise<InfrastructureChanges> {
   const { saved, lock } = locked;
-  if (saved !== undefined) return savedChanges(deps, saved, terraformDirectory, locked);
+  if (saved !== undefined) return savedChanges(deps, saved, terraformDirectory, locked, machines);
   const planned = await planInfrastructure(deps, {
     instance,
     bucket: lock.bucket,
     terraformDirectory,
     planFile: locked.files.factory,
     underFactoryLock: true,
+    resizeGuard: machines.resizeGuard,
   });
   if (planned.kind !== "planned") return planned;
   return { kind: "ready", changes: planned.changes };
@@ -443,6 +463,8 @@ interface ApprovedChanges {
   readonly workers: readonly PlannedWorker[];
   readonly controlPlane: readonly PlannedControlPlane[];
   readonly dispatch: readonly PlannedDispatch[];
+  /** The workers the plan skips as stopped. */
+  readonly stopped: readonly HostKey[];
 }
 
 /**
@@ -483,6 +505,7 @@ async function approveAndApply(
     workers,
     controlPlane,
     dispatch,
+    stopped,
   }: ApprovedChanges & { readonly plan: readonly string[] },
 ): Promise<FactoryApply> {
   const { log, progress } = tracking;
@@ -519,6 +542,7 @@ async function approveAndApply(
     created,
     controlPlane,
     dispatch,
+    stopped,
   });
 }
 
@@ -537,6 +561,7 @@ async function workersStage(
     readonly created: readonly HostKey[];
     readonly controlPlane: readonly PlannedControlPlane[];
     readonly dispatch: readonly PlannedDispatch[];
+    readonly stopped: readonly HostKey[];
   },
 ): Promise<FactoryApply> {
   const { infrastructure, created, controlPlane } = applied;
@@ -566,6 +591,7 @@ async function workersStage(
     request.instance.hosts ?? [],
     request.assetsSha256,
     new Set(created),
+    new Set(applied.stopped),
   );
   for (const approved of controlPlane) {
     if (created.includes(approved.key)) continue;
@@ -590,7 +616,7 @@ async function workersStage(
     )
       continue;
     activityView ??= await deps.peers.view();
-    const location = locateWorker(activityView, plan.hostname, tag);
+    const location = locateWorker(activityView, plan, tag);
     const activity =
       location.kind === "found" && deps.controlPlane !== undefined
         ? await deps.controlPlane.activeAgents(location.worker)
@@ -616,6 +642,7 @@ async function workersStage(
       projections: projectHosts(request.instance, locked.target.factoryId, locked.target.release),
       created,
       deferred,
+      stopped: applied.stopped,
     },
     (outcomes) => log.workers(outcomes),
   );
@@ -671,13 +698,12 @@ async function repositoriesStage(
       tag,
       hosts: request.instance.hosts ?? [],
       repositories: request.instance.repositories ?? [],
+      stopped: workerOutcomes.filter((outcome) => outcome.kind === "stopped").map(({ key }) => key),
     },
   );
   if (deps.interrupted()) return interruptedUnder(log);
   await log.repositories(repositoryStage.outcomes);
-  const repositoryStatus = repositoryStage.outcomes.every(
-    (outcome) => outcome.kind === "synchronized",
-  )
+  const repositoryStatus = repositoryStage.outcomes.every(repositoriesComplete)
     ? "synchronized"
     : "partial";
   await log.stage(repositoryStatus, REPOSITORIES_STAGE);
@@ -704,6 +730,11 @@ async function repositoriesStage(
     },
     async (post, recordFailure) => finished(workerOutcomes, recordFailure, post),
   );
+}
+
+/** A worker's repositories are as complete as this apply makes them: synchronized, or stopped. */
+function repositoriesComplete(outcome: RepositoryOutcome): boolean {
+  return outcome.kind === "synchronized" || outcome.kind === "stopped";
 }
 
 /** factory.json's `tailscale.tag`; missing is an error, never a default (`checkPlannable` has it). */
@@ -803,7 +834,7 @@ function phaseThreePartial(
 ): boolean {
   return (
     about.result === "partial" ||
-    about.repositories.some((outcome) => outcome.kind !== "synchronized") ||
+    !about.repositories.every(repositoriesComplete) ||
     post.controlPlane?.some((outcome) => outcome.kind === "deferred") === true ||
     !post.verification.ready
   );
@@ -849,9 +880,7 @@ async function finishUnverified(
   post: PostWorkers,
   applied: (post: PostWorkers, recordFailure: string | undefined) => Promise<FactoryApply>,
 ): Promise<FactoryApply> {
-  const incomplete =
-    about.result === "partial" ||
-    about.repositories.some((outcome) => outcome.kind !== "synchronized");
+  const incomplete = about.result === "partial" || !about.repositories.every(repositoriesComplete);
   const recordFailure = await finishControlPlane(
     log,
     incomplete ? "partial" : "succeeded",
@@ -933,7 +962,7 @@ async function reconcileWorkerControlPlane(
   observation: string | undefined,
 ): Promise<WorkerControlPlane> {
   const identity: WorkerIdentity = { key: worker.key, hostname: worker.hostname };
-  const location = locateWorker(view, worker.hostname, tag, thenRerunApply);
+  const location = locateWorker(view, identity, tag, thenRerunApply);
   if (location.kind !== "found") return { control: undefined, location, paseoHealth: "unknown" };
   const control = await applyControlPlane(
     { controlPlane },
@@ -1038,6 +1067,13 @@ async function postWorkersStages(
     // The workers stage projected exactly factory.json's hosts, so each worker has its host.
     if (host === undefined)
       throw new Error(`worker ${worker.key} is not one of factory.json's hosts`);
+    // A stopped worker is sent nothing by any stage.
+    if (worker.kind === "stopped") {
+      const identity = { key: worker.key, hostname: worker.hostname };
+      controlOutcomes.push({ ...identity, kind: "stopped" });
+      if (workflowQueue !== undefined) dispatchWorkers.push({ worker: identity, stopped: true });
+      continue;
+    }
     // A deferred worker bypasses the control-plane stage, its outcome already the deferral, and
     // dispatch sends it nothing, naming the deferral even if the workers stage skipped it for
     // another reason first. Any other skipped worker the tailnet locates is still reconciled.
@@ -1099,19 +1135,27 @@ async function infrastructureStage(
   const { log } = tracking;
   await log.start();
   if (deps.interrupted()) return interruptedUnder(log);
+  // Read once, under the lock that `worker stop|start` also take: the plan approved, its
+  // refusals and the stages after it all go by this one look at which machines are stopped.
+  const machines = await declaredMachines(deps.machines, request, locked.target);
+  if (deps.interrupted()) return interruptedUnder(log);
   const ready = await infrastructureChanges(
     deps,
     request.instance,
     request.terraformDirectory,
     locked,
+    machines,
   );
   if (deps.interrupted()) return interruptedUnder(log);
   if (ready.kind !== "ready") {
     await log.finish("refused", "refused");
     return ready;
   }
-  // A complete factory.json declares a worker, so every plan has the workers stage's changes.
+  // Every declared worker is in the workers stage; a factory that declares none has no worker
+  // changes, and its plan says so.
   const workers = declaredWorkers(request.instance, locked.target.factoryId);
+  // A saved plan skips the workers stopped when it was made, which are stopped still.
+  const stopped = locked.saved?.stopped_workers ?? (machines.stopped ?? []).map(({ key }) => key);
   const controlPlane =
     locked.saved?.control_plane ??
     (await planControlPlane(
@@ -1121,6 +1165,7 @@ async function infrastructureStage(
       request.instance.hosts ?? [],
       request.assetsSha256,
       new Set(createdWorkers(ready.changes, workers)),
+      new Set(stopped),
     ));
   const dispatch =
     locked.saved?.dispatch ?? plannedDispatch(request.instance, locked.target.factoryId);
@@ -1133,6 +1178,7 @@ async function infrastructureStage(
       request.instance,
       controlPlane,
       dispatch,
+      stopped,
     ),
   ];
   return approveAndApply(deps, request, locked, tracking, {
@@ -1141,6 +1187,7 @@ async function infrastructureStage(
     workers,
     controlPlane,
     dispatch,
+    stopped,
   });
 }
 

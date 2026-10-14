@@ -15,6 +15,7 @@
  * the tailnet no longer locating it) is skipped here too, before any gate: it is sent nothing,
  * so its existing schedule stays as it is until a later apply reconciles it. Its gates would
  * read its unverified release as failing and turn off a schedule that was dispatching fine.
+ * A worker whose machine is stopped is sent nothing either, and reported `stopped`: not a skip.
  */
 import {
   type AdoptionState,
@@ -41,7 +42,13 @@ export interface DispatchStageDependencies {
  * and the address to reconcile it at, or why an earlier stage left it as it is. A worker with an
  * address is never skipped, and a skipped one has no address.
  */
-export type DispatchWorker = GatedDispatchWorker | SkippedDispatchWorker;
+export type DispatchWorker = GatedDispatchWorker | SkippedDispatchWorker | StoppedDispatchWorker;
+
+/** A worker whose machine the workers stage found stopped: sent nothing. */
+export interface StoppedDispatchWorker {
+  readonly worker: WorkerIdentity;
+  readonly stopped: true;
+}
 
 /** Why the dispatch stage leaves a worker as it is, and the next action that completes it. */
 export interface DispatchSkip {
@@ -105,7 +112,9 @@ export type DispatchOutcome =
       readonly nextAction: string;
     })
   /** An earlier stage skipped the worker: it was sent nothing, its schedule left as it is. */
-  | (WorkerIdentity & { readonly kind: "skipped" } & DispatchSkip);
+  | (WorkerIdentity & { readonly kind: "skipped" } & DispatchSkip)
+  /** Its machine is stopped: sent nothing, its schedule left as it is, and not a skip. */
+  | (WorkerIdentity & { readonly kind: "stopped" });
 
 export interface DispatchStage {
   readonly outcomes: readonly DispatchOutcome[];
@@ -171,6 +180,7 @@ async function reconcile(
   entry: DispatchWorker,
 ): Promise<DispatchOutcome> {
   const { worker } = entry;
+  if ("stopped" in entry) return { ...worker, kind: "stopped" };
   if ("skip" in entry) {
     const { reason, summary, nextAction } = entry.skip;
     return { ...worker, kind: "skipped", reason, summary, nextAction };

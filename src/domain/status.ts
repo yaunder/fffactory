@@ -91,9 +91,15 @@ export interface WorkerFacts {
   readonly enrollment: readonly EnrollmentReport[] | null;
 }
 
+/**
+ * A worker's status: a check's, or `stopped`, its machine stopped on purpose
+ * (`fffactory worker stop`), which is neither broken nor missing and keeps a report ready.
+ */
+export type WorkerState = CheckStatus | "stopped";
+
 /** A worker's result: `CheckResult`'s status, summary, details and next action, and facts. */
 export interface Verdict {
-  readonly status: CheckStatus;
+  readonly status: WorkerState;
   readonly summary: string;
   readonly details: readonly string[];
   readonly nextAction: string | null;
@@ -214,8 +220,38 @@ export function machineFacts(inventory: MachineInventory, key: HostKey): Machine
   return { machine: only.state, instanceId: only.instanceId, instanceIds };
 }
 
-/** Why the machine cannot be inspected, or undefined when status goes on to the tailnet. */
-export function machineVerdict(facts: MachineFacts): Verdict | undefined {
+/**
+ * The workers of `keys` whose one machine the inventory shows `stopped`, in their order; none
+ * when the inventory could not be listed, whose workers are judged by the tailnet instead.
+ */
+export function stoppedWorkers(inventory: MachineInventory, keys: readonly HostKey[]): HostKey[] {
+  return keys.filter((key) => machineFacts(inventory, key).machine === "stopped");
+}
+
+/** A machine that is not running and that changing the instance type of would start. */
+export type PoweredDown = Extract<MachineState, "stopped" | "stopping">;
+
+/**
+ * The hosts among `keys` whose one machine is stopped or stopping, with its state, in their
+ * order: the pinned AWS provider starts either to change its instance type
+ * (`docs/specs/plan-apply.md` §Instance type of a stopped worker). None when the inventory is
+ * unavailable.
+ */
+export function poweredDownWorkers(
+  inventory: MachineInventory,
+  keys: readonly HostKey[],
+): { readonly key: HostKey; readonly machine: PoweredDown }[] {
+  return keys.flatMap((key) => {
+    const { machine } = machineFacts(inventory, key);
+    return machine === "stopped" || machine === "stopping" ? [{ key, machine }] : [];
+  });
+}
+
+/**
+ * Why the machine of host `key` cannot be inspected, or undefined when status goes on to the
+ * tailnet. A stopped machine is not a fault: its verdict is `stopped`.
+ */
+export function machineVerdict(facts: MachineFacts, key: HostKey): Verdict | undefined {
   const { machine, instanceId, instanceIds } = facts;
   switch (machine) {
     case "absent":
@@ -231,10 +267,12 @@ export function machineVerdict(facts: MachineFacts): Verdict | undefined {
         instanceIds.map((id) => `Instance: ${id}`),
       );
     case "stopped":
-      return notReadyVerdict(
-        `EC2 instance ${instanceId} is stopped`,
-        `Start instance ${instanceId} in the EC2 console`,
-      );
+      return {
+        status: "stopped",
+        summary: "Stopped",
+        details: [],
+        nextAction: thenRerunStatus(`Start it with \`fffactory worker start ${key}\``),
+      };
     case "stopping":
     case "shutting-down":
       return notReadyVerdict(
@@ -285,10 +323,11 @@ function unavailableView(
  */
 export function locateWorker(
   view: PeerView,
-  hostname: string,
+  worker: { readonly key: HostKey; readonly hostname: string },
   tag: string,
   then: Then = thenRerunStatus,
 ): TailnetLocation {
+  const { hostname } = worker;
   if (view.kind !== "peers") return unavailableView(view, then);
   const verdict = (summary: string, action: string) => notReadyAfter(summary, action, then);
   const resolution = resolveWorker(view.peers, hostname, tag);
@@ -296,18 +335,19 @@ export function locateWorker(
     case "found":
       return resolution;
     case "missing":
-      // TODO(re-evaluate when host replacement lands in M3): offer guided replacement of a
-      // worker whose bootstrap failed.
       // Bootstrap runs once, at first boot, so a failed one is recovered by terminating the
-      // instance: refresh drops it from state and the next plan creates it, which D11 allows.
+      // instance, keeping the host: refresh drops it from state and the next plan creates it,
+      // which D11 allows (docs/specs/worker-bootstrap.md §Failed first boot). A worker that
+      // never joined cannot be inspected, so only --force terminates it.
       return blocked(
         "missing",
         verdict(
           `No Tailscale device named ${hostname} is visible from this machine`,
           "If the worker has just started, wait for it to join the tailnet. Otherwise check " +
             "that tailnet policy lets this device see the factory's tag, and the bootstrap in " +
-            "the instance's EC2 console output: if it failed, terminate the instance in the " +
-            "EC2 console; once it is terminated, the next `fffactory apply` creates it again",
+            "the instance's EC2 console output: if it shows the bootstrap failed, terminate it " +
+            `uninspected with \`fffactory worker terminate ${worker.key} --keep --force\`, and ` +
+            "`fffactory apply` then creates it again",
         ),
       );
     case "duplicate":
@@ -632,13 +672,21 @@ export function inspectionVerdict(
   };
 }
 
-/** The report: its status is the worst of every inventory and worker. */
+/** What a worker's state counts as in the report: a stopped worker keeps it ready. */
+function reportedStatus(state: WorkerState): CheckStatus {
+  return state === "stopped" ? "ready" : state;
+}
+
+/** The report: its status is the worst of every inventory and worker, a stopped one ready. */
 export function statusReport(
   inventories: readonly CheckResult[],
   workers: readonly WorkerStatus[],
 ): StatusReport {
   return {
-    status: worstStatus([...inventories, ...workers].map((entry) => entry.status)),
+    status: worstStatus([
+      ...inventories.map((entry) => entry.status),
+      ...workers.map((entry) => reportedStatus(entry.status)),
+    ]),
     inventories,
     workers,
   };

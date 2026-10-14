@@ -7,10 +7,10 @@ live in `docs/specs/`, tests in `tests/` mirroring this tree.
 
 | Directory | Holds | May import |
 | --- | --- | --- |
-| `domain/` | Pure types and rules: `FactoryInstance`, `FactoryId`, `HostKey`, `Release`, validation, completeness, factory ID generation, gap-filling merge; doctor's `CheckResult`, capability grouping, exit-code rule, and tool, cache and release asset readiness rules; the AWS account-match rule, credential selection and caller observations; the VPC quota headroom rule; the resource namespacing rule, factory-ID tags and the stable host key check; release bundle entry-path rules and the materialization marker; `SUPPORTED_TERRAFORM`, the one Terraform pin, and its cache state; the backend bootstrap plan rules and the state bucket's readiness rule; the factory-wide lock's lease rules; `SecretMaterial`, secret names and their factory.json targets; plans (`plan.ts`: plan IDs, the CLI/pin match guard, resource changes and their presentation, the workers whose machine a plan creates, the D11 refusals, the saved plan record and its freshness rule) and operation records (`operation.ts`); release compatibility (`release-compatibility.ts`: `RELEASE_COMPATIBILITY`, release precedence, upgrade's pin assessment and its D11 refusals); the host protocol (`protocol-fields.ts`: its version and shared field readers; `host-protocol.ts`: worker paths, the inspect document, its serializer and parser, `RemoteCommand` and the inspect, upload and activate commands; `host-projection.ts`: the canonical non-secret host projection, `projectHost` (one factory.json host) and `projectHosts` (every host of the instance), the one projection every stage sends, plans and checks, and `Sha256`; `dispatch-projection.ts`: canonical desired and observed dispatch documents; `installation.ts`: the install steps, step results, the apply document and record, reading the activator's answer; `readiness.ts`: the verify document, enrollment states and the next actions the CLI names for them; `rollout.ts`: a worker's outcome, the rollout rule, and the first boot wait's deadline and rules); the tailnet peer view and the hostname-match rule and tag check that alone make a `WorkerAddress` (`tailnet.ts`); status's inventories, worker verdicts and readiness rule (`status.ts`); repository placement and the per-host repository manifest, the repository readiness that gates dispatch and the unmanaged-checkout rule (`repository-placement.ts`); the control-plane change classification table and the maintenance-deferral rule that never interrupts active agents, and the words every deferral is reported in (`maintenanceDeferral`, `change-classification.ts`); the dispatch readiness gates, the requested-versus-active dispatch state and the dispatch readiness progression (`dispatch-readiness.ts`). | Nothing outside `domain/`. No `node:*`, no Bun APIs, no I/O. |
-| `application/` | Use cases (`resolveInstance`, `validateInstance`, `initInstance`, `doctor`, `requireExpectedAccount`, `bootstrapBackend`, `beginFactoryOperation`, the factory lock's `acquireFactoryLock`, `withFactoryLock`, `settleFactoryLock` and `breakFactoryLock`, `setSecret`, `planFactory`, `applyFactory`, `applyWorkers`, `applyRepositories`, `applyControlPlane`, `applyDispatch`, `verifyFactory`, `upgradeFactory`, `factoryStatus`, `inspectWorker`, `inspectRepositories`, `inspectDispatch`) and the ports they call (`InstanceStore`, `ToolProbe`, `CacheDirectoryProbe`, `AssetBundle`, `CallerIdentity`, `VpcQuotaProbe`, `ManagedTerraformProbe`, `Provisioner`, `LockStore`, `SecretStore`, `Approval`, `OperatorPrompt`, `PlanStore`, `HostTransport`, `TailnetPeers`, `MachineInventorySource`, `ControlPlane`, `WorkflowQueue`), each port in its own file beside the use cases; the Terraform input projection (`projectFactoryVariables`, `projectBackendVariables`); `releaseAssetsDirectory`, `managedTerraformPaths` and `planStoreDirectory`, the cache layouts. | `domain/`, and pure `node:path`. |
-| `infrastructure/` | Adapters implementing application ports (`filesystemInstanceStore`, `localToolProbe`, `filesystemCacheDirectory`, `releaseAssetBundle`, `stsCallerIdentity`, `awsVpcQuotaProbe`, `s3LockStore`, `secretsManagerStore` and `ec2MachineInventory` over the shared `aws-session.ts`, `terminalPrompt`, `filesystemPlanStore`, `sshTransport`, `tailscalePeers`, `paseoControlPlane` (the `ControlPlane` over the host protocol), `ffflowGithubWorkflowQueue` (the `WorkflowQueue` over the host protocol), and managed Terraform in `terraform/`, with `NAMED_RESOURCES` and the namespacing check over a JSON plan), and the release tarball codec. | `application/`, `domain/`, Node and Bun APIs. |
-| `host/` | The worker side of the host protocol (`docs/specs/host-protocol.md`): what `fffactory host` subcommands do on a worker, `workerInspector`, `workerApplier`, `workerVerifier` and the repository reconciler (`workerEndpoint` together), over a `WorkerSystem` (root directory, process runner, hostname, machine, free space; for apply also the clock, privilege, standard input, release and install lock) that tests replace. An adapter layer beside `infrastructure/`, run only on workers. | `domain/`, `infrastructure/`, Node and Bun APIs. Never `application/`'s operator use cases or `cli/`. |
+| `domain/` | Pure types and rules: `FactoryInstance`, `FactoryId`, `HostKey`, `Release`, validation, completeness, factory ID generation, gap-filling merge; doctor's `CheckResult`, capability grouping, exit-code rule, and tool, cache and release asset readiness rules; the AWS account-match rule, credential selection and caller observations; the VPC quota headroom rule; the resource namespacing rule, factory-ID tags and the stable host key check; release bundle entry-path rules and the materialization marker; `SUPPORTED_TERRAFORM`, the one Terraform pin, and its cache state; the backend bootstrap plan rules and the state bucket's readiness rule; the factory-wide lock's lease rules; `SecretMaterial`, secret names and their factory.json targets; plans (`plan.ts`: plan IDs, the CLI/pin match guard, resource changes and their presentation, the workers whose machine a plan creates, the D11 refusals (a host removed by hand names `fffactory worker terminate KEY`), the refusal to resize a stopped or stopping worker, or any while the EC2 inventory cannot be read, the saved plan record and its freshness rule) and operation records (`operation.ts`); release compatibility (`release-compatibility.ts`: `RELEASE_COMPATIBILITY`, release precedence, upgrade's pin assessment and its D11 refusals); the host protocol (`protocol-fields.ts`: its version and shared field readers; `host-protocol.ts`: worker paths, the inspect document, its serializer and parser, `RemoteCommand` and the inspect, upload and activate commands; `host-projection.ts`: the canonical non-secret host projection, `projectHost` (one factory.json host) and `projectHosts` (every host of the instance), the one projection every stage sends, plans and checks, and `Sha256`; `dispatch-projection.ts`: canonical desired and observed dispatch documents; `installation.ts`: the install steps, step results, the apply document and record, reading the activator's answer; `readiness.ts`: the verify document, enrollment states and the next actions the CLI names for them; `rollout.ts`: a worker's outcome, the rollout rule, and the first boot wait's deadline and rules); the tailnet peer view and the hostname-match rule and tag check that alone make a `WorkerAddress`, and the devices `worker terminate` deletes (`selectWorkerDevices`: the reported hostname exactly, never the MagicDNS label, and the factory's tag) (`tailnet.ts`); status's inventories, worker verdicts (`stopped` among them) and readiness rule (`status.ts`); repository placement and the per-host repository manifest, the repository readiness that gates dispatch, the unmanaged-checkout rule and `RepositoryObservation` (`repository-placement.ts`); the work inspection's document, its parser, the printable path and branch rules, and what counts as unresolved work (`workFindings`, `work-inspection.ts`); the control-plane change classification table and the maintenance-deferral rule that never interrupts active agents, and the words every deferral is reported in (`maintenanceDeferral`, `change-classification.ts`); the dispatch readiness gates, the requested-versus-active dispatch state and the dispatch readiness progression (`dispatch-readiness.ts`); `fffactory worker stop|start|terminate`'s rules: the one target machine, what each EC2 state means for an action, the gates of stop and terminate (terminate's also read the current work and the repository result, and pass a stopped machine uninspected), the confirmation rules (y/N, `--yes`, terminate's typed key and `--confirm`), the admin client's refusals, the tailnet device removal's outcome, the bounded waits and their words, and `WorkerCommand`, the command as run that every next action reruns (`terminate` or `terminate-keep`) (`worker-lifecycle.ts`); terminate's removal of a host: factory.json without it by own entries (the last host leaving `hosts` empty, a complete factory with no worker), the scoped removal rule over Terraform's JSON plan, the plan as shown and the words of its failures (`host-removal.ts`). | Nothing outside `domain/`. No `node:*`, no Bun APIs, no I/O. |
+| `application/` | Use cases (`resolveInstance`, `validateInstance`, `initInstance`, `doctor`, `requireExpectedAccount`, `bootstrapBackend`, `beginFactoryOperation`, the factory lock's `acquireFactoryLock`, `withFactoryLock`, `settleFactoryLock` and `breakFactoryLock`, `setSecret`, `planFactory`, `applyFactory`, `applyWorkers`, `applyRepositories`, `applyControlPlane`, `applyDispatch`, `verifyFactory`, `upgradeFactory`, `factoryStatus`, `inspectWorker`, `inspectRepositories`, `inspectWork`, `inspectDispatch`, `stopWorker`, `startWorker`, `terminateWorker`) and the ports they call (`InstanceStore`, `ToolProbe`, `CacheDirectoryProbe`, `AssetBundle`, `CallerIdentity`, `VpcQuotaProbe`, `ManagedTerraformProbe`, `Provisioner`, `LockStore`, `SecretStore`, `Approval`, `OperatorPrompt`, `PlanStore`, `HostTransport`, `TailnetPeers`, `MachineInventorySource`, `MachineControl`, `TailnetAdmin`, `ControlPlane`, `WorkflowQueue`), each port in its own file beside the use cases; the Terraform input projection (`projectFactoryVariables`, `projectBackendVariables`); `releaseAssetsDirectory`, `managedTerraformPaths` and `planStoreDirectory`, the cache layouts. | `domain/`, and pure `node:path`. |
+| `infrastructure/` | Adapters implementing application ports (`filesystemInstanceStore`, `localToolProbe`, `filesystemCacheDirectory`, `releaseAssetBundle`, `stsCallerIdentity`, `awsVpcQuotaProbe`, `s3LockStore`, `secretsManagerStore`, `ec2MachineInventory` and `ec2MachineControl` over the shared `aws-session.ts`, `terminalPrompt`, `filesystemPlanStore`, `sshTransport`, `tailscalePeers`, `tailscaleApiAdmin` (the `TailnetAdmin` over Tailscale's API), `paseoControlPlane` (the `ControlPlane` over the host protocol), `ffflowGithubWorkflowQueue` (the `WorkflowQueue` over the host protocol), and managed Terraform in `terraform/`, with `NAMED_RESOURCES` and the namespacing check over a JSON plan), and the release tarball codec. | `application/`, `domain/`, Node and Bun APIs. |
+| `host/` | The worker side of the host protocol (`docs/specs/host-protocol.md`): what `fffactory host` subcommands do on a worker, `workerInspector`, `workerApplier`, `workerVerifier`, the repository reconciler and `workerWork`, the work inspection (`workerEndpoint` together), over a `WorkerSystem` (root directory, process runner, hostname, machine, free space; for apply also the clock, privilege, standard input, release and install lock) that tests replace. An adapter layer beside `infrastructure/`, run only on workers. | `domain/`, `infrastructure/`, Node and Bun APIs. Never `application/`'s operator use cases or `cli/`. |
 | `cli/` | Driving adapter and composition root: argument parsing, output, exit codes; `cli/release.ts` is the single source of the running release version. | Everything. Only `cli/main.ts` touches `process`, the random source, and wires concrete adapters. |
 
 Dependencies point inward: `domain <- application <- infrastructure, cli`, and
@@ -26,31 +26,42 @@ Dependencies point inward: `domain <- application <- infrastructure, cli`, and
   over or expires it; only `fffactory lock break`, confirmed by the lock ID, removes it,
   and logs the break first. An interrupted operation never releases it
   (`settleFactoryLock`), and records each step in its operation record.
-- Apply applies only the exact plan approved: a fresh plan approved at the terminal, or a
-  saved plan named by its ID, whose freshness (factory.json's text, release and assets,
-  account, Terraform state revision, age) is checked first (`docs/specs/plan-apply.md`).
-  The workers stage (`application/apply-workers.ts`) is the second step under the same lock
-  and record, and its changes, each declared worker's install, are in the one plan approved.
-  The repositories stage (`application/apply-repositories.ts`) follows it under that lock and
-  record, and its per-worker manifest projection is also shown in the approved plan; a new
-  stage follows the same rule. The dispatch stage never fails a worker the workers stage skipped
-  (its maintenance deferred, offline, ...): it sends it nothing and reports it `skipped`, which
-  exits 2, not 1 (`docs/specs/dispatch.md` §Skipped workers). Only a deferred worker also bypasses
-  the control-plane stage; one skipped for another reason that the tailnet still locates is
-  reconciled there, and may fail. The workers stage waits, within `FIRST_BOOT_DEADLINE_MS`, only for the
-  workers whose machine the approved plan created (`createdWorkers`), never for one missing
-  for another reason, and the match rule's refusals still apply at every look
-  (`docs/specs/plan-apply.md` §Waiting for a new worker). Waiting goes through the injected
-  `sleep` (`CliContext.sleep`) and checks `interrupted` after every sleep.
-- Only the release factory.json pins may change the factory: `plan`, `apply` and `secret set`
-  refuse otherwise (`pinRefusal`). `upgrade` moves the pin forward, writing it under the lock
-  once its plan is approved; `init` and `lock break` are not guarded
+- Apply applies only the exact plan approved: a fresh plan approved at the terminal, or a saved
+  plan named by its ID, whose freshness (factory.json's text, release and assets, account,
+  Terraform state revision, age) is checked first (`docs/specs/plan-apply.md`). The workers
+  stage (`application/apply-workers.ts`) is the second step under the same lock and record, and
+  its changes, each declared worker's install, are in the one plan approved. The repositories
+  stage (`application/apply-repositories.ts`) follows it under that lock and record, and its
+  per-worker manifest projection is also shown in the approved plan; a new stage follows the
+  same rule. The dispatch stage never fails a worker the workers stage skipped (its maintenance
+  deferred, offline, ...): it sends it nothing and reports it `skipped`, which exits 2, not 1
+  (`docs/specs/dispatch.md` §Skipped workers). Only a deferred worker also bypasses the
+  control-plane stage; one skipped for another reason that the tailnet still locates is
+  reconciled there, and may fail. A worker whose machine is stopped is no skip: apply reads the
+  EC2 inventory once under its lock (`declaredMachines`), the plan shows the worker skipped, a
+  saved plan records it (`stopped_workers`, stale once it changes), and every stage sends it
+  nothing and reports it `stopped`, which never makes the operation partial. A plan that changes
+  the instance type of a worker stopped or stopping, or of any while the inventory cannot be
+  read, is refused (`resizeRefusal`): the pinned AWS provider starts an instance to resize it
+  (`docs/specs/plan-apply.md` §Stopped workers). The workers stage waits, within
+  `FIRST_BOOT_DEADLINE_MS`, only for the workers whose machine the approved plan created
+  (`createdWorkers`), never for one missing for another reason, and the match rule's refusals
+  still apply at every look (`docs/specs/plan-apply.md` §Waiting for a new worker). Waiting goes
+  through the injected `sleep` (`CliContext.sleep`) and checks `interrupted` after every sleep.
+- Only the release factory.json pins may change the factory: `plan`, `apply`, `secret set` and
+  `worker stop|start|terminate` refuse otherwise (`pinRefusal`). `upgrade` moves the pin forward,
+  writing it under the lock once its plan is approved; `init` and `lock break` are not guarded
   (`docs/specs/plan-apply.md` §CLI/pin match guard). What a release declares about the
   factories it can operate is `RELEASE_COMPATIBILITY`, never the bundle's `release.json`,
   which the activator on existing workers reads.
-- Secret material is a `SecretMaterial` from a hidden prompt or standard input, never a
-  command argument; only a `SecretStore` adapter calls `reveal`, and factory.json keeps
-  only the ARN (`docs/specs/secrets.md`). Arguments of `secret` are never echoed.
+- Secret material is a `SecretMaterial` from a hidden prompt, standard input or
+  `SecretStore.read`, never a command argument; only a `SecretStore` adapter calls `reveal`,
+  and `tailscaleApiAdmin`, for the admin client's token requests (one renewal per call
+  refused with HTTP 401). factory.json keeps only
+  the ARN (`docs/specs/secrets.md`). Arguments of `secret` are never echoed.
+  `tailscale.admin_client_secret`, the operator's admin-tier Tailscale OAuth client, never
+  reaches a worker: neither the host projection nor the Terraform inputs carry it, so the
+  hosts' IAM policy cannot read it.
 - A command is a `Command` in `cli/commands/<name>.ts`, registered in `cli/run.ts`.
   Commands receive a `CliContext`; they never read `process` directly.
 - Commands return exit codes; `run` maps unexpected errors to exit 1.
@@ -124,7 +135,7 @@ Dependencies point inward: `domain <- application <- infrastructure, cli`, and
   calls `stopRunningTools`. Once the tools have stopped it exits with 128 + the signal number
   whatever the command returned; a second signal calls `killRunningTools` and exits at once.
   A tool in its own session would otherwise outlive an interrupted `fffactory`. Only a command
-  with `waitsOnInterrupt` (`apply`, `upgrade`, `doctor`, `status`) is first waited for, at most
+  with `waitsOnInterrupt` (`apply`, `upgrade`, `doctor`, `status`, `worker`) is first waited for, at most
   `RETURN_GRACE_MS`, so it can report what the interrupt left; it must return promptly: a use
   case that holds the lock takes `interrupted` and, once it is set, starts nothing more and
   writes no more of its operation record, and a read-only report (`doctor`, `status`) is not
@@ -158,6 +169,53 @@ Dependencies point inward: `domain <- application <- infrastructure, cli`, and
   states and fffactory's words, never instructions: whatever the CLI prints as a command to
   run it builds itself, from the hostname it resolved, and it trusts an answer only for the
   worker and release it asked about.
-- `status` is read-only: no lock, no record, no stored result. `schemas/status-report.schema.json`
-  mirrors `statusJson` in `cli/commands/status.ts`, versioned as doctor's report is.
+- `worker stop|start|terminate` (`application/worker-lifecycle.ts`,
+  `docs/specs/worker-lifecycle.md`) acts on the one EC2 instance carrying the factory ID and
+  host key tags, never a guessed one, under the lock and its record, and only after
+  confirmation (y/N at a terminal, or `--yes`; terminate: the host key typed, or `--confirm
+  KEY`, never `--yes`). EC2's state is the truth: factory.json keeps no power field. The gates
+  of stop (active agents, a running worker it cannot inspect) and terminate (also work not
+  pushed to any remote in any checkout or worktree, read fresh with `inspectWork` once the
+  activity is read and only when it does not already refuse, and unresolved or unmanaged
+  checkouts in the last repository result; a stopped machine passes uninspected) are skipped
+  only by `--force`, never the account check, pin guard, lock or confirmation. Work that cannot
+  be inspected, including on a worker whose activator predates `work inspect`, and a checkout
+  factory.json places there that the inspection does not report, refuse terminate; neither
+  ever reads as no work. A worker the tailnet does not
+  locate refuses terminate with its own next action (`--force` once the EC2 console output
+  shows a failed bootstrap), never status's recovery, which is terminate itself. Terminate opens its tailnet admin
+  session before EC2 is asked anything, and deletes no device and removes no host before its
+  typed-key confirmation, even for a machine EC2 is already terminating or one already gone
+  (with `--keep`, asked before the wait for `terminated`); a tailnet device it could not delete makes it partial,
+  exit 2, never undone. With `--keep` it keeps the host in factory.json and never runs
+  Terraform. Without it, it removes the host (`docs/specs/worker-lifecycle.md` §Terminate
+  (remove)): the only path that may destroy a host machine or drop a recorded host key. Its
+  plan is factory.json without the host, planned under the lock (and Terraform's state lock)
+  into a plan file of its own, and refused unless `removalPlanRefusal` passes it: only that
+  host's machine destroyed (when EC2 lists one, that very instance, and never when it lists
+  none) and, for a host with its own Paseo password, the hosts' policy dropping exactly that
+  ARN. The plan is shown, approved with the typed key, applied exactly, and the recorded keys
+  read again; only then is factory.json written (`InstanceStore.write`), and only while it is
+  still the text read, then the devices deleted. Every partial state names its next action, and
+  a rerun finishes it: a host whose machine is already gone is removed without gates, and with
+  `--keep` only has its devices deleted (an unreadable EC2 inventory is refused, never taken for
+  a machine gone). The last declared host is removed like any other, leaving an empty factory:
+  `hosts: []` is complete, and plan, apply and status say no worker is declared and exit 0
+  (status once its inventories are ready). Next actions rerun the command as given
+  (`WorkerCommand`), never with `--keep` added or dropped. Waits for a machine state or the
+  tailnet go through the injected `sleep` and check `interrupted` after every sleep.
+- The Tailscale API is reached only through `TailnetAdmin` (`infrastructure/tailscale-api-admin.ts`),
+  as the factory's admin client (`tailscale.admin_client_secret`): each request within its
+  deadline and following no redirect, failures named by HTTP status or network code, no answer
+  body, token or secret ever printed, recorded or in an argument, and the token, and the
+  secret it is renewed from once per call refused with 401, kept only in its session. It sends the secret with a placeholder client ID, as Tailscale's own CLI does:
+  undocumented behavior, recorded in `docs/specs/worker-lifecycle.md` §Tailnet device removal.
+  A device is deleted only when `selectWorkerDevices` finds its reported hostname is the
+  worker's, exactly but for case, and it carries the factory's tag; never by its MagicDNS label,
+  which can be another worker's (`builder`'s second device labelled `builder-1`). One without
+  the tag is reported by its ID, never deleted.
+- `status` is read-only: no lock, no record, no stored result. A stopped machine is a worker's own
+  verdict, `stopped`, which counts as ready (`WorkerState`). `schemas/status-report.schema.json`
+  mirrors `statusJson` in `cli/commands/status.ts`, versioned as doctor's report is, except that
+  a new worker state is an addition, keeping the version (`docs/specs/status.md` §JSON).
 - Run `just check-all` before committing.

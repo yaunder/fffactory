@@ -8,6 +8,7 @@ import { type HostVerifier, workerVerifier } from "./verify";
 import { type HostRepositories, workerRepositories } from "./repositories";
 import { type HostControlPlane, workerControlPlane } from "./control-plane";
 import { type HostDispatch, workerDispatch } from "./dispatch";
+import { type HostWork, workerWork } from "./work";
 
 export interface WorkerEndpoint
   extends HostInspector,
@@ -15,7 +16,8 @@ export interface WorkerEndpoint
     HostVerifier,
     HostRepositories,
     HostControlPlane,
-    HostDispatch {
+    HostDispatch,
+    HostWork {
   /** Whether this process runs as root, as `host apply` and `host verify` need. */
   isRoot(): boolean;
 }
@@ -27,6 +29,7 @@ export function workerEndpoint(system: ApplySystem): WorkerEndpoint {
   const repositories = workerRepositories(system);
   const controlPlane = workerControlPlane(system);
   const dispatch = workerDispatch(system);
+  const work = workerWork(system);
   return {
     inspect: () => inspector.inspect(),
     apply: () => applier.apply(),
@@ -40,6 +43,7 @@ export function workerEndpoint(system: ApplySystem): WorkerEndpoint {
     adoption: () => dispatch.adoption(),
     reconcileDispatch: () => dispatch.reconcileDispatch(),
     inspectDispatch: () => dispatch.inspectDispatch(),
+    inspectWork: () => work.inspectWork(),
     isRoot: system.isRoot,
   };
 }

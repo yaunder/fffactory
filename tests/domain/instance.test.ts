@@ -187,6 +187,10 @@ describe("parseFactoryInstance", () => {
         { tailscale: { auth_key_secret: "tskey-auth-kX1234CNTRL-abc" } },
       ],
       [
+        "tailscale.admin_client_secret",
+        { tailscale: { admin_client_secret: "tskey-client-kX1234CNTRL-abc" } },
+      ],
+      [
         "hosts[0].paseo_password_secret",
         { hosts: [{ key: "a", paseo_password_secret: "correct horse battery staple" }] },
       ],
@@ -213,7 +217,11 @@ describe("parseFactoryInstance", () => {
         const arn = elsewhere[kind];
         const issues = issuesFor({
           ...document,
-          tailscale: { tag: "tag:software-factory", auth_key_secret: arn },
+          tailscale: {
+            tag: "tag:software-factory",
+            auth_key_secret: arn,
+            admin_client_secret: arn,
+          },
           hosts: [
             (document.hosts as Record<string, unknown>[])[0],
             { key: "builder-2", paseo_password_secret: arn },
@@ -221,6 +229,7 @@ describe("parseFactoryInstance", () => {
         });
         expect(issues).toEqual([
           { path: "tailscale.auth_key_secret", message: messages[kind] },
+          { path: "tailscale.admin_client_secret", message: messages[kind] },
           { path: "hosts[1].paseo_password_secret", message: messages[kind] },
         ]);
         expect(JSON.stringify(issues)).not.toContain("elsewhere");
@@ -367,6 +376,25 @@ describe("assessCompleteness", () => {
         "hosts",
       ],
     });
+  });
+
+  test("the Tailscale admin client is optional: no command needs it to plan", () => {
+    const complete = completeDocument();
+    const tailscale = complete.tailscale as Record<string, unknown>;
+    const document = { ...complete, tailscale: { ...tailscale, admin_client_secret: SECRET_ARN } };
+    expect(assessCompleteness(parsed(document))).toEqual({ complete: true, missing: [] });
+  });
+
+  test("an empty host list is complete: a factory may declare no worker", () => {
+    expect(assessCompleteness(parsed({ ...completeDocument(), hosts: [] }))).toEqual({
+      complete: true,
+      missing: [],
+    });
+  });
+
+  test("an absent host list is still needed: an empty one declares no worker on purpose", () => {
+    const { hosts: _hosts, ...document } = completeDocument();
+    expect(assessCompleteness(parsed(document))).toEqual({ complete: false, missing: ["hosts"] });
   });
 
   test("lists machine fields missing from a declared host", () => {

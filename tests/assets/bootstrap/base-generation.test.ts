@@ -12,17 +12,24 @@ import { sha256Hex } from "../../../src/infrastructure/release-tarball";
 const BOOTSTRAP = join(import.meta.dir, "../../../assets/terraform/bootstrap");
 
 /**
- * The SHA-256 of the worker bootstrap each base generation describes. Bootstrap sets up a
- * worker's base once, at its first boot, and an upgrade never reruns it. After changing the
- * bootstrap, decide: if a release's install steps or worker executable will rely on the change,
- * raise `RELEASE_COMPATIBILITY.base_generation` (with `base_generation_since`, the release that
- * raises it) and record the new digest under the new generation, so `fffactory upgrade`
- * refuses to install that release on workers with the older base (plan-apply §Upgrade);
- * otherwise record the new digest under the same generation.
+ * The SHA-256 of every worker bootstrap each base generation describes, oldest first; the last
+ * is this checkout's. Bootstrap sets up a worker's base once, at its first boot, and an upgrade
+ * never reruns it, so workers of one generation may run any of its bootstraps. After changing
+ * the bootstrap, decide: if a release's install steps or worker executable will rely on the
+ * change, raise `RELEASE_COMPATIBILITY.base_generation` (with `base_generation_since`, the
+ * release that raises it) and record the new digest under the new generation, so `fffactory
+ * upgrade` refuses to install that release on workers with the older base (plan-apply
+ * §Upgrade); otherwise append the new digest to the same generation, keeping the older ones.
  */
-const BOOTSTRAP_OF_GENERATION: Readonly<Record<number, string>> = {
-  1: "0b5940daa3375b9cc33cb299499849fc677441197099fd4b06efa1810937213b",
-  2: "81718968693c26131bef92a4a7ac7ec81cb786eca273de81620966e7ab8a8348",
+const BOOTSTRAP_OF_GENERATION: Readonly<Record<number, readonly string[]>> = {
+  1: ["0b5940daa3375b9cc33cb299499849fc677441197099fd4b06efa1810937213b"],
+  2: [
+    // As released in 0.0.1 and 0.0.2: its activator has no `work inspect`.
+    "81718968693c26131bef92a4a7ac7ec81cb786eca273de81620966e7ab8a8348",
+    // The activator's `work inspect` (#9) kept generation 2: only the operator's terminate relies
+    // on it, and a worker whose activator lacks it is refused as one it cannot inspect.
+    "d38234c8764349f3b72750366d5e26c9addab1d0b342ccc9f57035bfc274f7bb",
+  ],
 };
 
 /** The bootstrap's files, as a worker receives them: every file here but CLAUDE.md. */
@@ -35,13 +42,14 @@ function bootstrapDigest(): string {
 }
 
 describe("the base generation (plan-apply §Upgrade)", () => {
-  test("the worker bootstrap is the one this release's base generation describes", () => {
+  test("the worker bootstrap is the latest this release's base generation describes", () => {
     expect({
       base_generation: RELEASE_COMPATIBILITY.base_generation,
       bootstrap_sha256: bootstrapDigest(),
     }).toEqual({
       base_generation: RELEASE_COMPATIBILITY.base_generation,
-      bootstrap_sha256: BOOTSTRAP_OF_GENERATION[RELEASE_COMPATIBILITY.base_generation] ?? "none",
+      bootstrap_sha256:
+        BOOTSTRAP_OF_GENERATION[RELEASE_COMPATIBILITY.base_generation]?.at(-1) ?? "none",
     });
   });
 

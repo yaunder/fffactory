@@ -36,8 +36,9 @@ const USAGE = [
   "pins a later release is never moved back. Like every command that plans or",
   "changes AWS, it first checks that the credentials belong to the factory's account.",
   "",
-  "Exits as apply does: 0 once every worker is installed, 2 when a worker was",
-  "skipped, and 1 when anything failed or was refused.",
+  "Exits as apply does: 0 once every worker is installed and verified, or stopped",
+  "(a stopped worker gets the release once started and `fffactory apply` runs), 2",
+  "when a worker was skipped, and 1 when anything failed or was refused.",
 ];
 
 const QUESTION = 'Move the pin and apply this plan? Only "yes" does: ';
@@ -126,6 +127,7 @@ async function upgrade(args: readonly string[], context: CliContext): Promise<nu
       lockStore: context.lockStore,
       provisioner: context.provisioner,
       planStore: context.planStore,
+      machines: context.machines,
       approval: operatorApproval(undefined, context, QUESTION),
       interrupted: context.interrupted,
       peers: context.tailnet,

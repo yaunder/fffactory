@@ -46,22 +46,25 @@ const USAGE = [
   "only once its verification completes; accounts it still needs a human to",
   "enroll are listed with their exact steps. Any other offline worker is skipped;",
   "a failed install stops the rollout, leaving that worker on the new release,",
-  "unhealthy, until a rerun repairs it.",
+  "unhealthy, until a rerun repairs it. A worker whose EC2 instance is stopped",
+  "(`fffactory worker stop`) is never started: it is listed as stopped and sent",
+  "nothing, and the plan refuses to change its instance type until it is started.",
   "",
   "Interrupting apply (Ctrl-C) stops Terraform gracefully and leaves the factory",
   "locked, with a record of the interrupted operation in the state bucket. Once",
   "fffactory has exited, break the lock with `fffactory lock break`; rerunning",
   "apply plans again from what exists and converges.",
   "",
-  "Exits 0 once every worker is installed and verified, 2 when a worker was",
-  "skipped, and 1 when anything failed or was refused, including a new worker",
+  "Exits 0 once every worker is installed and verified or stopped, 2 when a worker",
+  "was skipped, and 1 when anything failed or was refused, including a new worker",
   "whose first boot did not finish in time.",
   "",
   "Refused, naming what is missing, when this fffactory is not the release",
-  "factory.json pins, and until host retirement exists (milestone M3) when",
-  "factory.json removes a provisioned host key or the plan would destroy or",
-  "replace a host machine. Like every command that plans or changes AWS, it first",
-  "checks that the credentials belong to the factory's account.",
+  "factory.json pins, when factory.json no longer declares a provisioned host key",
+  "(only `fffactory worker terminate KEY` removes a host), and until host",
+  "replacement exists (milestone M3) when the plan would destroy or replace a host",
+  "machine. Like every command that plans or changes AWS, it first checks that the",
+  "credentials belong to the factory's account.",
 ];
 
 const APPROVAL_QUESTION = 'Apply this plan? Only "yes" applies it: ';
@@ -159,6 +162,7 @@ const LABELS: Readonly<Record<WorkerOutcome["kind"], string>> = {
   skipped: "skipped",
   failed: "failed",
   not_attempted: "not tried",
+  stopped: "stopped",
 };
 const LABEL_WIDTH = Math.max(...Object.values(LABELS).map((label) => label.length));
 const INDENT = " ".repeat(2 + LABEL_WIDTH + 2);
@@ -201,8 +205,15 @@ function workerLines(outcome: WorkerOutcome): string[] {
   }
 }
 
-/** Standard output for installed and skipped workers, standard error for the rest. */
+/**
+ * Standard output for installed, stopped and skipped workers, standard error for the rest. A
+ * stopped worker is not a skip: it keeps the exit status 0.
+ */
 function printWorkers(outcomes: readonly WorkerOutcome[], context: CliContext): number {
+  if (outcomes.length === 0) {
+    context.out("Workers: none declared.");
+    return 0;
+  }
   context.out("Workers:");
   for (const outcome of outcomes) {
     const print =
@@ -210,7 +221,9 @@ function printWorkers(outcomes: readonly WorkerOutcome[], context: CliContext): 
     for (const line of workerLines(outcome)) print(line);
   }
   if (outcomes.some((outcome) => outcome.kind === "failed")) return 1;
-  return outcomes.some((outcome) => outcome.kind !== "installed") ? 2 : 0;
+  return outcomes.some((outcome) => outcome.kind !== "installed" && outcome.kind !== "stopped")
+    ? 2
+    : 0;
 }
 
 const FIRST_BOOT_MINUTES = FIRST_BOOT_DEADLINE_MS / 60_000;
@@ -241,8 +254,8 @@ const worker = (outcome: { readonly key: string; readonly hostname: string }) =>
 function printRepositories(outcomes: readonly RepositoryOutcome[], context: CliContext): void {
   context.out("Repositories:");
   for (const outcome of outcomes) {
-    if (outcome.kind === "synchronized") {
-      context.out(`  synchronized  ${worker(outcome)}`);
+    if (outcome.kind === "synchronized" || outcome.kind === "stopped") {
+      context.out(`  ${outcome.kind}  ${worker(outcome)}`);
       continue;
     }
     context.out(`  ${outcome.kind}  ${worker(outcome)}: ${outcome.summary}`);
@@ -254,8 +267,8 @@ function printRepositories(outcomes: readonly RepositoryOutcome[], context: CliC
 function printControlPlane(outcomes: readonly ControlPlaneOutcome[], context: CliContext): void {
   context.out("Control plane:");
   for (const outcome of outcomes) {
-    if (outcome.kind === "applied") {
-      context.out(`  applied  ${worker(outcome)}`);
+    if (outcome.kind === "applied" || outcome.kind === "stopped") {
+      context.out(`  ${outcome.kind}  ${worker(outcome)}`);
       continue;
     }
     context.out(`  ${outcome.kind}  ${worker(outcome)}: ${outcome.summary}`);
@@ -276,6 +289,9 @@ function printDispatch(outcomes: readonly DispatchOutcome[], context: CliContext
         break;
       case "not_requested":
         context.out(`  not requested  ${worker(outcome)}`);
+        break;
+      case "stopped":
+        context.out(`  stopped  ${worker(outcome)}`);
         break;
       case "failed":
       case "skipped":
@@ -314,7 +330,9 @@ function appliedExit(
 ): number {
   const repositoriesReady =
     result.repositories === undefined ||
-    result.repositories.every((outcome) => outcome.kind === "synchronized");
+    result.repositories.every(
+      (outcome) => outcome.kind === "synchronized" || outcome.kind === "stopped",
+    );
   const controlCode = controlPlaneExit(result.controlPlane);
   const dispatchCode = dispatchExit(result.dispatch);
   if (controlCode === 1 || dispatchCode === 1) return 1;
@@ -336,9 +354,15 @@ function reportApplied(
       : "Infrastructure: no changes to apply.",
   );
   const code = printWorkers(result.workers, context);
-  if (result.repositories !== undefined) printRepositories(result.repositories, context);
-  if (result.controlPlane !== undefined) printControlPlane(result.controlPlane, context);
-  if (result.dispatch !== undefined) printDispatch(result.dispatch, context);
+  // A factory that declares no worker has nothing to report per worker after the workers stage.
+  const some = <T>(outcomes: readonly T[] | undefined) =>
+    outcomes !== undefined && outcomes.length > 0 ? outcomes : undefined;
+  const repositories = some(result.repositories);
+  const controlPlane = some(result.controlPlane);
+  const dispatch = some(result.dispatch);
+  if (repositories !== undefined) printRepositories(repositories, context);
+  if (controlPlane !== undefined) printControlPlane(controlPlane, context);
+  if (dispatch !== undefined) printDispatch(dispatch, context);
   if (result.verification !== undefined) printVerification(result.verification, context);
   printRecord(result.operation, context);
   printRecordFailure(result.recordFailure, context);
@@ -487,6 +511,7 @@ async function apply(args: readonly string[], context: CliContext): Promise<numb
       lockStore: context.lockStore,
       provisioner: context.provisioner,
       planStore: context.planStore,
+      machines: context.machines,
       approval: operatorApproval(planId, context),
       interrupted: context.interrupted,
       peers: context.tailnet,

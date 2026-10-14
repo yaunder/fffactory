@@ -64,6 +64,7 @@ The endpoint persists a versioned result containing `synchronized` or
 | `synchronized` | The manifest was delivered and the sync run exited `0`. |
 | `unresolved` | The sync run exited non-zero: one or more placed checkouts were left unresolved (dirty tree, divergence, a wrong branch, an unadopted branch), each reported and left untouched. |
 | `skipped` | The worker was not located, or the manifest write or the sync run did not complete (unreachable, access denied, host-key mismatch, timed out, ssh missing or unstartable). |
+| `stopped` | The workers stage found its machine stopped ([plan and apply §Stopped workers](plan-apply.md#stopped-workers)): it was sent nothing, and is not located. Not a skip: the stage still ends `synchronized`. |
 
 ## The repository-sync program
 
@@ -107,6 +108,15 @@ the sorted difference from placed paths. `fffactory status` runs the active
 release's unprivileged `host repositories --json` endpoint, reports that last
 completed observation and includes every unmanaged path. An unresolved or
 missing result keeps the worker not ready; an unreadable result is an error.
+
+## The last result and the current work
+
+The persisted result is the last completed synchronization's: a checkout
+dirtied, or a commit made, after it is not in it. Status reports it as such.
+Terminate, which destroys the checkouts with the machine, also reads their
+current state, and that of every Paseo worktree, through the read-only
+[work inspection](host-protocol.md#work-inspect)
+([worker lifecycle §Gates (terminate)](worker-lifecycle.md#gates-terminate)).
 
 ## Layer mapping
 

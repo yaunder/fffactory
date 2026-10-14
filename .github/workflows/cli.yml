@@ -70,8 +70,9 @@ jobs:
         run: bun install --frozen-lockfile
 
       # The managed Terraform, never a system one: fmt, validate against the shipped
-      # lockfiles, and plans for two factory IDs against a local stand-in, not AWS.
-      - name: Format, validate and namespacing plans
+      # lockfiles, plans for two factory IDs, and removal plans from synthesized local
+      # states, against a local stand-in, not AWS.
+      - name: Format, validate, namespacing and removal plans
         run: bun scripts/terraform-check.ts
 
   bootstrap:

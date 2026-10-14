@@ -66,6 +66,7 @@ Each worker's dispatch outcome is one of:
 | `pending` | A gate blocks dispatch; it was kept inactive, with the blocking gates and their next actions. |
 | `failed` | Reconciling the schedule did not complete; the schedule may be unchanged. |
 | `skipped` | An earlier stage skipped the worker; it was sent nothing and its schedule left as it is ([below](#skipped-workers)). |
+| `stopped` | Its machine is stopped ([plan and apply §Stopped workers](plan-apply.md#stopped-workers)); it was sent nothing and its schedule left as it is. Not a skip: it keeps the stage `active` and apply's exit 0. |
 
 ### Skipped workers
 

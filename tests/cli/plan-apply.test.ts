@@ -37,7 +37,14 @@ import { type Behavior, fakeTerraform } from "../support/fake-terraform";
 import { MemoryInstanceStore } from "../support/memory-instance-store";
 import { MemoryLockStore, READY_BUCKET } from "../support/memory-lock-store";
 import { MemoryPlanStore } from "../support/memory-plan-store";
-import { appliedRecord, inspection, installableWorker, peer, peers } from "../support/fake-workers";
+import {
+  appliedRecord,
+  inspection,
+  installableWorker,
+  machine,
+  peer,
+  peers,
+} from "../support/fake-workers";
 import { hostApplyJson, pendingSteps, withStep } from "../../src/domain/installation";
 
 const PATH = "/work/repo/.fffactory/factory.json";
@@ -78,6 +85,10 @@ const INSTALLED = [
 const ENROLLMENT_PENDING =
   `  installed  builder-1 (${B1}): release 0.3.0 installed and verified; enrollment pending: ` +
   "GitHub, OpenAI Codex, Claude Code";
+
+/** The plan's line for a factory that declares no worker. */
+const NO_WORKERS =
+  "Workers: none declared. Declare a host in factory.json's hosts, then create it with `fffactory apply`.";
 
 function text(hosts: string[], overrides: object = {}): string {
   return `${JSON.stringify({ ...declaring(...hosts), ...overrides }, null, 2)}\n`;
@@ -128,6 +139,7 @@ function cli(
       assets: assets.bundle,
       identity: identity.identity,
       interrupted: () => signal.interrupted,
+      machines: fleet.deps.machines,
       tailnet: fleet.deps.peers,
       transport: fleet.deps.transport,
       sleep: fleet.deps.sleep,
@@ -207,6 +219,23 @@ describe("fffactory plan (plan-apply §Plan)", () => {
     expect(planStore.saved.size).toBe(1);
   });
 
+  test("an empty factory plans only its shared infrastructure, saying no worker is declared", async () => {
+    const { context, out, err, planStore } = cli({ declared: [] });
+    expect(await run(["plan"], context)).toBe(0);
+    expect(err).toEqual([]);
+    expect(out).toEqual([
+      INSTANCE_LINE,
+      ...HEADER,
+      "Infrastructure changes:",
+      `  + ${NETWORK}`,
+      "  1 to add, 0 to change, 0 to destroy.",
+      NO_WORKERS,
+      "Saved as plan aaaaaaaa, until 2026-09-30T13:00:00.000Z. To apply exactly it:",
+      "  fffactory apply --plan-id aaaaaaaa",
+    ]);
+    expect(planStore.saved.size).toBe(1);
+  });
+
   test("before the first apply, shows backend bootstrap's plan", async () => {
     const { context, out, lockStore } = cli({ bucket: false });
     expect(await run(["plan"], context)).toBe(0);
@@ -259,14 +288,18 @@ describe("fffactory plan (plan-apply §Plan)", () => {
     ]);
   });
 
-  test("D11: removing a provisioned host key is refused, naming host retirement", async () => {
+  test("D11: removing a provisioned host key by hand is refused, naming `fffactory worker terminate`", async () => {
     const { context, err, planStore } = cli({ hosts: ["builder-1", "builder-2"] });
     expect(await run(["plan"], context)).toBe(1);
-    expect(err[0]).toBe(
-      "Refusing: this change needs host retirement, which fffactory does not have yet " +
-        "(D11; it arrives in milestone M3):",
-    );
-    expect(err[1]).toContain('host key "builder-2" is provisioned but no longer declared');
+    expect(err).toEqual([
+      "Refusing: this change needs host removal, which only `fffactory worker terminate KEY` " +
+        "does (D11):",
+      '  hosts: host key "builder-2" is provisioned but no longer declared: host keys cannot ' +
+        "be renamed, and only `fffactory worker terminate builder-2` removes a host. Restore " +
+        "it, and declare any new host under a new key beside it",
+      "Nothing was applied. Declare every provisioned host key in factory.json again, then " +
+        "remove a host with `fffactory worker terminate KEY`.",
+    ]);
     expect(planStore.saved.size).toBe(0);
   });
 
@@ -275,12 +308,53 @@ describe("fffactory plan (plan-apply §Plan)", () => {
     terraform.world.replace.add("builder-1");
     expect(await run(["plan"], context)).toBe(1);
     expect(err).toEqual([
-      "Refusing: this change needs host retirement and replacement, which fffactory does " +
+      "Refusing: this change needs host replacement, which fffactory does " +
         "not have yet (D11; it arrives in milestone M3):",
       `  ${hostAddress("builder-1")} would be replaced`,
       "Nothing was applied. Change factory.json so the plan keeps every host machine, then " +
         "plan again.",
     ]);
+  });
+
+  test("a stopped worker's install is shown skipped (plan-apply §Stopped workers)", async () => {
+    const fleet = workerFleet(["builder-1"]);
+    fleet.machines.inventory = { kind: "machines", machines: [machine("builder-1", "stopped")] };
+    const { context, out } = cli({ hosts: ["builder-1"], fleet });
+    expect(await run(["plan"], context)).toBe(0);
+    expect(out).toContain(
+      `  = builder-1 (${B1}): skipped: stopped; start it with \`fffactory worker start builder-1\`, then apply again to install it`,
+    );
+  });
+
+  test("an instance type change on a stopped worker is refused, naming the start command", async () => {
+    const fleet = workerFleet(["builder-1"]);
+    fleet.machines.inventory = { kind: "machines", machines: [machine("builder-1", "stopped")] };
+    const { context, err, terraform, planStore } = cli({ hosts: ["builder-1"], fleet });
+    terraform.world.resize.add("builder-1");
+    expect(await run(["plan"], context)).toBe(1);
+    expect(err).toEqual([
+      "Refusing to plan: the plan changes the instance type of a stopped worker, and " +
+        "Terraform starts a stopped instance to change its type:",
+      `  builder-1 (${B1}): ${hostAddress("builder-1")} would be updated in place`,
+      "Nothing was applied. Start it first with `fffactory worker start builder-1`, then plan again.",
+    ]);
+    expect(planStore.saved.size).toBe(0);
+  });
+
+  test("with the EC2 inventory unreadable, an instance type change is refused", async () => {
+    const fleet = workerFleet(["builder-1"]);
+    fleet.machines.inventory = { kind: "unavailable", reason: "EC2 DescribeInstances failed: x" };
+    const { context, err, terraform, planStore } = cli({ hosts: ["builder-1"], fleet });
+    terraform.world.resize.add("builder-1");
+    expect(await run(["plan"], context)).toBe(1);
+    expect(err).toEqual([
+      "Refusing to plan: the plan changes the instance type of a worker the EC2 inventory " +
+        "could not be read to check is not stopped, and Terraform starts a stopped instance " +
+        "to change its type:",
+      `  builder-1 (${B1}): ${hostAddress("builder-1")} would be updated in place`,
+      "Nothing was applied. Plan again once the EC2 inventory can be read.",
+    ]);
+    expect(planStore.saved.size).toBe(0);
   });
 
   test("a state bucket bootstrap did not finish is refused with how to complete it", async () => {
@@ -502,6 +576,38 @@ describe("fffactory apply (plan-apply §Apply)", () => {
     expect(terraform.calls.some(({ call }) => call === "applyPlan")).toBe(false);
   });
 
+  test("an empty factory applies its shared infrastructure, installs nothing and exits 0", async () => {
+    const queue = fakeWorkflowQueue();
+    const { context, out, err, terraform, lockStore, fleet } = cli({
+      declared: [],
+      interactive: true,
+      answers: ["yes"],
+      controlPlane: fakeControlPlane("healthy", { kind: "idle" }).controlPlane,
+      workflowQueue: queue.queue,
+    });
+    expect(await run(["apply"], context)).toBe(0);
+    expect(err).toEqual([]);
+    expect(
+      out.slice(out.indexOf("Applied: the factory's infrastructure matches factory.json.")),
+    ).toEqual([
+      "Applied: the factory's infrastructure matches factory.json.",
+      "Workers: none declared.",
+      "End-to-end verification: The factory is ready: it declares no workers",
+      expect.stringMatching(/^Operation record: s3:\/\/fff-abcd1234-state\/.+\.json$/),
+    ]);
+    expect(terraform.world.network).toBe(true);
+    expect(fleet.transport.calls).toEqual([]);
+    expect(lockStore.locks.size).toBe(0);
+    // Rerun: nothing to change, nothing to install, still ready.
+    expect(
+      await run(["apply"], {
+        ...context,
+        prompt: fakePrompt({ interactive: true, answers: ["yes"] }).prompt,
+      }),
+    ).toBe(0);
+    expect(out).toContain("Infrastructure: no changes to apply.");
+  });
+
   test("a skipped worker exits 2 with its next action", async () => {
     const { context, out } = cli({
       hosts: ["builder-1"],
@@ -515,6 +621,46 @@ describe("fffactory apply (plan-apply §Apply)", () => {
     );
     expect(out.find((line) => line.startsWith("             Next: "))).toEndWith(
       ", then rerun `fffactory apply`.",
+    );
+  });
+
+  test("a stopped worker is listed, sent nothing, and exits 0 (plan-apply §Stopped workers)", async () => {
+    const fleet = workerFleet(["builder-1"]);
+    fleet.machines.inventory = {
+      kind: "machines",
+      machines: [machine("builder-1"), machine("builder-2", "stopped")],
+    };
+    const { context, out, err } = cli({
+      declared: ["builder-1", "builder-2"],
+      hosts: ["builder-1", "builder-2"],
+      interactive: true,
+      answers: ["yes"],
+      fleet,
+    });
+    expect(await run(["apply"], context)).toBe(0);
+    const B2 = "fff-abcd1234-builder-2";
+    expect(out).toContain(`  stopped    builder-2 (${B2}): Stopped: nothing was sent to it`);
+    expect(out).toContain(
+      "             Next: To install it, start it with `fffactory worker start builder-2`, then rerun `fffactory apply`.",
+    );
+    expect(out).toContain(`  stopped  builder-2 (${B2})`);
+    expect(err).toEqual([]);
+    expect(fleet.transport.calls.map(({ worker }) => worker.hostname)).not.toContain(B2);
+  });
+
+  test("with the EC2 inventory unreadable, a stopped worker offline in the tailnet is skipped as before", async () => {
+    const fleet = workerFleet(["builder-1"]);
+    fleet.machines.inventory = { kind: "unavailable", reason: "EC2 DescribeInstances failed: x" };
+    const { context, out } = cli({
+      declared: ["builder-1", "builder-2"],
+      hosts: ["builder-1", "builder-2"],
+      interactive: true,
+      answers: ["yes"],
+      fleet,
+    });
+    expect(await run(["apply"], context)).toBe(2);
+    expect(out).toContain(
+      "  skipped    builder-2 (fff-abcd1234-builder-2): No Tailscale device named fff-abcd1234-builder-2 is visible from this machine",
     );
   });
 
@@ -615,9 +761,10 @@ describe("fffactory apply (plan-apply §Apply)", () => {
     expect(err).toEqual([
       `  failed     builder-1 (${B1}): Its first boot did not finish within 15 min (last seen: ${missing})`,
       "             Next: Read the bootstrap in the instance's EC2 console output, and check that " +
-        "tailnet policy lets this device see the factory's tag. If the bootstrap failed, " +
-        "terminate the instance in the EC2 console and wait until it is terminated; if it is " +
-        "still running, wait for it to finish, then rerun `fffactory apply`.",
+        "tailnet policy lets this device see the factory's tag. If the console output shows " +
+        "the bootstrap failed, terminate it uninspected with " +
+        "`fffactory worker terminate builder-1 --keep --force`; if it is still running, " +
+        "wait for it to finish, then rerun `fffactory apply`.",
     ]);
   });
 
@@ -829,7 +976,7 @@ describe("fffactory apply (plan-apply §Apply)", () => {
   test("refusals to plan are shown for apply too", async () => {
     const { context, err } = cli({ interactive: true, hosts: ["builder-1", "builder-2"] });
     expect(await run(["apply"], context)).toBe(1);
-    expect(err[0]).toStartWith("Refusing: this change needs host retirement");
+    expect(err[0]).toStartWith("Refusing: this change needs host removal");
     const other = cli({
       interactive: true,
       document: text(["builder-1"], { release: "0.2.0" }),

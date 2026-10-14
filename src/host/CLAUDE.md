@@ -37,6 +37,24 @@ over SSH as `fffactory-admin` (`docs/specs/host-protocol.md`). Rules:
   `inspect` actions and shares that lock. It installs only the active release's assets,
   persists canonical desired and observed state, and drops to `factory` for FFFlow,
   repository and Paseo commands. Inspection checks the schedule before reporting active.
+- `host work inspect` runs only through the activator's fixed `work inspect` operation and
+  shares that lock. It lists directories as root but runs every Git command as `factory`
+  (`runuser`, `env -i`) with `GIT_OPTIONAL_LOCKS=0`, no fsmonitor and no LFS filter, so it
+  writes no index, lock, ref or LFS object and never fetches. Its document carries counts and
+  printable paths and branch names only (`printablePath`, `printableBranch`), never a file's
+  name or content. It bounds itself (`WORK_BUDGET_MS`, `WORK_LIMITS`, its search depth) and
+  says `complete: false` rather than guess: a search root reached through a symbolic link, a
+  directory at the depth limit holding directories, or a bare repository, is incomplete, never
+  no work. A path a repository lists as its worktree is that repository's only when the Git
+  directory there is its own (`ownedBy`); another repository at a stale entry's path is
+  inspected as itself, and the entry is `unreadable`. A populated submodule is a repository of
+  its own, counted against `WORK_LIMITS.repositories`, and is its own only when Git there names
+  its directory the top level and a common Git directory in the parent worktree's `modules/`
+  (or its own `.git` directory); never `listing()` it, since Git names its Git directory as
+  its first worktree. What Git cannot fully report reads `unreadable`, never clean: a `git
+  status` that writes to standard error (it exits 0 past a directory it cannot open), an index
+  entry assumed unchanged or skip-worktree with its file on disk, a submodule's directory with
+  files but no repository, an unused submodule Git directory.
 - A step's output goes only to its log under `WORKER_PATHS.logs`, written by the step itself as
   it runs (`ProcessOptions.output`), never collected and written afterwards; a verifier's tool
   output goes nowhere. Documents carry fffactory's own words and states, never a tool's output.

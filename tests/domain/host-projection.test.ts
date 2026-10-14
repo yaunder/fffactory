@@ -76,6 +76,25 @@ describe("the host's non-secret projection (host protocol §apply)", () => {
     expect(projectHosts({ schema_version: 1 }, factoryId, release)).toEqual([]);
   });
 
+  test("never carries the factory-wide Tailscale references, the admin client's above all", () => {
+    const factoryId = "fff-abcd1234" as FactoryId;
+    const release = "0.3.0" as Release;
+    const arn = (name: string) =>
+      `arn:aws:secretsmanager:eu-west-2:123456789012:secret:fff-abcd1234/${name}-AbCdEf` as SecretReference;
+    const instance: FactoryInstance = {
+      schema_version: 1,
+      tailscale: {
+        tag: "tag:factory",
+        auth_key_secret: arn("tailscale-auth-key"),
+        admin_client_secret: arn("tailscale-admin-client"),
+      },
+      hosts: [{ key: "builder-1" as HostKey }],
+    };
+    const projections = projectHosts(instance, factoryId, release);
+    expect(projections).toEqual([PROJECTION]);
+    expect(projections.map(hostProjectionJson).join("")).not.toContain("tailscale");
+  });
+
   test("digests the canonical text with the injected SHA-256", () => {
     expect(hostProjectionSha256(PROJECTION, (text) => `sha256 of ${text}`)).toBe(
       `sha256 of ${TEXT}`,

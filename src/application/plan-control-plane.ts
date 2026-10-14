@@ -21,11 +21,17 @@ export async function planControlPlane(
   hosts: readonly Host[],
   assetsSha256: string,
   created: ReadonlySet<string> = new Set(),
+  stopped: ReadonlySet<string> = new Set(),
 ): Promise<PlannedControlPlane[]> {
   let view: Awaited<ReturnType<TailnetPeers["view"]>> | undefined;
   const planned: PlannedControlPlane[] = [];
   for (const host of hosts) {
     const hostname = hostName(target.factoryId, host.key);
+    // A stopped worker is sent nothing, not even an inspection: apply skips it.
+    if (stopped.has(host.key)) {
+      planned.push({ key: host.key, hostname, observation: "stopped", changes: [] });
+      continue;
+    }
     const desiredConfiguration = hostProjectionSha256(
       projectHost(target.factoryId, target.release, host),
       deps.sha256,
@@ -45,7 +51,7 @@ export async function planControlPlane(
       continue;
     }
     view ??= await deps.peers.view();
-    const location = locateWorker(view, hostname, tag);
+    const location = locateWorker(view, { key: host.key, hostname }, tag);
     if (location.kind !== "found") {
       planned.push({
         key: host.key,

@@ -32,9 +32,15 @@ export class AdapterRefusal extends Error {
   }
 }
 
-/** An AWS call that failed, described without quoting AWS. */
+/**
+ * An AWS call that failed, described without quoting AWS. `timedOut` when its deadline passed:
+ * the call may then have reached AWS.
+ */
 export class AwsFailure extends Error {
-  constructor(message: string) {
+  constructor(
+    message: string,
+    readonly timedOut = false,
+  ) {
     super(message);
     this.name = "AwsFailure";
   }
@@ -107,7 +113,10 @@ export async function withAwsSession<C extends AwsCalls, T>(
     return await Promise.race([running, deadline]);
   } catch (error) {
     if (error instanceof AdapterRefusal) throw error;
-    throw new AwsFailure(`${what} failed: ${failureReason(error, timeoutMs)}`);
+    throw new AwsFailure(
+      `${what} failed: ${failureReason(error, timeoutMs)}`,
+      error === DEADLINE_EXCEEDED,
+    );
   } finally {
     clearTimeout(timer);
     controller.abort();

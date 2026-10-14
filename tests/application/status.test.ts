@@ -342,7 +342,7 @@ describe("factory status", () => {
     expect(worker).toMatchObject({ status: "not_ready", tailnet: "missing", release: "unknown" });
     expect(worker?.nextAction).toContain("wait for it to join the tailnet");
     expect(worker?.nextAction).toContain(
-      "if it failed, terminate the instance in the EC2 console; once it is terminated, the next `fffactory apply` creates it again",
+      "if it shows the bootstrap failed, terminate it uninspected with `fffactory worker terminate builder-1 --keep --force`, and `fffactory apply` then creates it again",
     );
     expect(transport.calls.map((call) => call.worker.hostname)).toEqual([B2, B2, B2]);
   });
@@ -408,7 +408,7 @@ describe("factory status", () => {
     });
   });
 
-  test("a worker that is not provisioned or is stopped is not connected to", async () => {
+  test("a worker that is not provisioned or is stopped is not connected to; stopped is its own verdict", async () => {
     const { deps, transport } = world({
       inventory: { kind: "machines", machines: [machine("builder-2", "stopped")] },
     });
@@ -420,7 +420,14 @@ describe("factory status", () => {
       release: "unknown",
       status: "not_ready",
     });
-    expect(workers["builder-2"]).toMatchObject({ machine: "stopped", tailnet: "not_checked" });
+    expect(workers["builder-2"]).toMatchObject({
+      machine: "stopped",
+      tailnet: "not_checked",
+      status: "stopped",
+      summary: "Stopped",
+      nextAction:
+        "Start it with `fffactory worker start builder-2`, then rerun `fffactory status`.",
+    });
     expect(transport.calls).toEqual([]);
   });
 

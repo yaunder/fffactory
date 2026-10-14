@@ -2,15 +2,13 @@
 import {
   INSPECT_REPOSITORIES_COMMAND,
   parseRepositoryInspection,
-  type RepositoryInspection,
+  type RepositoryObservation,
 } from "../domain/repository-placement";
 import type { WorkerAddress } from "../domain/tailnet";
 import type { HostTransport } from "./host-transport";
 
 export const INSPECT_REPOSITORIES_TIMEOUT_MS = 30_000;
-export type RepositoryObservation =
-  | RepositoryInspection
-  | { readonly state: "unknown"; readonly reason: string };
+export type { RepositoryObservation };
 
 export async function inspectRepositories(
   transport: HostTransport,

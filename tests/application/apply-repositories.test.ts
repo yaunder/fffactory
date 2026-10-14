@@ -43,6 +43,7 @@ function stage(
     script?: Record<string, Answer>;
     hosts?: Host[];
     repositories?: Repository[];
+    stopped?: HostKey[];
   } = {},
 ) {
   const tailnet = fakeTailnet(options.view ?? peers(peer(B1), peer(B2)));
@@ -56,6 +57,7 @@ function stage(
     tag: TAG,
     hosts: options.hosts ?? [host("builder-1")],
     repositories: options.repositories ?? [repo("alpha")],
+    ...(options.stopped === undefined ? {} : { stopped: options.stopped }),
   };
   return { deps, request, calls: transport.calls, run: () => applyRepositories(deps, request) };
 }
@@ -78,6 +80,21 @@ describe("the repository stage", () => {
     const manifest = JSON.parse(new TextDecoder().decode(call?.stdin));
     expect(manifest.repositories.alpha.remote).toBe("https://github.com/yaunder/alpha");
     expect(manifest.hosts[B1].repository_sets).toEqual(["placed"]);
+  });
+
+  test("sends a stopped worker nothing and reports it stopped (plan-apply §Stopped workers)", async () => {
+    const run = stage({
+      view: peers(peer(B1, { online: false }), peer(B2)),
+      hosts: [host("builder-1"), host("builder-2")],
+      script: { [B2]: worker(COMPLETED("synchronized")) },
+      stopped: ["builder-1" as HostKey],
+    });
+    const { outcomes } = await run.run();
+    expect(outcomes).toEqual([
+      { key: "builder-1" as HostKey, hostname: B1, kind: "stopped" },
+      { key: "builder-2" as HostKey, hostname: B2, kind: "synchronized", unmanaged: [] },
+    ]);
+    expect(run.calls.map((call) => call.worker.hostname)).toEqual([B2]);
   });
 
   test("never issues a destructive command to a worker", async () => {

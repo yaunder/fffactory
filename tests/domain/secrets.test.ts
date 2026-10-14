@@ -15,6 +15,8 @@ import {
 const VALUE = "tskey-auth-kSECRETVALUE-0123456789";
 const ARN =
   "arn:aws:secretsmanager:eu-west-2:123456789012:secret:fff-abcd1234/tailscale-auth-key-AbCdEf" as SecretReference;
+const ADMIN_ARN =
+  "arn:aws:secretsmanager:eu-west-2:123456789012:secret:fff-abcd1234/tailscale-admin-client-AbCdEf" as SecretReference;
 const PASEO_ARN =
   "arn:aws:secretsmanager:eu-west-2:123456789012:secret:fff-abcd1234/builder-2/paseo-password-AbCdEf" as SecretReference;
 
@@ -90,6 +92,19 @@ describe("resolveSecretTarget", () => {
     });
   });
 
+  test("the Tailscale admin client goes to tailscale.admin_client_secret, named under the factory ID", () => {
+    expect(resolveSecretTarget(FACTORY, "tailscale-admin-client", undefined) as unknown).toEqual({
+      ok: true,
+      target: {
+        name: "tailscale-admin-client",
+        field: "tailscale.admin_client_secret",
+        secretName: "fff-abcd1234/tailscale-admin-client",
+        description: "Tailscale admin client of factory fff-abcd1234",
+        factoryId: "fff-abcd1234",
+      },
+    });
+  });
+
   test("a Paseo password goes to its host's paseo_password_secret", () => {
     expect(resolveSecretTarget(FACTORY, "paseo-password", "builder-2") as unknown).toEqual({
       ok: true,
@@ -110,7 +125,7 @@ describe("resolveSecretTarget", () => {
       FACTORY,
       VALUE,
       undefined,
-      "unknown secret name; expected tailscale-auth-key or paseo-password",
+      "unknown secret name; expected tailscale-auth-key, tailscale-admin-client or paseo-password",
     ],
     [
       "a factory without an ID",
@@ -125,6 +140,13 @@ describe("resolveSecretTarget", () => {
       "tailscale-auth-key",
       "builder-1",
       "tailscale-auth-key belongs to the whole factory and takes no --host",
+    ],
+    [
+      "a host for the factory-wide admin client",
+      FACTORY,
+      "tailscale-admin-client",
+      "builder-1",
+      "tailscale-admin-client belongs to the whole factory and takes no --host",
     ],
     [
       "a Paseo password without a host",
@@ -163,6 +185,24 @@ describe("secret references in factory.json", () => {
     expect(updated.hosts).toEqual(FACTORY.hosts);
     expect(FACTORY.tailscale?.auth_key_secret).toBeUndefined();
     expect(secretReference(updated, target.target)).toBe(ARN);
+    expect(parseFactoryInstance(updated).valid).toBe(true);
+  });
+
+  test("setting the admin client reference leaves the auth key's alone, and the reverse", () => {
+    const admin = resolveSecretTarget(FACTORY, "tailscale-admin-client", undefined);
+    const key = resolveSecretTarget(FACTORY, "tailscale-auth-key", undefined);
+    if (!admin.ok || !key.ok) throw new Error("expected both targets");
+    const withKey = withSecretReference(FACTORY, key.target, ARN);
+    expect(secretReference(withKey, admin.target)).toBeUndefined();
+    const updated = withSecretReference(withKey, admin.target, ADMIN_ARN);
+    expect(updated.tailscale).toEqual({
+      tag: "tag:factory",
+      auth_key_secret: ARN,
+      admin_client_secret: ADMIN_ARN,
+    });
+    expect(secretReference(updated, admin.target)).toBe(ADMIN_ARN);
+    expect(secretReference(updated, key.target)).toBe(ARN);
+    expect(updated.hosts).toEqual(FACTORY.hosts);
     expect(parseFactoryInstance(updated).valid).toBe(true);
   });
 

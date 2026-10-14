@@ -49,6 +49,16 @@ describe("factory.json projected into the factory root module's variables", () =
     expect(projection.ok && projection.variables.tailscale_auth_key_secret_arn).toBe(own);
   });
 
+  test("the Tailscale admin client never reaches Terraform, so no worker may read it", () => {
+    const admin = "arn:aws:secretsmanager:us-east-1:123456789012:secret:example/ts-admin-XyZ123";
+    const projection = projectFactoryVariables(
+      instance({ ...example, tailscale: { ...example.tailscale, admin_client_secret: admin } }),
+      [],
+    );
+    expect(projection).toEqual(projectFactoryVariables(instance(), []));
+    expect(JSON.stringify(projection)).not.toContain("ts-admin");
+  });
+
   test("the Tailscale tag every host advertises is factory.json's tailscale.tag", () => {
     const projection = projectFactoryVariables(
       instance({ ...example, tailscale: { ...example.tailscale, tag: "tag:lab-workers" } }),
@@ -76,6 +86,25 @@ describe("factory.json projected into the factory root module's variables", () =
     });
     expect(projection.ok && projection.variables.paseo_password_secret_arns).toEqual({
       "b-2": PASEO,
+    });
+  });
+
+  test("an empty factory projects no hosts and no Paseo passwords: only the shared infrastructure", () => {
+    const projection = projectFactoryVariables(withHosts([]), []);
+    expect(projection).toEqual({
+      ok: true,
+      variables: expect.objectContaining({
+        tailscale_auth_key_secret_arn: TAILSCALE,
+        paseo_password_secret_arns: {},
+        hosts: {},
+      }),
+    });
+  });
+
+  test("an empty factory whose state still records a host is refused (D11)", () => {
+    expect(projectFactoryVariables(withHosts([]), ["builder-1"])).toEqual({
+      ok: false,
+      issues: [{ path: "hosts", message: expect.stringContaining('host key "builder-1"') }],
     });
   });
 

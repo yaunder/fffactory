@@ -53,7 +53,14 @@ export type OperationStatus =
  * Where a stage is. The infrastructure stage goes `planning`, then `awaiting_approval`,
  * then `applying`, and ends `applied`, `unchanged`, `declined`, `refused` or `failed`. The
  * workers stage goes `installing` and ends `installed`, `partial` (some workers skipped) or
- * `failed`.
+ * `failed`. A worker lifecycle operation's one stage, named for its action, goes `locating`,
+ * then `inspecting` (stop and terminate), `authorizing` (terminate's Tailscale admin client),
+ * `awaiting_approval`, `stopping`, `starting` or `terminating`, then `waiting` (start, for the
+ * tailnet) or `removing_devices` (terminate), and ends `stopped`, `started`, `terminated`,
+ * `unchanged`, `partial` (terminate left tailnet devices behind), `declined`, `refused` or
+ * `failed`. Terminate removing the host goes `planning` after `authorizing`, then
+ * `awaiting_approval`, `applying` (Terraform), `writing` (factory.json) and `removing_devices`,
+ * and ends `removed` (`docs/specs/worker-lifecycle.md` §Operation record).
  */
 export type StageStatus =
   | "pending"
@@ -72,6 +79,19 @@ export type StageStatus =
   | "active"
   | "verified"
   | "written"
+  | "locating"
+  | "inspecting"
+  | "stopping"
+  | "stopped"
+  | "starting"
+  | "started"
+  | "authorizing"
+  | "terminating"
+  | "terminated"
+  | "removing_devices"
+  | "writing"
+  | "removed"
+  | "waiting"
   | "partial"
   | "declined"
   | "refused"
@@ -82,19 +102,19 @@ export interface StageRecord {
   readonly status: StageStatus;
 }
 
-/** One worker's result in the workers stage, in fffactory's own words. */
+/** One worker's result in the workers stage, in fffactory's own words; `stopped` is no skip. */
 export interface WorkerRecord {
   readonly key: string;
   readonly hostname: string;
   readonly status: WorkerOutcome["kind"];
-  /** Why it was skipped or failed; null otherwise. */
+  /** Why it was skipped, failed or stopped; null otherwise. */
   readonly summary: string | null;
 }
 
 export interface RepositoryRecord {
   readonly key: string;
   readonly hostname: string;
-  readonly status: "synchronized" | "unresolved" | "skipped";
+  readonly status: "synchronized" | "unresolved" | "skipped" | "stopped";
   readonly unmanaged: readonly string[];
   readonly summary: string | null;
 }
@@ -102,14 +122,14 @@ export interface RepositoryRecord {
 export interface ControlPlaneRecord {
   readonly key: string;
   readonly hostname: string;
-  readonly status: "applied" | "deferred" | "failed";
+  readonly status: "applied" | "deferred" | "failed" | "stopped";
   readonly summary: string | null;
 }
 
 export interface DispatchRecord {
   readonly key: string;
   readonly hostname: string;
-  readonly status: "not_requested" | "active" | "pending" | "failed" | "skipped";
+  readonly status: "not_requested" | "active" | "pending" | "failed" | "skipped" | "stopped";
   readonly blockers: readonly DispatchGate[];
   readonly summary: string | null;
 }
@@ -121,13 +141,21 @@ export interface OperationVerification {
     readonly key: HostKey;
     readonly hostname: string;
     readonly ready: boolean;
-    readonly release: "healthy" | "unhealthy" | "skipped" | "absent";
-    readonly repositories: "synchronized" | "unresolved" | "skipped" | "unknown";
-    readonly controlPlane: "applied" | "deferred" | "failed" | "unknown";
-    readonly dispatch: "active" | "pending" | "not_requested" | "failed" | "skipped";
+    readonly release: "healthy" | "unhealthy" | "skipped" | "absent" | "stopped";
+    readonly repositories: "synchronized" | "unresolved" | "skipped" | "unknown" | "stopped";
+    readonly controlPlane: "applied" | "deferred" | "failed" | "unknown" | "stopped";
+    readonly dispatch: "active" | "pending" | "not_requested" | "failed" | "skipped" | "stopped";
     readonly summary: string;
     readonly details: readonly string[];
   }[];
+}
+
+/** The worker a power operation acts on, and its machine's EC2 state as last read. */
+export interface MachineRecord {
+  readonly key: string;
+  readonly hostname: string;
+  readonly instance_id: string;
+  readonly state: string;
 }
 
 export interface OperationRecord {
@@ -154,6 +182,8 @@ export interface OperationRecord {
   readonly finished_at: string | null;
   /** Why it failed, in fffactory's own words: never an AWS or Terraform message. */
   readonly failure: string | null;
+  /** A worker power operation's machine, once located; apply's records have none. */
+  readonly machine?: MachineRecord;
 }
 
 /**
@@ -173,6 +203,26 @@ export function startOperation(
   planId: string | undefined,
   pending: readonly string[] = [],
 ): OperationRecord {
+  return openOperation(lock, planId, [
+    ...pending.map((name) => ({ name, status: "pending" as const })),
+    { name: INFRASTRUCTURE_STAGE, status: "planning" },
+  ]);
+}
+
+/** The record of an operation that has just taken `lock` and runs one stage, `name`. */
+export function startStageOperation(
+  lock: LockRecord,
+  name: string,
+  status: StageStatus,
+): OperationRecord {
+  return openOperation(lock, undefined, [{ name, status }]);
+}
+
+function openOperation(
+  lock: LockRecord,
+  planId: string | undefined,
+  stages: readonly StageRecord[],
+): OperationRecord {
   return {
     schema_version: OPERATION_SCHEMA_VERSION,
     operation_id: lock.lock_id,
@@ -182,10 +232,7 @@ export function startOperation(
     release: lock.release,
     plan_id: planId ?? null,
     status: "running",
-    stages: [
-      ...pending.map((name) => ({ name, status: "pending" as const })),
-      { name: INFRASTRUCTURE_STAGE, status: "planning" },
-    ],
+    stages,
     workers: [],
     repositories: [],
     control_plane: [],
@@ -235,7 +282,7 @@ export function withControlPlane(
   outcomes: readonly {
     readonly key: string;
     readonly hostname: string;
-    readonly kind: "applied" | "deferred" | "failed";
+    readonly kind: ControlPlaneRecord["status"];
     readonly summary?: string;
   }[],
   now: Date,
@@ -258,7 +305,7 @@ export function withRepositories(
   outcomes: readonly {
     readonly key: string;
     readonly hostname: string;
-    readonly kind: "synchronized" | "unresolved" | "skipped";
+    readonly kind: RepositoryRecord["status"];
     readonly unmanaged?: readonly string[];
     readonly summary?: string;
   }[],
@@ -275,6 +322,15 @@ export function withRepositories(
     })),
     updated_at: now.toISOString(),
   };
+}
+
+/** The record with the worker power operation's machine as last read. */
+export function withMachine(
+  record: OperationRecord,
+  machine: MachineRecord,
+  now: Date,
+): OperationRecord {
+  return { ...record, machine, updated_at: now.toISOString() };
 }
 
 /** The record with stage `name` at `status`, added after the others when it is new. */
@@ -301,7 +357,7 @@ export function withWorkers(
     key: outcome.key,
     hostname: outcome.hostname,
     status: outcome.kind,
-    summary: outcome.kind === "skipped" || outcome.kind === "failed" ? outcome.summary : null,
+    summary: "summary" in outcome ? outcome.summary : null,
   }));
   return { ...record, workers, updated_at: now.toISOString() };
 }

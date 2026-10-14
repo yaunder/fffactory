@@ -14,6 +14,7 @@ import type { FactoryId, HostKey, Release, SecretReference } from "../../src/dom
 import {
   FIRST_BOOT_POLL_MS,
   firstBootTimedOut,
+  stoppedOutcome,
   type WorkerOutcome,
 } from "../../src/domain/rollout";
 import type { PeerView } from "../../src/domain/tailnet";
@@ -46,6 +47,7 @@ function request(...keys: string[]): WorkersStageRequest {
     release: RELEASE,
     projections: keys.map((key) => projectHost(FACTORY, RELEASE, { key: key as HostKey })),
     created: [],
+    stopped: [],
   };
 }
 
@@ -350,6 +352,55 @@ describe("the workers stage (plan-apply §The workers stage)", () => {
     const result = await applyWorkers(deps, request("builder-1", "builder-2"), record);
     expect(result).toEqual({ kind: "interrupted", outcomes: [], installing: undefined });
     expect(transport.calls).toHaveLength(1);
+  });
+});
+
+describe("a stopped worker (plan-apply §Stopped workers)", () => {
+  const B1_STOPPED = ["builder-1" as HostKey];
+
+  test("is sent nothing, is no skip, and the rollout goes on", async () => {
+    const { deps, record, transport, recorded } = stage({
+      view: peers(peer(B1, { online: false }), peer(B2)),
+      script: { [B2]: installs(B2) },
+    });
+    const result = await applyWorkers(
+      deps,
+      { ...request("builder-1", "builder-2"), stopped: B1_STOPPED },
+      record,
+    );
+    const stopped = stoppedOutcome({ key: "builder-1" as HostKey, hostname: B1 });
+    expect(result.outcomes).toEqual([
+      stopped,
+      expect.objectContaining({ key: "builder-2", kind: "installed" }),
+    ]);
+    expect(stopped.nextAction).toBe(
+      `To install it, start it with \`fffactory worker start builder-1\`${THEN}`,
+    );
+    expect(transport.calls.some(({ worker }) => worker.hostname === B1)).toBe(false);
+    expect(recorded[0]).toEqual([stopped]);
+  });
+
+  test("is whatever the approved plan skipped as stopped, never looked for in the tailnet", async () => {
+    const { deps, record, transport } = stage({
+      script: { [B1]: installs(B1), [B2]: installs(B2) },
+    });
+    const result = await applyWorkers(
+      deps,
+      { ...request("builder-1", "builder-2"), stopped: B1_STOPPED },
+      record,
+    );
+    expect(result.outcomes.map((outcome) => outcome.kind)).toEqual(["stopped", "installed"]);
+    expect(transport.calls.some(({ worker }) => worker.hostname === B1)).toBe(false);
+  });
+
+  test("stays stopped, not skipped, when this fffactory carries no worker executable", async () => {
+    const { deps, record } = stage({ worker: undefined });
+    const result = await applyWorkers(
+      deps,
+      { ...request("builder-1", "builder-2"), stopped: B1_STOPPED },
+      record,
+    );
+    expect(result.outcomes.map((outcome) => outcome.kind)).toEqual(["stopped", "skipped"]);
   });
 });
 

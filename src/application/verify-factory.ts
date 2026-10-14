@@ -11,7 +11,9 @@
  * dispatch is active. A pending dispatch, a deferred maintenance or a skipped worker is not a
  * failure, but the factory has not reached its requested end state until a later apply completes
  * it. A worker the workers stage skipped keeps whatever release it had: its release is left as
- * it is, never absent, and its verdict names the skip and its next action.
+ * it is, never absent, and its verdict names the skip and its next action. A worker whose
+ * machine is stopped is sent nothing by any stage: it is reported `stopped`, and does not keep
+ * the factory from being ready.
  */
 import type { ControlPlaneOutcome } from "./apply-control-plane";
 import type { DispatchOutcome } from "./apply-dispatch";
@@ -28,12 +30,19 @@ export interface VerifyFactoryRequest {
 
 /**
  * `skipped`: the workers stage skipped the worker, leaving its release as it is. `absent`: the
- * rollout stopped before it (`not_attempted`), which no verified apply reaches.
+ * rollout stopped before it (`not_attempted`), which no verified apply reaches. `stopped`: its
+ * machine is stopped, and no stage sent it anything.
  */
-export type ReleaseVerdict = "healthy" | "unhealthy" | "skipped" | "absent";
-export type RepositoriesVerdict = "synchronized" | "unresolved" | "skipped" | "unknown";
-export type ControlPlaneVerdict = "applied" | "deferred" | "failed" | "unknown";
-export type DispatchVerdict = "active" | "pending" | "not_requested" | "failed" | "skipped";
+export type ReleaseVerdict = "healthy" | "unhealthy" | "skipped" | "absent" | "stopped";
+export type RepositoriesVerdict = "synchronized" | "unresolved" | "skipped" | "unknown" | "stopped";
+export type ControlPlaneVerdict = "applied" | "deferred" | "failed" | "unknown" | "stopped";
+export type DispatchVerdict =
+  | "active"
+  | "pending"
+  | "not_requested"
+  | "failed"
+  | "skipped"
+  | "stopped";
 
 /** One worker's composite end-to-end verdict. */
 export interface WorkerVerification {
@@ -59,6 +68,7 @@ export interface FactoryVerification {
 function releaseVerdict(outcome: WorkerOutcome): ReleaseVerdict {
   if (outcome.kind === "installed") return "healthy";
   if (outcome.kind === "failed") return "unhealthy";
+  if (outcome.kind === "stopped") return "stopped";
   return outcome.kind === "skipped" ? "skipped" : "absent";
 }
 
@@ -106,12 +116,28 @@ function skipActions(outcome: WorkerOutcome, dispatch: DispatchOutcome | undefin
   return [...new Set(actions)];
 }
 
+/** A stopped worker: no stage sent it anything, so there is nothing to verify. */
+function stoppedWorker(outcome: WorkerOutcome): WorkerVerification {
+  return {
+    key: outcome.key,
+    hostname: outcome.hostname,
+    release: "stopped",
+    repositories: "stopped",
+    controlPlane: "stopped",
+    dispatch: "stopped",
+    ready: false,
+    summary: `${outcome.hostname} is stopped: nothing was sent to it`,
+    details: [],
+  };
+}
+
 function verifyWorker(
   outcome: WorkerOutcome,
   repositories: RepositoryOutcome | undefined,
   controlPlane: ControlPlaneOutcome | undefined,
   dispatch: DispatchOutcome | undefined,
 ): WorkerVerification {
+  if (outcome.kind === "stopped") return stoppedWorker(outcome);
   const release = releaseVerdict(outcome);
   const repos = repositoriesVerdict(repositories);
   const control = controlPlaneVerdict(controlPlane);
@@ -142,7 +168,10 @@ function verifyWorker(
   };
 }
 
-/** The end-to-end verdict: every declared worker joined across the stages, and the factory total. */
+/**
+ * The end-to-end verdict: every declared worker joined across the stages, and the factory total,
+ * ready once every worker but the stopped ones is, and so when it declares none.
+ */
 export function verifyFactory(request: VerifyFactoryRequest): FactoryVerification {
   const repositories = byKey(request.repositories);
   const controlPlane = byKey(request.controlPlane);
@@ -155,13 +184,20 @@ export function verifyFactory(request: VerifyFactoryRequest): FactoryVerificatio
       dispatch.get(outcome.key),
     ),
   );
-  const ready = workers.every((worker) => worker.ready);
-  const notReady = workers.filter((worker) => !worker.ready).length;
+  const stopped = workers.filter((worker) => worker.release === "stopped").length;
+  const notReady = workers.filter((worker) => !worker.ready).length - stopped;
+  const ready = notReady === 0;
+  const verified =
+    workers.length === 0
+      ? "it declares no workers"
+      : stopped === 0
+        ? "every worker is verified end to end"
+        : `every worker but the ${stopped} stopped is verified end to end`;
   return {
     ready,
     workers,
     summary: ready
-      ? "The factory is ready: every worker is verified end to end"
+      ? `The factory is ready: ${verified}`
       : `The factory is not ready: ${notReady} of ${workers.length} workers need attention`,
   };
 }

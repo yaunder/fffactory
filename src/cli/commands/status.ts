@@ -9,7 +9,7 @@ import type { CheckStatus } from "../../domain/check-result";
 import { exitCodeFor } from "../../domain/check-result";
 import type { Release } from "../../domain/instance";
 import { nextActionFields } from "../../domain/readiness";
-import type { StatusReport, WorkerStatus } from "../../domain/status";
+import type { StatusReport, WorkerState, WorkerStatus } from "../../domain/status";
 import { sha256Text } from "../../infrastructure/release-tarball";
 import type { CliContext, Command } from "../context";
 import { checkJson, checkLines } from "./doctor";
@@ -69,10 +69,11 @@ export function statusJson(target: StatusTarget, report: StatusReport, release: 
   };
 }
 
-const LABELS: Readonly<Record<CheckStatus, string>> = {
+const LABELS: Readonly<Record<WorkerState, string>> = {
   ready: "ready",
   not_ready: "not ready",
   error: "error",
+  stopped: "stopped",
 };
 const RESULTS: Readonly<Record<CheckStatus, string>> = {
   ready: "Ready",
@@ -95,10 +96,30 @@ function workerLines(worker: WorkerStatus): string[] {
   ];
 }
 
+/** A stopped worker needs no attention: it was stopped on purpose and starts on request. */
+function needsAttention(entry: { readonly status: WorkerState }): boolean {
+  return entry.status !== "ready" && entry.status !== "stopped";
+}
+
+/** The workers section of a factory that declares none, as `worker terminate` can leave it. */
+const NO_WORKERS = [
+  "  none declared",
+  "  Next: Declare a host in factory.json's hosts, then create it with `fffactory apply`.",
+];
+
+function readyLine(workers: readonly WorkerStatus[]): string {
+  if (workers.length === 0) return `${RESULTS.ready}: no workers are declared.`;
+  const stopped = workers.filter((worker) => worker.status === "stopped").length;
+  if (stopped === 0) return `${RESULTS.ready}: all ${workers.length} workers are ready.`;
+  const running = workers.length - stopped;
+  const is = (count: number) => (count === 1 ? "is" : "are");
+  return `${RESULTS.ready}: ${running} of ${workers.length} workers ${is(running)} ready; ${stopped} ${is(stopped)} stopped.`;
+}
+
 function resultLine(report: StatusReport): string {
   const entries = [...report.inventories, ...report.workers];
-  const attention = entries.filter((entry) => entry.status !== "ready").length;
-  if (attention === 0) return `${RESULTS.ready}: all ${report.workers.length} workers are ready.`;
+  const attention = entries.filter(needsAttention).length;
+  if (attention === 0) return readyLine(report.workers);
   const verb = attention === 1 ? "needs" : "need";
   return `${RESULTS[report.status]}: ${attention} of ${entries.length} entries ${verb} attention.`;
 }
@@ -114,7 +135,7 @@ export function statusText(target: StatusTarget, report: StatusReport, release: 
     ...report.inventories.flatMap(checkLines),
     "",
     "Workers:",
-    ...(report.workers.length === 0 ? ["  none declared"] : report.workers.flatMap(workerLines)),
+    ...(report.workers.length === 0 ? NO_WORKERS : report.workers.flatMap(workerLines)),
     "",
     resultLine(report),
   ];
@@ -210,10 +231,16 @@ export const statusCommand: Command = {
     "                   standard AWS credential chain.",
     "  --json           Print a versioned JSON report instead of text.",
     "",
-    "Exits 0 when every worker is ready on the pinned release, 2 when something is",
-    "missing, offline, drifting, unhealthy or pending, and 1 when status itself",
-    "failed: invalid arguments, an unusable factory.json, another AWS account, or",
-    "an inventory or worker it could not inspect.",
+    "A worker whose EC2 instance is stopped is shown as stopped, with the command",
+    "that starts it, and is not connected to.",
+    "",
+    "A factory that declares no worker is reported as such, with how to add one.",
+    "",
+    "Exits 0 when every worker is ready on the pinned release or stopped, or none",
+    "is declared, 2 when something is missing, offline, drifting, unhealthy or",
+    "pending, and 1 when status itself failed: invalid arguments, an unusable",
+    "factory.json, another AWS account, or an inventory or worker it could not",
+    "inspect.",
   ],
   run: status,
   waitsOnInterrupt: true,

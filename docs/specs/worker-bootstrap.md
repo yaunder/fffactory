@@ -112,12 +112,23 @@ It is written to a temporary file, checked with `visudo -c -f`, installed,
 and the whole configuration checked again with `visudo -c`. A file that fails
 the check is never installed.
 
-The activator accepts only three shapes: `TARBALL SHA256` for release
+The activator accepts only these shapes: `TARBALL SHA256` for release
 activation; the exact word `repositories` for the active release's fixed
-repository endpoint; and `control-plane ACTION`, where `ACTION` is exactly
-`activity`, `install`, `reload` or `restart`. The endpoints share the
-activation lock and invoke only the active root-owned release. Standard input
-carries structured data; no configuration value becomes a command token.
+repository endpoint; `control-plane ACTION`, where `ACTION` is exactly
+`activity`, `install`, `reload` or `restart`; `dispatch ACTION`, where `ACTION`
+is exactly `adoption`, `reconcile` or `inspect`; and `work inspect`, the
+read-only [work inspection](host-protocol.md#work-inspect) terminate runs. The
+endpoints share the activation lock and invoke only the active root-owned
+release. Standard input carries structured data; no configuration value becomes
+a command token.
+
+The activator is part of the user data, which runs once, at first boot, and
+which Terraform ignores afterwards: a worker keeps the activator it was
+bootstrapped with. One from before an operation refuses it as a usage error
+(exit 64); the CLI reports such a worker as one it cannot inspect, never as one
+without work. An activator change that only the operator's CLI relies on keeps
+the base generation ([plan and apply §Upgrade](plan-apply.md#upgrade)): `work
+inspect` did.
 
 ### Package installation and the RPM lock
 
@@ -143,14 +154,21 @@ User data runs once, and nothing reruns it: a bootstrap that fails, even
 transiently, leaves an instance that may never join the tailnet, or never
 write its marker. That apply then fails the worker at its deadline, and
 `fffactory status` names the same recovery for a worker missing from the
-tailnet ([status §Workers](status.md#workers)): read the bootstrap in the instance's EC2 console
-output and, if it failed, terminate the instance in the EC2 console. Once it
-is terminated, Terraform's refresh drops it from state and the next `fffactory
-apply` plans the host as a plain create, which the D11 refusals allow
-([plan-apply §Refusals](plan-apply.md#refusals-until-lifecycle-work-lands-d11)),
-and the new instance boots afresh, its first boot waited for by that apply. Guided replacement arrives with host
-replacement in milestone M3 (`TODO(re-evaluate when host replacement lands
-in M3)` in `src/domain/status.ts`).
+tailnet ([status §Workers](status.md#workers)): read the bootstrap in the
+instance's EC2 console output and, if it shows the bootstrap failed, terminate
+it with `fffactory worker terminate KEY --keep --force`, then run `fffactory
+apply` ([worker lifecycle §Terminate (keep)](worker-lifecycle.md#terminate-keep)).
+Terminate destroys the instance, deletes any tailnet device it left, and keeps
+the host in factory.json. `--force` is required: a worker that never joined the
+tailnet cannot be inspected, and terminate refuses it without `--force`, which
+says the console output was read
+([Gates (terminate)](worker-lifecycle.md#gates-terminate)). Terminate's refusal
+names that too, rather than status's recovery, so it never sends the operator
+back to the command it refused. Terraform's
+refresh then drops the terminated instance from state, and that apply plans the
+host as a plain create, which the D11 refusals allow
+([plan-apply §Refusals](plan-apply.md#refusals-until-lifecycle-work-lands-d11)):
+the new instance boots afresh, its first boot waited for by that apply.
 
 ### No SSM
 
@@ -286,7 +304,9 @@ steps, and the host projections of builder-1 and builder-2.
   bundles (traversal, absolute, backslash, symlink, hard link, directory,
   setuid, group-writable, duplicate, marker, no or bad `release.json`, extra
   keys, not gzip, no `bin/fffactory`, a file `bin` beside `bin/fffactory`) each refused for its own reason with
-  nothing unpacked; non-root; a held lock.
+  nothing unpacked; the fixed repository, control-plane, dispatch and `work
+  inspect` operations run from the active release as root in a clean
+  environment, any other action a usage error; non-root; a held lock.
 - `user-data.test.sh`, with stand-in `dnf`, `systemctl`, `hostnamectl`,
   `tailscale`, `aws` and `sleep` that log their arguments, and Amazon Linux's
   own `useradd`, `install`, `visudo` and `sudo`: accounts, directories,

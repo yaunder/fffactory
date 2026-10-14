@@ -1,14 +1,14 @@
 /**
  * Apply's repository stage (`docs/specs/repositories.md`): on each declared worker, deliver the
- * host's projected repository manifest and run `sync-repositories.sh`, which
- * clones missing repositories, fast-forwards clean primary checkouts, and refuses resets,
- * dirty trees, divergence and unsafe branch state, leaving a removed checkout on disk. The
- * worker is reached only over Tailscale SSH, as the workers stage is. A worker that is not
- * reachable is a known skip that leaves the others to be attempted; the stage itself issues no
- * destructive command. Each worker's outcome feeds `status` and the dispatch readiness gate
- * (`domain/repository-placement.ts`, task #105).
+ * host's projected repository manifest and run `sync-repositories.sh`, which clones missing
+ * repositories, fast-forwards clean primary checkouts, and refuses resets, dirty trees,
+ * divergence and unsafe branch state, leaving a removed checkout on disk. The worker is reached
+ * only over Tailscale SSH, as the workers stage is. A worker that is not reachable is a known
+ * skip that leaves the others to be attempted, and one whose machine is stopped is sent nothing
+ * and reported `stopped`; the stage itself issues no destructive command. Each worker's outcome
+ * feeds `status` and the dispatch readiness gate (`domain/repository-placement.ts`, task #105).
  */
-import type { FactoryId, Host, Repository } from "../domain/instance";
+import type { FactoryId, Host, HostKey, Repository } from "../domain/instance";
 import {
   repositoryManifest,
   repositoryManifestJson,
@@ -47,7 +47,12 @@ export type RepositoryOutcome =
       readonly kind: "skipped";
       readonly summary: string;
       readonly nextAction: string;
-    });
+    })
+  /**
+   * Its machine is stopped: sent nothing, and not a skip (`docs/specs/plan-apply.md` §Stopped
+   * workers).
+   */
+  | (WorkerIdentity & { readonly kind: "stopped" });
 
 export interface RepositoriesStageDependencies {
   readonly peers: TailnetPeers;
@@ -62,6 +67,8 @@ export interface RepositoriesStageRequest {
   readonly hosts: readonly Host[];
   /** factory.json's repository inventory, which host placement selects from. */
   readonly repositories: readonly Repository[];
+  /** The workers the workers stage found stopped: sent nothing. */
+  readonly stopped?: readonly HostKey[];
 }
 
 export interface RepositoriesStage {
@@ -136,7 +143,10 @@ async function syncWorker(
   };
 }
 
-/** The repository stage: every declared worker, in factory.json's order, each attempted. */
+/**
+ * The repository stage: every declared worker, in factory.json's order, each attempted unless
+ * stopped.
+ */
 export async function applyRepositories(
   deps: RepositoriesStageDependencies,
   request: RepositoriesStageRequest,
@@ -148,7 +158,11 @@ export async function applyRepositories(
       key: host.key,
       hostname: hostName(request.factoryId, host.key),
     };
-    const location = locateWorker(view, worker.hostname, request.tag, thenRerunApply);
+    if (request.stopped?.includes(host.key) === true) {
+      outcomes.push({ ...worker, kind: "stopped" });
+      continue;
+    }
+    const location = locateWorker(view, worker, request.tag, thenRerunApply);
     if (location.kind === "blocked") {
       outcomes.push(skip(worker, location.verdict));
       continue;

@@ -48,6 +48,10 @@ function stubbed(script: Partial<SecretsManagerCalls> = {}) {
         calls.push(`PutSecretValue ${input.SecretId}`);
         return { ARN };
       },
+      getSecretValue: async (input) => {
+        calls.push(`GetSecretValue ${input.SecretId}`);
+        return { ARN, SecretString: VALUE };
+      },
       ...script,
       close: () => calls.push("close"),
     };
@@ -103,6 +107,48 @@ describe("Secrets Manager store over stubbed calls", () => {
   });
 });
 
+describe("reading a secret (secrets §The Tailscale admin client)", () => {
+  const LOOKUP = {
+    reference: ARN,
+    region: "eu-west-2",
+    credentials: { source: "--profile", profile: "factory" },
+  } as const;
+
+  test("reads the secret by its ARN in the factory Region, as SecretMaterial", async () => {
+    const stub = stubbed();
+    const material = await secretsManagerStore(stub.open).read(LOOKUP);
+    expect(material).toBeInstanceOf(SecretMaterial);
+    expect(material.reveal()).toBe(VALUE);
+    expect(String(material)).toBe("[secret]");
+    expect(stub.calls).toEqual([`GetSecretValue ${ARN}`, "close"]);
+    expect(stub.sessions.map(({ region, profile }) => ({ region, profile }))).toEqual([
+      { region: "eu-west-2", profile: "factory" },
+    ]);
+  });
+
+  test("a secret without a text value is refused", async () => {
+    const stub = stubbed({ getSecretValue: async () => ({ ARN }) });
+    await expect(secretsManagerStore(stub.open).read(LOOKUP)).rejects.toThrow(
+      "Secrets Manager holds no text value for the secret",
+    );
+  });
+
+  test("a failure is named, never quoted", async () => {
+    const stub = stubbed({
+      getSecretValue: async () => {
+        throw sdkError("AccessDeniedException");
+      },
+    });
+    const error = await secretsManagerStore(stub.open)
+      .read(LOOKUP)
+      .catch((caught: Error) => caught);
+    expect((error as Error).message).toBe(
+      "Reading the secret from Secrets Manager failed: AccessDeniedException",
+    );
+    expect(JSON.stringify(error)).not.toContain(VALUE);
+  });
+});
+
 describe("Secrets Manager store with the real SDK against a local stub", () => {
   let stub: StubSecretsManager | undefined;
 
@@ -137,6 +183,22 @@ describe("Secrets Manager store with the real SDK against a local stub", () => {
       ],
     });
     expect(rest.map(({ operation }) => operation)).toEqual(["CreateSecret", "PutSecretValue"]);
+  });
+
+  test("reads back the current value of a secret by its ARN", async () => {
+    const store = againstStub();
+    await store.write(WRITE);
+    await store.write({ ...WRITE, material: new SecretMaterial("second") });
+    const read = await store.read({
+      reference: ARN,
+      region: "eu-west-2",
+      credentials: { source: "chain" },
+    });
+    expect(read.reveal()).toBe("second");
+    expect(stub?.requests.at(-1)).toEqual({
+      operation: "GetSecretValue",
+      body: { SecretId: ARN },
+    });
   });
 
   test("a service error is reported by its type", async () => {

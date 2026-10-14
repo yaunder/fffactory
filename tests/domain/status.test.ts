@@ -12,6 +12,8 @@ import {
   machineVerdict,
   readinessVerdict,
   statusReport,
+  poweredDownWorkers,
+  stoppedWorkers,
   tailnetCheck,
   type WorkerInspection,
   type WorkerStatus,
@@ -29,6 +31,7 @@ import {
 
 const HOSTNAME = "fff-aaaa1111-builder-1";
 const KEY = "builder-1" as HostKey;
+const WORKER = { key: KEY, hostname: HOSTNAME };
 const EXPECTED = {
   hostname: HOSTNAME,
   release: "0.3.0",
@@ -290,7 +293,7 @@ describe("the EC2 inventory", () => {
 
   test("absent, duplicate, stopped and stopping machines are not inspected", () => {
     const verdict = (machines: ReturnType<typeof machine>[]) =>
-      machineVerdict(machineFacts({ kind: "machines", machines }, KEY));
+      machineVerdict(machineFacts({ kind: "machines", machines }, KEY), KEY);
     expect(verdict([])?.nextAction).toBe(`Provision it with \`fffactory apply\`${RERUN}`);
     const duplicate = verdict([machine(KEY), machine(KEY, "running", "i-0fedcba9876543210")]);
     expect(duplicate?.summary).toBe("2 EC2 instances carry this host key");
@@ -298,21 +301,54 @@ describe("the EC2 inventory", () => {
       "Instance: i-0123456789abcdef0",
       "Instance: i-0fedcba9876543210",
     ]);
-    expect(verdict([machine(KEY, "stopped")])?.nextAction).toBe(
-      `Start instance i-0123456789abcdef0 in the EC2 console${RERUN}`,
-    );
-    for (const state of ["stopping", "shutting-down"] as const)
-      expect(verdict([machine(KEY, state)])?.summary).toBe(
-        `EC2 instance i-0123456789abcdef0 is ${state}`,
-      );
+    for (const state of ["stopping", "shutting-down"] as const) {
+      const verdictOf = verdict([machine(KEY, state)]);
+      expect(verdictOf?.summary).toBe(`EC2 instance i-0123456789abcdef0 is ${state}`);
+      expect(verdictOf?.status).toBe("not_ready");
+    }
     expect(verdict([machine(KEY, "running")])).toBeUndefined();
     expect(verdict([machine(KEY, "pending")])).toBeUndefined();
+  });
+
+  test("a stopped machine has its own verdict, stopped, naming the start command", () => {
+    const stopped = machineVerdict(
+      machineFacts({ kind: "machines", machines: [machine(KEY, "stopped")] }, KEY),
+      KEY,
+    );
+    expect(stopped).toEqual({
+      status: "stopped",
+      summary: "Stopped",
+      details: [],
+      nextAction: `Start it with \`fffactory worker start ${KEY}\`${RERUN}`,
+    });
+  });
+
+  test("the workers whose one machine is stopped", () => {
+    const keys = ["builder-1", "builder-2", "builder-3", "builder-4"] as HostKey[];
+    const inventory = {
+      kind: "machines" as const,
+      machines: [
+        machine("builder-1", "stopped", "i-0000000000000000a"),
+        machine("builder-2", "running", "i-0000000000000000b"),
+        machine("builder-3", "stopped", "i-0000000000000000c"),
+        machine("builder-3", "stopped", "i-0000000000000000d"),
+        machine("builder-4", "stopping", "i-0000000000000000e"),
+      ],
+    };
+    expect(stoppedWorkers(inventory, keys)).toEqual(["builder-1" as HostKey]);
+    expect(stoppedWorkers({ kind: "unavailable", reason: "x" }, keys)).toEqual([]);
+    // Changing the instance type of either would start it (plan-apply §Stopped workers).
+    expect(poweredDownWorkers(inventory, keys)).toEqual([
+      { key: "builder-1" as HostKey, machine: "stopped" },
+      { key: "builder-4" as HostKey, machine: "stopping" },
+    ]);
+    expect(poweredDownWorkers({ kind: "unavailable", reason: "x" }, keys)).toEqual([]);
   });
 
   test("an unavailable inventory leaves the machine unknown and still inspects it", () => {
     const facts = machineFacts({ kind: "unavailable", reason: "x" }, KEY);
     expect(facts.machine).toBe("unknown");
-    expect(machineVerdict(facts)).toBeUndefined();
+    expect(machineVerdict(facts, KEY)).toBeUndefined();
   });
 
   test("is a check: ready with a count, or an error naming the failure", () => {
@@ -345,7 +381,7 @@ describe("the tailnet", () => {
   });
 
   test("refuses a missing or duplicate hostname with the next action, never guessing", () => {
-    const missing = locateWorker(peers(peer(`${HOSTNAME}-1`)), HOSTNAME, TAG);
+    const missing = locateWorker(peers(peer(`${HOSTNAME}-1`)), WORKER, TAG);
     expect(missing).toMatchObject({ kind: "blocked", tailnet: "missing" });
     expect(missing.kind === "blocked" && missing.verdict.summary).toBe(
       `No Tailscale device named ${HOSTNAME} is visible from this machine`,
@@ -353,10 +389,11 @@ describe("the tailnet", () => {
     expect(missing.kind === "blocked" && missing.verdict.nextAction).toBe(
       "If the worker has just started, wait for it to join the tailnet. Otherwise check that " +
         "tailnet policy lets this device see the factory's tag, and the bootstrap in the " +
-        "instance's EC2 console output: if it failed, terminate the instance in the EC2 console; " +
-        `once it is terminated, the next \`fffactory apply\` creates it again${RERUN}`,
+        "instance's EC2 console output: if it shows the bootstrap failed, terminate it " +
+        "uninspected with `fffactory worker terminate builder-1 --keep --force`, and " +
+        `\`fffactory apply\` then creates it again${RERUN}`,
     );
-    const duplicate = locateWorker(peers(peer(HOSTNAME), peer(HOSTNAME)), HOSTNAME, TAG);
+    const duplicate = locateWorker(peers(peer(HOSTNAME), peer(HOSTNAME)), WORKER, TAG);
     expect(duplicate).toMatchObject({ kind: "blocked", tailnet: "duplicate" });
     expect(duplicate.kind === "blocked" && duplicate.verdict.nextAction).toBe(
       `Remove the stale devices named ${HOSTNAME} at https://login.tailscale.com/admin/machines, keeping the worker's${RERUN}`,
@@ -364,7 +401,7 @@ describe("the tailnet", () => {
   });
 
   test("refuses the one device with the name when it lacks the factory's tag, never echoing the tag", () => {
-    const untagged = locateWorker(peers(peer(HOSTNAME, { tags: ["tag:intruder"] })), HOSTNAME, TAG);
+    const untagged = locateWorker(peers(peer(HOSTNAME, { tags: ["tag:intruder"] })), WORKER, TAG);
     expect(untagged).toMatchObject({
       kind: "blocked",
       tailnet: "untagged",
@@ -378,29 +415,29 @@ describe("the tailnet", () => {
   });
 
   test("an offline worker or one without Tailscale SSH is not ready", () => {
-    expect(locateWorker(peers(peer(HOSTNAME, { online: false })), HOSTNAME, TAG)).toMatchObject({
+    expect(locateWorker(peers(peer(HOSTNAME, { online: false })), WORKER, TAG)).toMatchObject({
       tailnet: "offline",
       verdict: { status: "not_ready", summary: "Offline in the tailnet" },
     });
-    expect(locateWorker(peers(peer(HOSTNAME, { sshHostKeys: [] })), HOSTNAME, TAG)).toMatchObject({
+    expect(locateWorker(peers(peer(HOSTNAME, { sshHostKeys: [] })), WORKER, TAG)).toMatchObject({
       tailnet: "no_ssh",
       verdict: { status: "not_ready" },
     });
   });
 
   test("an unavailable view leaves every worker unknown", () => {
-    expect(locateWorker({ kind: "daemon_unreachable" }, HOSTNAME, TAG)).toMatchObject({
+    expect(locateWorker({ kind: "daemon_unreachable" }, WORKER, TAG)).toMatchObject({
       tailnet: "unknown",
       verdict: { status: "not_ready", details: ["See the Tailscale client check."] },
     });
-    expect(locateWorker({ kind: "unusable", reason: "x" }, HOSTNAME, TAG)).toMatchObject({
+    expect(locateWorker({ kind: "unusable", reason: "x" }, WORKER, TAG)).toMatchObject({
       tailnet: "unknown",
       verdict: { status: "error" },
     });
   });
 
   test("the one match is found", () => {
-    expect(locateWorker(peers(peer(HOSTNAME)), HOSTNAME, TAG).kind).toBe("found");
+    expect(locateWorker(peers(peer(HOSTNAME)), WORKER, TAG).kind).toBe("found");
   });
 });
 
@@ -411,5 +448,15 @@ describe("the report", () => {
     expect(statusReport([check], []).status).toBe("ready");
     expect(statusReport([check], [worker("ready"), worker("not_ready")]).status).toBe("not_ready");
     expect(statusReport([check], [worker("error"), worker("not_ready")]).status).toBe("error");
+  });
+
+  test("a stopped worker does not keep the report from being ready", () => {
+    const check = ready({ id: "x", title: "X" }, "fine");
+    const worker = (status: WorkerStatus["status"]) => ({ status }) as WorkerStatus;
+    expect(statusReport([check], [worker("ready"), worker("stopped")]).status).toBe("ready");
+    expect(statusReport([check], [worker("stopped")]).status).toBe("ready");
+    expect(statusReport([check], [worker("stopped"), worker("not_ready")]).status).toBe(
+      "not_ready",
+    );
   });
 });

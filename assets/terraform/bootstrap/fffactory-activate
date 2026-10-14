@@ -32,7 +32,7 @@ refuse() {
 }
 
 usage() {
-  refuse 64 "usage: fffactory-activate TARBALL SHA256 | repositories | control-plane ACTION | dispatch ACTION"
+  refuse 64 "usage: fffactory-activate TARBALL SHA256 | repositories | control-plane ACTION | dispatch ACTION | work inspect"
 }
 
 dispatch() {
@@ -70,6 +70,19 @@ control_plane() {
   cd /
   exec env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin HOME=/root LANG=C.UTF-8 \
     "$executable" host control-plane "$1"
+}
+
+work() {
+  (($# == 1)) || usage
+  [[ "$1" == inspect ]] || usage
+  local executable=/opt/fffactory/current/bin/fffactory
+  [[ -f "$executable" && ! -L "$executable" && -x "$executable" ]] ||
+    refuse 65 "the active release has no executable work endpoint"
+  exec 9>"$LOCK"
+  flock -n 9 || refuse 75 "another activation or host reconciliation is running"
+  cd /
+  exec env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin HOME=/root LANG=C.UTF-8 \
+    "$executable" host work inspect
 }
 
 # Why an entry path is unsafe, or nothing: printable ASCII without backslashes, relative,
@@ -135,6 +148,9 @@ main() {
   fi
   if (($# == 2)) && [[ $1 == dispatch ]]; then
     dispatch "$2"
+  fi
+  if (($# == 2)) && [[ $1 == work ]]; then
+    work "$2"
   fi
   (($# == 2)) || usage
   local tarball="$1" expected="$2"

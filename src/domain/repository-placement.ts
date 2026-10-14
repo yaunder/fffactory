@@ -134,6 +134,11 @@ export type RepositoryInspection =
       readonly unmanaged: readonly string[];
     };
 
+/** The worker's repository result as the CLI observed it: `unknown` when it could not be read. */
+export type RepositoryObservation =
+  | RepositoryInspection
+  | { readonly state: "unknown"; readonly reason: string };
+
 /** A repository protocol document, with stable key order. */
 export function repositoryInspectionJson(inspection: RepositoryInspection): string {
   return JSON.stringify(
