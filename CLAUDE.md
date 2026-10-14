@@ -1,6 +1,6 @@
 @AGENTS.md
 
-<!-- ffflow:beliefs v0.4.0 — managed by /fff:upgrade-ffflow. Edits inside this block are overwritten. -->
+<!-- ffflow:beliefs v0.4.2 — managed by /fff:upgrade-ffflow. Edits inside this block are overwritten. -->
 ## FFFlow beliefs
 
 This project runs [FFFlow](https://github.com/bryonjacob/ffflow-plugin). These are the non-negotiables — the rules you should not have to discover.
