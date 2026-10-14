@@ -1,4 +1,5 @@
 import type { InstanceStore } from "../../src/application/instance-store";
+import { plainStyle, type Style, writer } from "../../src/cli/presentation/style";
 import type { CliContext } from "../../src/cli/run";
 import type { RandomBytes } from "../../src/domain/initialization";
 import type { Release } from "../../src/domain/instance";
@@ -37,7 +38,8 @@ export const zeroBytes: RandomBytes = (count) => new Uint8Array(count);
  * the cache directory, the asset bundle, the AWS caller, the VPC quota, managed Terraform,
  * the lock store, Secrets Manager, the prompt, Terraform, the plan store, the EC2 inventory and
  * machine control,
- * the tailnet and its admin API, SSH and this machine as a worker are fakes unless overridden, and nothing is interrupted; the clock is fixed and sleeping returns at once. Nothing touches the host or AWS.
+ * the tailnet and its admin API, SSH and this machine as a worker are fakes unless overridden, and nothing is interrupted; the clock is fixed and sleeping returns at once. Both streams are
+ * plain unless `styles` colors one. Nothing touches the host or AWS.
  */
 export function harness(
   store: InstanceStore,
@@ -69,8 +71,12 @@ export function harness(
       | "sleep"
       | "compatibility"
     >
-  > = {},
+  > & {
+    /** Each stream's style; plain unless a test colors one. */
+    readonly styles?: { readonly out?: Style; readonly err?: Style };
+  } = {},
 ) {
+  const { styles = {}, ...replaced } = overrides;
   const out: string[] = [];
   const err: string[] = [];
   const context: CliContext = {
@@ -102,9 +108,9 @@ export function harness(
     release: TEST_RELEASE,
     compatibility: RELEASE_COMPATIBILITY,
     randomBytes: zeroBytes,
-    out: (line) => out.push(line),
-    err: (line) => err.push(line),
-    ...overrides,
+    out: writer((line) => out.push(line), styles.out ?? plainStyle),
+    err: writer((line) => err.push(line), styles.err ?? plainStyle),
+    ...replaced,
   };
   return { context, out, err };
 }

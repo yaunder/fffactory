@@ -8,6 +8,7 @@
  */
 import { constants } from "node:os";
 import { interruptible, RETURN_GRACE_MS } from "../../src/cli/interrupts";
+import { plainStyle, writer } from "../../src/cli/presentation/style";
 import { run } from "../../src/cli/run";
 import {
   killRunningTools,
@@ -60,8 +61,8 @@ await interrupts.run(
   () =>
     run(["apply"], {
       ...context,
-      out: (line) => console.log(line),
-      err: (line) => console.error(line),
+      out: writer((line) => console.log(line), plainStyle),
+      err: writer((line) => console.error(line), plainStyle),
     }),
   { waitsOnInterrupt: true },
 );

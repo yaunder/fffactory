@@ -32,7 +32,16 @@ function fffactoryIn(cwd: string, ...args: string[]) {
 }
 
 function fffactoryWith(path: string, cwd: string, ...args: string[]) {
-  const env: Record<string, string> = { PATH: path, HOME: scratch, ...isolatedAws };
+  return fffactoryWithEnv(path, cwd, {}, ...args);
+}
+
+function fffactoryWithEnv(
+  path: string,
+  cwd: string,
+  extra: Record<string, string>,
+  ...args: string[]
+) {
+  const env: Record<string, string> = { PATH: path, HOME: scratch, ...isolatedAws, ...extra };
   const result = Bun.spawnSync([process.execPath, MAIN, ...args], { cwd, env });
   return {
     code: result.exitCode,
@@ -160,6 +169,17 @@ describe("fffactory doctor executable", () => {
     const result = fffactoryWith(path, scratch, "doctor", "--json", "--instance", EXAMPLE);
     expect(statuses(result.stdout).tailscale).toBe("error");
     expect(result.code).toBe(1);
+  });
+
+  test("--json writes the same unstyled bytes under forced color (cli output §JSON)", async () => {
+    const path = await toolPath("none-forced", {});
+    const args = ["doctor", "--json", "--instance", EXAMPLE];
+    const plain = fffactoryWith(path, scratch, ...args);
+    const forced = { FORCE_COLOR: "3", TERM: "xterm-256color" };
+    const colored = fffactoryWithEnv(path, scratch, forced, ...args);
+    expect(colored.stdout).not.toContain("\x1b");
+    expect(colored.stdout).toBe(plain.stdout);
+    expect(statuses(colored.stdout).openssh).toBe("not_ready");
   });
 });
 

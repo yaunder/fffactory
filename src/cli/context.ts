@@ -22,6 +22,7 @@ import type { RandomBytes } from "../domain/initialization";
 import type { Release } from "../domain/instance";
 import type { ReleaseCompatibility } from "../domain/release-compatibility";
 import type { WorkerEndpoint } from "../host/endpoint";
+import type { Writer } from "./presentation/style";
 
 /** Everything a command may touch, injected so commands run the same in tests and the executable. */
 export interface CliContext {
@@ -81,8 +82,12 @@ export interface CliContext {
   /** What the running release declares: its factory.json schema version and base generation. */
   readonly compatibility: ReleaseCompatibility;
   readonly randomBytes: RandomBytes;
-  readonly out: (line: string) => void;
-  readonly err: (line: string) => void;
+  /**
+   * Standard output and error, each carrying its own style (`docs/specs/cli-output.md` §Color):
+   * a command that routes human lines to the other stream styles them as that stream is.
+   */
+  readonly out: Writer;
+  readonly err: Writer;
 }
 
 export interface Command {

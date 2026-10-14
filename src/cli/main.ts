@@ -38,6 +38,8 @@ import { terraformProvisioner } from "../infrastructure/terraform/provisioner";
 import { terraformRunner } from "../infrastructure/terraform/runner";
 import { RELEASE_COMPATIBILITY } from "../domain/release-compatibility";
 import { interruptible, RETURN_GRACE_MS } from "./interrupts";
+import { streamStyles } from "./presentation/color";
+import { writer } from "./presentation/style";
 import { RELEASE } from "./release";
 import { run, waitsOnInterrupt } from "./run";
 
@@ -69,6 +71,13 @@ const terraform = managedTerraform();
 
 /** One SSH transport reaches every worker stage: the workers, repositories and phase-3 stages. */
 const transport = sshTransport({ env: process.env });
+
+/** Each stream's style, from its own terminal status and the environment, decided once. */
+const styles = streamStyles({
+  stdoutIsTTY: process.stdout.isTTY,
+  stderrIsTTY: process.stderr.isTTY,
+  env: process.env,
+});
 
 const argv = process.argv.slice(2);
 await interrupts.run(
@@ -115,8 +124,8 @@ await interrupts.run(
       release: RELEASE,
       compatibility: RELEASE_COMPATIBILITY,
       randomBytes: (count) => crypto.getRandomValues(new Uint8Array(count)),
-      out: (line) => console.log(line),
-      err: (line) => console.error(line),
+      out: writer((line) => console.log(line), styles.out),
+      err: writer((line) => console.error(line), styles.err),
     }),
   { waitsOnInterrupt: waitsOnInterrupt(argv) },
 );
