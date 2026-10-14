@@ -21,7 +21,7 @@ concurrency:
 jobs:
   tag:
     name: Check the tag against package.json
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 5
     permissions:
       contents: read
@@ -59,7 +59,7 @@ jobs:
     needs:
       - tag
       - executables
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 10
     permissions:
       contents: write

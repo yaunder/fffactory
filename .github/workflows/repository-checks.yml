@@ -17,7 +17,7 @@ jobs:
   # (.github/main-branch-protection.json).
   repository-checks:
     name: Factory code validation
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 20
 
     steps:
