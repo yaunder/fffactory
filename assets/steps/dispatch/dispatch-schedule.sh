@@ -83,8 +83,10 @@ matches=false
 if [[ ${enabled} == false ]]; then
   [[ ${current} == null ]] && matches=true
 else
-  if jq -en --argjson desired "${desired}" --argjson current "${current}" '
-    $current != null
+  # Inspection includes unbounded run history; feed it on stdin, never in argv.
+  if jq -e --argjson desired "${desired}" '
+    . as $current
+    | $current != null
     and $current.name == $desired.name
     and $current.prompt == $desired.prompt
     and $current.cadence == {type:"cron", expression:$desired.cron, timezone:$desired.timezone}
@@ -97,7 +99,7 @@ else
     and $current.maxRuns == null
     and $current.expiresAt == null
     and $current.status == "active"
-  ' >/dev/null; then
+  ' <<<"${current}" >/dev/null; then
     matches=true
   fi
 fi

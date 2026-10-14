@@ -164,6 +164,48 @@ class DispatchScheduleTest(unittest.TestCase):
         self.assertEqual(json.loads(self.state.read_text())["target"]["config"]["modeId"],
                          "bypassPermissions")
 
+    def test_large_run_history_checks_and_reconciles_without_losing_history(self):
+        self.requested = True
+        self.active = True
+        self.write_projection()
+        result = self.invoke("--apply")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        original = json.loads(self.state.read_text())
+        # Exceed both Linux's per-argument limit and macOS's total argv limit.
+        original["runs"] = [{"id": f"run-{i}", "status": "succeeded", "summary": "x" * 1024}
+                            for i in range(1024)]
+        encoded = json.dumps(original)
+        self.assertGreater(len(encoded.encode()), 1024 * 1024)
+        self.state.write_text(encoded)
+        self.calls.write_text("")
+
+        for mode in ("--check", "--apply"):
+            with self.subTest(mode=mode):
+                result = self.invoke(mode)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(json.loads(result.stdout)["status"], "active")
+                self.assertEqual(json.loads(self.state.read_text()), original)
+        calls = self.calls.read_text().splitlines()
+        self.assertTrue(all(line.startswith(("schedule ls ", "schedule inspect "))
+                            for line in calls))
+
+        self.dispatch["cron"] = "*/30 * * * *"
+        self.write_projection()
+        result = self.invoke("--check")
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertEqual(json.loads(result.stdout)["status"], "drift")
+        result = self.invoke("--apply")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)["status"], "active")
+        updated = json.loads(self.state.read_text())
+        self.assertEqual(updated["id"], original["id"])
+        self.assertEqual(updated["runs"], original["runs"])
+        self.assertEqual(updated["cadence"]["expression"], self.dispatch["cron"])
+        calls = self.calls.read_text().splitlines()
+        self.assertEqual(sum(line.startswith("schedule update ") for line in calls), 1)
+        self.assertFalse(any(line.startswith(("schedule create ", "schedule delete "))
+                             for line in calls))
+
     def test_recreates_schedule_with_limits(self):
         self.requested = True
         self.active = True
