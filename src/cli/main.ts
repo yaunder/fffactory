@@ -37,11 +37,16 @@ import { managedTerraform } from "../infrastructure/terraform/installer";
 import { terraformProvisioner } from "../infrastructure/terraform/provisioner";
 import { terraformRunner } from "../infrastructure/terraform/runner";
 import { RELEASE_COMPATIBILITY } from "../domain/release-compatibility";
+import { descriptorLines } from "./descriptor-lines";
 import { interruptible, RETURN_GRACE_MS } from "./interrupts";
 import { streamStyles } from "./presentation/color";
 import { writer } from "./presentation/style";
 import { RELEASE } from "./release";
 import { run, waitsOnInterrupt } from "./run";
+
+/** Standard output's and standard error's lines, written raw: never through `console`. */
+const stdoutLines = descriptorLines(1);
+const stderrLines = descriptorLines(2);
 
 /** Signal handling (`cli/interrupts.ts`) over this process. */
 const interrupts = interruptible({
@@ -52,7 +57,7 @@ const interrupts = interruptible({
   stopRunningTools,
   killRunningTools,
   stopsGracefully,
-  err: (line) => console.error(line),
+  err: stderrLines,
   graceMs: RETURN_GRACE_MS,
 });
 
@@ -124,8 +129,8 @@ await interrupts.run(
       release: RELEASE,
       compatibility: RELEASE_COMPATIBILITY,
       randomBytes: (count) => crypto.getRandomValues(new Uint8Array(count)),
-      out: writer((line) => console.log(line), styles.out),
-      err: writer((line) => console.error(line), styles.err),
+      out: writer(stdoutLines, styles.out),
+      err: writer(stderrLines, styles.err),
     }),
   { waitsOnInterrupt: waitsOnInterrupt(argv) },
 );

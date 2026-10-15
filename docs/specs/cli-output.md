@@ -37,6 +37,11 @@ backticks around inline code, which color drops, so an agent reads it as
 Markdown. Color is added on top and is never the only signal: every status has
 its glyph in both modes.
 
+Both streams' lines are written raw to their file descriptors, synchronously, in
+the order written and with nothing lost at exit, never through the runtime's
+console, whose own coloring would wrap them. Tested in `tests/cli/main.test.ts` and
+`tests/cli/descriptor-lines.test.ts`.
+
 ## Style roles
 
 | Role | Plain | Color |
@@ -231,4 +236,5 @@ apply only to human lines laid out by `src/cli/presentation/`.
 | CLI adapter | `src/cli/presentation/apply.ts` | A report on [two streams](#two-streams): apply's Result and Next block as lines, each for its stream (`StreamLine`), written by the command in order. |
 | CLI adapter | `src/cli/presentation/command-line.ts` | `fffactoryCommand`: an `fffactory` command a Next block names, repeating the `--instance` and `--profile` the running command was given, each word quoted for a POSIX shell (`shellWord`) where needed. |
 | CLI adapter | `src/cli/context.ts` | `CliContext.out` and `err`, each a `Writer` carrying its stream's style. |
+| CLI adapter | `src/cli/descriptor-lines.ts` | `descriptorLines`, a stream's raw line writer over its file descriptor ([Plain output](#plain-output)). |
 | CLI adapter | `src/cli/main.ts` | The one place reading each stream's `isTTY` and the environment to pick the styles. |

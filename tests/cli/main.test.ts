@@ -111,19 +111,37 @@ describe("fffactory plan executable, redirected (cli-output §Color)", () => {
   test("FORCE_COLOR colors a redirected stream, unless NO_COLOR or TERM=dumb says otherwise", () => {
     const args = ["plan", "--instance", EXAMPLE];
     const path = process.env.PATH ?? "";
+    const piped = fffactory(...args);
+    expect(piped.stderr).toStartWith("Refusing to plan: ");
     const forced = fffactoryWithEnv(path, scratch, { FORCE_COLOR: "1" }, ...args);
     expect(forced.code).toBe(1);
     expect(forced.stdout).toContain("\x1b[1mfffactory plan\x1b[22m");
     expect(stripVTControlCharacters(forced.stdout)).toBe(HEADER);
+    // This refusal has no styled span, so colored standard error is the plain text: the
+    // runtime console's own coloring never wraps a line (cli-output §Plain output).
+    expect(forced.stderr).toBe(piped.stderr);
     const plainly: Record<string, string>[] = [
+      { NO_COLOR: "1" },
+      { TERM: "dumb" },
       { FORCE_COLOR: "1", NO_COLOR: "1" },
       { FORCE_COLOR: "1", TERM: "dumb" },
       { FORCE_COLOR: "0" },
     ];
     for (const plain of plainly) {
       const result = fffactoryWithEnv(path, scratch, plain, ...args);
-      expect(result.stdout).toBe(HEADER);
+      expect({ plain, stdout: result.stdout, stderr: result.stderr }).toEqual({
+        plain,
+        stdout: HEADER,
+        stderr: piped.stderr,
+      });
     }
+  });
+
+  test("lines written to both streams on one pipe keep the order they were written in", () => {
+    const command = `'${process.execPath}' '${MAIN}' plan --instance '${EXAMPLE}' 2>&1`;
+    const env = { PATH: process.env.PATH ?? "", HOME: scratch, ...isolatedAws };
+    const merged = Bun.spawnSync(["/bin/sh", "-c", command], { cwd: scratch, env });
+    expect(merged.stdout.toString()).toBe(HEADER + fffactory("plan", "--instance", EXAMPLE).stderr);
   });
 });
 
