@@ -55,6 +55,10 @@ over SSH as `fffactory-admin` (`docs/specs/host-protocol.md`). Rules:
   status` that writes to standard error (it exits 0 past a directory it cannot open), an index
   entry assumed unchanged or skip-worktree with its file on disk, a submodule's directory with
   files but no repository, an unused submodule Git directory.
+- `plugins.ts` implements the plugin install step and its read-only verifier. It reads
+  `plugins.json` through `plugin-manifest.ts`, uses one command deadline for the whole
+  operation, and runs tools through `runtime-account.ts` as `factory`. Only locked
+  `host apply` invokes installation; there is no standalone plugin mutation command.
 - A step's output goes only to its log under `WORKER_PATHS.logs`, written by the step itself as
   it runs (`ProcessOptions.output`), never collected and written afterwards; a verifier's tool
   output goes nowhere. Documents carry fffactory's own words and states, never a tool's output.

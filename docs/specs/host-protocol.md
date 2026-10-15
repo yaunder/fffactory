@@ -378,8 +378,8 @@ No arguments: the activator passes none. In order, it:
    made. From here the requested release is active, healthy or not.
 5. **Runs the install steps** in order, in this one process: `packages`,
    `user`, `systemd`, `harness`, `plugins` (`INSTALL_STEPS`,
-   `domain/installation.ts`), each `/bin/bash <release>/steps/<name>.sh` as
-   root with its own timeout and only `PATH`, `HOME=/root`, `LANG` and its
+   `domain/installation.ts`). The first four run `/bin/bash <release>/steps/<name>.sh` as
+   root with their own timeouts and only `PATH`, `HOME=/root`, `LANG` and its
    inputs in the environment: `FFFACTORY_RELEASE`, `FFFACTORY_STEPS` (the
    release's steps directory, holding the pins and plugin manifest),
    `FFFACTORY_STATE`, `FFFACTORY_HOSTNAME`, `FFFACTORY_FACTORY_ID` and
@@ -392,7 +392,8 @@ No arguments: the activator passes none. In order, it:
    rewritten after each step. It **stops at the first step that fails** (a
    non-zero exit, its timeout, or bash missing or not starting); the later
    steps stay `not_run`. Nothing waits for or polls a marker file: the process
-   orders the steps.
+   orders the steps. The final `plugins` step runs in TypeScript inside the same
+   install lock and record, with its own command budget and log as described below.
 6. **Verifies**, once every step succeeded: the verifiers of `host verify`, in
    process ([verify](#verify)), within `VERIFY_TIMEOUT_MS` (5 minutes);
    verification that takes longer fails the install.
@@ -414,9 +415,9 @@ never waiting for the install to finish
 stay `running`, which `status` reports as an install that has not finished
 ([status §Readiness](status.md#readiness)).
 
-The steps (`assets/steps/`) are v1's development-environment and
+The shell steps (`assets/steps/`) are v1's development-environment and
 agent-harness setup scripts, wrapped (D3; the originals were deleted in
-[#102](https://github.com/yaunder/factory/issues/102)): split into those five steps, taking
+[#102](https://github.com/yaunder/factory/issues/102)): split into install steps, taking
 their inputs from the environment above, without their marker waits and state
 records. Each is idempotent, so a rerun repairs what a failed run left. A
 failed install leaves the requested release active and unhealthy; `status`
@@ -429,6 +430,43 @@ reports it and the next apply repairs it. Nothing on this path uses SSM.
 | `systemd` | `tailscaled.service` enabled and active. |
 | `harness` | Codex and Claude Code for `factory` at the versions and npm integrity values `versions.env` pins. |
 | `plugins` | The Claude Code plugins `plugins.json` pins, from marketplace checkouts at their pinned revisions; undeclared ones removed. |
+
+### Plugin installation
+
+`src/host/plugins.ts` implements the `plugins` step and the read-only plugin
+verifier; `plugin-manifest.ts` validates the release's `steps/plugins.json`.
+The manifest keeps exact semver versions and full Git commit SHAs, unique
+plugin IDs and marketplace names, safe relative paths, GitHub sources only,
+and no Codex plugins. Invalid or unreadable metadata fails before mutations.
+
+The marketplace catalog supplies the marketplace name and the plugin's source
+path. Its catalog version and any per-entry version are not the plugin pin:
+`<plugin path>/.claude-plugin/plugin.json` supplies the authoritative plugin
+name and version. Both catalog formats, with or without per-entry versions,
+are supported. Multiple plugins may be listed in the catalog; only declared
+plugins are installed.
+
+Verification requires a clean marketplace checkout at the exact pinned SHA,
+the declared catalog mapping and plugin manifest, the directory marketplace
+registration, exactly one enabled user-scope installation at its expected
+cache path, an installed registry entry recording the pinned SHA, and content
+identical to the pinned source. Undeclared user plugins or marketplaces fail
+verification. Verification never installs, removes or fetches anything.
+
+Installation removes undeclared user plugins and marketplaces, leaves matching
+pins alone, and repairs drift by cloning the declared upstream repository,
+checking out its pinned commit detached, validating its metadata, and installing
+from that local marketplace. It verifies the result before succeeding. Project
+scope plugins are left alone. Failed inspection or commands fail the step;
+untrusted names are validated before being used as removal paths.
+
+Git, Claude and content comparison run as `factory` with `runuser` and `env -i`.
+Root directory creation and cache cleanup use fixed tools and rooted paths.
+One deadline bounds all commands in each install or verification operation;
+mutation output streams to the step log and inspection output stays private.
+This step runs inside `host apply`'s existing lock; no new mutating CLI is exposed.
+Tests: `tests/host/plugins.test.ts`, the native step cases in
+`tests/host/apply.test.ts`, and `tests/host/verify.test.ts`.
 
 ### Document, protocol version 1
 
@@ -806,7 +844,7 @@ produces it byte for byte from real Git, the CLI reads it back over the
 transport), `tests/domain/work-inspection.test.ts`,
 `tests/application/inspect-work.test.ts`, the activator's `work inspect` in
 `tests/bootstrap/activator.test.sh`,
-`tests/assets/steps/steps.test.ts` (one script per step, parsing with
+`tests/assets/steps/steps.test.ts` (one script per shell step, parsing with
 `bash -n`, no marker polling, jq's re-evaluation markers, the plugin manifest
 valid, no SSM anywhere on the worker path), the container cases of
 `tests/bootstrap/host-apply.test.sh`, which run the real linux-x64 worker

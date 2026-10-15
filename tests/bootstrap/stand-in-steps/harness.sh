@@ -10,6 +10,6 @@ echo harness >>/tmp/steps.log
 source "${FFFACTORY_STEPS}/versions.env"
 printf '#!/bin/bash\nif [[ "${1:-}" == --version ]]; then echo "codex-cli %s"; else exit 1; fi\n' \
   "${CODEX_VERSION}" >/usr/local/bin/codex
-printf '#!/bin/bash\nif [[ "${1:-}" == --version ]]; then echo "%s (Claude Code)"; else exit 1; fi\n' \
+printf '#!/bin/bash\nif [[ "${1:-}" == --version ]]; then echo "%s (Claude Code)"; elif [[ "${1:-}" == plugin ]]; then echo "[]"; else exit 1; fi\n' \
   "${CLAUDE_CODE_VERSION}" >/usr/local/bin/claude
 chmod 0755 /usr/local/bin/codex /usr/local/bin/claude

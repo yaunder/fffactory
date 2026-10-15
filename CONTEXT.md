@@ -24,7 +24,7 @@ A machine prepared to execute work for a factory.
 ### Work item
 
 A captured request for development work produced by
-[FFFlow's planning and capture workflow](https://github.com/bryonjacob/ffflow/blob/main/plugin/skills/plan-capture/SKILL.md),
+[FFFlow's planning and capture workflow](https://github.com/zerotechdebt/ffflow/blob/main/plugin/skills/plan-capture/SKILL.md),
 with a durable identity and completion criteria. An epic and an individual task
 are different granularities of work item.
 
