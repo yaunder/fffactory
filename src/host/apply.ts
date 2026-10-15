@@ -31,6 +31,7 @@ import type { ProcessOutcome } from "../infrastructure/local-tool-probe";
 import { sha256Text } from "../infrastructure/release-tarball";
 import { exists, markerRecords, operatingSystem, tokenOr, type WorkerSystem } from "./inspect";
 import type { ExclusiveLock } from "./install-lock";
+import { workerPlugins } from "./plugins";
 import type { HostVerifier } from "./verify";
 
 /** What `host apply` needs of the worker beyond what inspection reads. */
@@ -50,10 +51,11 @@ export interface HostApplier {
   apply(): Promise<HostApplyResult>;
 }
 
-/** A step's name and timeout, run as `bash steps/<name>.sh` from the release. */
+/** A step's name and timeout; shell assets by default, or the native plugin implementation. */
 export interface InstallStep {
   readonly name: string;
   readonly timeoutMs: number;
+  readonly implementation?: "plugins";
 }
 
 /** A step's environment; the release's steps directory is always part of it. */
@@ -229,11 +231,15 @@ async function runStep(
     return `its log ${path} could not be opened (${errorCode(error)})`;
   }
   try {
-    const outcome = await system.run(["/bin/bash", script], step.timeoutMs, {
-      env,
-      output: log.fd,
-    });
-    const reason = failure(outcome, step.timeoutMs);
+    const reason =
+      step.implementation === "plugins"
+        ? (await workerPlugins(system, env.FFFACTORY_STEPS, "install", step.timeoutMs, log.fd))
+          ? undefined
+          : "plugin installation or verification failed"
+        : failure(
+            await system.run(["/bin/bash", script], step.timeoutMs, { env, output: log.fd }),
+            step.timeoutMs,
+          );
     const ended = reason === undefined ? "succeeded" : `failed: ${reason}`;
     await log.write(`--- fffactory: step ${step.name} ${ended}\n`);
     return reason;

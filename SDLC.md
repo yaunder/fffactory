@@ -2,7 +2,7 @@
 
 The factory is only useful when its machines run a defined workflow. This
 document defines that workflow: which stages exist, which
-[FFFlow](https://github.com/bryonjacob/ffflow) skill implements each stage,
+[FFFlow](https://github.com/zerotechdebt/ffflow) skill implements each stage,
 where each stage runs, and what gates the transition to the next one. It is the
 design record for making FFFlow the execution model of the factory. The
 factory side of it ships in `fffactory` releases; remaining work is in

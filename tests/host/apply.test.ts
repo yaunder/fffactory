@@ -12,7 +12,11 @@ import { hostProjection, hostProjectionJson } from "../../src/domain/host-projec
 import { type HostApplyRecord, INSTALL_STEPS, parseHostApply } from "../../src/domain/installation";
 import type { FactoryId, HostKey, Release } from "../../src/domain/instance";
 import { ENROLLMENTS, type Verification } from "../../src/domain/readiness";
-import { type ApplySystem, readLimited, workerApplier } from "../../src/host/apply";
+import {
+  type ApplySystem,
+  readLimited,
+  workerApplier as realWorkerApplier,
+} from "../../src/host/apply";
 import { workerEndpoint } from "../../src/host/endpoint";
 import { flockExclusive } from "../../src/host/install-lock";
 import type { HostVerifier } from "../../src/host/verify";
@@ -23,6 +27,15 @@ import {
 } from "../../src/infrastructure/local-tool-probe";
 import { sha256Text } from "../../src/infrastructure/release-tarball";
 import { activate, system, WORKER_HOSTNAME } from "./worker-scenarios";
+
+// Exercise step ordering and logging with shell stand-ins; native plugins have their own suite.
+const workerApplier: typeof realWorkerApplier = (system, verifier, steps, timeout) =>
+  realWorkerApplier(
+    system,
+    verifier,
+    steps ?? INSTALL_STEPS.map(({ name, timeoutMs }) => ({ name, timeoutMs })),
+    timeout,
+  );
 
 const RELEASE = "0.3.0" as Release;
 const PROJECTION = hostProjectionJson(
@@ -343,12 +356,53 @@ describe("host apply, failing outside its steps", () => {
   test("verification that does not finish in time fails the install", async () => {
     await worker();
     const verifier: HostVerifier = { verify: () => new Promise(() => {}) };
-    const result = await workerApplier(applySystem(), verifier, INSTALL_STEPS, 50).apply();
+    const result = await workerApplier(applySystem(), verifier, undefined, 50).apply();
     expect(result).toMatchObject({
       state: "failed",
       verification: null,
       failure: "verification did not finish within 0.05 s",
     });
+  });
+});
+
+describe("host apply's native plugin step", () => {
+  test("runs inside the install lock and streams mutations to the plugin log", async () => {
+    await worker();
+    await writeFile(
+      join(RELEASE_DIRECTORY(), "steps/plugins.json"),
+      JSON.stringify({ schema: 1, providers: { claude: { plugins: [] }, codex: { plugins: [] } } }),
+    );
+    const seen: { argv: readonly string[]; output: number | undefined }[] = [];
+    const run: ProcessRunner = async (argv, _timeout, options) => {
+      if (argv[0] === "/bin/bash") return bunProcessRunner(argv, _timeout, options);
+      expect(await flockExclusive(at(WORKER_PATHS.applyLock))).toBeUndefined();
+      seen.push({ argv, output: options?.output });
+      return { kind: "exited", exitCode: 0, stdout: "[]", stderr: "" };
+    };
+    const result = await realWorkerApplier(applySystem({ run }), fakeVerifier().verifier).apply();
+    expect(result.state).toBe("succeeded");
+    expect(seen.find(({ argv }) => argv[0] === "/usr/bin/install")?.output).toBeNumber();
+    expect(
+      seen
+        .filter(({ argv }) => argv.includes("--json"))
+        .every(({ output }) => output === undefined),
+    ).toBe(true);
+    expect(await readFile(at(join(WORKER_PATHS.logs, "plugins.log")), "utf8")).toBe(
+      "--- fffactory: step plugins succeeded\n",
+    );
+  });
+
+  test("invalid native plugin metadata fails the step and skips verification", async () => {
+    await worker();
+    await writeFile(join(RELEASE_DIRECTORY(), "steps/plugins.json"), "invalid");
+    const { verifier, runs } = fakeVerifier();
+    const result = await realWorkerApplier(applySystem(), verifier).apply();
+    expect(result.state !== "refused" && result.steps.at(-1)).toEqual({
+      name: "plugins",
+      status: "failed",
+      reason: "plugin installation or verification failed",
+    });
+    expect(runs()).toBe(0);
   });
 });
 

@@ -167,10 +167,10 @@ not remove the current FFFlow/Claude Code dependency.
 
 ## Relationship to FFFlow's cartridges
 
-FFFlow's [capture contract](https://github.com/bryonjacob/ffflow/blob/main/plugin/skills/plan-capture/SKILL.md)
+FFFlow's [capture contract](https://github.com/zerotechdebt/ffflow/blob/main/plugin/skills/plan-capture/SKILL.md)
 defines common work structure while tracker cartridges handle GitHub, Linear,
 Jira and Markdown representations. Its
-[work-epic skill](https://github.com/bryonjacob/ffflow/blob/main/plugin/skills/work-epic/SKILL.md)
+[work-epic skill](https://github.com/zerotechdebt/ffflow/blob/main/plugin/skills/work-epic/SKILL.md)
 uses the configured capture backend to resolve tasks. This is the useful
 precedent: retain shared behavior while varying the implementation at a seam.
 
@@ -182,8 +182,8 @@ portability; issue tracking is also distinct from code hosting and PR creation.
 
 The upstream links describe the sources examined for this discussion. The
 factory's shipped FFFlow version is governed by
-[plugins.json](../../assets/steps/plugins.json), currently 0.4.2 at revision
-`9e231e2a610bdef2ae30ebca9c3814cc59121e26`; upstream changes do not update a
+[plugins.json](../../assets/steps/plugins.json), currently 0.4.3 at revision
+`527c1a8ea204a9745b16713218fe9557943b8a10`; upstream changes do not update a
 worker automatically.
 
 The existing [executor-cartridge discussion](../../SDLC.md#relationship-to-upstream-ffflow)

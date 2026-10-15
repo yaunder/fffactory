@@ -209,7 +209,7 @@ for how to find that name. You should see the worker in the client.
 ## Add your first repository
 
 The factory assumes each target repository has already adopted
-[FFFlow](https://github.com/bryonjacob/ffflow), with GitHub issue capture enabled
+[FFFlow](https://github.com/zerotechdebt/ffflow), with GitHub issue capture enabled
 on its configured branch. See the FFFlow repository for adoption instructions.
 
 ### 1. Assign it to the worker

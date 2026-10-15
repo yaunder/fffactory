@@ -6,8 +6,9 @@ the first that fails. Spec: [docs/specs/host-protocol.md](../../docs/specs/host-
 §apply. Wrapped from v1's setup scripts (D3): a step is ported to TypeScript only when it is
 changed for another reason.
 
-- One `<step>.sh` per install step, plus `validate-plugins.sh`; `versions.env` and
-  `plugins.json` are the pins. `tests/assets/steps/steps.test.ts` checks the list.
+- One `<step>.sh` per shell install step; the plugin step is native TypeScript in
+  `src/host/plugins.ts`, with manifest validation in `src/host/plugin-manifest.ts`.
+  `versions.env` and `plugins.json` are the pins. `tests/assets/steps/steps.test.ts` checks the list.
 - Bash on Amazon Linux 2023, `set -Eeuo pipefail`, shellcheck-clean (CI checks), executable.
   `host apply` runs each with `/bin/bash`, as root, from `/`, with only `PATH`, `HOME=/root`,
   `LANG` and the `FFFACTORY_*` inputs in its environment; read inputs only from those, never

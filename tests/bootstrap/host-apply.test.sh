@@ -12,8 +12,7 @@ HOST_NAME=fff-aaaa1111-builder-1
 STEPS_RUN="packages
 user
 systemd
-harness
-plugins"
+harness"
 
 setup() {
   install -D -o root -g root -m 0755 /bootstrap/fffactory-activate "$ACTIVATE"

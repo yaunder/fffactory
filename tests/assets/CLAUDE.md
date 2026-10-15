@@ -6,9 +6,9 @@
   `support/terraform-guardrails.ts`, the D5 guardrails, against the real modules and against
   deliberately broken modules in `terraform/fixtures/`. Running the modules
   with the managed Terraform is `scripts/terraform-check.ts` (`just terraform-check`, in CI).
-- `steps/` checks the install steps: one script per step in `INSTALL_STEPS`, `bash -n` and
+- `steps/` checks the install steps: one script per shell step in `INSTALL_STEPS`, `bash -n` and
   executable, no marker polling or v1 inputs, jq's re-evaluation markers, and the plugin
-  manifest passing its own validator. It also scans the whole worker path, from the workers
+  manifest passing the native TypeScript validator. It also scans the whole worker path, from the workers
   stage to the steps, for SSM. The Paseo programs in `control-plane/` it checks parse, are
   executable and name no v1 paths or markers, and that `setup-host.sh` hands the worker's
   addresses to `paseo-config.sh`, whose own Python tests sit beside it.

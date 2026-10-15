@@ -206,6 +206,8 @@ const exited = (exitCode: number, stdout = ""): ProcessOutcome => ({
 export function installedTools(failing: readonly string[] = []): ProcessRunner {
   const uid = process.getuid?.() ?? 1000;
   const answers: Record<string, ProcessOutcome> = {
+    "claude plugin list --json": exited(0, "[]"),
+    "claude plugin marketplace list --json": exited(0, "[]"),
     "id -u factory": exited(0, `${uid}\n`),
     "node --version": exited(0, "v22.12.0\n"),
     "codex --version": exited(0, "codex-cli 0.156.1\n"),
@@ -237,6 +239,11 @@ function commandOf(argv: readonly string[]): string {
  */
 export async function unpackedWorker(root: string): Promise<void> {
   await bootstrapped(root);
+  await file(
+    root,
+    join(WORKER_PATHS.releases, "0.3.0", "steps/plugins.json"),
+    '{"schema":1,"providers":{"claude":{"plugins":[]},"codex":{"plugins":[]}}}',
+  );
   await activate(root, "0.3.0");
   await rm(at(root, WORKER_PATHS.activeRelease));
   await file(

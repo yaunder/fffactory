@@ -33,6 +33,10 @@ beforeEach(async () => {
   const steps = join(root, WORKER_PATHS.releases, RELEASE, "steps");
   await mkdir(steps, { recursive: true });
   await writeFile(join(steps, "versions.env"), PINS);
+  await writeFile(
+    join(steps, "plugins.json"),
+    '{"schema":1,"providers":{"claude":{"plugins":[]},"codex":{"plugins":[]}}}',
+  );
   for (const directory of ["workspace/repos", "workspace/cache"])
     await mkdir(join(root, directory), { recursive: true });
 });
@@ -49,6 +53,8 @@ const exited = (exitCode: number, stdout = ""): ProcessOutcome => ({
 
 /** What a healthy worker answers, by the command run as factory or as root. */
 const HEALTHY: Record<string, ProcessOutcome> = {
+  "claude plugin list --json": exited(0, "[]"),
+  "claude plugin marketplace list --json": exited(0, "[]"),
   "id -u factory": exited(0, `${UID}\n`),
   "node --version": exited(0, "v22.12.0\n"),
   "codex --version": exited(0, "codex-cli 0.156.1\n"),
@@ -147,18 +153,14 @@ describe("host verify's software checks (readiness §Verification)", () => {
 
   test("the plugins step verifies the plugins, and tailscaled must be active", async () => {
     const { verification, calls } = await verify({
-      "bash plugins.sh verify": exited(1),
+      "claude plugin list --json": exited(1),
       "systemctl is-active tailscaled.service": exited(3, "inactive\n"),
     });
     expect(statusOf(verification)).toMatchObject({ plugins: "failed", tailscaled: "failed" });
-    const plugins = calls.find(({ argv }) => argv.at(-1) === "verify");
-    expect(plugins?.argv).toEqual([
-      "/bin/bash",
-      join(root, WORKER_PATHS.releases, RELEASE, "steps", "plugins.sh"),
-      "verify",
-    ]);
-    // It reads every plugin checkout, so it has its own, longer deadline.
-    expect(plugins?.timeoutMs).toBe(PLUGINS_TIMEOUT_MS);
+    const plugins = calls.find(({ argv }) => argv.includes("plugin"));
+    expect(plugins?.argv).toEqual([...AS_FACTORY, "claude", "plugin", "list", "--json"]);
+    expect(plugins?.timeoutMs).toBeLessThanOrEqual(PLUGINS_TIMEOUT_MS);
+    expect(plugins?.timeoutMs).toBeGreaterThan(0);
     expect(PLUGINS_TIMEOUT_MS).toBe(120_000);
   });
 });
@@ -206,8 +208,8 @@ describe("host verify's enrollment (readiness §Enrollment)", () => {
       env: {},
     });
     const tools = calls.filter(({ argv }) => argv[0] === AS_FACTORY[0]).length;
-    // Every tool, both agents and three credentials.
-    expect(tools).toBe(TOOLCHAIN.length + 2 + 3);
+    // Every tool, both agents, three credentials and the two plugin lists.
+    expect(tools).toBe(TOOLCHAIN.length + 2 + 3 + 2);
   });
 
   test("a worker it finds healthy and fully enrolled is ready in status", async () => {

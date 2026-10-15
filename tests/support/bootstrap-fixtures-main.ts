@@ -86,6 +86,10 @@ try {
     recursive: true,
     force: true,
   });
+  await writeFile(
+    join(assets, "steps/plugins.json"),
+    JSON.stringify({ schema: 1, providers: { claude: { plugins: [] }, codex: { plugins: [] } } }),
+  );
   const tarball = await packAssetsDirectory(assets, release, worker);
   await writeFile(join(out, "worker-release.tar.gz"), tarball, { mode: 0o644 });
   await writeFile(join(out, "worker-release.tar.gz.sha256"), `${sha256Hex(tarball)}\n`, {
