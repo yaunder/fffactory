@@ -2,6 +2,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test
 import { chmod, mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { stripVTControlCharacters } from "node:util";
 import manifest from "../../package.json";
 import { isolatedAwsEnvironment } from "../support/aws-isolation";
 import { goneWithin, killSurvivors, recordedPids } from "../support/processes";
@@ -92,6 +93,37 @@ describe("fffactory executable", () => {
     const rerun = fffactoryIn(project, "init");
     expect(rerun.stdout).toContain("Unchanged ");
     expect(await readFile(document, "utf8")).toBe(first);
+  });
+});
+
+describe("fffactory plan executable, redirected (cli-output §Color)", () => {
+  const HEADER =
+    `fffactory plan · release ${manifest.version}\n` + `Instance  ${EXAMPLE} (--instance)\n`;
+
+  test("an ordinary pipe gets plain human output, and so does any refusal", () => {
+    const result = fffactory("plan", "--instance", EXAMPLE);
+    expect(result.code).toBe(1);
+    expect(result.stdout).toBe(HEADER);
+    expect(result.stderr).toStartWith("Refusing to plan: ");
+    expect(result.stdout + result.stderr).not.toContain("\x1b");
+  });
+
+  test("FORCE_COLOR colors a redirected stream, unless NO_COLOR or TERM=dumb says otherwise", () => {
+    const args = ["plan", "--instance", EXAMPLE];
+    const path = process.env.PATH ?? "";
+    const forced = fffactoryWithEnv(path, scratch, { FORCE_COLOR: "1" }, ...args);
+    expect(forced.code).toBe(1);
+    expect(forced.stdout).toContain("\x1b[1mfffactory plan\x1b[22m");
+    expect(stripVTControlCharacters(forced.stdout)).toBe(HEADER);
+    const plainly: Record<string, string>[] = [
+      { FORCE_COLOR: "1", NO_COLOR: "1" },
+      { FORCE_COLOR: "1", TERM: "dumb" },
+      { FORCE_COLOR: "0" },
+    ];
+    for (const plain of plainly) {
+      const result = fffactoryWithEnv(path, scratch, plain, ...args);
+      expect(result.stdout).toBe(HEADER);
+    }
   });
 });
 

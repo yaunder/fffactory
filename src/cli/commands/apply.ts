@@ -10,22 +10,31 @@ import type { DispatchOutcome } from "../../application/apply-dispatch";
 import type { RepositoryOutcome } from "../../application/apply-repositories";
 import type { FactoryVerification } from "../../application/verify-factory";
 import type { Approval } from "../../application/approval";
+import type { PlanRefusal } from "../../application/plan-factory";
 import { isPlanId } from "../../domain/plan";
 import { FIRST_BOOT_DEADLINE_MS, type WorkerOutcome } from "../../domain/rollout";
 import type { CliContext, Command } from "../context";
 import { sha256Text } from "../../infrastructure/release-tarball";
 import { printDiagnostics } from "../diagnostics";
-import { describeReview, staleRefusal } from "../presentation/plan";
+import type { Report } from "../presentation/blocks";
+import type { Selection } from "../presentation/command-line";
+import {
+  damagedPlanReport,
+  planRefusalReport,
+  reviewBlocks,
+  staleReport,
+  unknownPlanReport,
+} from "../presentation/plan";
 import { workerLines } from "../presentation/workers";
-import { planningBasis, printPlanRefusal } from "./planning";
+import { planningBasis, printReport, withNotice } from "./planning";
 
 const USAGE = [
   "Usage: fffactory apply [--instance PATH] [--profile NAME] [--plan-id ID]",
   "",
   "Applies the factory's plan under the factory-wide lock. Without --plan-id it",
   "plans afresh from factory.json and what exists now, shows the plan (the",
-  "configuration path, factory, AWS account, Region and release, the",
-  "infrastructure changes, then each worker's install) and applies exactly that",
+  "factory, AWS account, Region and release, the infrastructure changes, then",
+  "every stage's changes for each worker) and applies exactly that",
   "plan once you type yes, so it needs a terminal. With --plan-id ID it applies",
   "exactly the plan `fffactory plan` saved under that ID, which naming it",
   "approves, and refuses it once factory.json, the fffactory release, the AWS",
@@ -67,16 +76,19 @@ const APPLYING = "Applying. Terraform's output is not shown; this can take sever
 
 /**
  * Shows each plan's review and asks the operator to approve exactly it. A saved plan was
- * approved by naming its ID, so it is shown and applied without asking.
+ * approved by naming its ID, so it is shown and applied without asking. The commands a review
+ * names repeat the instance and profile in `selection`.
  */
 export function operatorApproval(
   planId: string | undefined,
   context: CliContext,
+  selection: Selection,
   question = APPROVAL_QUESTION,
 ): Approval {
   return {
     approve: async (review) => {
-      for (const line of describeReview(review)) context.out(line);
+      printReport(context.out, { blocks: reviewBlocks(review, selection) });
+      context.out("");
       if (planId !== undefined) {
         context.out(`Applying saved plan ${planId}, approved by naming its ID.`);
         context.out(APPLYING);
@@ -94,15 +106,17 @@ function printRecord(operation: OperationLocation, context: CliContext): void {
 }
 
 /**
- * How a result is reported: the action refused, such as `apply`, and the command a rerun
- * uses, `apply`, or `upgrade` for an upgrade whose pin was not moved.
+ * How a result is reported: the action refused, such as `apply`, the command a rerun uses,
+ * `apply`, or `upgrade` for an upgrade whose pin was not moved, the instance and profile the
+ * command was given, which the commands it names repeat, and a `notice` said once the outcome is
+ * reported, before any Next block, such as an upgrade's pin left where it was.
  */
 export interface Reporting {
   readonly action: "apply" | "upgrade";
   readonly rerun: "apply" | "upgrade";
+  readonly selection: Selection;
+  readonly notice?: string | undefined;
 }
-
-const APPLYING_REPORT: Reporting = { action: "apply", rerun: "apply" };
 
 const rerunLine = ({ rerun }: Reporting) =>
   `Rerun \`fffactory ${rerun}\`: it plans again from what exists now and converges what remains.`;
@@ -371,11 +385,45 @@ function reportFailed(
   return 1;
 }
 
-/** Reports how apply, or upgrade's apply, ended, and returns the exit code. */
-export function reportApply(
-  result: FactoryApply,
+/** The outcomes that refuse the plan before anything is applied: restyled, with a Next block. */
+type Refused =
+  | PlanRefusal
+  | Extract<FactoryApply, { readonly kind: "stale" | "no_plan" | "damaged_plan" }>;
+
+/** Every refusal's kind: a kind added to `Refused` but not here fails to compile. */
+const REFUSED: Readonly<Record<Refused["kind"], true>> = {
+  refused: true,
+  release_mismatch: true,
+  d11: true,
+  stopped_resize: true,
+  unready: true,
+  unexpected_plan: true,
+  locked: true,
+  stale: true,
+  no_plan: true,
+  damaged_plan: true,
+};
+
+const isRefused = (result: FactoryApply): result is Refused => Object.hasOwn(REFUSED, result.kind);
+
+function refusalReport(result: Refused, context: CliContext, reporting: Reporting): Report {
+  const { selection } = reporting;
+  switch (result.kind) {
+    case "stale":
+      return staleReport(result.planId, result.reasons, selection);
+    case "no_plan":
+      return unknownPlanReport(result.planId, selection);
+    case "damaged_plan":
+      return damagedPlanReport(result.planId, selection);
+    default:
+      return planRefusalReport(result, { action: reporting.action, now: context.now(), selection });
+  }
+}
+
+function reportOutcome(
+  result: Exclude<FactoryApply, Refused>,
   context: CliContext,
-  reporting: Reporting = APPLYING_REPORT,
+  reporting: Reporting,
 ): number {
   switch (result.kind) {
     case "applied":
@@ -401,25 +449,29 @@ export function reportApply(
     case "interrupted":
       reportInterrupted(result, context, reporting);
       return 1;
-    case "no_plan":
-      context.err(
-        `There is no saved plan ${result.planId} for this factory here: it expired, was ` +
-          "applied, or was saved elsewhere. Review a new plan with `fffactory plan`.",
-      );
-      return 1;
-    case "damaged_plan":
-      context.err(
-        `Saved plan ${result.planId} cannot be applied: its record cannot be read, or its ` +
-          "Terraform plan changed after it was saved. Review a new plan with `fffactory plan`.",
-      );
-      return 1;
-    case "stale":
-      for (const line of staleRefusal(result.planId, result.reasons)) context.err(line);
-      return 1;
-    default:
-      printPlanRefusal(reporting.action, result, context);
-      return 1;
   }
+}
+
+/**
+ * Reports how apply, or upgrade's apply, ended, and returns the exit code. A refusal of the plan
+ * is laid out in blocks, its Next block last, `reporting.notice` before it; any other outcome
+ * prints its own lines (`docs/specs/plan-apply.md` §Apply), then the notice.
+ */
+export function reportApply(
+  result: FactoryApply,
+  context: CliContext,
+  reporting: Reporting,
+): number {
+  if (isRefused(result)) {
+    printReport(
+      context.err,
+      withNotice(refusalReport(result, context, reporting), reporting.notice),
+    );
+    return 1;
+  }
+  const code = reportOutcome(result, context, reporting);
+  if (reporting.notice !== undefined) context.err(reporting.notice);
+  return code;
 }
 
 async function apply(args: readonly string[], context: CliContext): Promise<number> {
@@ -459,7 +511,7 @@ async function apply(args: readonly string[], context: CliContext): Promise<numb
       provisioner: context.provisioner,
       planStore: context.planStore,
       machines: context.machines,
-      approval: operatorApproval(planId, context),
+      approval: operatorApproval(planId, context, values),
       interrupted: context.interrupted,
       peers: context.tailnet,
       transport: context.transport,
@@ -478,7 +530,7 @@ async function apply(args: readonly string[], context: CliContext): Promise<numb
       randomBytes: context.randomBytes,
     },
   );
-  return reportApply(result, context);
+  return reportApply(result, context, { action: "apply", rerun: "apply", selection: values });
 }
 
 export const applyCommand: Command = {

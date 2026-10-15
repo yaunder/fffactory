@@ -2,8 +2,10 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { stripVTControlCharacters } from "node:util";
 import { managedTerraformPaths } from "../../src/application/managed-terraform";
 import { planStoreDirectory } from "../../src/application/plan-store";
+import { ansiStyle, type Style } from "../../src/cli/presentation/style";
 import { run } from "../../src/cli/run";
 import { newLockRecord } from "../../src/domain/factory-lock";
 import type { Release } from "../../src/domain/instance";
@@ -48,32 +50,51 @@ import {
 import { hostApplyJson, pendingSteps, withStep } from "../../src/domain/installation";
 
 const PATH = "/work/repo/.fffactory/factory.json";
-const INSTANCE_LINE = `Instance: ${PATH} (nearest .fffactory/factory.json)`;
+/** What `fffactory COMMAND` prints first: its release, and the instance it acts on. */
+const header = (command: string, instance = `${PATH} (nearest .fffactory/factory.json)`) => [
+  `fffactory ${command} · release 0.3.0`,
+  `Instance  ${instance}`,
+];
 const ASSETS = "/home/operator/.cache/fffactory/releases/0.3.0";
-const HEADER = [
-  "Factory plan:",
-  `  Configuration: ${PATH}`,
-  "  Factory: Test factory (fff-abcd1234)",
-  "  AWS account: 123456789012, Region: eu-west-2",
-  "  Release: 0.3.0",
+/** A section's rule line, 53 columns wide. */
+const rule = (title: string) => `── ${title} ${"─".repeat(Math.max(2, 49 - title.length))}`;
+const NEXT = rule("Next");
+/** The plan section's rule and target, after the blank line that separates it. */
+const PLAN = [
+  "",
+  rule("Plan"),
+  "  Factory   Test factory (fff-abcd1234)",
+  "  Account   123456789012 · eu-west-2",
+  "  Release   0.3.0",
+  "",
+];
+/** A first plan's infrastructure: the network and builder-1's machine. */
+const CREATES = [
+  "  Infrastructure   2 to add, 0 to change, 0 to destroy",
+  `    + ${NETWORK}`,
+  `    + ${hostAddress("builder-1")}`,
 ];
 const B1 = "fff-abcd1234-builder-1";
-const WORKERS = [
-  "Worker changes, one worker at a time:",
-  `  ~ builder-1 (${B1}): install release 0.3.0 and its host configuration, then verify it`,
+/** Every later stage of builder-1, as the plan shows it. */
+const STAGES = [
+  "  Workers          one at a time",
+  "    ~ builder-1   install release 0.3.0 and host configuration, then verify",
+  "  Control plane    before worker activation",
+  "    ~ builder-1   paseo-package, service-definition, listen-address",
+  "  Repositories     one worker at a time",
+  "    ~ builder-1   reconcile 0 placed repositories as factory; preserve and report unmanaged checkouts",
+  "  Dispatch         after every readiness gate",
+  "    ~ builder-1   remove the factory dispatch schedule if it exists",
+  "  Verification     end to end: observe each worker's release, repositories, Paseo and actual dispatch schedule",
 ];
-const CONTROL_PLANE = [
-  "Control-plane changes, before worker activation:",
-  `  ~ builder-1 (${B1}): paseo-package, service-definition, listen-address`,
-];
-const REPOSITORIES = [
-  "Repository changes, one worker at a time:",
-  `  ~ builder-1 (${B1}): reconcile 0 placed repositories as factory; preserve and report unmanaged checkouts`,
-];
-const DISPATCH = [
-  "Dispatch changes, after every readiness gate:",
-  `  ~ builder-1 (${B1}): remove the factory dispatch schedule if it exists`,
-  "End-to-end verification: observe each worker's release, repositories, Paseo and actual dispatch schedule.",
+/** What `fffactory plan` prints after the plan it saved as aaaaaaaa. */
+const SAVED = [
+  "",
+  "Saved as plan aaaaaaaa, until 2026-09-30T13:00:00.000Z.",
+  "",
+  NEXT,
+  "  Apply exactly this plan:",
+  "    $ fffactory apply --plan-id aaaaaaaa",
 ];
 const REPOSITORY_RESULTS = ["Repositories:", `  synchronized  builder-1 (${B1})`];
 /** What apply prints while it installs builder-1, and once it is installed. */
@@ -86,9 +107,9 @@ const ENROLLMENT_PENDING =
   `  installed  builder-1 (${B1}): release 0.3.0 installed and verified; enrollment pending: ` +
   "GitHub, OpenAI Codex, Claude Code";
 
-/** The plan's line for a factory that declares no worker. */
+/** The plan's row for a factory that declares no worker. */
 const NO_WORKERS =
-  "Workers: none declared. Declare a host in factory.json's hosts, then create it with `fffactory apply`.";
+  "  Workers          none declared. Declare a host in factory.json's hosts, then create it with `fffactory apply`.";
 
 function text(hosts: string[], overrides: object = {}): string {
   return `${JSON.stringify({ ...declaring(...hosts), ...overrides }, null, 2)}\n`;
@@ -111,6 +132,7 @@ function cli(
     fleet?: ReturnType<typeof workerFleet>;
     controlPlane?: ControlPlane;
     workflowQueue?: WorkflowQueue;
+    styles?: { out?: Style; err?: Style };
   } = {},
 ) {
   const store = new MemoryInstanceStore({
@@ -145,6 +167,7 @@ function cli(
       sleep: fleet.deps.sleep,
       ...(options.controlPlane === undefined ? {} : { controlPlane: options.controlPlane }),
       ...(options.workflowQueue === undefined ? {} : { workflowQueue: options.workflowQueue }),
+      styles: options.styles,
     },
   );
   return {
@@ -166,20 +189,7 @@ describe("fffactory plan (plan-apply §Plan)", () => {
     const { context, out, err, planStore, terraform, assets, store } = cli();
     expect(await run(["plan"], context)).toBe(0);
     expect(err).toEqual([]);
-    expect(out).toEqual([
-      INSTANCE_LINE,
-      ...HEADER,
-      "Infrastructure changes:",
-      `  + ${NETWORK}`,
-      `  + ${hostAddress("builder-1")}`,
-      "  2 to add, 0 to change, 0 to destroy.",
-      ...WORKERS,
-      ...CONTROL_PLANE,
-      ...REPOSITORIES,
-      ...DISPATCH,
-      "Saved as plan aaaaaaaa, until 2026-09-30T13:00:00.000Z. To apply exactly it:",
-      "  fffactory apply --plan-id aaaaaaaa",
-    ]);
+    expect(out).toEqual([...header("plan"), ...PLAN, ...CREATES, ...STAGES, ...SAVED]);
     expect(planStore.saved.get(`${FACTORY}/aaaaaaaa`)).toMatchObject({
       instance_path: PATH,
       configuration_sha256: sha256Hex(new TextEncoder().encode(store.files[PATH])),
@@ -194,27 +204,78 @@ describe("fffactory plan (plan-apply §Plan)", () => {
     });
   });
 
-  test("the apply hint repeats the instance and profile the plan was made with", async () => {
+  test("the Next block repeats the instance and profile the plan was made with, quoted", async () => {
     const { context, out, store } = cli();
-    store.files["/elsewhere/my factory.json"] = store.files[PATH] as string;
-    const args = ["plan", "--instance", "/elsewhere/my factory.json", "--profile", "factory"];
+    const path = "/elsewhere/it's my factory.json";
+    store.files[path] = store.files[PATH] as string;
+    const args = ["plan", "--instance", path, "--profile", "o'brien factory"];
     expect(await run(args, context)).toBe(0);
-    expect(out.at(-1)).toBe(
-      "  fffactory apply --plan-id aaaaaaaa --instance '/elsewhere/my factory.json' --profile factory",
+    expect(out.slice(0, 2)).toEqual(header("plan", `${path} (--instance)`));
+    expect(out.slice(-3)).toEqual([
+      NEXT,
+      "  Apply exactly this plan:",
+      "    $ fffactory apply --plan-id aaaaaaaa --instance '/elsewhere/it'\\''s my factory.json' " +
+        "--profile 'o'\\''brien factory'",
+    ]);
+  });
+
+  test("a factory.json under the home directory is shown from ~", async () => {
+    const { context, out, store } = cli();
+    const path = "/home/operator/test-factory/.fffactory/factory.json";
+    store.files[path] = store.files[PATH] as string;
+    expect(await run(["plan", "--instance", path], context)).toBe(0);
+    expect(out.slice(0, 2)).toEqual(
+      header("plan", "~/test-factory/.fffactory/factory.json (--instance)"),
     );
+    expect(out.at(-1)).toBe(`    $ fffactory apply --plan-id aaaaaaaa --instance ${path}`);
+  });
+
+  test("a factory placing a repository and requesting dispatch shows each in its stage", async () => {
+    const { context, out } = cli({
+      hosts: ["builder-1"],
+      document: `${JSON.stringify(requestingDispatch(), null, 2)}\n`,
+    });
+    expect(await run(["plan"], context)).toBe(0);
+    const stages = out.indexOf("  Control plane    before worker activation");
+    expect(out.slice(stages, -SAVED.length)).toEqual([
+      "  Control plane    before worker activation",
+      "    ~ builder-1   paseo-package, service-definition, listen-address",
+      "  Repositories     one worker at a time",
+      "    ~ builder-1   reconcile 1 placed repository as factory; preserve and report unmanaged checkouts",
+      "  Dispatch         after every readiness gate",
+      "    ~ builder-1   install the dispatcher and skill, then reconcile */15 * * * * UTC with claude/configured-model, mode default, cwd /home/factory",
+      "  Verification     end to end: observe each worker's release, repositories, Paseo and actual dispatch schedule",
+    ]);
+  });
+
+  test("its human output is colored only on a stream that is (cli-output §Color)", async () => {
+    const { context, out, err } = cli({ styles: { out: ansiStyle } });
+    expect(await run(["plan"], context)).toBe(0);
+    expect(err).toEqual([]);
+    expect(out[0]).toBe(`${ansiStyle.heading("fffactory plan")} · release 0.3.0`);
+    expect(out).toContain(`    ${ansiStyle.command("fffactory apply --plan-id aaaaaaaa")}`);
+    expect(out.map((line) => stripVTControlCharacters(line))).toEqual([
+      ...header("plan"),
+      ...PLAN,
+      ...CREATES,
+      ...STAGES,
+      ...SAVED,
+    ]);
+    const refused = cli({ styles: { out: ansiStyle }, hosts: ["builder-1", "builder-2"] });
+    expect(await run(["plan"], refused.context)).toBe(1);
+    expect(refused.err.join("\n")).not.toContain("\x1b");
+    expect(refused.err[1]).toStartWith("✖ Refusing: this change needs host removal");
   });
 
   test("without infrastructure changes, the plan installs the workers and is saved", async () => {
     const { context, out, planStore } = cli({ hosts: ["builder-1"] });
     expect(await run(["plan"], context)).toBe(0);
-    expect(out.slice(-12)).toEqual([
-      "Infrastructure: no changes.",
-      ...WORKERS,
-      ...CONTROL_PLANE,
-      ...REPOSITORIES,
-      ...DISPATCH,
-      "Saved as plan aaaaaaaa, until 2026-09-30T13:00:00.000Z. To apply exactly it:",
-      "  fffactory apply --plan-id aaaaaaaa",
+    expect(out).toEqual([
+      ...header("plan"),
+      ...PLAN,
+      "  Infrastructure   no changes",
+      ...STAGES,
+      ...SAVED,
     ]);
     expect(planStore.saved.size).toBe(1);
   });
@@ -224,14 +285,12 @@ describe("fffactory plan (plan-apply §Plan)", () => {
     expect(await run(["plan"], context)).toBe(0);
     expect(err).toEqual([]);
     expect(out).toEqual([
-      INSTANCE_LINE,
-      ...HEADER,
-      "Infrastructure changes:",
-      `  + ${NETWORK}`,
-      "  1 to add, 0 to change, 0 to destroy.",
+      ...header("plan"),
+      ...PLAN,
+      "  Infrastructure   1 to add, 0 to change, 0 to destroy",
+      `    + ${NETWORK}`,
       NO_WORKERS,
-      "Saved as plan aaaaaaaa, until 2026-09-30T13:00:00.000Z. To apply exactly it:",
-      "  fffactory apply --plan-id aaaaaaaa",
+      ...SAVED,
     ]);
     expect(planStore.saved.size).toBe(1);
   });
@@ -240,13 +299,19 @@ describe("fffactory plan (plan-apply §Plan)", () => {
     const { context, out, lockStore } = cli({ bucket: false });
     expect(await run(["plan"], context)).toBe(0);
     expect(out).toEqual([
-      INSTANCE_LINE,
-      `Backend bootstrap: the state bucket ${BUCKET} does not exist yet.`,
-      ...HEADER.slice(1),
-      "Terraform will create:",
-      "  + module.state_bucket.aws_s3_bucket.state",
-      "The factory itself is planned once the state bucket exists: `fffactory apply` asks you " +
-        "to approve this bootstrap first, then plans the factory for its own approval.",
+      ...header("plan"),
+      "",
+      rule("Plan: backend bootstrap"),
+      ...PLAN.slice(2),
+      `  State bucket     ${BUCKET}, which does not exist yet`,
+      "  Infrastructure   1 to add, 0 to change, 0 to destroy",
+      "    + module.state_bucket.aws_s3_bucket.state",
+      "",
+      "The factory itself is planned once the state bucket exists.",
+      "",
+      NEXT,
+      "  Approve this bootstrap, then the factory's own plan, at a terminal:",
+      "    $ fffactory apply",
     ]);
     expect(lockStore.buckets.size).toBe(0);
   });
@@ -270,7 +335,8 @@ describe("fffactory plan (plan-apply §Plan)", () => {
     });
     expect(await run(["plan"], context)).toBe(1);
     expect(err).toEqual([
-      "Refusing to plan: factory.json pins another fffactory release than this one, 0.3.0: " +
+      "",
+      "✖ Refusing to plan: factory.json pins another fffactory release than this one, 0.3.0: " +
         "only the pinned release may plan or change this factory. Install the release " +
         "factory.json pins, or move the pin to 0.3.0 with `fffactory upgrade`.",
     ]);
@@ -281,7 +347,8 @@ describe("fffactory plan (plan-apply §Plan)", () => {
     const { context, err } = cli({ document: text(["builder-1"], { network: undefined }) });
     expect(await run(["plan"], context)).toBe(1);
     expect(err).toEqual([
-      "Refusing to plan: factory.json is not ready:",
+      "",
+      "✖ Refusing to plan: factory.json is not ready:",
       "  network.vpc_cidr: is required to plan",
       "  network.public_subnet_cidr: is required to plan",
       "  network.availability_zone: is required to plan",
@@ -292,13 +359,18 @@ describe("fffactory plan (plan-apply §Plan)", () => {
     const { context, err, planStore } = cli({ hosts: ["builder-1", "builder-2"] });
     expect(await run(["plan"], context)).toBe(1);
     expect(err).toEqual([
-      "Refusing: this change needs host removal, which only `fffactory worker terminate KEY` " +
+      "",
+      "✖ Refusing: this change needs host removal, which only `fffactory worker terminate KEY` " +
         "does (D11):",
       '  hosts: host key "builder-2" is provisioned but no longer declared: host keys cannot ' +
         "be renamed, and only `fffactory worker terminate builder-2` removes a host. Restore " +
         "it, and declare any new host under a new key beside it",
-      "Nothing was applied. Declare every provisioned host key in factory.json again, then " +
-        "remove a host with `fffactory worker terminate KEY`.",
+      "",
+      "Nothing was applied.",
+      "",
+      NEXT,
+      "  Declare every provisioned host key in factory.json again, then remove a host with " +
+        "`fffactory worker terminate KEY`.",
     ]);
     expect(planStore.saved.size).toBe(0);
   });
@@ -308,11 +380,15 @@ describe("fffactory plan (plan-apply §Plan)", () => {
     terraform.world.replace.add("builder-1");
     expect(await run(["plan"], context)).toBe(1);
     expect(err).toEqual([
-      "Refusing: this change needs host replacement, which fffactory does " +
+      "",
+      "✖ Refusing: this change needs host replacement, which fffactory does " +
         "not have yet (D11; it arrives in milestone M3):",
       `  ${hostAddress("builder-1")} would be replaced`,
-      "Nothing was applied. Change factory.json so the plan keeps every host machine, then " +
-        "plan again.",
+      "",
+      "Nothing was applied.",
+      "",
+      NEXT,
+      "  Change factory.json so the plan keeps every host machine, then plan again.",
     ]);
   });
 
@@ -321,9 +397,22 @@ describe("fffactory plan (plan-apply §Plan)", () => {
     fleet.machines.inventory = { kind: "machines", machines: [machine("builder-1", "stopped")] };
     const { context, out } = cli({ hosts: ["builder-1"], fleet });
     expect(await run(["plan"], context)).toBe(0);
-    expect(out).toContain(
-      `  = builder-1 (${B1}): skipped: stopped; start it with \`fffactory worker start builder-1\`, then apply again to install it`,
-    );
+    expect(out).toEqual([
+      ...header("plan"),
+      ...PLAN,
+      "  Infrastructure   no changes",
+      "  Workers          one at a time",
+      "    builder-1   skipped: stopped; start it with `fffactory worker start builder-1`, then " +
+        "apply again to install it",
+      "  Control plane    before worker activation",
+      "    builder-1   skipped: stopped",
+      "  Repositories     one worker at a time",
+      "    builder-1   skipped: stopped",
+      "  Dispatch         after every readiness gate",
+      "    builder-1   skipped: stopped",
+      "  Verification     end to end: observe each worker's release, repositories, Paseo and actual dispatch schedule",
+      ...SAVED,
+    ]);
   });
 
   test("an instance type change on a stopped worker is refused, naming the start command", async () => {
@@ -333,10 +422,18 @@ describe("fffactory plan (plan-apply §Plan)", () => {
     terraform.world.resize.add("builder-1");
     expect(await run(["plan"], context)).toBe(1);
     expect(err).toEqual([
-      "Refusing to plan: the plan changes the instance type of a stopped worker, and " +
+      "",
+      "✖ Refusing to plan: the plan changes the instance type of a stopped worker, and " +
         "Terraform starts a stopped instance to change its type:",
-      `  builder-1 (${B1}): ${hostAddress("builder-1")} would be updated in place`,
-      "Nothing was applied. Start it first with `fffactory worker start builder-1`, then plan again.",
+      `  builder-1   ${hostAddress("builder-1")} would be updated in place`,
+      "",
+      "Nothing was applied.",
+      "",
+      NEXT,
+      "  Start it first:",
+      "    $ fffactory worker start builder-1",
+      "  Then plan again:",
+      "    $ fffactory plan",
     ]);
     expect(planStore.saved.size).toBe(0);
   });
@@ -348,11 +445,17 @@ describe("fffactory plan (plan-apply §Plan)", () => {
     terraform.world.resize.add("builder-1");
     expect(await run(["plan"], context)).toBe(1);
     expect(err).toEqual([
-      "Refusing to plan: the plan changes the instance type of a worker the EC2 inventory " +
+      "",
+      "✖ Refusing to plan: the plan changes the instance type of a worker the EC2 inventory " +
         "could not be read to check is not stopped, and Terraform starts a stopped instance " +
         "to change its type:",
-      `  builder-1 (${B1}): ${hostAddress("builder-1")} would be updated in place`,
-      "Nothing was applied. Plan again once the EC2 inventory can be read.",
+      `  builder-1   ${hostAddress("builder-1")} would be updated in place`,
+      "",
+      "Nothing was applied.",
+      "",
+      NEXT,
+      "  Plan again once the EC2 inventory can be read:",
+      "    $ fffactory plan",
     ]);
     expect(planStore.saved.size).toBe(0);
   });
@@ -361,10 +464,15 @@ describe("fffactory plan (plan-apply §Plan)", () => {
     const { context, err, lockStore } = cli();
     lockStore.readiness.set(BUCKET, { ...READY_BUCKET, encrypted: false });
     expect(await run(["plan"], context)).toBe(1);
-    expect(err[0]).toBe(
-      `The state bucket ${BUCKET} exists, but backend bootstrap did not finish it. It lacks:`,
-    );
-    expect(err[1]).toBe("  default encryption");
+    expect(err.slice(0, 7)).toEqual([
+      "",
+      `✖ The state bucket ${BUCKET} exists, but backend bootstrap did not finish it. It lacks:`,
+      "  default encryption",
+      "",
+      NEXT,
+      "  If another first apply is still bootstrapping it, wait for that to finish, then retry.",
+      "",
+    ]);
   });
 
   test("a Terraform plan fffactory cannot read is refused", async () => {
@@ -372,7 +480,8 @@ describe("fffactory plan (plan-apply §Plan)", () => {
     terraform.world.shown = { resource_changes: "garbled" };
     expect(await run(["plan"], context)).toBe(1);
     expect(err).toEqual([
-      "Refusing to plan: Terraform's plan is not one fffactory can apply:",
+      "",
+      "✖ Refusing to plan: Terraform's plan is not one fffactory can apply:",
       "  Terraform's plan could not be read",
     ]);
   });
@@ -390,13 +499,16 @@ describe("fffactory plan (plan-apply §Plan)", () => {
         randomBytes: (count) => new Uint8Array(count).fill(9),
       }),
     );
-    expect(await run(["plan"], context)).toBe(1);
+    expect(await run(["plan", "--profile", "factory"], context)).toBe(1);
     expect(err).toEqual([
-      "The factory is locked by another operation:",
+      "",
+      "✖ The factory is locked by another operation:",
       "  Lock jjjjjjjj: apply by arn:aws:iam::123456789012:user/other on desk",
       "  Acquired 2026-09-30T11:55:00.000Z (5 min ago) by fffactory 0.3.0",
-      "Wait for it to finish. If its holder is no longer running, break the lock with " +
-        "`fffactory lock break`.",
+      "",
+      NEXT,
+      "  Wait for it to finish. If its holder is no longer running, break the lock:",
+      "    $ fffactory lock break --profile factory",
     ]);
   });
 
@@ -418,16 +530,11 @@ describe("fffactory apply (plan-apply §Apply)", () => {
     expect(err).toEqual([]);
     const key = `${FACTORY}-operations/2026-09-30T12:00:00.000Z-aaaaaaaa.json`;
     expect(out).toEqual([
-      INSTANCE_LINE,
-      ...HEADER,
-      "Infrastructure changes:",
-      `  + ${NETWORK}`,
-      `  + ${hostAddress("builder-1")}`,
-      "  2 to add, 0 to change, 0 to destroy.",
-      ...WORKERS,
-      ...CONTROL_PLANE,
-      ...REPOSITORIES,
-      ...DISPATCH,
+      ...header("apply"),
+      ...PLAN,
+      ...CREATES,
+      ...STAGES,
+      "",
       "Applying. Terraform's output is not shown; this can take several minutes.",
       ...INSTALLED,
       "Applied: the factory's infrastructure matches factory.json.",
@@ -482,16 +589,11 @@ describe("fffactory apply (plan-apply §Apply)", () => {
     terraform.calls.length = 0;
     expect(await run(["apply", "--plan-id", "aaaaaaaa"], context)).toBe(0);
     expect(out).toEqual([
-      INSTANCE_LINE,
-      ...HEADER,
-      "Infrastructure changes:",
-      `  + ${NETWORK}`,
-      `  + ${hostAddress("builder-1")}`,
-      "  2 to add, 0 to change, 0 to destroy.",
-      ...WORKERS,
-      ...CONTROL_PLANE,
-      ...REPOSITORIES,
-      ...DISPATCH,
+      ...header("apply"),
+      ...PLAN,
+      ...CREATES,
+      ...STAGES,
+      "",
       "Applying saved plan aaaaaaaa, approved by naming its ID.",
       "Applying. Terraform's output is not shown; this can take several minutes.",
       ...INSTALLED,
@@ -513,12 +615,29 @@ describe("fffactory apply (plan-apply §Apply)", () => {
     terraform.calls.length = 0;
     expect(await run(["apply", "--plan-id", "aaaaaaaa"], context)).toBe(1);
     expect(err).toEqual([
-      "Refusing to apply plan aaaaaaaa: it is no longer the plan to apply:",
+      "",
+      "✖ Refusing to apply plan aaaaaaaa: it is no longer the plan to apply:",
       "  factory.json changed after it was planned",
-      "Nothing was applied. Review a new plan with `fffactory plan`.",
+      "",
+      "Nothing was applied.",
+      "",
+      NEXT,
+      "  Review a new plan:",
+      "    $ fffactory plan",
     ]);
     expect(terraform.calls).toEqual([]);
     expect(lockStore.locks.size).toBe(0);
+  });
+
+  test("a refusal's Next block repeats the instance and profile apply was given", async () => {
+    const { context, err, store } = cli();
+    const path = "/elsewhere/my factory.json";
+    store.files[path] = store.files[PATH] as string;
+    const args = ["apply", "--instance", path, "--profile", "factory", "--plan-id", "zzzzzzzz"];
+    expect(await run(args, context)).toBe(1);
+    expect(err.at(-1)).toBe(
+      "    $ fffactory plan --instance '/elsewhere/my factory.json' --profile factory",
+    );
   });
 
   test("even a formatting change to factory.json makes a saved plan stale", async () => {
@@ -533,14 +652,20 @@ describe("fffactory apply (plan-apply §Apply)", () => {
     const { context, err, planStore } = cli();
     expect(await run(["apply", "--plan-id", "zzzzzzzz"], context)).toBe(1);
     expect(err).toEqual([
-      "There is no saved plan zzzzzzzz for this factory here: it expired, was applied, or " +
-        "was saved elsewhere. Review a new plan with `fffactory plan`.",
+      "",
+      "✖ There is no saved plan zzzzzzzz for this factory here: it expired, was applied, or " +
+        "was saved elsewhere",
+      "",
+      NEXT,
+      "  Review a new plan:",
+      "    $ fffactory plan",
     ]);
     expect(await run(["plan"], context)).toBe(0);
     planStore.damage(FACTORY, "aaaaaaaa");
     err.length = 0;
     expect(await run(["apply", "--plan-id", "aaaaaaaa"], context)).toBe(1);
-    expect(err[0]).toStartWith("Saved plan aaaaaaaa cannot be applied");
+    expect(err[1]).toStartWith("✖ Saved plan aaaaaaaa cannot be applied");
+    expect(err.at(-1)).toBe("    $ fffactory plan");
   });
 
   test("a failed Terraform apply says what may have changed and how to converge", async () => {
@@ -858,7 +983,8 @@ describe("fffactory apply (plan-apply §Apply)", () => {
     });
     expect(await run(["apply"], context)).toBe(0);
     expect(prompt.asked).toHaveLength(2);
-    expect(out[1]).toBe(`Backend bootstrap: the state bucket ${BUCKET} does not exist yet.`);
+    expect(out[3]).toBe(rule("Plan: backend bootstrap"));
+    expect(out).toContainEqual(rule("Plan"));
     expect(lockStore.buckets.has(BUCKET)).toBe(true);
   });
 
@@ -976,13 +1102,13 @@ describe("fffactory apply (plan-apply §Apply)", () => {
   test("refusals to plan are shown for apply too", async () => {
     const { context, err } = cli({ interactive: true, hosts: ["builder-1", "builder-2"] });
     expect(await run(["apply"], context)).toBe(1);
-    expect(err[0]).toStartWith("Refusing: this change needs host removal");
+    expect(err[1]).toStartWith("✖ Refusing: this change needs host removal");
     const other = cli({
       interactive: true,
       document: text(["builder-1"], { release: "0.2.0" }),
     });
     expect(await run(["apply"], other.context)).toBe(1);
-    expect(other.err[0]).toStartWith("Refusing to apply: factory.json pins another");
+    expect(other.err[1]).toStartWith("✖ Refusing to apply: factory.json pins another");
   });
 
   test("an empty --profile is refused", async () => {

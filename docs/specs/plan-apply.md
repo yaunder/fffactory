@@ -22,7 +22,22 @@ factory.json's release pin to the running release.
 
 Both commands:
 
-1. resolve and validate factory.json and print `Instance: PATH (SOURCE)`;
+1. resolve and validate factory.json, printing first the command's header,
+   laid out as [CLI output](cli-output.md) describes:
+
+   ```text
+   fffactory plan · release 0.3.0
+   Instance  /work/.fffactory/factory.json (nearest .fffactory/factory.json)
+   ```
+
+   The path is the selected factory.json's, whole: under the operator's home
+   directory it is shown from `~`
+   (`Instance  ~/test-factory/.fffactory/factory.json (--instance)`), and it is
+   never shortened further, since it is how the operator tells which
+   factory.json the command acts on. The source is named in `describeSource`'s
+   words, the ones doctor's JSON summary publishes
+   ([instance configuration §Instance discovery](instance-configuration.md#instance-discovery)),
+   never a second mapping;
 2. run the account check and refuse, with doctor's summary, details and next
    action, unless the caller is in `aws.account_id`
    ([instance configuration §Credentials](instance-configuration.md#credentials));
@@ -33,6 +48,20 @@ Both commands:
    [complete](instance-configuration.md#completeness), listing each missing
    field `is required to plan`.
 
+### How refusals are shown
+
+A refusal of `plan`, `apply` or `upgrade` that concerns its plan (the pin
+guard, an incomplete factory.json, an unready state bucket, a held lock, the
+D11 and stopped-worker refusals, an unreadable Terraform plan and a saved
+plan's) goes to standard error, after a blank line that separates it from the
+header on a terminal: an error status line (`✖`), each reason indented under
+it, `Nothing was applied.` where the refusal concerns a change, and, where
+there is something to do, a closing Next block. A command it names repeats the
+`--instance` and `--profile` the refused command was given, quoted for a POSIX
+shell. Each example below shows it. The account check's refusal (2) and an
+invalid factory.json keep their own lines, as every other command prints them,
+until those commands are restyled.
+
 ### CLI/pin match guard
 
 Only the release factory.json pins may plan or change the factory
@@ -40,7 +69,7 @@ Only the release factory.json pins may plan or change the factory
 is never echoed:
 
 ```text
-Refusing to plan: factory.json pins another fffactory release than this one, 0.3.0: only the pinned release may plan or change this factory. Install the release factory.json pins, or move the pin to 0.3.0 with `fffactory upgrade`.
+✖ Refusing to plan: factory.json pins another fffactory release than this one, 0.3.0: only the pinned release may plan or change this factory. Install the release factory.json pins, or move the pin to 0.3.0 with `fffactory upgrade`.
 ```
 
 When the pin is a later release than the running one, the refusal ends
@@ -74,8 +103,24 @@ keeps Terraform's state lock as well.
 
 1. When the state bucket does not exist, the plan is
    [backend bootstrap's](provisioning.md#backend-bootstrap), shown as bootstrap
-   shows it, followed by `The factory itself is planned once the state bucket
-   exists: ...`. No plan is saved; exit 0.
+   shows it, then how the factory gets planned. No plan is saved; exit 0:
+
+   ```text
+   ── Plan: backend bootstrap ──────────────────────────
+     Factory   Test factory (fff-abcd1234)
+     Account   123456789012 · eu-west-2
+     Release   0.3.0
+
+     State bucket     fff-abcd1234-state, which does not exist yet
+     Infrastructure   1 to add, 0 to change, 0 to destroy
+       + module.state_bucket.aws_s3_bucket.state
+
+   The factory itself is planned once the state bucket exists.
+
+   ── Next ─────────────────────────────────────────────
+     Approve this bootstrap, then the factory's own plan, at a terminal:
+       $ fffactory apply --profile factory
+   ```
 2. A bucket bootstrap did not finish is refused as bootstrap refuses it.
 3. While the factory is locked, planning is refused with the holder
    ([provisioning §Lock](provisioning.md#lock)): a plan made during another
@@ -85,43 +130,58 @@ keeps Terraform's state lock as well.
    worker's inspection, repository reconciliation for every declared worker,
    the complete requested dispatch projection (or schedule removal), and
    end-to-end verification.
-5. The plan is printed:
+5. The plan is printed, as the `Plan` section, then the plan saved, and a
+   closing Next block applying exactly it:
 
    ```text
-   Factory plan:
-     Configuration: /work/.fffactory/factory.json
-     Factory: Test factory (fff-abcd1234)
-     AWS account: 123456789012, Region: eu-west-2
-     Release: 0.3.0
-   Infrastructure changes:
-     + module.network.aws_vpc.this
-     + module.hosts.aws_instance.host["builder-1"]
-     2 to add, 0 to change, 0 to destroy.
-   Worker changes, one worker at a time:
-     ~ builder-1 (fff-abcd1234-builder-1): install release 0.3.0 and its host configuration, then verify it
-   Control-plane changes, before worker activation:
-     ~ builder-1 (fff-abcd1234-builder-1): paseo-package, service-definition, listen-address, password
-   Repository changes, one worker at a time:
-     ~ builder-1 (fff-abcd1234-builder-1): reconcile 0 placed repositories as factory; preserve and report unmanaged checkouts
-   Dispatch changes, after every readiness gate:
-     ~ builder-1 (fff-abcd1234-builder-1): remove the factory dispatch schedule if it exists
-   End-to-end verification: observe each worker's release, repositories, Paseo and actual dispatch schedule.
-   Saved as plan k3x9q2ab, until 2026-09-30T13:00:00.000Z. To apply exactly it:
-     fffactory apply --plan-id k3x9q2ab
+   fffactory plan · release 0.3.0
+   Instance  /work/.fffactory/factory.json (nearest .fffactory/factory.json)
+
+   ── Plan ─────────────────────────────────────────────
+     Factory   Test factory (fff-abcd1234)
+     Account   123456789012 · eu-west-2
+     Release   0.3.0
+
+     Infrastructure   2 to add, 0 to change, 0 to destroy
+       + module.network.aws_vpc.this
+       + module.hosts.aws_instance.host["builder-1"]
+     Workers          one at a time
+       ~ builder-1   install release 0.3.0 and host configuration, then verify
+     Control plane    before worker activation
+       ~ builder-1   paseo-package, service-definition, listen-address, password
+     Repositories     one worker at a time
+       ~ builder-1   reconcile 0 placed repositories as factory; preserve and report unmanaged checkouts
+     Dispatch         after every readiness gate
+       ~ builder-1   remove the factory dispatch schedule if it exists
+     Verification     end to end: observe each worker's release, repositories, Paseo and actual dispatch schedule
+
+   Saved as plan k3x9q2ab, until 2026-09-30T13:00:00.000Z.
+
+   ── Next ─────────────────────────────────────────────
+     Apply exactly this plan:
+       $ fffactory apply --plan-id k3x9q2ab
    ```
 
    The apply command repeats the `--instance` and `--profile` the plan was
-   given, quoted for a POSIX shell where needed, since a saved plan applies
-   only with the same factory.json. Each change shows Terraform's symbol: `+`
-   create, `~` update, `-` delete, `-/+` and `+/-` replace; any other set of
+   given, quoted for a POSIX shell where needed (`--instance
+   '/elsewhere/it'\''s my factory.json'`), since a saved plan applies only
+   with the same factory.json. The section names the factory, its account and
+   Region, and the release; the factory.json is the header's. Each stage is a
+   row, its label aligned with the others'
+   ([CLI output §Rows](cli-output.md#rows)), and its changes are indented under
+   it, each worker by its key alone (its hostname is the factory ID and the key).
+   The infrastructure row tallies the changes, then shows each with Terraform's
+   symbol: `+` create, `~` update, `-` delete, `-/+` and `+/-` replace (in
+   color, green, yellow, and red for a delete or replacement); any other set of
    actions is shown by name, and reads and no-ops are left out. Without
-   infrastructure changes it prints `Infrastructure: no changes.`. Every plan
-   is saved, even one with nothing to change. A factory that declares a worker
-   has the workers, control-plane, repository, dispatch and verification
-   stages' changes; one that declares none has no stage after the
-   infrastructure ([An empty factory](#an-empty-factory)). A saved plan
-   contains the dispatch projection; a record without it is damaged and is
-   never applied.
+   infrastructure changes the row reads `no changes`. A worker's change in a
+   stage is marked `~`; a worker the stage sends nothing (stopped, or whose
+   Paseo is unchanged) has no glyph. Every plan is saved, even one with nothing
+   to change. A factory that declares a worker has the workers, control-plane,
+   repository, dispatch and verification stages' changes; one that declares
+   none has no stage after the infrastructure
+   ([An empty factory](#an-empty-factory)). A saved plan contains the dispatch
+   projection; a record without it is damaged and is never applied.
 
 ### An empty factory
 
@@ -133,12 +193,20 @@ Its plan is the factory's shared infrastructure alone: the
 [projection](provisioning.md#terraform-inputs) has no hosts and no Paseo
 passwords, Terraform plans no instance, and the hosts' policy allows only the
 Tailscale enrollment key. In place of the workers and later stages the plan
-shows:
+shows how to add one:
 
 ```text
-Infrastructure: no changes.
-Workers: none declared. Declare a host in factory.json's hosts, then create it with `fffactory apply`.
+── Plan ─────────────────────────────────────────────
+  Factory   Test factory (fff-abcd1234)
+  Account   123456789012 · eu-west-2
+  Release   0.3.0
+
+  Infrastructure   no changes
+  Workers          none declared. Declare a host in factory.json's hosts, then create it with `fffactory apply`.
 ```
+
+Its `fffactory apply` repeats the `--instance` and `--profile` the plan was
+given.
 
 Apply asks for the approval of that plan and applies it as any other, under the
 lock and its record. It installs nothing and reaches no worker: `Workers: none
@@ -181,7 +249,7 @@ and is verified, whatever it runs now: the steps are idempotent, so rerunning
 apply converges what remains. The stage's changes therefore depend only on
 factory.json's text and the release, which a saved plan is bound to; they are
 shown after the infrastructure's, one line per worker, and approved with them.
-`declaredWorkers` (`src/domain/plan.ts`) makes them, and `describeWorkers`
+`declaredWorkers` (`src/domain/plan.ts`) makes them, and `planSection`
 (`src/cli/presentation/plan.ts`) shows them.
 
 Under the lock, after the infrastructure stage (applied, or with no changes
@@ -351,14 +419,24 @@ worker's power while apply runs.
   its control-plane observation is `stopped`, with no change.
 
   ```text
-  Worker changes, one worker at a time:
-    ~ builder-1 (fff-abcd1234-builder-1): install release 0.3.0 and its host configuration, then verify it
-    = builder-2 (fff-abcd1234-builder-2): skipped: stopped; start it with `fffactory worker start builder-2`, then apply again to install it
-  Control-plane changes, before worker activation:
-    ~ builder-1 (fff-abcd1234-builder-1): paseo-package, service-definition
-    = builder-2 (fff-abcd1234-builder-2): skipped: stopped
+    Infrastructure   no changes
+    Workers          one at a time
+      ~ builder-1   install release 0.3.0 and host configuration, then verify
+        builder-2   skipped: stopped; start it with `fffactory worker start builder-2`, then apply again to install it
+    Control plane    before worker activation
+      ~ builder-1   paseo-package, service-definition
+        builder-2   skipped: stopped
+    Repositories     one worker at a time
+      ~ builder-1   reconcile 0 placed repositories as factory; preserve and report unmanaged checkouts
+        builder-2   skipped: stopped
+    Dispatch         after every readiness gate
+      ~ builder-1   remove the factory dispatch schedule if it exists
+        builder-2   skipped: stopped
+    Verification     end to end: observe each worker's release, repositories, Paseo and actual dispatch schedule
   ```
 
+  The start command repeats the `--instance` and `--profile` the plan was
+  given.
 - A saved plan records them in `stopped_workers`, and is stale once a worker
   has been started or stopped since ([Freshness](#freshness)).
 - A plan that changes the instance type of a worker stopped or stopping, or of
@@ -394,15 +472,23 @@ inventory it reads under the lock, so a worker stopped since the plan was made,
 or stopping now, is refused too:
 
 ```text
-Refusing to plan: the plan changes the instance type of a stopped worker, and Terraform starts a stopped instance to change its type:
-  builder-2 (fff-abcd1234-builder-2): module.hosts.aws_instance.host["builder-2"] would be updated in place
-Nothing was applied. Start it first with `fffactory worker start builder-2`, then plan again.
+✖ Refusing to plan: the plan changes the instance type of a stopped worker, and Terraform starts a stopped instance to change its type:
+  builder-1   module.hosts.aws_instance.host["builder-1"] would be updated in place
+
+Nothing was applied.
+
+── Next ─────────────────────────────────────────────
+  Start it first:
+    $ fffactory worker start builder-1
+  Then plan again:
+    $ fffactory plan
 ```
 
-A stopping worker's line ends `, and it is stopping`, and the last line says
-to start it `` `fffactory worker start KEY` once it has stopped ``
-(`worker start` refuses a stopping machine,
-[worker lifecycle](worker-lifecycle.md)).
+Several workers are each named, and started (`Start each first:`). A stopping
+worker's line ends `, and it is stopping`, and the Next block says to start it
+once it has stopped (`Start it first, once it has stopped:`; `worker start`
+refuses a stopping machine, [worker lifecycle](worker-lifecycle.md)). An
+upgrade's refusal plans again with `fffactory upgrade`.
 
 With the inventory unreadable no worker is known not to be stopped, so `plan`
 and `apply` (fresh or saved, whose staleness cannot see a worker stopped since)
@@ -410,9 +496,14 @@ refuse a change of any worker's instance type, failing closed; everything else
 goes on as above:
 
 ```text
-Refusing to apply: the plan changes the instance type of a worker the EC2 inventory could not be read to check is not stopped, and Terraform starts a stopped instance to change its type:
-  builder-2 (fff-abcd1234-builder-2): module.hosts.aws_instance.host["builder-2"] would be updated in place
-Nothing was applied. Plan again once the EC2 inventory can be read.
+✖ Refusing to apply: the plan changes the instance type of a worker the EC2 inventory could not be read to check is not stopped, and Terraform starts a stopped instance to change its type:
+  builder-1   module.hosts.aws_instance.host["builder-1"] would be updated in place
+
+Nothing was applied.
+
+── Next ─────────────────────────────────────────────
+  Plan again once the EC2 inventory can be read:
+    $ fffactory plan
 ```
 
 Other in-place updates of a stopped worker's machine, such as its tags or root
@@ -434,15 +525,23 @@ naming the capability the change needs, and nothing is saved or applied:
 | The Terraform plan does anything to an `aws_instance` but create it, update it in place or leave it: deletes, replaces (`delete` then `create`, or `create` then `delete`) or forgets it, or takes any action fffactory does not know | `host replacement` |
 
 ```text
-Refusing: this change needs host removal, which only `fffactory worker terminate KEY` does (D11):
+✖ Refusing: this change needs host removal, which only `fffactory worker terminate KEY` does (D11):
   hosts: host key "builder-2" is provisioned but no longer declared: host keys cannot be renamed, and only `fffactory worker terminate builder-2` removes a host. Restore it, and declare any new host under a new key beside it
-Nothing was applied. Declare every provisioned host key in factory.json again, then remove a host with `fffactory worker terminate KEY`.
+
+Nothing was applied.
+
+── Next ─────────────────────────────────────────────
+  Declare every provisioned host key in factory.json again, then remove a host with `fffactory worker terminate KEY`.
 ```
 
 ```text
-Refusing: this change needs host replacement, which fffactory does not have yet (D11; it arrives in milestone M3):
+✖ Refusing: this change needs host replacement, which fffactory does not have yet (D11; it arrives in milestone M3):
   module.hosts.aws_instance.host["builder-1"] would be replaced
-Nothing was applied. Change factory.json so the plan keeps every host machine, then plan again.
+
+Nothing was applied.
+
+── Next ─────────────────────────────────────────────
+  Change factory.json so the plan keeps every host machine, then plan again.
 ```
 
 A host machine is a resource of type `aws_instance` whose mode is `managed`;
@@ -526,12 +625,17 @@ will be applied is read back with `showPlan`: the changes shown for approval,
 and checked against D11, are the file's, and a file whose changes differ from
 its record's is damaged.
 
-Refusal:
+Refusal, each reason under it:
 
 ```text
-Refusing to apply plan k3x9q2ab: it is no longer the plan to apply:
+✖ Refusing to apply plan k3x9q2ab: it is no longer the plan to apply:
   factory.json changed after it was planned
-Nothing was applied. Review a new plan with `fffactory plan`.
+
+Nothing was applied.
+
+── Next ─────────────────────────────────────────────
+  Review a new plan:
+    $ fffactory plan
 ```
 
 The other reasons: `it expired at T`, `it was planned for another factory.json,
@@ -540,10 +644,36 @@ other release assets than this fffactory's` (only when the release is the
 same), `it was planned in AWS account A, not this one`, `the factory's
 Terraform state changed after it was planned`, `the state bucket no longer
 exists`, `worker KEY was stopped when it was planned, and is not now`, `worker
-KEY is stopped now, and was not when it was planned`, and `the EC2 inventory
-could not be read to check that worker KEY is still stopped`. An unknown or
-pruned plan ID: `There is no saved plan ID for this factory here: ...`; a
-damaged one: `Saved plan ID cannot be applied: ...`.
+KEY is stopped now, and was not when it was planned`, `the EC2 inventory could
+not be read to check that worker KEY is still stopped`, and `Paseo state on
+HOSTNAME changed after it was planned`. An unknown or pruned plan ID is
+refused `✖ There is no saved plan ID for this factory here: it expired, was
+applied, or was saved elsewhere`, a damaged one `✖ Saved plan ID cannot be
+applied: its record cannot be read, or its Terraform plan changed after it was
+saved`, each with the same Next block. The `fffactory plan` it names repeats
+the `--instance` and `--profile` apply was given.
+
+An existing worker's Paseo state (`control_plane[].observation`) is compared
+again under the lock, as the workers stage reaches the worker:
+
+```text
+✖ Refusing to apply plan k3x9q2ab: it is no longer the plan to apply:
+  Paseo state on fff-abcd1234-builder-1 changed after it was planned
+
+Nothing was applied.
+
+── Next ─────────────────────────────────────────────
+  Review a new plan:
+    $ fffactory plan
+```
+
+TODO(re-evaluate when [#12](https://github.com/yaunder/fffactory/issues/12)
+lands): update this refusal's wording and its test to #12's corrected outcome.
+That comparison runs after the infrastructure stage has applied the plan's
+Terraform changes, so `Nothing was applied.` is known to be misleading for a
+plan with infrastructure changes. It is today's wording, kept unchanged by the
+restyling, not the intended contract: #12 moves the check before anything is
+applied, or reports what was.
 
 Plans are short-lived. Each `plan` and `apply` first prunes the factory's plans
 that expired over a day ago, and plan directories never saved that were made
@@ -577,8 +707,10 @@ After the checks above, and a saved plan's local freshness:
    plan file is read back: its changes, which must be its record's, are the
    plan, and the D11 refusals apply to them. Without one, the infrastructure stage is planned
    afresh, as `plan` plans it, and every refusal applies.
-4. One approval tied to exactly that plan: the plan is printed, then, at a
-   terminal, `Apply this plan? Only "yes" applies it: `. Anything but `yes`
+4. One approval tied to exactly that plan: the plan is printed as `plan`
+   prints its `Plan` section (a first apply's bootstrap as its `Plan: backend
+   bootstrap` section), then, after a blank line, at a terminal, `Apply this
+   plan? Only "yes" applies it: `. Anything but `yes`
    (Ctrl-C included, which cancels the question) applies nothing: `Not
    approved: nothing was applied.`, exit 1. With `--plan-id`, naming the plan
    ID is the approval of exactly the plan `fffactory plan` showed under it, so
@@ -808,7 +940,8 @@ terminal.` There is no saved upgrade plan.
 
 ### Before anything reaches AWS
 
-1. factory.json is selected (`Instance: PATH (SOURCE)`) and read, and its
+1. factory.json is selected (the header, `fffactory upgrade · release R`, then
+   `Instance  PATH (SOURCE)`) and read, and its
    `schema_version` is compared with the running release's before it is
    validated, since a release of another schema version could not validate it
    ([below](#compatibility-refusals-d11)).
@@ -844,17 +977,37 @@ then rerun `fffactory upgrade`.`, exit 1.
    factory.json as it will be once the pin moves: the document read, with only
    `release` changed to the running release. Every refusal of plan and apply
    applies, and the workers stage installs the running release.
-2. The pin move is shown first, then the plan, and approved together:
+2. The pin move is shown with the plan, beside the release it moves to, and
+   approved together:
 
    ```text
-   Upgrade: factory.json's release pin moves from 0.2.0 to 0.3.0. It is written once you approve this plan, before anything is applied.
-   Factory plan:
-     ...
-     Release: 0.3.0
-   ...
-   Move the pin and apply this plan? Only "yes" does:
+   fffactory upgrade · release 0.3.0
+   Instance  /work/repo/.fffactory/factory.json (nearest .fffactory/factory.json)
+
+   ── Plan ─────────────────────────────────────────────
+     Factory   Test factory (fff-abcd1234)
+     Account   123456789012 · eu-west-2
+     Release   0.3.0
+     Pin       factory.json's release pin moves from 0.2.0 to 0.3.0, written once you approve this plan, before anything is applied
+
+     Infrastructure   no changes
+     Workers          one at a time
+       ~ builder-1   install release 0.3.0 and host configuration, then verify
+     Control plane    before worker activation
+       ~ builder-1   paseo-package, service-definition, listen-address
+     Repositories     one worker at a time
+       ~ builder-1   reconcile 0 placed repositories as factory; preserve and report unmanaged checkouts
+     Dispatch         after every readiness gate
+       ~ builder-1   remove the factory dispatch schedule if it exists
+     Verification     end to end: observe each worker's release, repositories, Paseo and actual dispatch schedule
+
+   Move the pin and apply this plan? Only "yes" does: yes
    ```
 
+   The plan shows every stage it approves.
+   TODO(re-evaluate when [#11](https://github.com/yaunder/fffactory/issues/11)
+   lands): `upgrade` does not yet apply the control-plane, dispatch and
+   verification stages its plan shows; the plan is right, the run is #11's.
    The earlier pin is shown only when it is a plain `MAJOR.MINOR.PATCH`,
    which cannot hold anything else; otherwise `from the release it pins now`.
 3. Once approved, and only then, the new pin is written (`factory.json now
@@ -879,8 +1032,9 @@ skipped worker leaves the pin moved; the failure's rerun line names
 `fffactory apply`, which this release may now run and which converges what
 remains. Declined, refused, a planning failure, or an interrupt before the pin
 was written leave the pin where it was, and add on standard error
-`factory.json's pin was not moved: it still pins the release it pinned.`; their
-rerun lines, where they have one, name `fffactory upgrade`. A failure moving
+`factory.json's pin was not moved: it still pins the release it pinned.`, after
+the refusal's reasons and before its Next block when the plan was refused; their
+rerun lines and Next blocks, where they have one, name `fffactory upgrade`. A failure moving
 the pin is `Moving factory.json's pin failed: REASON. Nothing was applied.`. A
 failure once the pin was written and before anything is applied (its record
 could not be written) is `Upgrading failed once factory.json's pin moved:
@@ -927,12 +1081,16 @@ naming the capability, and nothing is written or applied:
 | Upgrade | Capability named | Reason |
 | --- | --- | --- |
 | factory.json's `schema_version` is earlier than the running release's | `schema migration` | `factory.json has schema version 1, and this release reads and writes schema version 2` |
-| The pin is earlier than `base_generation_since` | `base migration` | `release 0.4.0 needs base generation 2, which arrived in release 0.3.5: workers set up by the release factory.json pins have an older base` |
+| The pin is earlier than `base_generation_since` | `base migration` | `release 0.3.1 needs base generation 2, which arrived in release 0.3.0: workers set up by the release factory.json pins have an older base` |
 
 ```text
-Refusing: this change needs base migration, which fffactory does not have yet (D11; it arrives in milestone M3):
-  release 0.4.0 needs base generation 2, which arrived in release 0.3.5: workers set up by the release factory.json pins have an older base
-Nothing was applied. factory.json still pins its release; keep using that release until base migration arrives.
+✖ Refusing: this change needs base migration, which fffactory does not have yet (D11; it arrives in milestone M3):
+  release 0.3.1 needs base generation 2, which arrived in release 0.3.0: workers set up by the release factory.json pins have an older base
+
+Nothing was applied.
+
+── Next ─────────────────────────────────────────────
+  factory.json still pins its release; keep using that release until base migration arrives.
 ```
 
 A factory.json whose `schema_version` is later than the running release's was
@@ -966,8 +1124,9 @@ the pin move) or backend bootstrap's (its target, bucket and creations). The
 `bootstrapBackend` and `upgradeFactory` return or pass reviews and typed
 refusals: each saved plan's staleness is a `StaleReason`, an unreadable or
 non-create plan an `UnexpectedPlan`, an unready state bucket an `UnreadyBucket`.
-Only `src/cli/presentation/` lays any of them out as text, so what each command
-prints is unchanged by where the plan was made.
+Only `src/cli/presentation/` lays any of them out, in the
+[layout blocks](cli-output.md#layout-blocks), so what each command prints is
+unchanged by where the plan was made.
 
 | Layer | Module | Responsibility |
 | --- | --- | --- |
@@ -989,10 +1148,12 @@ prints is unchanged by where the plan was made.
 | Application | `src/application/lock-store.ts` | `writeOperation` and `stateRevision` on the state bucket port. |
 | Infrastructure | `src/infrastructure/plan-store.ts` | `filesystemPlanStore`: private plan directories, the plan file's digest, pruning. |
 | Infrastructure | `src/infrastructure/aws-s3-lock-store.ts` | PutObject of operation records; HeadObject of the state object. |
-| CLI adapter | `src/cli/presentation/plan.ts` | Every plan review, refusal and stale reason as text: `describePlan` (with `describeTarget`, `describeInfrastructure`, the `+ ~ -` glyphs, `describeWorkers`, `describeControlPlane`, `describeRepositories`, `describeDispatch`), `describePinMove`, `describeBootstrapPlan`, `describeReview`, `describeRemovalPlan`, `describeD11Refusal`, `describeStoppedResizeRefusal`, `describeUnexpectedPlan`, `staleRefusal` and `describeStaleReason`, and `unreadyBucketRefusal` with the AWS CLI commands that complete the bucket. |
+| CLI adapter | `src/cli/presentation/plan.ts` | Every plan review and refusal in blocks: `planSection` (the target rows and an upgrade's pin move, the infrastructure tally and changes with Terraform's symbols, then each stage's row with each worker's change), `bootstrapSection`, `reviewBlocks`, `savedPlanReport` and `bootstrapFirstReport` (`plan`'s Next block), `planRefusalReport` (each `PlanRefusal`), `d11Report`, `staleReport`, `unknownPlanReport` and `damagedPlanReport`, with `describeStaleReason` and `describeUnexpectedPlan`, and the unready bucket's AWS CLI commands; `describeRemovalPlan`, still unstyled. |
+| CLI adapter | `src/cli/presentation/command-line.ts` | `fffactoryCommand`: a command a Next block names, with the `--instance` and `--profile` given, quoted for a POSIX shell (`shellWord`). |
+| CLI adapter | `src/cli/presentation/instance-source.ts` | `instanceHeader`: the command, its release, and the instance (`displayPath`, `describeSource`'s words). |
 | CLI adapter | `src/cli/presentation/workers.ts` | Apply's workers as text (`workerLines`): each outcome under its aligned label, and an installed worker's enrollment rendered from its `WorkerEnrollment` ([readiness §Where it is reported](readiness.md#where-it-is-reported)). |
-| CLI adapter | `src/cli/presentation/lock.ts` | A held lock and the lock refusal as text (`describeHeldLock`, `lockRefusal`; [provisioning §Lock](provisioning.md#lock)). |
-| CLI adapter | `src/cli/commands/plan.ts`, `src/cli/commands/apply.ts`, `src/cli/commands/upgrade.ts`, `src/cli/commands/planning.ts` | The commands, the approval at the terminal (`operatorApproval` shows the review), and what they share. |
+| CLI adapter | `src/cli/presentation/lock.ts` | A held lock and the lock refusal (`describeHeldLock`, `lockRefusalReport`; [provisioning §Lock](provisioning.md#lock)). |
+| CLI adapter | `src/cli/commands/plan.ts`, `src/cli/commands/apply.ts`, `src/cli/commands/upgrade.ts`, `src/cli/commands/planning.ts` | The commands, the approval at the terminal (`operatorApproval` shows the review), and what they share: the header (`planningBasis`), `printReport` and `printPlanRefusal`, and an upgrade's pin notice before a refusal's Next block (`Reporting.notice`). |
 | CLI adapter | `src/cli/diagnostics.ts`, `src/cli/run.ts` | The path of a failed Terraform command's diagnostics, printed with the failure. |
 | CLI adapter | `src/cli/interrupts.ts` | `interruptible`: the interrupt notice and flag, the sleep an interrupt wakes, stopping running tools, then, for a command that waits on an interrupt, waiting `RETURN_GRACE_MS` at most for it to return, before exiting with 128 plus the signal's number; a second signal kills and exits at once. |
 | CLI adapter | `src/cli/run.ts`, `src/cli/context.ts` | `waitsOnInterrupt`: only `apply`, `upgrade`, `doctor`, `status` and `worker` (`Command.waitsOnInterrupt`) are waited for. |
@@ -1007,11 +1168,19 @@ inventory unreadable, refused and an unreadable change failing closed,
 `stopped_workers` round-tripping and every stopped staleness reason),
 `tests/domain/release-compatibility.test.ts` (the pin move never carrying a pin
 that is not a plain release), `tests/cli/presentation/plan.test.ts` (each review
-and refusal as text: the target, changes and tally, every stage with stopped
-workers shown skipped, the pin move, backend bootstrap's plan, an unready
-bucket's guidance, both D11 refusals, the resize refusals, every `StaleReason`'s
-words, the removal plan), `tests/domain/rollout.test.ts` (a stopped worker neither
-stopping the rollout nor making it partial, the first boot's deadline, the
+and refusal as plain text, and the plan section's and a refusal's color: the
+target, changes and tally, every stage with stopped workers shown skipped, an
+empty factory, the pin move, backend bootstrap's plan, `plan`'s Next block and
+its quoted instance and profile, the instance and profile a plan row's command
+repeats, data such as the factory name and dispatch values shown verbatim, an
+unready bucket's guidance, both D11 refusals, the resize refusals, every
+`StaleReason`'s words and the stale, unknown and damaged plan refusals, the
+removal plan), `tests/cli/presentation/instance-source.test.ts` (the header, a
+path under home shown from `~`, a path shown verbatim),
+`tests/cli/presentation/command-line.test.ts` (POSIX quoting of spaces and
+single quotes), `tests/cli/presentation/lock.test.ts` (the lock refusal, its
+holder shown verbatim, and its Next block), `tests/domain/rollout.test.ts` (a
+stopped worker neither stopping the rollout nor making it partial, the first boot's deadline, the
 tailnet states still joining, the bootstrap refusal waited for, the timed-out
 failure and the rollout going on after it), `tests/domain/operation.test.ts`,
 `tests/domain/stable-host-keys.test.ts` (recorded host keys),
@@ -1077,8 +1246,11 @@ stubbed and against `tests/support/stub-s3.ts`),
 question), `tests/cli/presentation/workers.test.ts` (each worker outcome's
 lines, an installed worker's pending accounts or full enrollment),
 `tests/cli/plan-apply.test.ts` (output, exit codes and every refusal
-in process, the workers' lines and exit codes 0, 2 and 1; an empty factory
-planning its shared infrastructure alone with `Workers: none declared.`, and
+in process, the plan's every stage including a placed repository and requested
+dispatch, `plan`'s Next block repeating a quoted instance and profile, a
+refusal's Next block repeating them, and human output colored only on the
+stream that is, the workers' lines and exit codes 0, 2 and 1; an empty factory
+planning its shared infrastructure alone with its `Workers` row `none declared`, and
 applying it, then nothing, with exit 0; a stopped worker
 shown skipped in the plan, listed `stopped` by apply with exit 0, its resize
 refused, and with the inventory unreadable skipped with exit 2 as before and a
@@ -1102,7 +1274,9 @@ does not wait exiting once its tools stop, without waiting for it; each
 signal's status; a second signal at once; sleeps woken),
 `tests/cli/run.test.ts` (only apply, upgrade, doctor, status and worker wait
 on an interrupt; `host`, `secret` and `lock` do not), `tests/cli/main.test.ts`
-(doctor's interrupt notice, which offers no second interrupt), and
+(doctor's interrupt notice, which offers no second interrupt; the spawned
+`plan`'s header plain on an ordinary pipe, colored there only by `FORCE_COLOR`,
+and plain again under `NO_COLOR`, `TERM=dumb` or `FORCE_COLOR=0`), and
 `tests/assets/terraform/guardrails.test.ts` (the factory root's backend key is
 `FACTORY_STATE_KEY`, and it outputs `host_keys`).
 
@@ -1125,8 +1299,9 @@ its lock broken and apply finishing; every refusal before AWS: nothing to
 upgrade, a downgrade, no pin, base and schema D11),
 `tests/cli/upgrade.test.ts` (the output and question, plan passing the guard
 once upgraded, declined, a failed apply naming `fffactory apply`, a failure
-once the pin moved, no state bucket, no terminal,
-nothing to upgrade and the other refusals without reaching AWS, usage),
+once the pin moved, no state bucket, no terminal, a held lock refusing it with
+the pin notice before the Next block, nothing to upgrade and the other refusals
+without reaching AWS, usage),
 `tests/application/set-secret.test.ts` and `tests/cli/secret.test.ts` (the guard
 on `secret set` before AWS), `tests/cli/lock.test.ts` (`lock break` whatever
 the pin), `tests/cli/plan-apply.test.ts` (the guard on plan and apply) and

@@ -1,21 +1,22 @@
 import { describe, expect, test } from "bun:test";
+import { stripVTControlCharacters } from "node:util";
+import type { PlanRefusal } from "../../../src/application/plan-factory";
+import { type Block, type Report, render } from "../../../src/cli/presentation/blocks";
 import {
-  describeBootstrapPlan,
-  describeD11Refusal,
-  describeInfrastructure,
-  describePinMove,
-  describePlan,
+  bootstrapFirstReport,
+  d11Report,
+  damagedPlanReport,
   describeRemovalPlan,
-  describeRepositories,
-  describeReview,
   describeStaleReason,
-  describeStoppedResizeRefusal,
-  describeTarget,
   describeUnexpectedPlan,
-  describeWorkers,
-  staleRefusal,
-  unreadyBucketRefusal,
+  planRefusalReport,
+  planSection,
+  reviewBlocks,
+  savedPlanReport,
+  staleReport,
+  unknownPlanReport,
 } from "../../../src/cli/presentation/plan";
+import { ansiStyle, plainStyle } from "../../../src/cli/presentation/style";
 import { tlsOnlyPolicy, unreadyBucket } from "../../../src/domain/backend-bootstrap";
 import type { FactoryId, HostKey, Release } from "../../../src/domain/instance";
 import {
@@ -43,26 +44,32 @@ const TARGET = {
   release: "0.3.0" as Release,
 };
 const HOST = 'module.hosts.aws_instance.host["builder-1"]';
-const TARGET_LINES = [
-  "  Configuration: /work/.fffactory/factory.json",
-  "  Factory: Test factory (fff-abcd1234)",
-  "  AWS account: 123456789012, Region: eu-west-2",
-  "  Release: 0.3.0",
-];
 const release = (value: string) => value as Release;
+
+/** A section's rule line, 53 columns wide, as `render` draws it. */
+const rule = (title: string) => `── ${title} ${"─".repeat(Math.max(2, 49 - title.length))}`;
+const PLAN = rule("Plan");
+const NEXT = rule("Next");
+const TARGET_ROWS = [
+  "  Factory   Test factory (fff-abcd1234)",
+  "  Account   123456789012 · eu-west-2",
+  "  Release   0.3.0",
+];
+
+/** A block as plain text. */
+const plain = (block: Block) => render(plainStyle, [block]);
+/** A report as plain text: its blocks, then its Next block. */
+const shown = (report: Report) => render(plainStyle, report.blocks, report.next);
 
 function change(address: string, actions: string[], type?: string): ResourceChange {
   return type === undefined ? { address, actions } : { address, type, actions };
 }
 
-/** The plan's line for a factory that declares no worker. */
-const NO_WORKERS =
-  "Workers: none declared. Declare a host in factory.json's hosts, then create it with `fffactory apply`.";
-
 const WORKERS: PlannedWorker[] = [
   { key: "builder-1" as HostKey, hostname: "fff-abcd1234-builder-1" },
   { key: "builder-2" as HostKey, hostname: "fff-abcd1234-builder-2" },
 ];
+const [BUILDER_1, BUILDER_2] = WORKERS as [PlannedWorker, PlannedWorker];
 
 /** A factory review with nothing but its target and the given fields. */
 function review(fields: Partial<FactoryPlanReview> = {}): FactoryPlanReview {
@@ -79,126 +86,136 @@ function review(fields: Partial<FactoryPlanReview> = {}): FactoryPlanReview {
   };
 }
 
-describe("the plan's presentation (plan-apply §Layer mapping)", () => {
-  test("the target shows the configuration path, factory, account, Region and release", () => {
-    expect(describeTarget(TARGET)).toEqual(TARGET_LINES);
-    const { name: _, ...unnamed } = TARGET;
-    expect(describeTarget(unnamed)[1]).toBe("  Factory: fff-abcd1234");
+/** Every stage of one or more workers, as `planFactory` reviews them. */
+function staged(workers: readonly PlannedWorker[], fields: Partial<FactoryPlanReview> = {}) {
+  return review({
+    workers: [...workers],
+    repositories: workers.map((worker) => ({ ...worker, placed: [] })),
+    controlPlane: workers.map((worker) => ({
+      ...worker,
+      observation: "no-release",
+      changes: ["paseo-package" as const, "service-definition" as const],
+    })),
+    dispatch: workers.map((worker) => ({ ...worker, requested: false, schedule: null })),
+    ...fields,
+  });
+}
+
+const NO_WORKERS =
+  "  Workers          none declared. Declare a host in factory.json's hosts, then create it with `fffactory apply`.";
+
+describe("the plan section (plan-apply §Plan)", () => {
+  test("shows the factory, account, Region and release, then infrastructure and every stage", () => {
+    expect(
+      plain(planSection(staged([BUILDER_1], { changes: [change(HOST, ["create"])] }), {})),
+    ).toEqual([
+      PLAN,
+      ...TARGET_ROWS,
+      "",
+      "  Infrastructure   1 to add, 0 to change, 0 to destroy",
+      `    + ${HOST}`,
+      "  Workers          one at a time",
+      "    ~ builder-1   install release 0.3.0 and host configuration, then verify",
+      "  Control plane    before worker activation",
+      "    ~ builder-1   paseo-package, service-definition",
+      "  Repositories     one worker at a time",
+      "    ~ builder-1   reconcile 0 placed repositories as factory; preserve and report unmanaged checkouts",
+      "  Dispatch         after every readiness gate",
+      "    ~ builder-1   remove the factory dispatch schedule if it exists",
+      "  Verification     end to end: observe each worker's release, repositories, Paseo and actual dispatch schedule",
+    ]);
   });
 
-  test("each change is shown with its action, and reads and no-ops are left out", () => {
-    expect(
-      describeInfrastructure([
-        change(HOST, ["create"]),
-        change("module.network.aws_vpc.this", ["update"]),
-        change("module.network.aws_subnet.public", ["delete", "create"]),
-        change("module.network.aws_route_table.public", ["create", "delete"]),
-        change("module.host_identity.aws_iam_role_policy.read_secrets", ["delete"]),
-        change("module.x.aws_thing.gone", ["forget"]),
-        change("data.aws_ssm_parameter.al2023", ["read"]),
-        change("module.network.aws_internet_gateway.this", ["no-op"]),
-      ]),
-    ).toEqual([
-      "Infrastructure changes:",
-      `  + ${HOST}`,
-      "  ~ module.network.aws_vpc.this",
-      "  -/+ module.network.aws_subnet.public",
-      "  +/- module.network.aws_route_table.public",
-      "  - module.host_identity.aws_iam_role_policy.read_secrets",
-      "  module.x.aws_thing.gone (forget)",
-      "  3 to add, 1 to change, 3 to destroy.",
+  test("a factory without a name shows its ID alone", () => {
+    const { name: _, ...unnamed } = TARGET;
+    expect(plain(planSection(review({ target: unnamed }), {}))[1]).toBe("  Factory   fff-abcd1234");
+  });
+
+  test("each change is shown with its glyph, under its tally, and reads and no-ops are left out", () => {
+    const changes = [
+      change(HOST, ["create"]),
+      change("module.network.aws_vpc.this", ["update"]),
+      change("module.network.aws_subnet.public", ["delete", "create"]),
+      change("module.network.aws_route_table.public", ["create", "delete"]),
+      change("module.host_identity.aws_iam_role_policy.read_secrets", ["delete"]),
+      change("module.x.aws_thing.gone", ["forget"]),
+      change("data.aws_ssm_parameter.al2023", ["read"]),
+      change("module.network.aws_internet_gateway.this", ["no-op"]),
+    ];
+    expect(plain(planSection(review({ changes }), {})).slice(5)).toEqual([
+      "  Infrastructure   3 to add, 1 to change, 3 to destroy",
+      `    + ${HOST}`,
+      "    ~ module.network.aws_vpc.this",
+      "    -/+ module.network.aws_subnet.public",
+      "    +/- module.network.aws_route_table.public",
+      "    - module.host_identity.aws_iam_role_policy.read_secrets",
+      "    module.x.aws_thing.gone (forget)",
+      NO_WORKERS,
     ]);
   });
 
   test("a plan that changes nothing says so", () => {
-    expect(describeInfrastructure([change("data.aws_ssm_parameter.al2023", ["read"])])).toEqual([
-      "Infrastructure: no changes.",
+    const changes = [change("data.aws_ssm_parameter.al2023", ["read"])];
+    expect(plain(planSection(review({ changes }), {})).slice(5, 6)).toEqual([
+      "  Infrastructure   no changes",
     ]);
   });
 
-  test("the whole plan is its title, target and infrastructure changes", () => {
-    expect(describePlan(review({ changes: [change(HOST, ["create"])] }))).toEqual([
-      "Factory plan:",
-      ...TARGET_LINES,
-      "Infrastructure changes:",
-      `  + ${HOST}`,
-      "  1 to add, 0 to change, 0 to destroy.",
+  test("an empty factory's plan says it declares no worker, and how to add one (plan-apply §An empty factory)", () => {
+    expect(plain(planSection(review(), {}))).toEqual([
+      PLAN,
+      ...TARGET_ROWS,
+      "",
+      "  Infrastructure   no changes",
       NO_WORKERS,
     ]);
   });
 
-  test("an empty factory's plan says it declares no worker, and how to add one", () => {
-    expect(describePlan(review())).toEqual([
-      "Factory plan:",
-      ...TARGET_LINES,
-      "Infrastructure: no changes.",
-      NO_WORKERS,
+  test("each worker in the order they are updated, its hostname not repeated", () => {
+    const repositories = [
+      { ...BUILDER_1, placed: ["factory"] },
+      { ...BUILDER_2, placed: [] },
+    ];
+    expect(plain(planSection(staged(WORKERS, { repositories }), {})).slice(5, 15)).toEqual([
+      "  Infrastructure   no changes",
+      "  Workers          one at a time",
+      "    ~ builder-1   install release 0.3.0 and host configuration, then verify",
+      "    ~ builder-2   install release 0.3.0 and host configuration, then verify",
+      "  Control plane    before worker activation",
+      "    ~ builder-1   paseo-package, service-definition",
+      "    ~ builder-2   paseo-package, service-definition",
+      "  Repositories     one worker at a time",
+      "    ~ builder-1   reconcile 1 placed repository as factory; preserve and report unmanaged checkouts",
+      "    ~ builder-2   reconcile 0 placed repositories as factory; preserve and report unmanaged checkouts",
     ]);
-  });
-
-  test("then each worker's install of the release, in the order they are updated", () => {
-    expect(describePlan(review({ workers: WORKERS }))).toEqual([
-      "Factory plan:",
-      ...TARGET_LINES,
-      "Infrastructure: no changes.",
-      "Worker changes, one worker at a time:",
-      "  ~ builder-1 (fff-abcd1234-builder-1): install release 0.3.0 and its host configuration, then verify it",
-      "  ~ builder-2 (fff-abcd1234-builder-2): install release 0.3.0 and its host configuration, then verify it",
-    ]);
-    expect(describeWorkers([], release("0.3.0"))).toEqual([NO_WORKERS]);
-    expect(
-      describeRepositories([
-        { ...(WORKERS[0] as PlannedWorker), placed: ["factory"] },
-        { ...(WORKERS[1] as PlannedWorker), placed: [] },
-      ]),
-    ).toEqual([
-      "Repository changes, one worker at a time:",
-      "  ~ builder-1 (fff-abcd1234-builder-1): reconcile 1 placed repository as factory; preserve and report unmanaged checkouts",
-      "  ~ builder-2 (fff-abcd1234-builder-2): reconcile 0 placed repositories as factory; preserve and report unmanaged checkouts",
-    ]);
-    expect(describeRepositories([])).toEqual([]);
   });
 
   test("a stopped worker's install, and every later stage's change, is shown skipped (plan-apply §Stopped workers)", () => {
-    const shown = review({
-      workers: WORKERS,
-      repositories: WORKERS.map((worker) => ({ ...worker, placed: [] })),
-      controlPlane: WORKERS.map((worker) => ({
-        ...worker,
-        observation: "unavailable:blocked",
-        changes: ["listen-address" as const],
-      })),
-      dispatch: WORKERS.map((worker) => ({ ...worker, requested: false, schedule: null })),
-      stopped: ["builder-2" as HostKey],
-    });
-    expect(describePlan(shown)).toEqual([
-      "Factory plan:",
-      ...TARGET_LINES,
-      "Infrastructure: no changes.",
-      "Worker changes, one worker at a time:",
-      "  ~ builder-1 (fff-abcd1234-builder-1): install release 0.3.0 and its host configuration, then verify it",
-      "  = builder-2 (fff-abcd1234-builder-2): skipped: stopped; start it with `fffactory worker start builder-2`, then apply again to install it",
-      "Control-plane changes, before worker activation:",
-      "  ~ builder-1 (fff-abcd1234-builder-1): listen-address",
-      "  = builder-2 (fff-abcd1234-builder-2): skipped: stopped",
-      "Repository changes, one worker at a time:",
-      "  ~ builder-1 (fff-abcd1234-builder-1): reconcile 0 placed repositories as factory; preserve and report unmanaged checkouts",
-      "  = builder-2 (fff-abcd1234-builder-2): skipped: stopped",
-      "Dispatch changes, after every readiness gate:",
-      "  ~ builder-1 (fff-abcd1234-builder-1): remove the factory dispatch schedule if it exists",
-      "  = builder-2 (fff-abcd1234-builder-2): skipped: stopped",
-      "End-to-end verification: observe each worker's release, repositories, Paseo and actual dispatch schedule.",
+    const stopped = staged(WORKERS, { stopped: ["builder-2" as HostKey] });
+    expect(plain(planSection(stopped, {})).slice(5)).toEqual([
+      "  Infrastructure   no changes",
+      "  Workers          one at a time",
+      "    ~ builder-1   install release 0.3.0 and host configuration, then verify",
+      "      builder-2   skipped: stopped; start it with `fffactory worker start builder-2`, then apply again to install it",
+      "  Control plane    before worker activation",
+      "    ~ builder-1   paseo-package, service-definition",
+      "      builder-2   skipped: stopped",
+      "  Repositories     one worker at a time",
+      "    ~ builder-1   reconcile 0 placed repositories as factory; preserve and report unmanaged checkouts",
+      "      builder-2   skipped: stopped",
+      "  Dispatch         after every readiness gate",
+      "    ~ builder-1   remove the factory dispatch schedule if it exists",
+      "      builder-2   skipped: stopped",
+      "  Verification     end to end: observe each worker's release, repositories, Paseo and actual dispatch schedule",
     ]);
   });
 
   test("an unchanged control plane and a requested dispatch schedule are shown as planned", () => {
-    const [builder] = WORKERS as [PlannedWorker];
-    const shown = review({
-      workers: [builder],
-      controlPlane: [{ ...builder, observation: "{}", changes: [] }],
+    const shown = staged([BUILDER_1], {
+      controlPlane: [{ ...BUILDER_1, observation: "{}", changes: [] }],
       dispatch: [
         {
-          ...builder,
+          ...BUILDER_1,
           requested: true,
           schedule: {
             cron: "*/15 * * * *",
@@ -211,66 +228,222 @@ describe("the plan's presentation (plan-apply §Layer mapping)", () => {
         },
       ],
     });
-    expect(describePlan(shown).slice(-5)).toEqual([
-      "Control-plane changes, before worker activation:",
-      "  = builder-1 (fff-abcd1234-builder-1): Paseo is unchanged",
-      "Dispatch changes, after every readiness gate:",
-      "  ~ builder-1 (fff-abcd1234-builder-1): install the dispatcher and skill, then reconcile */15 * * * * UTC with codex/configured-model, mode workspace-write, cwd /home/factory",
-      "End-to-end verification: observe each worker's release, repositories, Paseo and actual dispatch schedule.",
+    const lines = plain(planSection(shown, {}));
+    expect(lines.slice(8, 10)).toEqual([
+      "  Control plane    before worker activation",
+      "    builder-1   Paseo is unchanged",
+    ]);
+    expect(lines.slice(-3, -1)).toEqual([
+      "  Dispatch         after every readiness gate",
+      "    ~ builder-1   install the dispatcher and skill, then reconcile */15 * * * * UTC with codex/configured-model, mode workspace-write, cwd /home/factory",
     ]);
   });
 
-  test("an upgrade's review shows its pin move first", () => {
+  test("an upgrade's plan shows its pin move beside the release (plan-apply §The pin move and the plan)", () => {
     const shown = review({ pinMove: pinMove("0.2.0", release("0.3.0")) });
-    expect(describePlan(shown).slice(0, 2)).toEqual([
-      "Upgrade: factory.json's release pin moves from 0.2.0 to 0.3.0. It is written once you approve this plan, before anything is applied.",
-      "Factory plan:",
+    expect(plain(planSection(shown, {})).slice(0, 6)).toEqual([
+      PLAN,
+      "  Factory   Test factory (fff-abcd1234)",
+      "  Account   123456789012 · eu-west-2",
+      "  Release   0.3.0",
+      "  Pin       factory.json's release pin moves from 0.2.0 to 0.3.0, written once you approve this plan, before anything is applied",
+      "",
     ]);
-    expect(describeReview(shown)).toEqual(describePlan(shown));
-  });
-});
-
-describe("the pin move's preview", () => {
-  test("names both releases when the pin is a plain release", () => {
-    expect(describePinMove(pinMove("0.2.0", release("0.3.0")))).toEqual([
-      "Upgrade: factory.json's release pin moves from 0.2.0 to 0.3.0. It is written once you approve this plan, before anything is applied.",
-    ]);
+    expect(reviewBlocks(shown, {})).toEqual([planSection(shown, {})]);
   });
 
   test("never echoes a pin whose prerelease text could hold anything", () => {
-    const lines = describePinMove(pinMove("0.2.9-SECRETLIKE", release("0.3.0")));
-    expect(lines).toEqual([
-      "Upgrade: factory.json's release pin moves from the release it pins now to 0.3.0. It is written once you approve this plan, before anything is applied.",
-    ]);
+    const lines = plain(
+      planSection(review({ pinMove: pinMove("0.2.9-SECRETLIKE", release("0.3.0")) }), {}),
+    );
+    expect(lines[4]).toBe(
+      "  Pin       factory.json's release pin moves from the release it pins now to 0.3.0, written once you approve this plan, before anything is applied",
+    );
     expect(lines.join("\n")).not.toContain("SECRETLIKE");
+  });
+
+  test("in color, the rule is dim, the title and labels bold, and each change glyph in its color", () => {
+    const lines = render(ansiStyle, [
+      planSection(staged([BUILDER_1], { changes: [change(HOST, ["create"])] }), {}),
+    ]);
+    expect(lines[0]).toBe(
+      `${ansiStyle.rule("──")} ${ansiStyle.heading("Plan")} ${ansiStyle.rule("─".repeat(45))}`,
+    );
+    expect(lines[1]).toBe(`  ${ansiStyle.label("Factory")}   Test factory (fff-abcd1234)`);
+    expect(lines[5]).toBe(
+      `  ${ansiStyle.label("Infrastructure")}   1 to add, 0 to change, 0 to destroy`,
+    );
+    expect(lines[6]).toBe(`    ${ansiStyle.status("create", "+")} ${HOST}`);
+    expect(lines[8]).toBe(
+      `    ${ansiStyle.glyph("update")} ${ansiStyle.label("builder-1")}   install release 0.3.0 and host configuration, then verify`,
+    );
+    expect(lines[6]).toContain("\x1b[32m");
+    expect(lines[8]).toContain("\x1b[33m");
+    expect(lines.map((line) => stripVTControlCharacters(line))).toEqual(
+      render(plainStyle, [
+        planSection(staged([BUILDER_1], { changes: [change(HOST, ["create"])] }), {}),
+      ]),
+    );
+  });
+});
+
+describe("data in the plan is shown verbatim (cli output §Layout blocks)", () => {
+  const ODD = "/work/`odd` dir";
+  const odd = staged([BUILDER_1], {
+    target: { ...TARGET, name: "my `odd` factory" },
+    dispatch: [
+      {
+        ...BUILDER_1,
+        requested: true,
+        schedule: {
+          cron: "*/15 * * * *",
+          timezone: "UTC",
+          provider: "codex",
+          model: "a`model",
+          mode: "workspace-write",
+          cwd: ODD,
+        },
+      },
+    ],
+  });
+  const DISPATCH = `install the dispatcher and skill, then reconcile */15 * * * * UTC with codex/a\`model, mode workspace-write, cwd ${ODD}`;
+
+  test("the factory name and dispatch values keep their backticks, plain and in color", () => {
+    const lines = plain(planSection(odd, {}));
+    expect(lines[1]).toBe("  Factory   my `odd` factory (fff-abcd1234)");
+    expect(lines.at(-2)).toBe(`    ~ builder-1   ${DISPATCH}`);
+    const colored = render(ansiStyle, [planSection(odd, {})]);
+    expect(colored[1]).toBe(`  ${ansiStyle.label("Factory")}   my \`odd\` factory (fff-abcd1234)`);
+    expect(colored.at(-2)).toBe(
+      `    ${ansiStyle.glyph("update")} ${ansiStyle.label("builder-1")}   ${DISPATCH}`,
+    );
+  });
+
+  test("a stale plan's other factory.json, and an issue's path, keep their backticks in color", () => {
+    const stale = render(
+      ansiStyle,
+      staleReport("k3x9q2ab", [{ kind: "other_instance", instancePath: ODD }], {}).blocks,
+    );
+    expect(stale[1]).toBe(`  it was planned for another factory.json, ${ODD}`);
+    const issues = render(
+      ansiStyle,
+      planRefusalReport(
+        {
+          kind: "refused",
+          issues: [{ path: "hosts[0].`x`", message: "is not a recognized field" }],
+        },
+        { action: "plan", now: new Date(0), selection: {} },
+      ).blocks,
+    );
+    expect(issues[1]).toBe("  hosts[0].`x`: is not a recognized field");
+  });
+
+  test("the commands a plan row names carry the instance and profile given", () => {
+    const selection = { instance: "/a b/factory.json", profile: "factory" };
+    const stopped = staged(WORKERS, { stopped: ["builder-2" as HostKey] });
+    expect(plain(planSection(stopped, selection))[8]).toBe(
+      "      builder-2   skipped: stopped; start it with `fffactory worker start builder-2 --instance '/a b/factory.json' --profile factory`, then apply again to install it",
+    );
+    expect(plain(planSection(review(), selection))[6]).toBe(
+      "  Workers          none declared. Declare a host in factory.json's hosts, then create it with `fffactory apply --instance '/a b/factory.json' --profile factory`.",
+    );
+    expect(render(ansiStyle, [planSection(review(), selection)])[6]).toEndWith(
+      `${ansiStyle.code("fffactory apply --instance '/a b/factory.json' --profile factory")}.`,
+    );
+  });
+});
+
+describe("what `fffactory plan` prints after the plan (plan-apply §Plan, §Saved plans)", () => {
+  const SAVED = { plan_id: "k3x9q2ab", expires_at: "2026-09-30T13:00:00.000Z" };
+
+  test("the spec's example: the plan's every stage, the plan saved, and how to apply it", () => {
+    const first = staged([BUILDER_1], {
+      changes: [change("module.network.aws_vpc.this", ["create"]), change(HOST, ["create"])],
+      controlPlane: [
+        {
+          ...BUILDER_1,
+          observation: "no-release",
+          changes: ["paseo-package", "service-definition", "listen-address", "password"],
+        },
+      ],
+    });
+    expect(shown(savedPlanReport(first, SAVED, {}))).toEqual([
+      PLAN,
+      ...TARGET_ROWS,
+      "",
+      "  Infrastructure   2 to add, 0 to change, 0 to destroy",
+      "    + module.network.aws_vpc.this",
+      `    + ${HOST}`,
+      "  Workers          one at a time",
+      "    ~ builder-1   install release 0.3.0 and host configuration, then verify",
+      "  Control plane    before worker activation",
+      "    ~ builder-1   paseo-package, service-definition, listen-address, password",
+      "  Repositories     one worker at a time",
+      "    ~ builder-1   reconcile 0 placed repositories as factory; preserve and report unmanaged checkouts",
+      "  Dispatch         after every readiness gate",
+      "    ~ builder-1   remove the factory dispatch schedule if it exists",
+      "  Verification     end to end: observe each worker's release, repositories, Paseo and actual dispatch schedule",
+      "",
+      "Saved as plan k3x9q2ab, until 2026-09-30T13:00:00.000Z.",
+      "",
+      NEXT,
+      "  Apply exactly this plan:",
+      "    $ fffactory apply --plan-id k3x9q2ab",
+    ]);
+  });
+
+  test("the saved plan, then a Next block applying exactly it", () => {
+    expect(shown(savedPlanReport(review(), SAVED, {})).slice(-5)).toEqual([
+      "Saved as plan k3x9q2ab, until 2026-09-30T13:00:00.000Z.",
+      "",
+      NEXT,
+      "  Apply exactly this plan:",
+      "    $ fffactory apply --plan-id k3x9q2ab",
+    ]);
+  });
+
+  test("the apply command repeats the instance and profile, quoted for a POSIX shell", () => {
+    const selection = { instance: "/elsewhere/it's my factory.json", profile: "factory" };
+    expect(shown(savedPlanReport(review(), SAVED, selection)).at(-1)).toBe(
+      "    $ fffactory apply --plan-id k3x9q2ab --instance '/elsewhere/it'\\''s my factory.json' --profile factory",
+    );
+  });
+
+  test("before the first apply, backend bootstrap's plan, then how the factory is planned", () => {
+    const report = bootstrapFirstReport(
+      {
+        kind: "backend_bootstrap",
+        target: { ...TARGET, bucket: "fff-abcd1234-state" },
+        creates: ["module.state_bucket.aws_s3_bucket.state"],
+      },
+      { profile: "factory" },
+    );
+    expect(shown(report)).toEqual([
+      rule("Plan: backend bootstrap"),
+      ...TARGET_ROWS,
+      "",
+      "  State bucket     fff-abcd1234-state, which does not exist yet",
+      "  Infrastructure   1 to add, 0 to change, 0 to destroy",
+      "    + module.state_bucket.aws_s3_bucket.state",
+      "",
+      "The factory itself is planned once the state bucket exists.",
+      "",
+      NEXT,
+      "  Approve this bootstrap, then the factory's own plan, at a terminal:",
+      "    $ fffactory apply --profile factory",
+    ]);
   });
 });
 
 describe("the backend bootstrap plan (provisioning §Backend bootstrap)", () => {
-  const CONTEXT = { ...TARGET, bucket: "fff-abcd1234-state" };
-
-  test("names the configuration, factory, account, Region, release and each creation", () => {
-    const lines = [
-      "Backend bootstrap: the state bucket fff-abcd1234-state does not exist yet.",
-      ...TARGET_LINES,
-      "Terraform will create:",
-      "  + module.state_bucket.aws_s3_bucket.state",
-    ];
-    expect(describeBootstrapPlan(CONTEXT, ["module.state_bucket.aws_s3_bucket.state"])).toEqual(
-      lines,
-    );
-    expect(
-      describeReview({
-        kind: "backend_bootstrap",
-        target: CONTEXT,
-        creates: ["module.state_bucket.aws_s3_bucket.state"],
-      }),
-    ).toEqual(lines);
-  });
-
-  test("a factory without a name shows its ID alone", () => {
-    const { name: _, ...unnamed } = CONTEXT;
-    expect(describeBootstrapPlan(unnamed, [])[2]).toBe("  Factory: fff-abcd1234");
+  test("is reviewed as its own plan section", () => {
+    const bootstrap = {
+      kind: "backend_bootstrap" as const,
+      target: { ...TARGET, bucket: "fff-abcd1234-state" },
+      creates: ["module.state_bucket.aws_s3_bucket.state"],
+    };
+    const [section] = reviewBlocks(bootstrap, {});
+    expect(plain(section as Block)[0]).toBe(rule("Plan: backend bootstrap"));
   });
 
   test("a plan that is not create-only, or not readable, is refused with each reason", () => {
@@ -290,6 +463,67 @@ describe("the backend bootstrap plan (provisioning §Backend bootstrap)", () => 
   });
 });
 
+/** A plan refusal of `plan`, with no instance or profile given. */
+const refusal = (refused: PlanRefusal, action = "plan") =>
+  shown(planRefusalReport(refused, { action, now: new Date(0), selection: {} }));
+
+describe("refusals to plan (plan-apply §Before anything reaches AWS)", () => {
+  test("the CLI/pin match guard is an error status line", () => {
+    expect(refusal({ kind: "release_mismatch", message: "factory.json pins another" })).toEqual([
+      "✖ Refusing to plan: factory.json pins another",
+    ]);
+  });
+
+  test("an incomplete factory.json names each missing field", () => {
+    expect(
+      refusal({
+        kind: "refused",
+        issues: [{ path: "network.vpc_cidr", message: "is required to plan" }],
+      }),
+    ).toEqual([
+      "✖ Refusing to plan: factory.json is not ready:",
+      "  network.vpc_cidr: is required to plan",
+    ]);
+  });
+
+  test("a Terraform plan fffactory cannot apply names each reason", () => {
+    expect(refusal({ kind: "unexpected_plan", unexpected: [{ kind: "unreadable_plan" }] })).toEqual(
+      [
+        "✖ Refusing to plan: Terraform's plan is not one fffactory can apply:",
+        "  Terraform's plan could not be read",
+      ],
+    );
+  });
+
+  test("a held lock shows its holder, and how to break it with the instance and profile given", () => {
+    const held = {
+      version: "v1",
+      record: {
+        schema_version: 1 as const,
+        lock_id: "aaaaaaaa",
+        factory_id: "fff-abcd1234" as FactoryId,
+        operation: "apply",
+        holder: { principal: "arn:aws:iam::123456789012:user/other", host: "desk" },
+        acquired_at: "1970-01-01T00:00:00.000Z",
+        release: release("0.3.0"),
+      },
+    };
+    const report = planRefusalReport(
+      { kind: "locked", held },
+      { action: "plan", now: new Date(5 * 60_000), selection: { instance: "/a b/factory.json" } },
+    );
+    expect(shown(report)).toEqual([
+      "✖ The factory is locked by another operation:",
+      "  Lock aaaaaaaa: apply by arn:aws:iam::123456789012:user/other on desk",
+      "  Acquired 1970-01-01T00:00:00.000Z (5 min ago) by fffactory 0.3.0",
+      "",
+      NEXT,
+      "  Wait for it to finish. If its holder is no longer running, break the lock:",
+      "    $ fffactory lock break --instance '/a b/factory.json'",
+    ]);
+  });
+});
+
 describe("an unready state bucket's refusal (provisioning §Backend bootstrap)", () => {
   const BUCKET = "fff-abcd1234-state";
   const LOCATION = { bucket: BUCKET, accountId: "123456789012", region: "eu-west-2" };
@@ -301,28 +535,31 @@ describe("an unready state bucket's refusal (provisioning §Backend bootstrap)",
   };
   const AT = `--region eu-west-2 --bucket ${BUCKET} --expected-bucket-owner 123456789012`;
 
-  function refusal(readiness: typeof READY | Record<string, unknown>): string[] {
-    const unready = unreadyBucket(LOCATION, { ...READY, ...readiness });
-    if (unready === undefined) throw new Error("the bucket is ready");
-    return unreadyBucketRefusal(unready);
+  function unready(readiness: typeof READY | Record<string, unknown>): string[] {
+    const bucket = unreadyBucket(LOCATION, { ...READY, ...readiness });
+    if (bucket === undefined) throw new Error("the bucket is ready");
+    return refusal({ kind: "unready", bucket });
   }
 
-  test("names what is missing and the commands that complete it", () => {
-    expect(refusal({ versioning: undefined, tlsOnly: false })).toEqual([
-      `The state bucket ${BUCKET} exists, but backend bootstrap did not finish it. It lacks:`,
+  test("names what is missing, then the commands that complete it", () => {
+    expect(unready({ versioning: undefined, tlsOnly: false })).toEqual([
+      `✖ The state bucket ${BUCKET} exists, but backend bootstrap did not finish it. It lacks:`,
       "  versioning (never enabled)",
       "  TLS-only bucket policy",
-      "If another first apply is still bootstrapping it, wait for that to finish, then retry.",
-      "Otherwise complete the bucket with these AWS CLI commands, using credentials for account " +
-        "123456789012, then retry:",
-      `  aws s3api put-bucket-versioning ${AT} --versioning-configuration Status=Enabled`,
-      `  aws s3api put-bucket-policy ${AT} --policy '${tlsOnlyPolicy(BUCKET)}'`,
-      "put-bucket-policy replaces the whole bucket policy: add any statements it already has.",
+      "",
+      NEXT,
+      "  If another first apply is still bootstrapping it, wait for that to finish, then retry.",
+      "",
+      "  Otherwise complete the bucket with these AWS CLI commands, using credentials for " +
+        "account 123456789012, then retry:",
+      `    $ aws s3api put-bucket-versioning ${AT} --versioning-configuration Status=Enabled`,
+      `    $ aws s3api put-bucket-policy ${AT} --policy '${tlsOnlyPolicy(BUCKET)}'`,
+      "  put-bucket-policy replaces the whole bucket policy: add any statements it already has.",
     ]);
   });
 
   test("the commands restore every setting, in the order bootstrap applies them", () => {
-    const lines = refusal({
+    const lines = unready({
       versioning: "Suspended",
       publicAccessBlocked: false,
       encrypted: false,
@@ -335,49 +572,57 @@ describe("an unready state bucket's refusal (provisioning §Backend bootstrap)",
       "  TLS-only bucket policy",
     ]);
     expect(lines.slice(-5)).toEqual([
-      `  aws s3api put-bucket-versioning ${AT} --versioning-configuration Status=Enabled`,
-      `  aws s3api put-public-access-block ${AT} --public-access-block-configuration ` +
+      `    $ aws s3api put-bucket-versioning ${AT} --versioning-configuration Status=Enabled`,
+      `    $ aws s3api put-public-access-block ${AT} --public-access-block-configuration ` +
         "BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true",
-      `  aws s3api put-bucket-encryption ${AT} --server-side-encryption-configuration ` +
+      `    $ aws s3api put-bucket-encryption ${AT} --server-side-encryption-configuration ` +
         '\'{"Rules":[{"ApplyServerSideEncryptionByDefault":{"SSEAlgorithm":"AES256"}}]}\'',
-      `  aws s3api put-bucket-policy ${AT} --policy '${tlsOnlyPolicy(BUCKET)}'`,
-      "put-bucket-policy replaces the whole bucket policy: add any statements it already has.",
+      `    $ aws s3api put-bucket-policy ${AT} --policy '${tlsOnlyPolicy(BUCKET)}'`,
+      "  put-bucket-policy replaces the whole bucket policy: add any statements it already has.",
     ]);
   });
 
   test("without the policy missing there is no whole-policy warning", () => {
-    expect(refusal({ encrypted: false }).at(-1)).toBe(
-      `  aws s3api put-bucket-encryption ${AT} --server-side-encryption-configuration ` +
+    expect(unready({ encrypted: false }).at(-1)).toBe(
+      `    $ aws s3api put-bucket-encryption ${AT} --server-side-encryption-configuration ` +
         '\'{"Rules":[{"ApplyServerSideEncryptionByDefault":{"SSEAlgorithm":"AES256"}}]}\'',
     );
   });
 });
 
-describe("D11 refusals", () => {
+describe("D11 refusals (plan-apply §Refusals until lifecycle work lands (D11))", () => {
   test("destroying or replacing a host machine names the missing capability", () => {
-    const refusal = hostMachineRefusal([
+    const refused = hostMachineRefusal([
       change(HOST, ["delete", "create"], "aws_instance"),
       change('module.hosts.aws_instance.host["old"]', ["delete"], "aws_instance"),
     ]);
-    expect(describeD11Refusal(refusal as NonNullable<typeof refusal>)).toEqual([
-      "Refusing: this change needs host replacement, which fffactory does not " +
-        "have yet (D11; it arrives in milestone M3):",
+    expect(refusal({ kind: "d11", refusal: refused as NonNullable<typeof refused> })).toEqual([
+      "✖ Refusing: this change needs host replacement, which fffactory does not have yet " +
+        "(D11; it arrives in milestone M3):",
       `  ${HOST} would be replaced`,
       '  module.hosts.aws_instance.host["old"] would be destroyed',
-      "Nothing was applied. Change factory.json so the plan keeps every host machine, then plan again.",
+      "",
+      "Nothing was applied.",
+      "",
+      NEXT,
+      "  Change factory.json so the plan keeps every host machine, then plan again.",
     ]);
   });
 
   test("removing a provisioned host key by hand names the command that removes one", () => {
-    const refusal = hostKeyRemovalRefusal([
+    const refused = hostKeyRemovalRefusal([
       { path: "hosts", message: 'host key "builder-1" is provisioned but no longer declared' },
     ]);
-    expect(describeD11Refusal(refusal as NonNullable<typeof refusal>)).toEqual([
-      "Refusing: this change needs host removal, which only `fffactory worker terminate KEY` " +
+    expect(shown(d11Report(refused as NonNullable<typeof refused>))).toEqual([
+      "✖ Refusing: this change needs host removal, which only `fffactory worker terminate KEY` " +
         "does (D11):",
       '  hosts: host key "builder-1" is provisioned but no longer declared',
-      "Nothing was applied. Declare every provisioned host key in factory.json again, then " +
-        "remove a host with `fffactory worker terminate KEY`.",
+      "",
+      "Nothing was applied.",
+      "",
+      NEXT,
+      "  Declare every provisioned host key in factory.json again, then remove a host with " +
+        "`fffactory worker terminate KEY`.",
     ]);
   });
 
@@ -394,11 +639,15 @@ describe("D11 refusals", () => {
       base_generation_since: release("0.3.0"),
     });
     if (assessment.kind !== "d11") throw new Error("expected a D11 refusal");
-    const lines = describeD11Refusal(assessment.refusal);
+    const lines = shown(d11Report(assessment.refusal));
     expect(lines).toEqual([
-      "Refusing: this change needs base migration, which fffactory does not have yet (D11; it arrives in milestone M3):",
+      "✖ Refusing: this change needs base migration, which fffactory does not have yet (D11; it arrives in milestone M3):",
       "  release 0.3.1 needs base generation 2, which arrived in release 0.3.0: workers set up by the release factory.json pins have an older base",
-      "Nothing was applied. factory.json still pins its release; keep using that release until base migration arrives.",
+      "",
+      "Nothing was applied.",
+      "",
+      NEXT,
+      "  factory.json still pins its release; keep using that release until base migration arrives.",
     ]);
     expect(lines.join("\n")).not.toContain("SECRETLIKE");
   });
@@ -409,32 +658,42 @@ describe("D11 refusals", () => {
       schema_version: 2,
     });
     if (change?.kind !== "d11") throw new Error("expected a D11 refusal");
-    expect(describeD11Refusal(change.refusal)).toEqual([
-      "Refusing: this change needs schema migration, which fffactory does not have yet (D11; it arrives in milestone M3):",
+    expect(shown(d11Report(change.refusal)).slice(0, 2)).toEqual([
+      "✖ Refusing: this change needs schema migration, which fffactory does not have yet (D11; it arrives in milestone M3):",
       "  factory.json has schema version 1, and this release reads and writes schema version 2",
-      "Nothing was applied. factory.json still pins its release; keep using that release until schema migration arrives.",
     ]);
+  });
+
+  test("in color, the refusal's status line is bold red and its inline code cyan", () => {
+    const refused = hostKeyRemovalRefusal([{ path: "hosts", message: "gone" }]);
+    const [line] = render(ansiStyle, d11Report(refused as NonNullable<typeof refused>).blocks);
+    expect(line).toStartWith(
+      `${ansiStyle.verdict("error", "✖")} ${ansiStyle.verdict("error", "Refusing: this change needs host removal, which only ")}${ansiStyle.code("fffactory worker terminate KEY")}`,
+    );
   });
 });
 
-describe("an instance type change on a stopped worker (plan-apply §Stopped workers)", () => {
-  const BUILDER_1 = WORKERS[0] as PlannedWorker;
+describe("an instance type change on a stopped worker (plan-apply §Instance type of a stopped worker)", () => {
   const B = { key: "b" as HostKey, hostname: "fff-abcd1234-b" };
+  const resize = (guard: ResizeGuard, action = "plan") =>
+    refusal({ kind: "stopped_resize", ...guard }, action);
 
   test("is refused: Terraform starts a stopped instance to change its type", () => {
-    expect(
-      describeStoppedResizeRefusal("plan", {
-        inventory: "read",
-        workers: [{ ...BUILDER_1, machine: "stopped" }],
-      }),
-    ).toEqual([
-      "Refusing to plan: the plan changes the instance type of a stopped worker, and Terraform starts a stopped instance to change its type:",
-      `  builder-1 (fff-abcd1234-builder-1): ${HOST} would be updated in place`,
-      "Nothing was applied. Start it first with `fffactory worker start builder-1`, then plan again.",
+    expect(resize({ inventory: "read", workers: [{ ...BUILDER_1, machine: "stopped" }] })).toEqual([
+      "✖ Refusing to plan: the plan changes the instance type of a stopped worker, and Terraform starts a stopped instance to change its type:",
+      `  builder-1   ${HOST} would be updated in place`,
+      "",
+      "Nothing was applied.",
+      "",
+      NEXT,
+      "  Start it first:",
+      "    $ fffactory worker start builder-1",
+      "  Then plan again:",
+      "    $ fffactory plan",
     ]);
   });
 
-  test("several stopped workers are each named", () => {
+  test("several stopped workers are each named and started", () => {
     const both: ResizeGuard = {
       inventory: "read",
       workers: [
@@ -442,36 +701,53 @@ describe("an instance type change on a stopped worker (plan-apply §Stopped work
         { ...B, machine: "stopped" },
       ],
     };
-    expect(describeStoppedResizeRefusal("apply", both).at(-1)).toBe(
-      "Nothing was applied. Start each first with `fffactory worker start builder-1` and `fffactory worker start b`, then plan again.",
-    );
+    expect(resize(both, "apply").slice(-5)).toEqual([
+      "  Start each first:",
+      "    $ fffactory worker start builder-1",
+      "    $ fffactory worker start b",
+      "  Then plan again:",
+      "    $ fffactory plan",
+    ]);
   });
 
   test("a stopping worker is named as stopping, to start once it has stopped", () => {
-    expect(
-      describeStoppedResizeRefusal("plan", {
-        inventory: "read",
-        workers: [{ ...BUILDER_1, machine: "stopping" }],
-      }),
-    ).toEqual([
-      "Refusing to plan: the plan changes the instance type of a stopped worker, and Terraform starts a stopped instance to change its type:",
-      `  builder-1 (fff-abcd1234-builder-1): ${HOST} would be updated in place, and it is stopping`,
-      "Nothing was applied. Start it first with `fffactory worker start builder-1` once it has stopped, then plan again.",
-    ]);
+    expect(resize({ inventory: "read", workers: [{ ...BUILDER_1, machine: "stopping" }] })).toEqual(
+      [
+        "✖ Refusing to plan: the plan changes the instance type of a stopped worker, and Terraform starts a stopped instance to change its type:",
+        `  builder-1   ${HOST} would be updated in place, and it is stopping`,
+        "",
+        "Nothing was applied.",
+        "",
+        NEXT,
+        "  Start it first, once it has stopped:",
+        "    $ fffactory worker start builder-1",
+        "  Then plan again:",
+        "    $ fffactory plan",
+      ],
+    );
   });
 
   test("with the EC2 inventory unreadable, the plan is refused until it can be read", () => {
-    expect(
-      describeStoppedResizeRefusal("apply", { inventory: "unreadable", workers: [BUILDER_1] }),
-    ).toEqual([
-      "Refusing to apply: the plan changes the instance type of a worker the EC2 inventory could not be read to check is not stopped, and Terraform starts a stopped instance to change its type:",
-      `  builder-1 (fff-abcd1234-builder-1): ${HOST} would be updated in place`,
-      "Nothing was applied. Plan again once the EC2 inventory can be read.",
+    expect(resize({ inventory: "unreadable", workers: [BUILDER_1] }, "apply")).toEqual([
+      "✖ Refusing to apply: the plan changes the instance type of a worker the EC2 inventory could not be read to check is not stopped, and Terraform starts a stopped instance to change its type:",
+      `  builder-1   ${HOST} would be updated in place`,
+      "",
+      "Nothing was applied.",
+      "",
+      NEXT,
+      "  Plan again once the EC2 inventory can be read:",
+      "    $ fffactory plan",
     ]);
+  });
+
+  test("an upgrade's refusal plans again with upgrade", () => {
+    expect(resize({ inventory: "unreadable", workers: [BUILDER_1] }, "upgrade").at(-1)).toBe(
+      "    $ fffactory upgrade",
+    );
   });
 });
 
-describe("a stale plan's refusal (plan-apply §Apply)", () => {
+describe("a saved plan's refusal (plan-apply §Freshness)", () => {
   const key = "builder-1" as HostKey;
 
   test.each<[StaleReason, string]>([
@@ -515,33 +791,84 @@ describe("a stale plan's refusal (plan-apply §Apply)", () => {
     expect(describeStaleReason(reason)).toBe(line);
   });
 
-  test("is refused with every reason and the way forward", () => {
-    expect(
-      staleRefusal("k3x9q2ab", [{ kind: "configuration_changed" }, { kind: "state_changed" }]),
-    ).toEqual([
-      "Refusing to apply plan k3x9q2ab: it is no longer the plan to apply:",
+  test("a stale plan is refused with its reason and a new plan as the way forward", () => {
+    expect(shown(staleReport("k3x9q2ab", [{ kind: "configuration_changed" }], {}))).toEqual([
+      "✖ Refusing to apply plan k3x9q2ab: it is no longer the plan to apply:",
+      "  factory.json changed after it was planned",
+      "",
+      "Nothing was applied.",
+      "",
+      NEXT,
+      "  Review a new plan:",
+      "    $ fffactory plan",
+    ]);
+  });
+
+  test("every reason is named, and the new plan repeats the instance and profile given", () => {
+    const reasons: StaleReason[] = [{ kind: "configuration_changed" }, { kind: "state_changed" }];
+    const lines = shown(staleReport("k3x9q2ab", reasons, { profile: "factory" }));
+    expect(lines.slice(1, 3)).toEqual([
       "  factory.json changed after it was planned",
       "  the factory's Terraform state changed after it was planned",
-      "Nothing was applied. Review a new plan with `fffactory plan`.",
     ]);
+    expect(lines.at(-1)).toBe("    $ fffactory plan --profile factory");
+  });
+
+  test("a worker's Paseo state that changed refuses the plan", () => {
+    const reasons: StaleReason[] = [
+      { kind: "paseo_changed", key, hostname: "fff-abcd1234-builder-1" },
+    ];
+    // TODO(re-evaluate when #12 lands): update this expectation to #12's corrected outcome.
+    // This refusal fires after Terraform has applied the plan's infrastructure changes, so
+    // "Nothing was applied." is known to be misleading here: it is today's wording, not the
+    // intended contract.
+    expect(shown(staleReport("k3x9q2ab", reasons, {}))).toEqual([
+      "✖ Refusing to apply plan k3x9q2ab: it is no longer the plan to apply:",
+      "  Paseo state on fff-abcd1234-builder-1 changed after it was planned",
+      "",
+      "Nothing was applied.",
+      "",
+      NEXT,
+      "  Review a new plan:",
+      "    $ fffactory plan",
+    ]);
+  });
+
+  test("an unknown or damaged plan ID is refused, with a new plan as the way forward", () => {
+    expect(shown(unknownPlanReport("zzzzzzzz", {}))).toEqual([
+      "✖ There is no saved plan zzzzzzzz for this factory here: it expired, was applied, or " +
+        "was saved elsewhere",
+      "",
+      NEXT,
+      "  Review a new plan:",
+      "    $ fffactory plan",
+    ]);
+    expect(shown(damagedPlanReport("k3x9q2ab", {}))[0]).toBe(
+      "✖ Saved plan k3x9q2ab cannot be applied: its record cannot be read, or its Terraform " +
+        "plan changed after it was saved",
+    );
   });
 });
 
 describe("the removal plan shown for approval (worker-lifecycle §Terminate (remove))", () => {
-  const worker = WORKERS[0] as PlannedWorker;
   const deleting: ResourceChange[] = [{ address: HOST, type: "aws_instance", actions: ["delete"] }];
 
+  // TODO(re-evaluate when epic #18 restyles `worker terminate`): replace these unstyled lines
+  // with the removal plan's blocks.
   test("names the factory, Terraform's changes, the factory.json edit and the devices", () => {
-    expect(describeRemovalPlan({ target: TARGET, changes: deleting, worker })).toEqual([
+    expect(describeRemovalPlan({ target: TARGET, changes: deleting, worker: BUILDER_1 })).toEqual([
       "Removal plan:",
-      ...TARGET_LINES,
+      "  Configuration: /work/.fffactory/factory.json",
+      "  Factory: Test factory (fff-abcd1234)",
+      "  AWS account: 123456789012, Region: eu-west-2",
+      "  Release: 0.3.0",
       "Infrastructure changes:",
       `  - ${HOST}`,
       "  0 to add, 0 to change, 1 to destroy.",
       "factory.json: remove host builder-1.",
       "Tailnet: delete the devices named fff-abcd1234-builder-1 that carry the factory's tag.",
     ]);
-    expect(describeRemovalPlan({ target: TARGET, changes: [], worker })).toContain(
+    expect(describeRemovalPlan({ target: TARGET, changes: [], worker: BUILDER_1 })).toContain(
       "Infrastructure: no changes.",
     );
   });

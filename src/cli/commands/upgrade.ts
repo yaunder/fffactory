@@ -8,8 +8,9 @@ import {
 import type { CliContext, Command } from "../context";
 import { sha256Text } from "../../infrastructure/release-tarball";
 import { operatorApproval, progressLine, reportApply } from "./apply";
-import { describeD11Refusal } from "../presentation/plan";
-import { basisOf } from "./planning";
+import type { Selection } from "../presentation/command-line";
+import { d11Report } from "../presentation/plan";
+import { basisOf, printReport } from "./planning";
 import { printIssues, selectInstance, validatedInstance } from "./selected-instance";
 
 const USAGE = [
@@ -17,8 +18,8 @@ const USAGE = [
   "",
   "Moves the factory to this fffactory's release. Run by a later fffactory than",
   "the release factory.json pins, it shows the pin move with the factory's complete",
-  "plan made for this release (the configuration path, factory, AWS account, Region",
-  "and release, the infrastructure changes, then each worker's install) and, once",
+  "plan made for this release (the factory, AWS account, Region and release, the",
+  "infrastructure changes, then every stage's changes for each worker) and, once",
   "you type yes, writes the new pin to factory.json under the factory-wide lock and",
   "applies exactly that plan, as `fffactory apply` does, so it needs a terminal.",
   "Declining, or a factory.json that changed meanwhile, moves nothing. An upgrade",
@@ -70,21 +71,23 @@ function reportNoUpgrade(
       );
       return 1;
     case "d11":
-      for (const line of describeD11Refusal(assessment.refusal)) context.err(line);
+      printReport(context.err, d11Report(assessment.refusal));
       return 1;
   }
 }
 
-function report(result: Upgrade, context: CliContext): number {
+const NOT_MOVED = "factory.json's pin was not moved: it still pins the release it pinned.";
+
+function report(result: Upgrade, context: CliContext, selection: Selection): number {
   if (result.kind !== "upgrade") return reportNoUpgrade(result, context);
   const { apply, pinned } = result;
   const code = reportApply(apply, context, {
     action: "upgrade",
     rerun: pinned ? "apply" : "upgrade",
+    selection,
+    notice: pinned ? undefined : NOT_MOVED,
   });
-  if (!pinned)
-    context.err("factory.json's pin was not moved: it still pins the release it pinned.");
-  else if (apply.kind === "failed" && (apply.step === "pinning" || apply.step === "pinned"))
+  if (pinned && apply.kind === "failed" && (apply.step === "pinning" || apply.step === "pinned"))
     context.err(
       `factory.json pins release ${context.release}: rerun \`fffactory apply\` with this ` +
         "release to finish.",
@@ -107,7 +110,7 @@ async function upgrade(args: readonly string[], context: CliContext): Promise<nu
     context.err("Upgrading needs your approval of the pin move and the plan: rerun at a terminal.");
     return 1;
   }
-  const selected = await selectInstance(values.instance, context);
+  const selected = await selectInstance(values.instance, context, "upgrade");
   if (!selected) return 1;
   // Before validation, which a factory.json of another schema version would fail.
   const schema = schemaVersionChange(
@@ -128,7 +131,7 @@ async function upgrade(args: readonly string[], context: CliContext): Promise<nu
       provisioner: context.provisioner,
       planStore: context.planStore,
       machines: context.machines,
-      approval: operatorApproval(undefined, context, QUESTION),
+      approval: operatorApproval(undefined, context, values, QUESTION),
       interrupted: context.interrupted,
       peers: context.tailnet,
       transport: context.transport,
@@ -148,7 +151,7 @@ async function upgrade(args: readonly string[], context: CliContext): Promise<nu
       randomBytes: context.randomBytes,
     },
   );
-  return report(result, context);
+  return report(result, context, values);
 }
 
 export const upgradeCommand: Command = {

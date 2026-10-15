@@ -6,6 +6,7 @@ import {
   type Row,
   render,
   renderInSection,
+  verbatim,
 } from "../../../src/cli/presentation/blocks";
 import { ansiStyle, plainStyle } from "../../../src/cli/presentation/style";
 
@@ -13,7 +14,10 @@ const HEADER: Block = {
   kind: "text",
   lines: [
     [{ text: "fffactory apply", tone: "heading" }, " · release 0.0.0"],
-    [{ text: "Instance", tone: "label" }, "  ~/…/test-factory/.fffactory/factory.json (nearest)"],
+    [
+      { text: "Instance", tone: "label" },
+      "  ~/test-factory/.fffactory/factory.json (nearest .fffactory/factory.json)",
+    ],
   ],
 };
 
@@ -155,7 +159,7 @@ describe("text (cli output §Text)", () => {
   test("lines are printed as they are", () => {
     expect(render(plainStyle, [HEADER])).toEqual([
       "fffactory apply · release 0.0.0",
-      "Instance  ~/…/test-factory/.fffactory/factory.json (nearest)",
+      "Instance  ~/test-factory/.fffactory/factory.json (nearest .fffactory/factory.json)",
     ]);
   });
 
@@ -172,7 +176,7 @@ describe("sections (cli output §Section)", () => {
       render(plainStyle, [HEADER, { kind: "section", title: "Plan", blocks: [TARGET, STAGES] }]),
     ).toEqual([
       "fffactory apply · release 0.0.0",
-      "Instance  ~/…/test-factory/.fffactory/factory.json (nearest)",
+      "Instance  ~/test-factory/.fffactory/factory.json (nearest .fffactory/factory.json)",
       "",
       "── Plan ─────────────────────────────────────────────",
       "  Factory   Test factory (fff-aaaa1111)",
@@ -404,6 +408,28 @@ describe("inline code (cli output §Layout blocks, §Style roles)", () => {
     expect(render(ansiStyle, [], next)[0]).toStartWith(
       `${ansiStyle.rule("──")} ${ansiStyle.heading("Next: ")}${ansiStyle.heading("run ")}${ansiStyle.code("fffactory status")} `,
     );
+  });
+
+  test("a verbatim span is data: never inline code, in the role around it, plain and in color", () => {
+    const data: Block[] = [
+      { kind: "text", lines: [["named ", verbatim("my `odd` factory"), " in `factory.json`"]] },
+      { kind: "rows", rows: [{ label: [verbatim("a`b")], value: [verbatim("`x`")] }] },
+      { kind: "verdict", status: "error", text: ["Refusing ", verbatim("`it`")] },
+    ];
+    expect(render(plainStyle, data)).toEqual([
+      "named my `odd` factory in `factory.json`",
+      "",
+      "a`b   `x`",
+      "",
+      "✖ Refusing `it`",
+    ]);
+    expect(render(ansiStyle, data)).toEqual([
+      `named my \`odd\` factory in ${ansiStyle.code("factory.json")}`,
+      "",
+      `${ansiStyle.label("a`b")}   \`x\``,
+      "",
+      `${ansiStyle.verdict("error", "✖")} ${ansiStyle.verdict("error", "Refusing ")}${ansiStyle.verdict("error", "`it`")}`,
+    ]);
   });
 });
 

@@ -4,8 +4,13 @@
  * `lockAge`, `formatDuration`, `confirmsBreak`); this lays them out.
  */
 import { formatDuration, type HeldLock, isStale, lockAge } from "../../domain/factory-lock";
+import { nextSteps, type Report, step, verbatim } from "./blocks";
+import { fffactoryCommand, type Selection } from "./command-line";
 
-/** The lines that show an operator who holds a lock, for how long, and its token. */
+/**
+ * The lines that show an operator who holds a lock, for how long, and its token: data from the
+ * lock record, which a restyled output shows verbatim.
+ */
 export function describeHeldLock(held: HeldLock, now: Date): string[] {
   const { record } = held;
   if (record === undefined)
@@ -19,6 +24,47 @@ export function describeHeldLock(held: HeldLock, now: Date): string[] {
   ];
 }
 
+/**
+ * Why an operation could not take the lock: an error status line, who holds it, then how to
+ * recover, breaking it with the instance and profile the operation was given.
+ */
+export function lockRefusalReport(
+  held: HeldLock | undefined,
+  now: Date,
+  selection: Selection,
+): Report {
+  if (held === undefined)
+    return {
+      blocks: [
+        {
+          kind: "verdict",
+          status: "error",
+          text: "The factory lock kept changing hands while fffactory tried to take it",
+        },
+      ],
+      next: nextSteps(step("Try again.")),
+    };
+  return {
+    blocks: [
+      {
+        kind: "verdict",
+        status: "error",
+        text: "The factory is locked by another operation:",
+        details: [
+          { kind: "text", lines: describeHeldLock(held, now).map((line) => [verbatim(line)]) },
+        ],
+      },
+    ],
+    next: nextSteps(
+      step("Wait for it to finish. If its holder is no longer running, break the lock:", [
+        fffactoryCommand(["lock", "break"], selection),
+      ]),
+    ),
+  };
+}
+
+// TODO(re-evaluate when epic #18 restyles the worker commands): `worker stop|start|terminate`
+// print this unstyled refusal; once they render `lockRefusalReport`, remove it.
 /** Why an operation could not take the lock, showing who holds it and how to recover. */
 export function lockRefusal(held: HeldLock | undefined, now: Date): string[] {
   if (held === undefined)

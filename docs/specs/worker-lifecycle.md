@@ -372,8 +372,8 @@ Operation record: s3://fff-abcd1234-state/fff-abcd1234-operations/2026-10-12T12:
 Afterwards `fffactory plan` shows no change for the host, since Terraform no
 longer records it and factory.json no longer declares it, and
 [status](status.md) no longer lists it. Once the last host is removed, `plan`
-shows `Workers: none declared.` with no other change, and `status` reports no
-workers declared and exits 0
+shows its `Workers` row as `none declared`, with how to declare a host, and no
+other change, and `status` reports no workers declared and exits 0
 ([plan-apply §An empty factory](plan-apply.md#an-empty-factory)).
 
 Each failure leaves a state the next action names, and every one is recorded

@@ -8,10 +8,20 @@ import { GLYPHS, type Status, type Style } from "./style";
 
 /** The role a marked span of text takes: a style role, or a status's color. */
 export type Tone = "heading" | "label" | "muted" | "code" | Status;
-/** Text, in which a matched pair of backticks marks inline code, or text marked with a tone. */
-export type Span = string | { readonly text: string; readonly tone: Tone };
+/**
+ * Text, in which a matched pair of backticks marks inline code; text marked with a tone; or,
+ * without a tone, text shown verbatim in the role around it, never read for inline code.
+ */
+export type Span = string | { readonly text: string; readonly tone?: Tone };
 /** A line's text: one span, or several in a row. */
 export type Inline = string | readonly Span[];
+
+/**
+ * Data, such as a configuration value or a lock's holder, shown verbatim: its backticks are
+ * never inline code, which marks only fffactory's own words (`docs/specs/cli-output.md`
+ * §Layout blocks).
+ */
+export const verbatim = (text: string): Span => ({ text });
 
 /** A label and its value; a status puts its glyph before the label; details go under it. */
 export interface Row {
@@ -57,6 +67,19 @@ export interface Next {
   /** Shown after `Next: `. */
   readonly title?: Inline;
   readonly paragraphs: readonly (readonly NextPart[])[];
+}
+
+/** A step: its text, then any command lines it asks for. */
+export const step = (text: Inline, commands?: readonly string[]): NextPart =>
+  commands === undefined ? { kind: "step", text } : { kind: "step", text, commands };
+
+/** A Next block of one paragraph. */
+export const nextSteps = (...parts: NextPart[]): Next => ({ paragraphs: [parts] });
+
+/** What a command prints of an outcome: its blocks, then at most one Next block. */
+export interface Report {
+  readonly blocks: readonly Block[];
+  readonly next?: Next;
 }
 
 const RULE_WIDTH = 53;
@@ -108,9 +131,10 @@ function marked(style: Style, text: string, plain: (text: string) => string): st
 function inline(style: Style, text: Inline, plain: (text: string) => string = (t) => t): string {
   const spans: readonly Span[] = typeof text === "string" ? [text] : text;
   return spans
-    .map((span) =>
-      typeof span === "string" ? marked(style, span, plain) : toned(style, span.tone, span.text),
-    )
+    .map((span) => {
+      if (typeof span === "string") return marked(style, span, plain);
+      return span.tone === undefined ? plain(span.text) : toned(style, span.tone, span.text);
+    })
     .join("");
 }
 

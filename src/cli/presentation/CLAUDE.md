@@ -15,7 +15,12 @@ The text a person reads, laid out from the data use cases return
 - Never style JSON: a `--json` document is written as serialized.
 - Every status keeps its glyph in plain output, plain output keeps `$ ` and backticks, and
   widths are measured with `Bun.stringWidth`, never `.length` or `padEnd` on styled text.
+- Backticks in a bare string span mark inline code: only in fffactory's own words. Data
+  (a configuration value, a path, a lock's holder) goes in a `verbatim` span, never read for
+  backticks (`docs/specs/cli-output.md` §Layout blocks).
 - A render takes at most one Next block and prints it last; a command that leaves work for the
-  operator ends with one.
+  operator ends with one. An `fffactory` command it names, or a row names as inline code (a
+  `code` span), is built with `fffactoryCommand` (`command-line.ts`), repeating the
+  `--instance` and `--profile` the running command was given, never by hand.
 - Tests (`tests/cli/presentation/`) are pure: exact plain text, and escape sequences pinned
   per role under `ansiStyle`.

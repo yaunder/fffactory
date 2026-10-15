@@ -68,6 +68,16 @@ Text in any block may mark inline code with backticks: a matched pair is inline
 code; an unmatched backtick is printed as it is. A command line is printed as it
 is, backticks included.
 
+Inline code marks only fffactory's own words, such as a command to run. Data,
+such as a configuration value, a path or a lock's holder, is shown verbatim
+(a `verbatim` span): its backticks are printed as they are in both modes, never
+read as inline code, in the role of the text around it. An `fffactory` command
+the presentation layer lays out as inline code is a code span built with
+`fffactoryCommand`, so the instance path it repeats is never read for
+backticks either. Tested in
+`tests/cli/presentation/blocks.test.ts`, and for the data each lays out in the
+`plan`, `lock` and `instance-source` tests beside it.
+
 ### Text
 
 Lines printed as they are, each of which may mark spans as heading, label,
@@ -75,7 +85,7 @@ muted, inline code or a status.
 
 ```text
 fffactory apply · release 0.0.0
-Instance  ~/…/test-factory/.fffactory/factory.json (nearest)
+Instance  ~/test-factory/.fffactory/factory.json (nearest .fffactory/factory.json)
 ```
 
 ### Section
@@ -192,6 +202,7 @@ apply only to human lines laid out by `src/cli/presentation/`.
 | --- | --- | --- |
 | CLI adapter | `src/cli/presentation/color.ts` | `colorEnabled` ([Color](#color)) and `streamStyles`, each stream's style. Pure: it is given the terminal status and environment. |
 | CLI adapter | `src/cli/presentation/style.ts` | `Style` and its roles, `plainStyle`, `ansiStyle` (over `node:util` `styleText` with `validateStream: false`, so only [Color](#color) decides), the glyphs, and `writer`, an output stream's line writer carrying its style. |
-| CLI adapter | `src/cli/presentation/blocks.ts` | The layout blocks, `render`, which lays blocks and at most one Next block out as lines in a style, measuring widths with `Bun.stringWidth`, and `renderInSection`, blocks streamed into a section. |
+| CLI adapter | `src/cli/presentation/blocks.ts` | The layout blocks, `verbatim` (data in a line, never read for inline code), `step` and `nextSteps` (a Next block's parts), `Report` (an outcome's blocks and at most one Next block), `render`, which lays blocks and at most one Next block out as lines in a style, measuring widths with `Bun.stringWidth`, and `renderInSection`, blocks streamed into a section. |
+| CLI adapter | `src/cli/presentation/command-line.ts` | `fffactoryCommand`: an `fffactory` command a Next block names, repeating the `--instance` and `--profile` the running command was given, each word quoted for a POSIX shell (`shellWord`) where needed. |
 | CLI adapter | `src/cli/context.ts` | `CliContext.out` and `err`, each a `Writer` carrying its stream's style. |
 | CLI adapter | `src/cli/main.ts` | The one place reading each stream's `isTTY` and the environment to pick the styles. |

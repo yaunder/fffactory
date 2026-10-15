@@ -501,24 +501,29 @@ account than `aws.account_id`. Then:
    `aws:SecureTransport` is `false`. S3's answer that a setting was never made
    counts as lacking it; any other failure fails the operation. A bucket
    lacking any of them was left by an interrupted bootstrap, and the
-   operation is refused before any plan or lock, changing nothing:
+   operation is refused before any plan or lock, changing nothing. Laid out
+   as [plan and apply](plan-apply.md#how-refusals-are-shown) lays out its
+   refusals, on standard error:
 
    ```text
-   The state bucket fff-abcd1234-state exists, but backend bootstrap did not finish it. It lacks:
+   ✖ The state bucket fff-abcd1234-state exists, but backend bootstrap did not finish it. It lacks:
      versioning (never enabled)
      TLS-only bucket policy
-   If another first apply is still bootstrapping it, wait for that to finish, then retry.
-   Otherwise complete the bucket with these AWS CLI commands, using credentials for account 123456789012, then retry:
-     aws s3api put-bucket-versioning --region eu-west-2 --bucket fff-abcd1234-state --expected-bucket-owner 123456789012 --versioning-configuration Status=Enabled
-     aws s3api put-bucket-policy --region eu-west-2 --bucket fff-abcd1234-state --expected-bucket-owner 123456789012 --policy '{"Version":"2012-10-17","Statement":[...]}'
-   put-bucket-policy replaces the whole bucket policy: add any statements it already has.
+
+   ── Next ─────────────────────────────────────────────
+     If another first apply is still bootstrapping it, wait for that to finish, then retry.
+
+     Otherwise complete the bucket with these AWS CLI commands, using credentials for account 123456789012, then retry:
+       $ aws s3api put-bucket-versioning --region eu-west-2 --bucket fff-abcd1234-state --expected-bucket-owner 123456789012 --versioning-configuration Status=Enabled
+       $ aws s3api put-bucket-policy --region eu-west-2 --bucket fff-abcd1234-state --expected-bucket-owner 123456789012 --policy '{"Version":"2012-10-17","Statement":[{"Sid":"DenyInsecureTransport","Effect":"Deny","Principal":"*","Action":"s3:*","Resource":["arn:aws:s3:::fff-abcd1234-state","arn:aws:s3:::fff-abcd1234-state/*"],"Condition":{"Bool":{"aws:SecureTransport":"false"}}}]}'
+     put-bucket-policy replaces the whole bucket policy: add any statements it already has.
    ```
 
    Each lacking setting is listed (versioning with its state, `never
    enabled` or `Suspended`; `public access block`; `default encryption`;
    `TLS-only bucket policy`) with the one command that applies it as the
-   `state-bucket` module does, in the module's order, and a warning that the
-   policy command replaces any existing bucket policy. fffactory cannot finish
+   `state-bucket` module does, in the module's order, and a muted warning that
+   the policy command replaces any existing bucket policy. fffactory cannot finish
    the bucket itself: the backend root keeps no state, and its plan would
    create a bucket that exists. Marked `TODO(re-evaluate when the
    state-bucket module's hardening changes, or when apply can import
@@ -540,17 +545,20 @@ account than `aws.account_id`. Then:
    (`src/cli/presentation/plan.ts`):
 
    ```text
-   Backend bootstrap: the state bucket fff-abcd1234-state does not exist yet.
-     Configuration: /work/.fffactory/factory.json
-     Factory: Test factory (fff-abcd1234)
-     AWS account: 123456789012, Region: eu-west-2
-     Release: 0.3.0
-   Terraform will create:
-     + module.state_bucket.aws_s3_bucket.state
-     ...
+   ── Plan: backend bootstrap ──────────────────────────
+     Factory   Test factory (fff-abcd1234)
+     Account   123456789012 · eu-west-2
+     Release   0.3.0
+
+     State bucket     fff-abcd1234-state, which does not exist yet
+     Infrastructure   1 to add, 0 to change, 0 to destroy
+       + module.state_bucket.aws_s3_bucket.state
    ```
 
-   Declining applies nothing, and takes no lock;
+   It names the factory, account, Region and release as the factory's `Plan`
+   section does ([plan and apply §Plan](plan-apply.md#plan)), and each
+   resource Terraform creates under the tally. Declining applies nothing, and
+   takes no lock;
 6. the approved plan, exactly that saved plan, is applied;
 7. the factory-wide lock is acquired in the bucket (next section) for the
    operation, and held by it from then on. The operation then builds the
@@ -630,15 +638,27 @@ account.
   its holder:
 
   ```text
-  The factory is locked by another operation:
-    Lock k3x9q2ab: apply by arn:aws:sts::123456789012:assumed-role/Admin/operator on operator-laptop
-    Acquired 2026-09-30T10:00:00.000Z (12 min ago) by fffactory 0.3.0
-  Wait for it to finish. If its holder is no longer running, break the lock with `fffactory lock break`.
+  ✖ The factory is locked by another operation:
+    Lock jjjjjjjj: apply by arn:aws:iam::123456789012:user/other on desk
+    Acquired 2026-09-30T11:55:00.000Z (5 min ago) by fffactory 0.3.0
+
+  ── Next ─────────────────────────────────────────────
+    Wait for it to finish. If its holder is no longer running, break the lock:
+      $ fffactory lock break --profile factory
   ```
 
-  A lock that was released between the refusal and the read is retried, up to
-  three attempts in all; after that the operation is refused with `The factory
-  lock kept changing hands while fffactory tried to take it; try again.`
+  That is `plan`'s, `apply`'s and `upgrade`'s refusal, laid out as their other
+  refusals ([plan and apply §How refusals are shown](plan-apply.md#how-refusals-are-shown)):
+  the `fffactory lock break` it names repeats the `--instance` and `--profile`
+  the refused command was given. `worker stop|start|terminate` still print it
+  unstyled: `The factory is locked by another operation:`, the holder's lines
+  indented, then `Wait for it to finish. If its holder is no longer running,
+  break the lock with `fffactory lock break`.` A lock that was released
+  between the refusal and the read is retried, up to three attempts in all;
+  after that the operation is refused with `✖ The factory lock kept changing
+  hands while fffactory tried to take it` and a Next block, `Try again.` (the
+  worker commands: `The factory lock kept changing hands while fffactory tried
+  to take it; try again.`).
 - An object at the key that is not a valid lock record for this factory (not
   JSON, another schema version or factory, a malformed field, or any
   character outside printable ASCII in a shown field) is an **unreadable
@@ -766,9 +786,9 @@ N s`, never an AWS or SDK message.
 | Infrastructure | `assets/terraform/` | The Terraform modules and their provider lockfiles. |
 | Domain | `src/domain/backend-bootstrap.ts` | The create-only rule (`bootstrapPlanVerdict`, each offending change as a `ResourceChange`) and `BootstrapContext`; the state bucket's readiness rule, its TLS-only policy and its check, and `UnreadyBucket` (where the bucket is, what S3 reports and each setting it lacks). Pure; no text layout. |
 | Domain | `src/domain/factory-lock.ts` | The lock record, its key and break-log key, parsing, staleness (`isStale`, `lockAge`, `formatDuration`), and the break confirmation rule (`confirmsBreak`). Pure; no text layout. |
-| CLI adapter | `src/cli/presentation/lock.ts` | The holder lines (`describeHeldLock`) and the lock refusal (`lockRefusal`). |
+| CLI adapter | `src/cli/presentation/lock.ts` | The holder lines (`describeHeldLock`) and the lock refusal: `lockRefusalReport` in blocks for plan, apply and upgrade, and the unstyled `lockRefusal` the worker commands still print. |
 | Application | `src/application/bootstrap-backend.ts` | `bootstrapBackend` and `beginFactoryOperation`: the bootstrap plan approved as a `PlanReview`, an unready bucket returned as its `UnreadyBucket`. |
-| CLI adapter | `src/cli/presentation/plan.ts` | The bootstrap plan as shown (`describeBootstrapPlan`), and the unready bucket's refusal (`unreadyBucketRefusal`): what it lacks, the AWS CLI commands that complete it, and the warning that `put-bucket-policy` replaces the whole policy. |
+| CLI adapter | `src/cli/presentation/plan.ts` | The bootstrap plan as shown (`bootstrapSection`), and the unready bucket's refusal (`planRefusalReport`): what it lacks, the AWS CLI commands that complete it, and the warning that `put-bucket-policy` replaces the whole policy. |
 | Application | `src/application/factory-lock.ts` | `stateBucketOf`, `lockHolder`, `acquireFactoryLock`, `releaseFactoryLock`, `settleFactoryLock`, `withFactoryLock`, `breakFactoryLock`. |
 | Application | `src/application/lock-store.ts`, `src/application/approval.ts`, `src/application/operator-prompt.ts` | The `LockStore`, `Approval` and `OperatorPrompt` ports. |
 | Infrastructure | `src/infrastructure/aws-s3-lock-store.ts` | `s3LockStore`: HeadBucket, the bucket's versioning, public access block, encryption and policy, conditional PutObject, GetObject and DeleteObject by version, PutObject of [operation records](plan-apply.md#operation-records) and HeadObject of the Terraform state, always with `ExpectedBucketOwner`. |

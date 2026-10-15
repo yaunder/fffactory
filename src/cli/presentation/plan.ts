@@ -1,19 +1,21 @@
 /**
- * The plan an operator approves, and every refusal of one, as text: the only place a
- * `PlanReview`, a `StaleReason` or a plan refusal becomes lines (`docs/specs/plan-apply.md`
- * §Layer mapping). The domain decides what a plan does and why it is refused; this lays it out.
+ * The plan an operator approves, and every refusal of one, as layout blocks: the only place a
+ * `PlanReview`, a `StaleReason` or a plan refusal is laid out (`docs/specs/plan-apply.md`
+ * §Layer mapping, `docs/specs/cli-output.md`). The domain decides what a plan does and why it is
+ * refused; this lays it out.
  */
+import type { PlanRefusal } from "../../application/plan-factory";
 import {
-  type BucketHardening,
   type BootstrapContext,
+  type BucketHardening,
   type StateBucketLocation,
   type StateBucketReadiness,
   tlsOnlyPolicy,
   type UnreadyBucket,
 } from "../../domain/backend-bootstrap";
-import type { HostKey, Release } from "../../domain/instance";
+import type { HostKey } from "../../domain/instance";
 import {
-  type ChangeKind,
+  type BootstrapPlanReview,
   changeKind,
   changesSomething,
   changeTally,
@@ -29,179 +31,63 @@ import {
   type PoweredDownWorker,
   type ResizeGuard,
   type ResourceChange,
+  type SavedPlan,
   type StaleReason,
   type UnexpectedPlan,
 } from "../../domain/plan";
 import type { PinMove } from "../../domain/release-compatibility";
 import type { WorkerIdentity } from "../../domain/rollout";
+import {
+  type Block,
+  type Inline,
+  type Next,
+  type NextPart,
+  nextSteps,
+  type Report,
+  type Row,
+  type Span,
+  step,
+  verbatim,
+} from "./blocks";
+import { fffactoryCommand, type Selection } from "./command-line";
+import { lockRefusalReport } from "./lock";
+import { GLYPHS, type Status } from "./style";
 
-/** What every plan shows first: which factory.json, factory, account, Region and release. */
-export function describeTarget(target: PlanTarget): string[] {
-  const factory =
-    target.name === undefined ? target.factoryId : `${target.name} (${target.factoryId})`;
+// TODO(re-evaluate when epic #18 restyles `worker terminate`): lay the removal plan
+// (`describeRemovalPlan`) out in blocks, and drop `describeTarget` and `describeInfrastructure`.
+/** The removal plan's target lines: which factory.json, factory, account, Region and release. */
+function describeTarget(target: PlanTarget): string[] {
   return [
     `  Configuration: ${target.instancePath}`,
-    `  Factory: ${factory}`,
+    `  Factory: ${factoryName(target)}`,
     `  AWS account: ${target.accountId}, Region: ${target.region}`,
     `  Release: ${target.release}`,
   ];
 }
 
-/** Terraform's symbol for each kind of change it shows one for. */
-const SYMBOLS: Readonly<Record<Exclude<ChangeKind, "replace" | "other">, string>> = {
-  create: "+",
-  update: "~",
-  delete: "-",
-};
-
-function describeChange(change: ResourceChange): string {
-  const { address, actions } = change;
+/** Terraform's symbol for a change: `+`, `~`, `-`, or a replacement's `-/+` or `+/-`. */
+function changeSymbol(change: ResourceChange): string | undefined {
   const kind = changeKind(change);
-  if (kind === "other") return `  ${address} (${actions.join(", ")})`;
+  if (kind === "other") return undefined;
   // A replacement's symbol tells which comes first: destroying the old, or creating the new.
-  const symbol = kind === "replace" ? (actions[0] === "delete" ? "-/+" : "+/-") : SYMBOLS[kind];
-  return `  ${symbol} ${address}`;
+  if (kind === "replace") return change.actions[0] === "delete" ? "-/+" : "+/-";
+  return GLYPHS[kind];
 }
 
-/** The infrastructure changes a plan makes, as the operator approves them. */
-export function describeInfrastructure(changes: readonly ResourceChange[]): string[] {
+/** The removal plan's infrastructure lines. */
+function describeInfrastructure(changes: readonly ResourceChange[]): string[] {
   const tally = changeTally(changes);
   if (tally.changing === 0) return ["Infrastructure: no changes."];
   return [
     "Infrastructure changes:",
-    ...changes.filter(changesSomething).map(describeChange),
+    ...changes.filter(changesSomething).map((change) => {
+      const symbol = changeSymbol(change);
+      return symbol === undefined
+        ? `  ${change.address} (${change.actions.join(", ")})`
+        : `  ${symbol} ${change.address}`;
+    }),
     `  ${tally.add} to add, ${tally.change} to change, ${tally.destroy} to destroy.`,
   ];
-}
-
-/** The plan's line for a factory that declares no worker. */
-const NO_WORKERS_DECLARED =
-  "Workers: none declared. Declare a host in factory.json's hosts, then create it with `fffactory apply`.";
-
-/** A later stage's line for a worker whose machine is stopped: it is sent nothing. */
-function skippedStopped({ key, hostname }: PlannedWorker): string {
-  return `  = ${key} (${hostname}): skipped: stopped`;
-}
-
-/**
- * The workers stage's changes: each worker gets the release and its host configuration and is
- * verified, a stopped one is skipped, and a factory that declares no worker says so, and how to
- * add one.
- */
-export function describeWorkers(
-  workers: readonly PlannedWorker[],
-  release: Release,
-  stopped: readonly HostKey[] = [],
-): string[] {
-  if (workers.length === 0) return [NO_WORKERS_DECLARED];
-  return [
-    "Worker changes, one worker at a time:",
-    ...workers.map(({ key, hostname }) =>
-      stopped.includes(key)
-        ? `  = ${key} (${hostname}): skipped: stopped; start it with \`fffactory worker start ${key}\`, then apply again to install it`
-        : `  ~ ${key} (${hostname}): install release ${release} and its host configuration, then verify it`,
-    ),
-  ];
-}
-
-/** The repository-stage mutations included in the approved plan. */
-export function describeRepositories(
-  repositories: readonly PlannedRepositories[],
-  stopped: readonly HostKey[] = [],
-): string[] {
-  if (repositories.length === 0) return [];
-  return [
-    "Repository changes, one worker at a time:",
-    ...repositories.map((worker) => {
-      const { key, hostname } = worker;
-      if (stopped.includes(key)) return skippedStopped(worker);
-      const count = worker.placed.length;
-      return `  ~ ${key} (${hostname}): reconcile ${count} placed ${count === 1 ? "repository" : "repositories"} as factory; preserve and report unmanaged checkouts`;
-    }),
-  ];
-}
-
-function describeControlPlane(
-  plans: readonly PlannedControlPlane[],
-  stopped: readonly HostKey[] = [],
-): string[] {
-  if (plans.length === 0) return [];
-  return [
-    "Control-plane changes, before worker activation:",
-    ...plans.map((plan) => {
-      const { key, hostname, changes } = plan;
-      if (stopped.includes(key)) return skippedStopped(plan);
-      return changes.length === 0
-        ? `  = ${key} (${hostname}): Paseo is unchanged`
-        : `  ~ ${key} (${hostname}): ${changes.join(", ")}`;
-    }),
-  ];
-}
-
-function describeDispatch(
-  plans: readonly PlannedDispatch[],
-  stopped: readonly HostKey[] = [],
-): string[] {
-  if (plans.length === 0) return [];
-  return [
-    "Dispatch changes, after every readiness gate:",
-    ...plans.map((plan) => {
-      const { key, hostname, requested, schedule } = plan;
-      if (stopped.includes(key)) return skippedStopped(plan);
-      return requested && schedule !== null
-        ? `  ~ ${key} (${hostname}): install the dispatcher and skill, then reconcile ${schedule.cron} ${schedule.timezone} with ${schedule.provider}/${schedule.model}, mode ${schedule.mode}, cwd ${schedule.cwd}`
-        : `  ~ ${key} (${hostname}): remove the factory dispatch schedule if it exists`;
-    }),
-    "End-to-end verification: observe each worker's release, repositories, Paseo and actual dispatch schedule.",
-  ];
-}
-
-/** What an upgrade's plan shows first: the pin it moves, approved with the plan. */
-export function describePinMove(move: PinMove): string[] {
-  const shown = move.from === "unshown" ? "the release it pins now" : move.from;
-  return [
-    `Upgrade: factory.json's release pin moves from ${shown} to ${move.to}. It is written once you ` +
-      "approve this plan, before anything is applied.",
-  ];
-}
-
-/**
- * The whole factory plan an operator approves: an upgrade's pin move, then its target, its
- * infrastructure changes, then each worker's install and later stages, those of the stopped
- * workers skipped.
- */
-export function describePlan(review: FactoryPlanReview): string[] {
-  const { target, stopped } = review;
-  return [
-    ...(review.pinMove === undefined ? [] : describePinMove(review.pinMove)),
-    "Factory plan:",
-    ...describeTarget(target),
-    ...describeInfrastructure(review.changes),
-    ...describeWorkers(review.workers, target.release, stopped),
-    ...describeControlPlane(review.controlPlane, stopped),
-    ...describeRepositories(review.repositories, stopped),
-    ...describeDispatch(review.dispatch, stopped),
-  ];
-}
-
-/** The lines an operator approves the backend bootstrap plan from. */
-export function describeBootstrapPlan(
-  context: BootstrapContext,
-  creates: readonly string[],
-): string[] {
-  return [
-    `Backend bootstrap: the state bucket ${context.bucket} does not exist yet.`,
-    ...describeTarget(context),
-    "Terraform will create:",
-    ...creates.map((address) => `  + ${address}`),
-  ];
-}
-
-/** Any plan an operator approves. */
-export function describeReview(review: PlanReview): string[] {
-  return review.kind === "factory"
-    ? describePlan(review)
-    : describeBootstrapPlan(review.target, review.creates);
 }
 
 /** The removal plan, as the operator approves it with the host key. */
@@ -220,6 +106,263 @@ export function describeRemovalPlan(plan: {
   ];
 }
 
+const factoryName = (target: PlanTarget): string =>
+  target.name === undefined ? target.factoryId : `${target.name} (${target.factoryId})`;
+
+/** What every plan shows first: which factory, account and Region, and which release. */
+function targetRows(target: PlanTarget, more: readonly Row[] = []): Block {
+  return {
+    kind: "rows",
+    rows: [
+      { label: "Factory", value: [verbatim(factoryName(target))] },
+      { label: "Account", value: `${target.accountId} · ${target.region}` },
+      { label: "Release", value: target.release },
+      ...more,
+    ],
+  };
+}
+
+/** One change, after its glyph in its color; a change of no known kind is named by its actions. */
+function changeLine(change: ResourceChange): Inline {
+  const symbol = changeSymbol(change);
+  if (symbol === undefined) return [verbatim(`${change.address} (${change.actions.join(", ")})`)];
+  const kind = changeKind(change);
+  const tone: Status = kind === "create" || kind === "update" ? kind : "delete";
+  return [{ text: symbol, tone }, " ", verbatim(change.address)];
+}
+
+/** The infrastructure stage: no changes, or the tally, then each change that changes something. */
+function infrastructureRow(changes: readonly ResourceChange[]): Row {
+  const tally = changeTally(changes);
+  if (tally.changing === 0) return { label: "Infrastructure", value: "no changes" };
+  return {
+    label: "Infrastructure",
+    value: `${tally.add} to add, ${tally.change} to change, ${tally.destroy} to destroy`,
+    details: [{ kind: "text", lines: changes.filter(changesSomething).map(changeLine) }],
+  };
+}
+
+/** A stage's row, then each worker's change under it. */
+const stageRow = (label: string, value: string, workers: readonly Row[]): Row => ({
+  label,
+  value,
+  details: [{ kind: "rows", rows: workers }],
+});
+
+/** A worker's change in a stage: `~`, then its key and what it does. */
+const changing = (key: HostKey, value: Inline): Row => ({ status: "update", label: key, value });
+
+/** A worker that stage sends nothing, such as one whose machine is stopped: no glyph. */
+const unchanged = (key: HostKey, value: Inline): Row => ({ label: key, value });
+
+const STOPPED = "skipped: stopped";
+
+/** An `fffactory` command as inline code, with the instance and profile given. */
+const commandCode = (words: readonly string[], selection: Selection): Span => ({
+  text: fffactoryCommand(words, selection),
+  tone: "code",
+});
+
+/**
+ * The workers stage: each worker gets the release and its host configuration and is verified,
+ * a stopped one is skipped, and a factory that declares no worker says so, and how to add one.
+ */
+function workersRow({ workers, stopped, target }: FactoryPlanReview, selection: Selection): Row {
+  if (workers.length === 0)
+    return {
+      label: "Workers",
+      value: [
+        "none declared. Declare a host in factory.json's hosts, then create it with ",
+        commandCode(["apply"], selection),
+        ".",
+      ],
+    };
+  return stageRow(
+    "Workers",
+    "one at a time",
+    workers.map(({ key }) =>
+      stopped.includes(key)
+        ? unchanged(key, [
+            `${STOPPED}; start it with `,
+            commandCode(["worker", "start", key], selection),
+            ", then apply again to install it",
+          ])
+        : changing(key, `install release ${target.release} and host configuration, then verify`),
+    ),
+  );
+}
+
+function controlPlaneRows(plans: readonly PlannedControlPlane[], stopped: readonly HostKey[]) {
+  if (plans.length === 0) return [];
+  return [
+    stageRow(
+      "Control plane",
+      "before worker activation",
+      plans.map(({ key, changes }) => {
+        if (stopped.includes(key)) return unchanged(key, STOPPED);
+        return changes.length === 0
+          ? unchanged(key, "Paseo is unchanged")
+          : changing(key, changes.join(", "));
+      }),
+    ),
+  ];
+}
+
+function repositoryRows(plans: readonly PlannedRepositories[], stopped: readonly HostKey[]) {
+  if (plans.length === 0) return [];
+  return [
+    stageRow(
+      "Repositories",
+      "one worker at a time",
+      plans.map(({ key, placed }) => {
+        if (stopped.includes(key)) return unchanged(key, STOPPED);
+        const count = placed.length;
+        return changing(
+          key,
+          `reconcile ${count} placed ${count === 1 ? "repository" : "repositories"} as factory; ` +
+            "preserve and report unmanaged checkouts",
+        );
+      }),
+    ),
+  ];
+}
+
+function dispatchChange({ requested, schedule }: PlannedDispatch): Inline {
+  if (!requested || schedule === null) return "remove the factory dispatch schedule if it exists";
+  return [
+    "install the dispatcher and skill, then reconcile ",
+    verbatim(`${schedule.cron} ${schedule.timezone}`),
+    " with ",
+    verbatim(`${schedule.provider}/${schedule.model}`),
+    ", mode ",
+    verbatim(schedule.mode),
+    ", cwd ",
+    verbatim(schedule.cwd),
+  ];
+}
+
+/** The dispatch stage, then the end-to-end verification that follows it. */
+function dispatchRows(plans: readonly PlannedDispatch[], stopped: readonly HostKey[]) {
+  if (plans.length === 0) return [];
+  return [
+    stageRow(
+      "Dispatch",
+      "after every readiness gate",
+      plans.map((plan) =>
+        stopped.includes(plan.key)
+          ? unchanged(plan.key, STOPPED)
+          : changing(plan.key, dispatchChange(plan)),
+      ),
+    ),
+    {
+      label: "Verification",
+      value:
+        "end to end: observe each worker's release, repositories, Paseo and actual dispatch schedule",
+    },
+  ];
+}
+
+/** An upgrade's pin move, approved with the plan. */
+function pinRow(move: PinMove): Row {
+  const from = move.from === "unshown" ? "the release it pins now" : move.from;
+  return {
+    label: "Pin",
+    value:
+      `factory.json's release pin moves from ${from} to ${move.to}, written once you approve ` +
+      "this plan, before anything is applied",
+  };
+}
+
+/**
+ * The whole factory plan an operator approves, as the `Plan` section: its target (and an
+ * upgrade's pin move), its infrastructure changes, then each worker's install and later stages,
+ * those of the stopped workers skipped.
+ */
+export function planSection(review: FactoryPlanReview, selection: Selection): Block {
+  const { stopped } = review;
+  return {
+    kind: "section",
+    title: "Plan",
+    blocks: [
+      targetRows(review.target, review.pinMove === undefined ? [] : [pinRow(review.pinMove)]),
+      {
+        kind: "rows",
+        rows: [
+          infrastructureRow(review.changes),
+          workersRow(review, selection),
+          ...controlPlaneRows(review.controlPlane, stopped),
+          ...repositoryRows(review.repositories, stopped),
+          ...dispatchRows(review.dispatch, stopped),
+        ],
+      },
+    ],
+  };
+}
+
+/** Backend bootstrap's plan, as its own section: the bucket it creates, and every creation. */
+function bootstrapSection(target: BootstrapContext, creates: readonly string[]): Block {
+  return {
+    kind: "section",
+    title: "Plan: backend bootstrap",
+    blocks: [
+      targetRows(target),
+      {
+        kind: "rows",
+        rows: [
+          { label: "State bucket", value: `${target.bucket}, which does not exist yet` },
+          infrastructureRow(creates.map((address) => ({ address, actions: ["create"] }))),
+        ],
+      },
+    ],
+  };
+}
+
+/**
+ * Any plan an operator approves, as the blocks shown before it is approved; the commands it
+ * names carry the instance and profile in `selection`.
+ */
+export function reviewBlocks(review: PlanReview, selection: Selection): Block[] {
+  return [
+    review.kind === "factory"
+      ? planSection(review, selection)
+      : bootstrapSection(review.target, review.creates),
+  ];
+}
+
+/** `fffactory plan`'s plan, saved, then how to apply exactly it. */
+export function savedPlanReport(
+  review: FactoryPlanReview,
+  saved: Pick<SavedPlan, "plan_id" | "expires_at">,
+  selection: Selection,
+): Report {
+  return {
+    blocks: [
+      planSection(review, selection),
+      { kind: "text", lines: [`Saved as plan ${saved.plan_id}, until ${saved.expires_at}.`] },
+    ],
+    next: nextSteps(
+      step("Apply exactly this plan:", [
+        fffactoryCommand(["apply", "--plan-id", saved.plan_id], selection),
+      ]),
+    ),
+  };
+}
+
+/** `fffactory plan` before the state bucket exists: bootstrap's plan, then how to go on. */
+export function bootstrapFirstReport(review: BootstrapPlanReview, selection: Selection): Report {
+  return {
+    blocks: [
+      bootstrapSection(review.target, review.creates),
+      { kind: "text", lines: ["The factory itself is planned once the state bucket exists."] },
+    ],
+    next: nextSteps(
+      step("Approve this bootstrap, then the factory's own plan, at a terminal:", [
+        fffactoryCommand(["apply"], selection),
+      ]),
+    ),
+  };
+}
+
 /** Why Terraform's plan is not one fffactory can apply, as one line. */
 export function describeUnexpectedPlan(reason: UnexpectedPlan): string {
   switch (reason.kind) {
@@ -234,44 +377,86 @@ export function describeUnexpectedPlan(reason: UnexpectedPlan): string {
   }
 }
 
-export function describeD11Refusal(refusal: D11Refusal): string[] {
+/** A refusal's error status line, then its reasons, each a line under it. */
+const refused = (text: Inline, reasons: readonly Inline[] = []): Block => ({
+  kind: "verdict",
+  status: "error",
+  text,
+  ...(reasons.length === 0 ? {} : { details: [{ kind: "text", lines: reasons }] }),
+});
+
+/** What every refusal of a change says once it has given its reasons. */
+const NOTHING_APPLIED: Block = { kind: "text", lines: ["Nothing was applied."] };
+
+/** A change that needs a lifecycle capability fffactory does not have, or another command (D11). */
+export function d11Report(refusal: D11Refusal): Report {
   const missing =
     refusal.command === undefined
       ? "which fffactory does not have yet (D11; it arrives in milestone M3):"
       : `which only \`${refusal.command}\` does (D11):`;
+  return {
+    blocks: [
+      refused(`Refusing: this change needs ${refusal.capability}, ${missing}`, refusal.reasons),
+      NOTHING_APPLIED,
+    ],
+    next: nextSteps(step(refusal.instead)),
+  };
+}
+
+/** How a refusal of `action` was given: when, and the instance and profile its commands repeat. */
+interface RefusalContext {
+  readonly action: string;
+  readonly now: Date;
+  readonly selection: Selection;
+}
+
+/** The command that plans again after a refusal: an upgrade's is `fffactory upgrade`. */
+const replan = ({ action, selection }: RefusalContext): string =>
+  fffactoryCommand([action === "upgrade" ? "upgrade" : "plan"], selection);
+
+/** The start commands, once a stopped or stopping worker can be started, and then planning again. */
+function startFirst(workers: readonly PoweredDownWorker[], context: RefusalContext): NextPart[] {
+  const one = workers.length === 1;
+  const once = workers.some(({ machine }) => machine === "stopping")
+    ? `, once ${one ? "it has" : "they have"} stopped`
+    : "";
   return [
-    `Refusing: this change needs ${refusal.capability}, ${missing}`,
-    ...refusal.reasons.map((reason) => `  ${reason}`),
-    `Nothing was applied. ${refusal.instead}`,
+    step(
+      `Start ${one ? "it" : "each"} first${once}:`,
+      workers.map(({ key }) => fffactoryCommand(["worker", "start", key], context.selection)),
+    ),
+    step("Then plan again:", [replan(context)]),
   ];
 }
 
-/** Why `action` is refused for the resized guarded workers, and what to do first. */
-export function describeStoppedResizeRefusal(action: string, refusal: ResizeGuard): string[] {
-  const updated = ({ key, hostname }: PlannedWorker) =>
-    `  ${key} (${hostname}): ${hostMachineAddress(key)} would be updated in place`;
-  const starts = " a stopped instance to change its type:";
-  if (refusal.inventory === "unreadable")
-    return [
-      `Refusing to ${action}: the plan changes the instance type of a worker the EC2 ` +
-        `inventory could not be read to check is not stopped, and Terraform starts${starts}`,
-      ...refusal.workers.map(updated),
-      "Nothing was applied. Plan again once the EC2 inventory can be read.",
-    ];
-  const { workers } = refusal;
-  const commands = workers.map(({ key }) => `\`fffactory worker start ${key}\``).join(" and ");
-  const one = workers.length === 1;
-  const once = workers.some(({ machine }) => machine === "stopping")
-    ? ` once ${one ? "it has" : "they have"} stopped`
-    : "";
-  const stopping = (worker: PoweredDownWorker) =>
-    worker.machine === "stopping" ? ", and it is stopping" : "";
-  return [
-    `Refusing to ${action}: the plan changes the instance type of a stopped worker, and ` +
-      `Terraform starts${starts}`,
-    ...workers.map((worker) => `${updated(worker)}${stopping(worker)}`),
-    `Nothing was applied. Start ${one ? "it" : "each"} first with ${commands}${once}, then plan again.`,
-  ];
+/** Why the plan is refused for the resized guarded workers, and what to do first. */
+function stoppedResizeReport(refusal: ResizeGuard, context: RefusalContext): Report {
+  const unreadable = refusal.inventory === "unreadable";
+  const worker = unreadable
+    ? "a worker the EC2 inventory could not be read to check is not stopped"
+    : "a stopped worker";
+  const updated = (plan: PlannedWorker | PoweredDownWorker): Row => ({
+    label: plan.key,
+    value:
+      `${hostMachineAddress(plan.key)} would be updated in place` +
+      ("machine" in plan && plan.machine === "stopping" ? ", and it is stopping" : ""),
+  });
+  return {
+    blocks: [
+      {
+        kind: "verdict",
+        status: "error",
+        text:
+          `Refusing to ${context.action}: the plan changes the instance type of ${worker}, and ` +
+          "Terraform starts a stopped instance to change its type:",
+        details: [{ kind: "rows", rows: refusal.workers.map(updated) }],
+      },
+      NOTHING_APPLIED,
+    ],
+    next: unreadable
+      ? nextSteps(step("Plan again once the EC2 inventory can be read:", [replan(context)]))
+      : nextSteps(...startFirst(refusal.workers, context)),
+  };
 }
 
 /** Why a saved plan is no longer the plan to apply, as one line. */
@@ -304,12 +489,56 @@ export function describeStaleReason(reason: StaleReason): string {
   }
 }
 
-export function staleRefusal(planId: string, reasons: readonly StaleReason[]): string[] {
-  return [
-    `Refusing to apply plan ${planId}: it is no longer the plan to apply:`,
-    ...reasons.map((reason) => `  ${describeStaleReason(reason)}`),
-    "Nothing was applied. Review a new plan with `fffactory plan`.",
-  ];
+/** A Next block reviewing a new plan, with the instance and profile given. */
+const reviewNewPlan = (selection: Selection): Next =>
+  nextSteps(step("Review a new plan:", [fffactoryCommand(["plan"], selection)]));
+
+// TODO(re-evaluate when #12 lands): update the `paseo_changed` refusal's wording to #12's
+// corrected outcome. It comes after the infrastructure stage applied, so its `Nothing was
+// applied.` is known to be misleading: #12 moves the check before anything is applied, or
+// reports what was.
+/** Why a saved plan is no longer the plan to apply: every reason, then a new plan. */
+export function staleReport(
+  planId: string,
+  reasons: readonly StaleReason[],
+  selection: Selection,
+): Report {
+  return {
+    blocks: [
+      refused(
+        `Refusing to apply plan ${planId}: it is no longer the plan to apply:`,
+        reasons.map((reason) => [verbatim(describeStaleReason(reason))]),
+      ),
+      NOTHING_APPLIED,
+    ],
+    next: reviewNewPlan(selection),
+  };
+}
+
+/** A plan ID naming no saved plan of this factory here. */
+export function unknownPlanReport(planId: string, selection: Selection): Report {
+  return {
+    blocks: [
+      refused(
+        `There is no saved plan ${planId} for this factory here: it expired, was applied, or ` +
+          "was saved elsewhere",
+      ),
+    ],
+    next: reviewNewPlan(selection),
+  };
+}
+
+/** A saved plan whose record cannot be read, or whose Terraform plan changed after saving. */
+export function damagedPlanReport(planId: string, selection: Selection): Report {
+  return {
+    blocks: [
+      refused(
+        `Saved plan ${planId} cannot be applied: its record cannot be read, or its Terraform ` +
+          "plan changed after it was saved",
+      ),
+    ],
+    next: reviewNewPlan(selection),
+  };
 }
 
 function hardeningLabel(setting: BucketHardening, readiness: StateBucketReadiness): string {
@@ -351,16 +580,73 @@ function hardeningCommand(setting: BucketHardening, location: StateBucketLocatio
  * Why an operation refuses a state bucket that exists but lacks some of backend bootstrap's
  * settings, and how to complete it: fffactory itself cannot finish an interrupted bootstrap.
  */
-export function unreadyBucketRefusal({ location, readiness, missing }: UnreadyBucket): string[] {
-  return [
-    `The state bucket ${location.bucket} exists, but backend bootstrap did not finish it. It lacks:`,
-    ...missing.map((setting) => `  ${hardeningLabel(setting, readiness)}`),
-    "If another first apply is still bootstrapping it, wait for that to finish, then retry.",
-    "Otherwise complete the bucket with these AWS CLI commands, using credentials for account " +
-      `${location.accountId}, then retry:`,
-    ...missing.map((setting) => `  ${hardeningCommand(setting, location)}`),
-    ...(missing.includes("tls_only_policy")
-      ? ["put-bucket-policy replaces the whole bucket policy: add any statements it already has."]
-      : []),
-  ];
+function unreadyBucketReport({ location, readiness, missing }: UnreadyBucket): Report {
+  const warning: NextPart[] = missing.includes("tls_only_policy")
+    ? [
+        {
+          kind: "note",
+          text: "put-bucket-policy replaces the whole bucket policy: add any statements it already has.",
+        },
+      ]
+    : [];
+  return {
+    blocks: [
+      refused(
+        `The state bucket ${location.bucket} exists, but backend bootstrap did not finish it. It lacks:`,
+        missing.map((setting) => hardeningLabel(setting, readiness)),
+      ),
+    ],
+    next: {
+      paragraphs: [
+        [
+          step(
+            "If another first apply is still bootstrapping it, wait for that to finish, then retry.",
+          ),
+        ],
+        [
+          step(
+            "Otherwise complete the bucket with these AWS CLI commands, using credentials for " +
+              `account ${location.accountId}, then retry:`,
+            missing.map((setting) => hardeningCommand(setting, location)),
+          ),
+          ...warning,
+        ],
+      ],
+    },
+  };
+}
+
+/** Why `context.action` was refused before anything changed: its status line, reasons and next step. */
+export function planRefusalReport(refusal: PlanRefusal, context: RefusalContext): Report {
+  const { action } = context;
+  switch (refusal.kind) {
+    case "release_mismatch":
+      return { blocks: [refused(`Refusing to ${action}: ${refusal.message}`)] };
+    case "refused":
+      return {
+        blocks: [
+          refused(
+            `Refusing to ${action}: factory.json is not ready:`,
+            refusal.issues.map((issue) => [verbatim(`${issue.path}: ${issue.message}`)]),
+          ),
+        ],
+      };
+    case "d11":
+      return d11Report(refusal.refusal);
+    case "stopped_resize":
+      return stoppedResizeReport(refusal, context);
+    case "unready":
+      return unreadyBucketReport(refusal.bucket);
+    case "unexpected_plan":
+      return {
+        blocks: [
+          refused(
+            `Refusing to ${action}: Terraform's plan is not one fffactory can apply:`,
+            refusal.unexpected.map((reason) => [verbatim(describeUnexpectedPlan(reason))]),
+          ),
+        ],
+      };
+    case "locked":
+      return lockRefusalReport(refusal.held, context.now, context.selection);
+  }
 }

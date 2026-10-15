@@ -8,7 +8,7 @@
  * apply; they are reported from two results here, each the shape the application produces.
  */
 import { describe, expect, test } from "bun:test";
-import { reportApply } from "../../src/cli/commands/apply";
+import { type Reporting, reportApply } from "../../src/cli/commands/apply";
 import type { FactoryApply } from "../../src/application/apply-factory";
 import type { ControlPlaneOutcome } from "../../src/application/apply-control-plane";
 import type { DispatchOutcome } from "../../src/application/apply-dispatch";
@@ -20,6 +20,9 @@ import { ENROLLMENTS } from "../../src/domain/readiness";
 import type { WorkerOutcome } from "../../src/domain/rollout";
 import { harness } from "../support/cli-harness";
 import { MemoryInstanceStore } from "../support/memory-instance-store";
+
+/** A plain apply's reporting, given no instance or profile. */
+const APPLYING: Reporting = { action: "apply", rerun: "apply", selection: {} };
 
 const BUCKET = "fff-abcd1234-state";
 const KEY = "fff-abcd1234-operations/2026-09-30T12:00:00.000Z-aaaaaaaa.json";
@@ -77,7 +80,7 @@ describe("fffactory apply, worker report (plan-apply §Apply)", () => {
     });
 
     // A failed worker stops the rollout: exit 1, with no verification to lift it to 2.
-    expect(reportApply(result, context)).toBe(1);
+    expect(reportApply(result, context, APPLYING)).toBe(1);
     expect(out).toEqual([
       "Infrastructure: no changes to apply.",
       "Workers:",
@@ -116,7 +119,7 @@ describe("fffactory apply, phase-3 report (plan-apply §Apply)", () => {
         recordFailure: undefined,
       };
 
-      expect(reportApply(result, context)).toBe(1);
+      expect(reportApply(result, context, APPLYING)).toBe(1);
       expect(err[0]).toStartWith(headline);
       if (consequence !== undefined) expect(err).toContain(consequence);
       expect(err.at(-1)?.toLowerCase()).toContain("rerun `fffactory apply`");
@@ -137,7 +140,7 @@ describe("fffactory apply, phase-3 report (plan-apply §Apply)", () => {
         },
       ],
     });
-    expect(reportApply(result, context)).toBe(1);
+    expect(reportApply(result, context, APPLYING)).toBe(1);
   });
 
   test("a genuine dispatch gate deferral exits 2, while reconciliation failure exits 1", () => {
@@ -151,7 +154,7 @@ describe("fffactory apply, phase-3 report (plan-apply §Apply)", () => {
       nextActions: ["Enroll GitHub"],
     };
     const pendingResult = applied({ workers: [installed("builder-1")], dispatch: [pending] });
-    expect(reportApply(pendingResult.result, pendingResult.context)).toBe(2);
+    expect(reportApply(pendingResult.result, pendingResult.context, APPLYING)).toBe(2);
 
     const failed: DispatchOutcome = {
       key: "builder-1" as HostKey,
@@ -161,7 +164,7 @@ describe("fffactory apply, phase-3 report (plan-apply §Apply)", () => {
       nextAction: "Repair Paseo",
     };
     const failedResult = applied({ workers: [installed("builder-1")], dispatch: [failed] });
-    expect(reportApply(failedResult.result, failedResult.context)).toBe(1);
+    expect(reportApply(failedResult.result, failedResult.context, APPLYING)).toBe(1);
 
     // A worker sent nothing because an earlier stage skipped it is not a failure (#134).
     const skipped: DispatchOutcome = {
@@ -173,7 +176,7 @@ describe("fffactory apply, phase-3 report (plan-apply §Apply)", () => {
       nextAction: "Check the worker, then rerun `fffactory apply`",
     };
     const skippedResult = applied({ workers: [installed("builder-1")], dispatch: [skipped] });
-    expect(reportApply(skippedResult.result, skippedResult.context)).toBe(2);
+    expect(reportApply(skippedResult.result, skippedResult.context, APPLYING)).toBe(2);
   });
 
   test("reports every repository, control-plane, dispatch and verification branch", () => {
@@ -274,7 +277,7 @@ describe("fffactory apply, phase-3 report (plan-apply §Apply)", () => {
 
     // A failed live dispatch reconciliation makes the command fail, even though other gaps are pending.
     expect(verification.ready).toBe(false);
-    expect(reportApply(result, context)).toBe(1);
+    expect(reportApply(result, context, APPLYING)).toBe(1);
     expect(err).toEqual([]);
 
     const ready = verification.workers.find((worker) => worker.ready);
