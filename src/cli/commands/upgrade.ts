@@ -7,7 +7,7 @@ import {
 } from "../../domain/release-compatibility";
 import type { CliContext, Command } from "../context";
 import { sha256Text } from "../../infrastructure/release-tarball";
-import { operatorApproval, progressLine, reportApply } from "./apply";
+import { applyingProgress, operatorApproval, reportApply } from "./apply";
 import type { Selection } from "../presentation/command-line";
 import { d11Report } from "../presentation/plan";
 import { basisOf, printReport } from "./planning";
@@ -76,23 +76,22 @@ function reportNoUpgrade(
   }
 }
 
-const NOT_MOVED = "factory.json's pin was not moved: it still pins the release it pinned.";
-
+// TODO(re-evaluate when #11 lands): upgrade wires no control plane or workflow queue, so its
+// run skips the control-plane, dispatch and verification stages its plan shows, and its Result
+// has none of their rows; wire them as apply does, and its Result shows them unchanged.
+/**
+ * Reports the upgrade's apply as apply's, with the pin's state: once moved, a rerun is apply's;
+ * not moved, a notice before any Next block, whose rerun is the upgrade's.
+ */
 function report(result: Upgrade, context: CliContext, selection: Selection): number {
   if (result.kind !== "upgrade") return reportNoUpgrade(result, context);
   const { apply, pinned } = result;
-  const code = reportApply(apply, context, {
+  return reportApply(apply, context, {
     action: "upgrade",
     rerun: pinned ? "apply" : "upgrade",
     selection,
-    notice: pinned ? undefined : NOT_MOVED,
+    pin: { moved: pinned, release: context.release },
   });
-  if (pinned && apply.kind === "failed" && (apply.step === "pinning" || apply.step === "pinned"))
-    context.err(
-      `factory.json pins release ${context.release}: rerun \`fffactory apply\` with this ` +
-        "release to finish.",
-    );
-  return code;
 }
 
 async function upgrade(args: readonly string[], context: CliContext): Promise<number> {
@@ -125,22 +124,26 @@ async function upgrade(args: readonly string[], context: CliContext): Promise<nu
   if (assessment.kind !== "upgrade") return reportNoUpgrade(assessment, context);
   const basis = await basisOf(loaded, "upgrade", values, context);
   if (!basis) return 1;
+  const applying = applyingProgress(context.out);
   const result = await upgradeFactory(
     {
       lockStore: context.lockStore,
       provisioner: context.provisioner,
       planStore: context.planStore,
       machines: context.machines,
-      approval: operatorApproval(undefined, context, values, QUESTION),
+      approval: operatorApproval(undefined, context, values, applying, {
+        question: QUESTION,
+        afterPin: true,
+      }),
       interrupted: context.interrupted,
       peers: context.tailnet,
       transport: context.transport,
       assets: context.assets,
-      progress: (event) => context.out(progressLine(event, context.release)),
+      progress: applying.progress,
       sleep: context.sleep,
       sha256: sha256Text,
       store: context.store,
-      pinned: () => context.out(`factory.json now pins release ${context.release}.`),
+      pinned: () => applying.pinned(context.release),
     },
     {
       ...basis,

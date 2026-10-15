@@ -54,7 +54,15 @@ describe("plain output (cli output §Plain output)", () => {
       "+",
       "~",
       "-",
+      "↷",
+      "◌",
+      "◼",
     ]);
+  });
+
+  test("every glyph takes one terminal column, even where width is ambiguous", () => {
+    for (const status of STATUSES)
+      expect(Bun.stringWidth(GLYPHS[status], { ambiguousIsNarrow: false })).toBe(1);
   });
 });
 
@@ -73,6 +81,12 @@ describe("style roles in color (cli output §Style roles)", () => {
     expect(ansiStyle.status("attention", "enrollment pending")).toBe(
       `${ESC}[33menrollment pending${ESC}[39m`,
     );
+  });
+
+  test("outcomes: skipped yellow; not attempted and stopped dim, neutral", () => {
+    expect(ansiStyle.glyph("skipped")).toBe(`${ESC}[33m↷${ESC}[39m`);
+    expect(ansiStyle.glyph("not_attempted")).toBe(`${ESC}[2m◌${ESC}[22m`);
+    expect(ansiStyle.glyph("stopped")).toBe(`${ESC}[2m◼${ESC}[22m`);
   });
 
   test("changes: create green, update yellow, delete red", () => {

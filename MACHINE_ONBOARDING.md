@@ -354,21 +354,22 @@ bucket exists: …`, and saves nothing. `apply` then:
    IAM role and the worker's instance, and the worker, control-plane,
    repository and dispatch lines show what each stage will do. Anything but
    `yes` applies nothing;
-3. applies the infrastructure (`Applying. Terraform's output is not shown;
-   this can take several minutes.`);
-4. waits for the new worker's first boot, up to 15 minutes (`Waiting for KEY
-   (HOSTNAME) to finish its first boot …`), as it joins the tailnet;
-5. uploads the release over Tailscale SSH, installs and verifies it (`Installing
-   release R on KEY (HOSTNAME): …`), then reconciles repositories, installs
-   Paseo and reconciles dispatch;
-6. prints each stage's outcome, the end-to-end verification and `Operation
-   record: s3://…`, and releases the lock.
+3. applies the infrastructure (its `Applying` section's `Infrastructure
+   applying with Terraform …` row);
+4. waits for the new worker's first boot, up to 15 minutes (`KEY   waiting for
+   its first boot …`), as it joins the tailnet;
+5. uploads the release over Tailscale SSH, installs and verifies it (`KEY
+   uploading N MiB`, then `KEY   installing and verifying …`), then reconciles
+   repositories, installs Paseo and reconciles dispatch;
+6. prints its `Result`: each stage's outcome, the end-to-end verification and
+   the operation record's location, and releases the lock.
 
-**Done when** apply exits 0 and its `Workers:` section shows `installed  KEY
-(HOSTNAME): release R installed and verified; enrollment pending: GitHub,
-OpenAI Codex, Claude Code`, each account followed by its exact steps, and
-`Paseo clients: enrollment is checked from each client, not the worker`.
-Pending enrollment is expected here: fffactory never enrolls an account.
+**Done when** apply exits 0, its `Result` shows `! KEY   installed and verified
+· enrollment pending (3)`, with each later stage under it, and it ends with
+`Next: enroll 3 accounts on KEY`: the login, each account's commands, then
+`exit`, `fffactory apply` and `fffactory status`, and `Paseo clients:
+enrollment is checked from each client, not the worker`. Pending enrollment is
+expected here: fffactory never enrolls an account.
 
 **Otherwise:**
 
@@ -386,7 +387,7 @@ Pending enrollment is expected here: fffactory never enrolls an account.
 - An install or verification failure leaves the worker on the new release,
   unhealthy: its next action names the failed step's log; rerun `fffactory
   apply` once the cause is fixed.
-- `Applying failed: …`: Terraform may have changed some infrastructure; rerun
+- `✖ Applying failed: …`: Terraform may have changed some infrastructure; rerun
   `fffactory apply`, which plans again from what exists and converges.
 - Interrupted (Ctrl-C): the factory stays locked. See
   [An interrupted operation](#an-interrupted-operation).
@@ -396,8 +397,8 @@ Pending enrollment is expected here: fffactory never enrolls an account.
 **Actor:** human: each login opens a browser or device-code flow. **Spec:**
 [readiness §Enrollment](docs/specs/readiness.md#enrollment).
 
-Run the steps apply printed for each pending account. They are, as `factory`
-on the worker:
+Run the steps apply's Next block printed for each pending account. They are, as
+`factory` on the worker:
 
 ```bash
 tailscale ssh factory@HOSTNAME
@@ -442,8 +443,8 @@ reviewed and approved that plan. Without `--plan-id`, apply asks at a terminal.
 A plan refused as stale (factory.json, the release, the account or the state
 changed) is never forced: plan again and review the new plan.
 
-**Done when** apply exits 0 with `installed  KEY (HOSTNAME): release R
-installed and verified; every account is enrolled`, and `status` exits 0,
+**Done when** apply exits 0 with `✔ KEY   installed and verified · every
+account enrolled` in its Result, and `status` exits 0,
 showing the worker `Ready on release R` and ending `Ready: all 1 workers are
 ready.`
 `fffactory status --json` gives the same report as a versioned document.

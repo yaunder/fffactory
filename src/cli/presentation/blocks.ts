@@ -37,10 +37,16 @@ export type Block =
   /** A rule with the title, then the blocks indented. */
   | { readonly kind: "section"; readonly title: Inline; readonly blocks: readonly Block[] }
   /**
-   * Aligned rows; `labelWidth` pads labels to at least that many columns, so rows rendered one
-   * at a time, such as progress, align.
+   * Aligned rows; `labelWidth` pads labels to at least that many columns, and `statusColumn`
+   * reserves the status column even when no row here has a status, so rows rendered one at a
+   * time, such as progress or a result whose rows go to two streams, align.
    */
-  | { readonly kind: "rows"; readonly rows: readonly Row[]; readonly labelWidth?: number }
+  | {
+      readonly kind: "rows";
+      readonly rows: readonly Row[];
+      readonly labelWidth?: number;
+      readonly statusColumn?: boolean;
+    }
   /** The outcome: its status's glyph and text, then any details. */
   | {
       readonly kind: "verdict";
@@ -153,7 +159,7 @@ function rowsLines(
   const labels = block.rows.map((row) => inline(style, row.label, style.label));
   const labelWidth = Math.max(block.labelWidth ?? 0, ...labels.map(width));
   const glyphs = block.rows.map((row) => (row.status ? style.glyph(row.status) : ""));
-  const glyphWidth = Math.max(...glyphs.map(width));
+  const glyphWidth = Math.max(block.statusColumn === true ? 1 : 0, ...glyphs.map(width));
   return block.rows.flatMap((row, index) => {
     const glyph = glyphWidth > 0 ? `${padded(glyphs[index] ?? "", glyphWidth)} ` : "";
     const label = labels[index] ?? "";
@@ -256,4 +262,13 @@ export function render(style: Style, blocks: readonly Block[], next?: Next): str
  */
 export function renderInSection(style: Style, blocks: readonly Block[]): string[] {
   return blockLines(style, blocks, INDENT);
+}
+
+/**
+ * `parts` as lines inside a Next block, as its own parts are: a Next block whose parts go to two
+ * streams renders its rule as a Next block with no paragraphs, then each part with this, a blank
+ * line between paragraphs (`docs/specs/cli-output.md` §Two streams).
+ */
+export function renderNextParts(style: Style, parts: readonly NextPart[]): string[] {
+  return parts.flatMap((part) => partLines(style, part));
 }

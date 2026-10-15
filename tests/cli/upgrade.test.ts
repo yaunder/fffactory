@@ -22,6 +22,9 @@ const HEADER = [
 const rule = (title: string) => `── ${title} ${"─".repeat(Math.max(2, 49 - title.length))}`;
 const NEXT = rule("Next");
 const NOT_MOVED = "factory.json's pin was not moved: it still pins the release it pinned.";
+const RESULT = rule("Result");
+const RECORD_LINE =
+  /^ {4}Operation record {3}s3:\/\/fff-abcd1234-state\/fff-abcd1234-operations\/.+\.json$/;
 const QUESTION = 'Move the pin and apply this plan? Only "yes" does: ';
 const COMPATIBLE: ReleaseCompatibility = {
   schema_version: 1,
@@ -80,8 +83,8 @@ describe("fffactory upgrade (plan-apply §Upgrade)", () => {
     expect(await run(["upgrade"], context)).toBe(0);
     expect(err).toEqual([]);
     // The plan shows every stage it approves, control plane and dispatch included; that upgrade
-    // then skips them is #11's, not this presentation's.
-    expect(out.slice(0, 21)).toEqual([
+    // then skips them is #11's, not this presentation's (below).
+    expect(out.slice(0, 20)).toEqual([
       ...HEADER,
       "",
       rule("Plan"),
@@ -102,11 +105,34 @@ describe("fffactory upgrade (plan-apply §Upgrade)", () => {
       "    ~ builder-1   remove the factory dispatch schedule if it exists",
       "  Verification     end to end: observe each worker's release, repositories, Paseo and actual dispatch schedule",
       "",
-      "Applying. Terraform's output is not shown; this can take several minutes.",
     ]);
-    expect(out[21]).toBe("factory.json now pins release 0.3.0.");
-    expect(out).toContain("Infrastructure: no changes to apply.");
-    expect(out.at(-1)).toStartWith(`Operation record: s3://${BUCKET}/${FACTORY}-operations/`);
+    // The pin is written first, then the worker installs: the Applying section says so as it
+    // happens, the Result and its Next block follow.
+    // TODO(re-evaluate when #11 lands): expect the Result's control-plane, dispatch and
+    // verification rows too: upgrade does not run those stages yet, so the Result has none.
+    expect(out.slice(20, 33)).toEqual([
+      "",
+      rule("Applying"),
+      "  Pin         factory.json now pins release 0.3.0",
+      "  builder-1   uploading 0.0 MiB",
+      "  builder-1   installing and verifying (can take many minutes)",
+      "",
+      RESULT,
+      "    Infrastructure     no changes",
+      "  ! builder-1          installed and verified · enrollment pending (3)",
+      "    ✔ Repositories    synchronized",
+      expect.stringMatching(RECORD_LINE),
+      "",
+      rule("Next: enroll 3 accounts on builder-1"),
+    ]);
+    expect(out.slice(-6)).toEqual([
+      "    $ exit",
+      "  Refresh enrollment verification, reviewing the new plan:",
+      "    $ fffactory apply",
+      "  Then confirm:",
+      "    $ fffactory status",
+      "  Paseo clients: enrollment is checked from each client, not the worker",
+    ]);
     expect(prompt.asked).toEqual([QUESTION]);
     expect(pin()).toBe("0.3.0");
     expect(lockStore.operationWrites[0]?.operation).toBe("upgrade");
@@ -122,7 +148,7 @@ describe("fffactory upgrade (plan-apply §Upgrade)", () => {
   test("declined: nothing is applied and the pin is not moved", async () => {
     const { context, err, pin, terraform } = cli({ answers: ["no"] });
     expect(await run(["upgrade"], context)).toBe(1);
-    expect(err).toEqual(["Not approved: nothing was applied.", NOT_MOVED]);
+    expect(err).toEqual(["", "✖ Not approved: nothing was applied", "", NOT_MOVED]);
     expect(pin()).toBe("0.2.0");
     expect(terraform.calls.some(({ call }) => call === "applyPlan")).toBe(false);
   });
@@ -132,10 +158,16 @@ describe("fffactory upgrade (plan-apply §Upgrade)", () => {
     terraform.world.hosts.delete("builder-1");
     terraform.world.failNext = "applyPlan";
     expect(await run(["upgrade"], context)).toBe(1);
+    // The pin moved: the rerun is apply's, by this release.
     expect(err).toEqual([
-      "Applying failed: `terraform apply` exited with status 1.",
-      "Terraform may have changed some of the infrastructure before it stopped.",
-      "Rerun `fffactory apply`: it plans again from what exists now and converges what remains.",
+      "",
+      RESULT,
+      "  ✖ Applying failed: `terraform apply` exited with status 1",
+      "    Terraform may have changed some of the infrastructure before it stopped.",
+      "",
+      NEXT,
+      "  Rerun: it plans again from what exists now and converges what remains:",
+      "    $ fffactory apply",
     ]);
     expect(pin()).toBe("0.3.0");
   });
@@ -155,10 +187,25 @@ describe("fffactory upgrade (plan-apply §Upgrade)", () => {
       return write(bucket, record);
     };
     expect(await run(["upgrade"], context)).toBe(1);
-    expect(out).toContain("factory.json now pins release 0.3.0.");
+    expect(out.slice(-5)).toEqual([
+      "",
+      rule("Applying"),
+      "  Pin         factory.json now pins release 0.3.0",
+      "",
+      "  Operation record   s3://fff-abcd1234-state/fff-abcd1234-operations/2026-09-30T12:00:00.000Z-aaaaaaaa.json",
+    ]);
+    // The pin's state, then how to finish, after the failure and the record.
     expect(err).toEqual([
-      "Upgrading failed once factory.json's pin moved: S3 answered SlowDown. Nothing was applied.",
-      "factory.json pins release 0.3.0: rerun `fffactory apply` with this release to finish.",
+      "",
+      RESULT,
+      "  ✖ Upgrading failed once factory.json's pin moved: S3 answered SlowDown",
+      "    Nothing was applied.",
+      "",
+      "factory.json pins release 0.3.0.",
+      "",
+      NEXT,
+      "  Finish with this release:",
+      "    $ fffactory apply",
     ]);
     expect(pin()).toBe("0.3.0");
   });
@@ -168,10 +215,18 @@ describe("fffactory upgrade (plan-apply §Upgrade)", () => {
     expect(await run(["upgrade"], context)).toBe(1);
     expect(out).toEqual(HEADER);
     expect(err).toEqual([
-      "Refusing to upgrade: the factory has no state bucket yet, and an upgrade never creates " +
-        "it. Nothing was created or applied. Run `fffactory apply` with the release " +
-        "factory.json pins first, then rerun `fffactory upgrade`.",
+      "",
+      "✖ Refusing to upgrade: the factory has no state bucket yet, and an upgrade never creates it",
+      "",
+      "Nothing was created or applied.",
+      "",
       NOT_MOVED,
+      "",
+      NEXT,
+      "  Create it with the release factory.json pins, which applies the factory:",
+      "    $ fffactory apply",
+      "  Then upgrade again:",
+      "    $ fffactory upgrade",
     ]);
     expect(prompt.asked).toEqual([]);
     expect(terraform.calls).toEqual([]);
@@ -196,9 +251,16 @@ describe("fffactory upgrade (plan-apply §Upgrade)", () => {
     };
     expect(await run(["upgrade"], editing)).toBe(1);
     expect(err).toEqual([
-      "Refusing to upgrade: factory.json changed after the plan was made. Nothing was " +
-        "applied. Review a new plan with `fffactory upgrade`.",
+      "",
+      "✖ Refusing to upgrade: factory.json changed after the plan was made",
+      "",
+      "Nothing was applied.",
+      "",
       NOT_MOVED,
+      "",
+      NEXT,
+      "  Review a new plan:",
+      "    $ fffactory upgrade",
     ]);
     expect(store.files[PATH]).toBe(edited);
   });

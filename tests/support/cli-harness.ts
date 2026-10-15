@@ -39,7 +39,8 @@ export const zeroBytes: RandomBytes = (count) => new Uint8Array(count);
  * the lock store, Secrets Manager, the prompt, Terraform, the plan store, the EC2 inventory and
  * machine control,
  * the tailnet and its admin API, SSH and this machine as a worker are fakes unless overridden, and nothing is interrupted; the clock is fixed and sleeping returns at once. Both streams are
- * plain unless `styles` colors one. Nothing touches the host or AWS.
+ * plain unless `styles` colors one; `written` keeps every line of both, in the order written.
+ * Nothing touches the host or AWS.
  */
 export function harness(
   store: InstanceStore,
@@ -79,6 +80,7 @@ export function harness(
   const { styles = {}, ...replaced } = overrides;
   const out: string[] = [];
   const err: string[] = [];
+  const written: { readonly stream: "out" | "err"; readonly line: string }[] = [];
   const context: CliContext = {
     cwd: CWD,
     home: "/home/operator",
@@ -108,9 +110,15 @@ export function harness(
     release: TEST_RELEASE,
     compatibility: RELEASE_COMPATIBILITY,
     randomBytes: zeroBytes,
-    out: writer((line) => out.push(line), styles.out ?? plainStyle),
-    err: writer((line) => err.push(line), styles.err ?? plainStyle),
+    out: writer((line) => {
+      out.push(line);
+      written.push({ stream: "out", line });
+    }, styles.out ?? plainStyle),
+    err: writer((line) => {
+      err.push(line);
+      written.push({ stream: "err", line });
+    }, styles.err ?? plainStyle),
     ...replaced,
   };
-  return { context, out, err };
+  return { context, out, err, written };
 }

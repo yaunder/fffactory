@@ -6,6 +6,7 @@ import {
   type Row,
   render,
   renderInSection,
+  renderNextParts,
   verbatim,
 } from "../../../src/cli/presentation/blocks";
 import { ansiStyle, plainStyle } from "../../../src/cli/presentation/style";
@@ -276,6 +277,30 @@ describe("rows (cli output §Rows)", () => {
     ).toEqual(streamed);
   });
 
+  test("a reserved status column aligns rows streamed one at a time, with or without a glyph", () => {
+    const result = (row: Row): Block => ({
+      kind: "rows",
+      labelWidth: 16,
+      statusColumn: true,
+      rows: [row],
+    });
+    const streamed = [
+      ...renderInSection(plainStyle, [result({ label: "Infrastructure", value: "no changes" })]),
+      ...renderInSection(plainStyle, [
+        { kind: "rows", labelWidth: 16, statusColumn: true, rows: [] },
+      ]),
+      ...renderInSection(plainStyle, [
+        result({ status: "attention", label: "builder-1", value: "enrollment pending (3)" }),
+      ]),
+      ...renderInSection(plainStyle, [result({ label: "Operation record", value: "s3://b/k" })]),
+    ];
+    expect(streamed).toEqual([
+      "    Infrastructure     no changes",
+      "  ! builder-1          enrollment pending (3)",
+      "    Operation record   s3://b/k",
+    ]);
+  });
+
   test("a row with a status and no text is its glyph alone, with no trailing space", () => {
     expect(
       render(plainStyle, [
@@ -350,6 +375,18 @@ describe("the Next block (cli output §Next)", () => {
       `  ${ansiStyle.muted("Paseo clients: enrollment is checked from each client, not the worker")}`,
     );
     expect(lines.map((line) => stripVTControlCharacters(line))).toEqual(ENROLL_TEXT);
+  });
+
+  test("a Next block streamed a part at a time, its rule alone first, reads as the block rendered whole", () => {
+    expect(render(plainStyle, [], { ...ENROLL, paragraphs: [] })).toEqual(ENROLL_TEXT.slice(0, 1));
+    const streamed = [
+      ...render(plainStyle, [], { ...ENROLL, paragraphs: [] }),
+      ...ENROLL.paragraphs.flatMap((paragraph, index) => [
+        ...(index === 0 ? [] : [""]),
+        ...paragraph.flatMap((part) => renderNextParts(plainStyle, [part])),
+      ]),
+    ];
+    expect(streamed).toEqual(ENROLL_TEXT);
   });
 
   test("numbered groups align their commands past two-digit numbers", () => {

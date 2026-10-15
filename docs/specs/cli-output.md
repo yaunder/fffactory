@@ -48,14 +48,18 @@ its glyph in both modes.
 | Status `ready` | `✔` | green |
 | Status `attention` | `!` | yellow |
 | Status `error` | `✖` | red |
+| Status `skipped` (for a known reason, a rerun completes it) | `↷` | yellow |
+| Status `not_attempted` (after a failure) | `◌` | dim |
+| Status `stopped` (an operator's intentional state, never an error) | `◼` | dim |
 | Change `create`, `update`, `delete` | `+`, `~`, `-` | green, yellow, red |
 | Command line | `$ COMMAND` | `$ ` dim, the command bold cyan |
 | Inline code | `` `CODE` `` | cyan, without the backticks |
 | Verdict | glyph and text | glyph and text bold, in the status's color |
 
-A status colors its glyph, and any text the layout marks with it. No role uses a
-background color: backgrounds depend on the terminal's theme and are ragged when
-a line wraps.
+A status colors its glyph, and any text the layout marks with it. Every glyph
+takes one terminal column, even where a terminal treats a character's width as
+ambiguous. No role uses a background color: backgrounds depend on the terminal's
+theme and are ragged when a line wraps.
 
 ## Layout blocks
 
@@ -76,7 +80,7 @@ the presentation layer lays out as inline code is a code span built with
 `fffactoryCommand`, so the instance path it repeats is never read for
 backticks either. Tested in
 `tests/cli/presentation/blocks.test.ts`, and for the data each lays out in the
-`plan`, `lock` and `instance-source` tests beside it.
+`plan`, `lock`, `instance-source`, `workers` and `apply` tests beside it.
 
 ### Text
 
@@ -123,8 +127,9 @@ Rows streamed into a section, such as apply's progress, are printed one at a
 time under its rule: the section rendered with no blocks prints the rule alone,
 then each row block is rendered in the section (`renderInSection`), indented as
 the section's own blocks are, with a fixed label width and either every row or
-none with a status, so the rows align. The lines are then those of the whole
-section rendered at once.
+none with a status, or the status column reserved (`statusColumn`) for every
+row, so the rows align. The lines are then those of the whole section rendered
+at once.
 
 ```text
 ── Applying ─────────────────────────────────────────
@@ -189,6 +194,26 @@ of steps, numbered groups and notes:
 A command restyled with these blocks that leaves work for the operator ends with
 exactly one Next block, after its results and any operation-record or diagnostic
 information. A render takes at most one Next block and always prints it last.
+It collects what every part of the outcome leaves, each instruction once.
+
+### Two streams
+
+A report may write some lines on standard output and others on standard error,
+as apply's Result does with a failed worker's row and its next action
+([plan and apply §What apply prints](plan-apply.md#what-apply-prints)). It is
+laid out as one report, each line for its stream, in its stream's style, and
+written in order, so a terminal showing both reads it whole. Each line keeps
+the stream its origin always used, whatever the exit status: restyling moves
+no line between the streams. A section's rule goes to the stream of its first
+block, the blank line before a block to that block's stream, and rows of one
+block split between the streams keep one label width and status column. Its
+one Next block is still last, and is laid out the same way: each step on its
+origin's stream (`renderNextParts` renders it), a step several origins share
+on standard error when any of them is, so it never leaves the stream an error
+used, the Next rule on its first step's, and the blank line before a paragraph
+on that paragraph's first step's. Tested in `tests/cli/presentation/apply.test.ts`,
+`tests/cli/apply-stages.test.ts` and `tests/cli/plan-apply.test.ts`, each
+stream alone and both in the order written.
 
 ## JSON
 
@@ -201,8 +226,9 @@ apply only to human lines laid out by `src/cli/presentation/`.
 | Layer | Module | Responsibility |
 | --- | --- | --- |
 | CLI adapter | `src/cli/presentation/color.ts` | `colorEnabled` ([Color](#color)) and `streamStyles`, each stream's style. Pure: it is given the terminal status and environment. |
-| CLI adapter | `src/cli/presentation/style.ts` | `Style` and its roles, `plainStyle`, `ansiStyle` (over `node:util` `styleText` with `validateStream: false`, so only [Color](#color) decides), the glyphs, and `writer`, an output stream's line writer carrying its style. |
-| CLI adapter | `src/cli/presentation/blocks.ts` | The layout blocks, `verbatim` (data in a line, never read for inline code), `step` and `nextSteps` (a Next block's parts), `Report` (an outcome's blocks and at most one Next block), `render`, which lays blocks and at most one Next block out as lines in a style, measuring widths with `Bun.stringWidth`, and `renderInSection`, blocks streamed into a section. |
+| CLI adapter | `src/cli/presentation/style.ts` | `Style` and its roles, `plainStyle`, `ansiStyle` (over `node:util` `styleText` with `validateStream: false`, so only [Color](#color) decides), the statuses and their glyphs, and `writer`, an output stream's line writer carrying its style. |
+| CLI adapter | `src/cli/presentation/blocks.ts` | The layout blocks, `verbatim` (data in a line, never read for inline code), `step` and `nextSteps` (a Next block's parts), `Report` (an outcome's blocks and at most one Next block), `render`, which lays blocks and at most one Next block out as lines in a style, measuring widths with `Bun.stringWidth`, `renderInSection`, blocks streamed into a section, and `renderNextParts`, a Next block's parts rendered under its rule, for a Next block on two streams; a rows block's fixed `labelWidth` and reserved `statusColumn`. |
+| CLI adapter | `src/cli/presentation/apply.ts` | A report on [two streams](#two-streams): apply's Result and Next block as lines, each for its stream (`StreamLine`), written by the command in order. |
 | CLI adapter | `src/cli/presentation/command-line.ts` | `fffactoryCommand`: an `fffactory` command a Next block names, repeating the `--instance` and `--profile` the running command was given, each word quoted for a POSIX shell (`shellWord`) where needed. |
 | CLI adapter | `src/cli/context.ts` | `CliContext.out` and `err`, each a `Writer` carrying its stream's style. |
 | CLI adapter | `src/cli/main.ts` | The one place reading each stream's `isTTY` and the environment to pick the styles. |

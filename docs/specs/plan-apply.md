@@ -209,10 +209,19 @@ Its `fffactory apply` repeats the `--instance` and `--profile` the plan was
 given.
 
 Apply asks for the approval of that plan and applies it as any other, under the
-lock and its record. It installs nothing and reaches no worker: `Workers: none
-declared.`, no repository, control-plane or dispatch lines, and `End-to-end
-verification: The factory is ready: it declares no workers`, exit 0, never
-partial. `upgrade` moves the pin of an empty factory the same way.
+lock and its record. It installs nothing and reaches no worker. Its Result keeps
+the guidance, with no repository, control-plane or dispatch rows and no Next
+block; exit 0, never partial:
+
+```text
+── Result ───────────────────────────────────────────
+    Infrastructure     no changes
+    Workers            none declared. Declare a host in factory.json's hosts, then create it with `fffactory apply`.
+  ✔ Verification       The factory is ready: it declares no workers
+    Operation record   s3://fff-abcd1234-state/fff-abcd1234-operations/2026-09-30T12:00:00.000Z-aaaaaaaa.json
+```
+
+`upgrade` moves the pin of an empty factory the same way.
 
 A host declared later is a plain create, applied and waited for
 ([Waiting for a new worker](#waiting-for-a-new-worker)) as any new worker: under
@@ -275,9 +284,9 @@ skipped: no Terraform apply runs), `applyWorkers`
    the host projection on standard input ([host protocol §apply](host-protocol.md#apply)):
    the one `projectHosts` builds from factory.json's hosts, Paseo secret
    reference included, whose digest plan and `status` expect.
-   While it works apply prints `Installing release R on KEY (HOSTNAME):
-   uploading N MiB.`, then `... host apply runs the install steps, then
-   verifies; this can take many minutes.`
+   While it works apply streams a row per step into its `Applying` section,
+   the worker by its key alone: `KEY   uploading N MiB`, then `KEY   installing
+   and verifying (can take many minutes)` ([Apply](#apply)).
 4. A worker counts as installed only once `host apply` answered with its
    verification, in a document for that worker and release. A known skip (not
    found, offline, an SSH login refused, an upload SSH could not finish,
@@ -290,23 +299,70 @@ skipped: no Terraform apply runs), `applyWorkers`
    installing: the worker fails with that said, and its next action is to wait
    for that install, then rerun.
 
-After Terraform's line (`Applied: the factory's infrastructure matches
-factory.json.`, or `Infrastructure: no changes to apply.`), apply lists the
-workers:
+Apply's Result then has a row per worker, in factory.json's order, by its key
+alone: its workers-stage outcome, then, under it, each later stage that ran for
+it ([Apply](#apply)). Every pending action is collected in the one closing Next
+block. An installed worker with enrollment pending and a skipped one:
 
 ```text
-Workers:
-  installed  builder-1 (fff-abcd1234-builder-1): release 0.3.0 installed and verified; enrollment pending: GitHub, OpenAI Codex, Claude Code
-             GitHub: Authenticate GitHub as factory on fff-abcd1234-builder-1 (tailnet SSH policy must let you log in as `factory`): run `tailscale ssh factory@fff-abcd1234-builder-1`, then `gh auth login --hostname github.com --git-protocol https --web`, then `gh auth status`
-             ...
-             Paseo clients: enrollment is checked from each client, not the worker
-  skipped    builder-2 (fff-abcd1234-builder-2): Offline in the tailnet
-             Next: Check that the instance is running and that Tailscale is up on it, then rerun `fffactory apply`.
+── Result ───────────────────────────────────────────
+    Infrastructure     no changes
+  ! builder-1          installed and verified · enrollment pending (3)
+    ✔ Control plane   applied
+    ✔ Repositories    synchronized
+      Dispatch        not requested
+  ↷ builder-2          skipped · Offline in the tailnet
+    ↷ Repositories    skipped
+    ↷ Dispatch        skipped
+  ! Verification       The factory is not ready: 1 of 2 workers need attention · enrollment pending on 1 worker
+    Operation record   s3://fff-abcd1234-state/fff-abcd1234-operations/2026-09-30T12:00:00.000Z-aaaaaaaa.json
+
+── Next ─────────────────────────────────────────────
+  builder-2: Check that the instance is running and that Tailscale is up on it, then rerun `fffactory apply`.
+
+  On builder-1, log in as factory (tailnet SSH policy must allow it):
+    $ tailscale ssh factory@fff-abcd1234-builder-1
+
+  1. GitHub
+     $ gh auth login --hostname github.com --git-protocol https --web
+     $ gh auth status
+  2. OpenAI Codex
+     $ codex login --device-auth
+     $ codex login status
+  3. Claude Code
+     $ claude auth login
+     $ claude auth status
+
+  Return to your workstation:
+    $ exit
+  Refresh enrollment verification, reviewing the new plan:
+    $ fffactory apply
+  Then confirm:
+    $ fffactory status
+  Paseo clients: enrollment is checked from each client, not the worker
 ```
+
+| Worker outcome | Status | Its row says |
+| --- | --- | --- |
+| Installed, every account enrolled | `✔` ready | `installed and verified · every account enrolled` |
+| Installed, accounts to enroll | `!` action needed, never `✔` | `installed and verified · enrollment pending (N)` |
+| Skipped | `↷` skipped | `skipped · SUMMARY` |
+| Failed | `✖` failed | `failed · SUMMARY` |
+| Not attempted after a failure | `◌` not attempted | `not attempted · the rollout stopped at the failure above` |
+| Stopped | `◼` stopped | ``stopped · nothing was sent to it; to install it, start it with `fffactory worker start KEY`, then apply again`` |
+
+A worker's status is its worst stage's (a failure, then action needed, then a
+skip, then ready): an installed, enrolled worker whose control plane is
+deferred or failed, whose repositories are unresolved, or whose dispatch is
+pending or failed is not shown ready. A stage row that sends nothing, such as
+dispatch not requested, has no glyph; a stopped worker has no stage rows, as no
+stage sent it anything. A later stage skipped for the reason the workers stage
+already gave says only `skipped`. Summaries are shown as data, never read for
+inline code.
 
 Each account's steps are apply's own, named for the hostname it resolved, never
 text from the worker ([readiness §Enrollment](readiness.md#enrollment)). Failed
-and not-attempted workers go to standard error. The exit status is 0 when every
+and not-attempted workers' rows go to standard error. The exit status is 0 when every
 worker was installed and verified or is stopped, 2 when one was skipped and
 none failed, and 1 when one failed, including a new worker whose first boot did
 not finish in time. The dispatch stage never fails a skipped worker: it reports
@@ -315,7 +371,7 @@ control-plane stage, but one skipped for another reason that the tailnet still
 locates goes through the control-plane stage, which may fail it (exit 1). Exit
 0 means every worker is ready or stopped, but for the accounts a human
 enrolls: fffactory cannot enroll them, so pending enrollment still counts as
-installed, and the worker's lines name each step. A failed install leaves that
+installed, and the Next block names each step. A failed install leaves that
 worker on the requested release, active and unhealthy; its next action names
 the failed step's log, and a rerun repairs it.
 
@@ -373,22 +429,30 @@ skipped as before: it is not booting because of this apply, and waiting would
 hide a real problem behind a quarter of an hour of silence. A rerun installs it
 once it is up.
 
-While it waits apply says so, then every minute (`FIRST_BOOT_REPORT_MS`) what it
-sees:
+While it waits apply says so in its `Applying` section, then every minute
+(`FIRST_BOOT_REPORT_MS`) what it sees, after Terraform's row for the apply that
+created the machine:
 
 ```text
-Waiting for builder-1 (fff-abcd1234-builder-1) to finish its first boot (up to 15 min): this apply just created its machine.
-Still waiting for builder-1 (fff-abcd1234-builder-1) after 1 of up to 15 min: No Tailscale device named fff-abcd1234-builder-1 is visible from this machine.
-Installing release 0.3.0 on builder-1 (fff-abcd1234-builder-1): uploading 48.2 MiB.
+── Applying ─────────────────────────────────────────
+  Infrastructure   applying with Terraform (its output is not shown; can take several minutes)
+  builder-1        waiting for its first boot (up to 15 min): this apply just created its machine
+  builder-1        still waiting after 1 of up to 15 min: No Tailscale device named fff-abcd1234-builder-1 is visible from this machine
+  builder-1        uploading 48.2 MiB
+  builder-1        installing and verifying (can take many minutes)
 ```
+
+A first boot that did not finish in time is the worker's `✖ builder-1 failed ·
+Its first boot did not finish within 15 min (last seen: …)` row, on standard
+error, and its recovery a step of the Next block.
 
 The wait runs under the same lock and operation record, which shows the
 workers stage `installing` throughout; the sleep is injected
 (`WorkersStageDependencies.sleep`, `CliContext.sleep`), and `cli/interrupts.ts`'s
 wakes at an interrupt. An interrupt while apply waits stops it at once: no
 more looks, no more of the record written, the lock kept, and on standard
-error ``Interrupted while waiting for KEY (HOSTNAME) to finish its first
-boot: no install step ran on it.`` before what the interrupt left
+error ``Interrupted while waiting for KEY to finish its first boot: no install
+step ran on it.`` under what the interrupt left
 ([Interruption](#interruption)). An interrupt while a look's activation runs
 is reported as any interrupted install.
 
@@ -442,14 +506,17 @@ worker's power while apply runs.
 - A plan that changes the instance type of a worker stopped or stopping, or of
   any worker while the inventory cannot be read, is refused
   ([below](#instance-type-of-a-stopped-worker)).
-- The workers stage lists a stopped worker `stopped`, on standard output:
-  `Stopped: nothing was sent to it`, next ``To install it, start it with
-  `fffactory worker start KEY`, then rerun `fffactory apply`.``. It is not a
-  skip: the rollout goes on, and the stage still ends `installed`.
+- The workers stage reports a stopped worker `stopped`, on standard output: its
+  Result row is ``◼ KEY   stopped · nothing was sent to it; to install it,
+  start it with `fffactory worker start KEY`, then apply again``, the start
+  command repeating the `--instance` and `--profile` apply was given. It is an
+  intentional state, not a skip: it is no error, adds nothing to the Next
+  block, the rollout goes on, and the stage still ends `installed`.
 - The repository, control-plane and dispatch stages send it nothing either and
-  report it `stopped`. End-to-end verification reports it `stopped` in every
-  column, never `absent`, and the factory is ready once every other worker is:
-  `The factory is ready: every worker but the 1 stopped is verified end to end`.
+  report it `stopped`, so its row has no stage rows under it. End-to-end
+  verification reports it `stopped` in every column, never `absent`, and the
+  factory is ready once every other worker is: `✔ Verification   The factory is
+  ready: every worker but the 1 stopped is verified end to end`.
 
 Apply exits 0 when every other worker succeeded. Starting a stopped worker is
 the operator's call: `fffactory worker start KEY`, then a plan installs
@@ -711,14 +778,17 @@ After the checks above, and a saved plan's local freshness:
    prints its `Plan` section (a first apply's bootstrap as its `Plan: backend
    bootstrap` section), then, after a blank line, at a terminal, `Apply this
    plan? Only "yes" applies it: `. Anything but `yes`
-   (Ctrl-C included, which cancels the question) applies nothing: `Not
-   approved: nothing was applied.`, exit 1. With `--plan-id`, naming the plan
-   ID is the approval of exactly the plan `fffactory plan` showed under it, so
-   nothing is asked: `Applying saved plan ID, approved by naming its ID.`
-5. `Applying. Terraform's output is not shown; this can take several minutes.`
-   Exactly the saved Terraform plan file is applied (`terraform apply
-   PLANFILE`), never a new plan; a plan without infrastructure changes applies
-   none.
+   (Ctrl-C included, which cancels the question) applies nothing: `✖ Not
+   approved: nothing was applied` on standard error, exit 1. With `--plan-id`,
+   naming the plan ID is the approval of exactly the plan `fffactory plan`
+   showed under it, so nothing is asked: `Applying saved plan ID, approved by
+   naming its ID.`
+5. The `Applying` section begins, its rows streamed as each step starts
+   ([below](#what-apply-prints)): `Infrastructure   applying with Terraform
+   (its output is not shown; can take several minutes)` when the plan has
+   infrastructure changes. Exactly the saved Terraform plan file is applied
+   (`terraform apply PLANFILE`), never a new plan; a plan without
+   infrastructure changes applies none, and has no such row.
 6. The workers stage ([above](#the-workers-stage)). It and every later stage
    send a stopped worker nothing ([Stopped workers](#stopped-workers)).
 7. The repository stage, exactly as shown in the plan, under the same lock.
@@ -738,23 +808,175 @@ After the checks above, and a saved plan's local freshness:
    (exit 2); a failed reconciliation is a command failure (exit 1). A skipped
    worker's release is left as is, never reported absent. A stopped worker is
    not incomplete.
-11. `Operation record: s3://BUCKET/KEY`, with the combined exit status of those
+11. The `Result` section, then the one closing Next block
+   ([below](#what-apply-prints)), with the combined exit status of those
    stages. The lock is released.
 
 Every refusal exits 1 and applies nothing. Apply's Terraform deadline is an
 hour ([provisioning §Operations](provisioning.md#operations)).
 
-### Failure
+### What apply prints
 
-A failure planning (`Planning failed: REASON. Nothing was applied.`) or applying
-releases the lock and records the failure. Applying may have changed some
-infrastructure before Terraform stopped:
+After the plan and its approval, apply prints three parts, laid out as
+[CLI output](cli-output.md) describes. The 2026-10-05 test-factory apply, which
+installed a new release on its one worker and left its three accounts to
+enroll, through every stage:
 
 ```text
-Applying failed: `terraform apply` exited with status 1.
-Terraform may have changed some of the infrastructure before it stopped.
-Rerun `fffactory apply`: it plans again from what exists now and converges what remains.
+fffactory apply · release 0.0.0
+Instance  ~/test-factory/.fffactory/factory.json (nearest .fffactory/factory.json)
+
+── Plan ─────────────────────────────────────────────
+  Factory   Test factory (fff-aaaa1111)
+  Account   123456789012 · us-east-1
+  Release   0.0.0
+
+  Infrastructure   no changes
+  Workers          one at a time
+    ~ test-builder-1   install release 0.0.0 and host configuration, then verify
+  Control plane    before worker activation
+    ~ test-builder-1   paseo-package, service-definition, listen-address, password
+  Repositories     one worker at a time
+    ~ test-builder-1   reconcile 0 placed repositories as factory; preserve and report unmanaged checkouts
+  Dispatch         after every readiness gate
+    ~ test-builder-1   remove the factory dispatch schedule if it exists
+  Verification     end to end: observe each worker's release, repositories, Paseo and actual dispatch schedule
+
+Apply this plan? Only "yes" applies it: yes
+
+── Applying ─────────────────────────────────────────
+  test-builder-1   uploading 35.3 MiB
+  test-builder-1   installing and verifying (can take many minutes)
+
+── Result ───────────────────────────────────────────
+    Infrastructure     no changes
+  ! test-builder-1     installed and verified · enrollment pending (3)
+    ✔ Control plane   applied
+    ✔ Repositories    synchronized
+      Dispatch        not requested
+  ! Verification       The factory is ready: every worker is verified end to end · enrollment pending on 1 worker
+    Operation record   s3://fff-aaaa1111-state/fff-aaaa1111-operations/2026-10-05T16:05:52.256Z-mlrqnb5n.json
+
+── Next: enroll 3 accounts on test-builder-1 ────────
+  Log in as factory (tailnet SSH policy must allow it):
+    $ tailscale ssh factory@fff-aaaa1111-test-builder-1
+
+  1. GitHub
+     $ gh auth login --hostname github.com --git-protocol https --web
+     $ gh auth status
+  2. OpenAI Codex
+     $ codex login --device-auth
+     $ codex login status
+  3. Claude Code
+     $ claude auth login
+     $ claude auth status
+
+  Return to your workstation:
+    $ exit
+  Refresh enrollment verification, reviewing the new plan:
+    $ fffactory apply
+  Then confirm:
+    $ fffactory status
+  Paseo clients: enrollment is checked from each client, not the worker
 ```
+
+In color the section rules are dim, `!`, `enrollment pending (3)` and
+`· enrollment pending on 1 worker` yellow, `✔` green, `✖` red, `$ ` dim and the
+commands bold cyan, and the Next heading bold.
+
+- **Applying**, streamed as it happens: a row when Terraform applies the plan,
+  an upgrade's `Pin` row ([Upgrade](#the-pin-move-and-the-plan)), and a row per
+  worker progress event, the worker by its key alone (its hostname is the
+  factory ID and the key), labels as wide as the approved review's widest, so
+  the rows align though printed one at a time. A step with nothing to show,
+  such as Terraform's for a plan without infrastructure changes, shows no row;
+  a run that shows none has no `Applying` section.
+- **Result**: the infrastructure's outcome (`applied: matches factory.json`,
+  or `no changes`, after `State bucket   created` when the run bootstrapped
+  it), each worker's row with its later stages under it
+  ([The workers stage](#the-workers-stage)), the end-to-end verification's
+  verdict as verification words it (`✔` ready, else `!`), the operation
+  record's location, and, on
+  standard error, a final record that could not be written
+  ([Operation records](#operation-records)). Verification checks the
+  software, and counts an account still to enroll only when dispatch needs it
+  (GitHub's): while any installed worker has an account to enroll, the
+  `Verification` row is `!`, never `✔`, its verdict followed by
+  `· enrollment pending on N worker(s)`, so a factory whose enrollment is
+  pending is never shown ready, as `status` does not show it ready; the exit
+  status is unchanged. No line per worker that is not ready follows it:
+  each worker's row and the Next block say what it needs. When nothing is
+  left to do, it ends with the muted Paseo clients note.
+- **Next**: one block collecting what every stage left for the operator, in
+  the stages' order (workers, repositories, control plane, dispatch), each
+  next action once, after the workers it concerns, however many stages and
+  workers name it: a deferred maintenance the workers, control-plane and
+  dispatch stages all report is one step. A dispatch gate another stage's
+  action already covers is left out: the GitHub credential gate of a worker
+  whose GitHub account is to enroll, the repository gate of one whose
+  repositories are unresolved or skipped, the Paseo gate of one whose control
+  plane failed or was deferred, the release gate of one not installed. Then
+  each worker's enrollment: the login once, with the requirement it carries
+  (`WorkerEnrollment.requirement`; [readiness §Where it is
+  reported](readiness.md#where-it-is-reported)), its accounts numbered with
+  their command lines, then `exit` back to the workstation. After the last
+  worker, `fffactory apply` verifies the enrollment again, since `status`
+  only reads the verification apply recorded, and `fffactory status`
+  confirms. The Paseo clients note ends the block when a worker was
+  installed. Its title names the enrollment when that is all it asks
+  (`Next: enroll 3 accounts on KEY`, `Next: enroll accounts on 2 workers`),
+  and each worker's login names the worker unless the title does. A run that
+  leaves nothing to do, a stopped worker included, has no Next block.
+
+Every `fffactory` command the Result or Next block names repeats the
+`--instance` and `--profile` apply was given, quoted for a POSIX shell; the
+next actions the stages word themselves (status's and the stages' published
+`next_action` wording) are shown as they are, so the `fffactory apply` they
+name repeats neither, marked
+`TODO(re-evaluate when stage next actions carry their fffactory command as data)`
+in `src/cli/presentation/apply.ts`.
+
+Each line goes to the stream it always has, whatever the exit status: the
+Applying and Result rows to standard output, but for failed and not-attempted
+workers' rows and a record that could not be finished, which go to standard
+error. The Next block's steps do the same: a failed worker's next action to
+standard error, with its row, even when it is one step with the same action
+another worker or stage names, so a failed worker's recovery always reaches
+standard error; every other step (a skipped worker's and the later stages'
+next actions, the enrollment, `exit`, `fffactory apply`, `fffactory status`
+and the Paseo clients note) to standard output. A section's rule, the Next
+block's included, goes to the stream of its first row or step, the blank line
+before a paragraph to its first step's stream, and rows split
+between the streams keep one label width and status column, so they align on a
+terminal showing both. The Next block is always last, after the record and any
+upgrade pin notice, which goes to standard error. A failed or interrupted
+run's Next block ([Failure](#failure), [Interruption](#interruption)) is on
+standard error.
+
+### Failure
+
+A failure planning or applying releases the lock and records the failure. Its
+`Result` is a failure status line and what the failure may have left, on
+standard error, then the private diagnostics file's path, if any, also on
+standard error, and the operation record's location, on standard output, then
+a Next block, on standard error, when a rerun converges what remains.
+Applying may have changed some infrastructure before Terraform stopped:
+
+```text
+── Result ───────────────────────────────────────────
+  ✖ Applying failed: `terraform apply` exited with status 1
+    Terraform may have changed some of the infrastructure before it stopped.
+
+  Terraform's diagnostics   /home/operator/.cache/fffactory/terraform/diagnostics/20260930T120000Z-apply-Ab12Cd.log
+  Operation record          s3://fff-abcd1234-state/fff-abcd1234-operations/2026-09-30T12:00:00.000Z-aaaaaaaa.json
+
+── Next ─────────────────────────────────────────────
+  Rerun: it plans again from what exists now and converges what remains:
+    $ fffactory apply
+```
+
+A planning failure says `✖ Planning failed: REASON`, then `Nothing was
+applied.`, and has no Next block.
 
 A Terraform apply that misses its deadline is stopped (SIGINT, then SIGKILL
 after the grace period) and reported the same way, as ``did not finish within
@@ -765,27 +987,28 @@ it is released; this is marked
 `TODO(re-evaluate when an apply ends with Terraform's state lock left behind)`
 in `src/application/apply-factory.ts`.
 
-The reason is fffactory's own message, never Terraform's or AWS's output.
+The reason is fffactory's own message, never Terraform's or AWS's output. It
+is shown verbatim, never read for inline code: an unexpected error's message,
+an adapter's included, can carry data such as a path.
 Terraform's standard error is kept in a private local file
 ([provisioning §Diagnostics](provisioning.md#diagnostics)), and only its path is
-printed, after the failure and before the record's location:
+printed, after the failure and before the record's location, as above.
 
-```text
-Terraform's diagnostics: /home/operator/.cache/fffactory/terraform/diagnostics/20260930T120000Z-apply-Ab12Cd.log
-```
+An unexpected error in a later stage is reported the same way and recorded as
+that stage `failed`, each with what it may have left and the same Next block:
 
-An unexpected error in the workers stage, such as the transport failing, is
-reported the same way and recorded as the workers stage `failed`:
-
-```text
-Installing the workers failed: REASON.
-The worker being installed may be on the new release, unhealthy.
-Rerun `fffactory apply`: it plans again from what exists now and converges what remains.
-```
+| Stage | Status line | What it may have left |
+| --- | --- | --- |
+| Workers, such as the transport failing | `✖ Installing the workers failed: REASON` | `The worker being installed may be on the new release, unhealthy.` |
+| Repositories | `✖ Repository synchronization failed: REASON` | `Completed repository changes were left in place.` |
+| Control plane | `✖ Control-plane reconciliation failed: REASON` | |
+| Dispatch | `✖ Dispatch reconciliation failed: REASON` | |
+| Verification | `✖ End-to-end verification failed: REASON` | |
 
 A Terraform command that fails outside the lock, such as `fffactory plan`'s,
-prints `fffactory: REASON` and the same line. Neither the diagnostics nor the
-file's path reach the operation record or the state bucket.
+prints `fffactory: REASON` and `Terraform's diagnostics: PATH`, until that
+command is restyled. Neither the diagnostics nor the file's path reach the
+operation record or the state bucket.
 
 ### Operation records
 
@@ -826,9 +1049,11 @@ of a skip, failure or stop. The operation's `status` is `running` until it ends
 `declined`, `refused` or `failed`, with `failure` naming why (for a worker,
 `worker KEY: SUMMARY`). Records are history: nothing reads them to decide
 anything. A final record that cannot be written after a successful apply does
-not fail it: `The operation record could not be finished: REASON` on standard
-error, exit 0. After a failure, the same line follows the failure's report,
-which is kept whole, and the exit stays 1.
+not fail it: `✖ The operation record could not be finished: REASON`, on
+standard error, last in the Result (only the muted Paseo clients note follows
+it, when there is no Next block) and before the Next block, which stays on
+standard output; exit 0. After a failure, the same line follows the failure's
+record location, the failure's report kept whole, and the exit stays 1.
 
 The repository stage (`repositories`) goes `synchronizing`, then
 `synchronized`, `partial` or `failed`. Its `repositories` array records each
@@ -885,24 +1110,45 @@ work. An interrupt while the lock's conditional write is in flight may leave the
 lock without a record.
 
 When apply returns within that grace, as it does, it says what the interrupt
-left, on standard error, and `fffactory` still exits with 128 plus the
-signal's number:
+left as its `Result`, on standard error but for the record's location, then how
+to recover as its Next block, on standard error, and `fffactory` still exits
+with 128 plus the signal's number. Interrupted while a worker's `host apply`
+ran, which stopping `ssh` leaves running on the worker, with no terminal to hang
+up:
 
-| Left | Message |
-| --- | --- |
-| No lock: interrupted before it was taken | ``Interrupted before the factory was locked: it is not locked. Rerun `fffactory apply`: it plans again from what exists now.`` |
-| The lock, and no record written yet | ``Interrupted: the factory stays locked by this apply, which may have no operation record. Once fffactory has exited, break the lock with `fffactory lock break`, then rerun `fffactory apply`.`` |
-| The lock and its record | ``Interrupted: the factory stays locked, with a record of this operation. Once fffactory has exited, ...``, then `Operation record: s3://BUCKET/KEY` on standard output. |
+```text
+── Result ───────────────────────────────────────────
+  ! Interrupted: the factory stays locked, with a record of this operation
+    Interrupted while installing on builder-1: host apply may still be running there, and a rerun skips that worker until it has finished.
 
-An interrupt during the workers stage first names the worker it concerned:
-``Interrupted while installing on KEY (HOSTNAME): host apply may still be
-running there, ...`` while `host apply` ran, or ``Interrupted while waiting
-for KEY (HOSTNAME) to finish its first boot: no install step ran on it.``
-while apply waited for a new worker.
+  Operation record   s3://fff-abcd1234-state/fff-abcd1234-operations/2026-09-30T12:00:00.000Z-aaaaaaaa.json
 
-Interrupted while a worker's `host apply` ran, it first says so: stopping `ssh`
-leaves `host apply` running on the worker, which has no terminal to hang up:
-``Interrupted while installing on KEY (HOSTNAME): host apply may still be running there, and a rerun skips that worker until it has finished.``
+── Next ─────────────────────────────────────────────
+  Once fffactory has exited, break the lock:
+    $ fffactory lock break
+  Then rerun:
+    $ fffactory apply
+```
+
+| Left | Status line | Next block |
+| --- | --- | --- |
+| No lock: interrupted before it was taken | `! Interrupted before the factory was locked: it is not locked` | `Rerun: it plans again from what exists now:`, then `fffactory apply` |
+| The lock, and no record written yet | `! Interrupted: the factory stays locked by this apply, which may have no operation record` | As above: break the lock once fffactory has exited, then rerun |
+| The lock and its record | `! Interrupted: the factory stays locked, with a record of this operation`, then `Operation record   s3://BUCKET/KEY` on standard output | As above |
+
+An interrupt during the workers stage names the worker it concerned under the
+status line: ``Interrupted while installing on KEY: host apply may still be
+running there, and a rerun skips that worker until it has finished.`` while
+`host apply` ran, or ``Interrupted while waiting for KEY to finish its first
+boot: no install step ran on it.`` while apply waited for a new worker. The
+commands repeat the `--instance` and `--profile` apply was given; an upgrade
+whose pin was not moved reruns `fffactory upgrade`, after its pin notice.
+
+TODO(re-evaluate when [#38](https://github.com/yaunder/fffactory/issues/38)
+lands): an interrupt during the final operation-record write is reported as
+the run's ordinary Result, which says nothing of the lock it leaves. That is
+today's behavior, not the intended contract: #38 reports the interruption and
+the retained lock, with the recovery above.
 
 A rerun is refused by the lock, which shows the interrupted apply as its
 holder. Nothing takes a lock over or expires it, and a rerun cannot resume the
@@ -968,10 +1214,21 @@ terminal.` There is no saved upgrade plan.
 apply's operation runs with the lock and its record named `upgrade`, and a
 pin move. An upgrade never bootstraps the backend: its one approval is the pin
 move's and the plan's. A factory without its state bucket is refused before
-anything is shown, asked, created or locked: `Refusing to upgrade: the factory
-has no state bucket yet, and an upgrade never creates it. Nothing was created
-or applied. Run `fffactory apply` with the release factory.json pins first,
-then rerun `fffactory upgrade`.`, exit 1.
+anything is shown, asked, created or locked, on standard error, exit 1:
+
+```text
+✖ Refusing to upgrade: the factory has no state bucket yet, and an upgrade never creates it
+
+Nothing was created or applied.
+
+factory.json's pin was not moved: it still pins the release it pinned.
+
+── Next ─────────────────────────────────────────────
+  Create it with the release factory.json pins, which applies the factory:
+    $ fffactory apply
+  Then upgrade again:
+    $ fffactory upgrade
+```
 
 1. Under the lock, the infrastructure stage is planned afresh from
    factory.json as it will be once the pin moves: the document read, with only
@@ -1007,18 +1264,28 @@ then rerun `fffactory upgrade`.`, exit 1.
    The plan shows every stage it approves.
    TODO(re-evaluate when [#11](https://github.com/yaunder/fffactory/issues/11)
    lands): `upgrade` does not yet apply the control-plane, dispatch and
-   verification stages its plan shows; the plan is right, the run is #11's.
+   verification stages its plan shows, so its Result has no control-plane,
+   dispatch or verification rows; the plan is right, the run is #11's, and
+   its Result then shows those rows as apply's does.
    The earlier pin is shown only when it is a plain `MAJOR.MINOR.PATCH`,
    which cannot hold anything else; otherwise `from the release it pins now`.
-3. Once approved, and only then, the new pin is written (`factory.json now
-   pins release 0.3.0.`): the document, serialized as `init` and `secret set`
-   write it, with only `release` changed. It is written only while factory.json
-   is still the exact text the plan was made from; otherwise nothing is
-   written or applied: `Refusing to upgrade: factory.json changed after the
-   plan was made. Nothing was applied. Review a new plan with `fffactory
-   upgrade`.`, exit 1.
+3. Once approved, and only then, the new pin is written, the `Applying`
+   section's first row, before Terraform's: the document, serialized as `init`
+   and `secret set` write it, with only `release` changed. It is written only
+   while factory.json is still the exact text the plan was made from; otherwise
+   nothing is written or applied: `✖ Refusing to upgrade: factory.json changed
+   after the plan was made`, `Nothing was applied.`, the pin notice (below),
+   and a Next block reviewing a new plan with `fffactory upgrade`, exit 1.
 4. Then the plan is applied exactly as apply applies it: the saved Terraform
-   plan file, then the workers stage.
+   plan file, then the workers stage, and reported as apply reports it
+   ([What apply prints](#what-apply-prints)):
+
+   ```text
+   ── Applying ─────────────────────────────────────────
+     Pin         factory.json now pins release 0.3.0
+     builder-1   uploading 48.2 MiB
+     builder-1   installing and verifying (can take many minutes)
+   ```
 
 So the plan applied is the plan approved, made for the factory.json the pin
 write leaves. Freshness needs no saved plan: the plan is made under the lock
@@ -1033,13 +1300,25 @@ skipped worker leaves the pin moved; the failure's rerun line names
 remains. Declined, refused, a planning failure, or an interrupt before the pin
 was written leave the pin where it was, and add on standard error
 `factory.json's pin was not moved: it still pins the release it pinned.`, after
-the refusal's reasons and before its Next block when the plan was refused; their
-rerun lines and Next blocks, where they have one, name `fffactory upgrade`. A failure moving
-the pin is `Moving factory.json's pin failed: REASON. Nothing was applied.`. A
-failure once the pin was written and before anything is applied (its record
-could not be written) is `Upgrading failed once factory.json's pin moved:
-REASON. Nothing was applied.`, followed by `factory.json pins release 0.3.0:
-rerun `fffactory apply` with this release to finish.`
+the outcome and the record and before any Next block; their Next blocks, where
+they have one, name `fffactory upgrade`. A failure moving the pin is `✖ Moving
+factory.json's pin failed: REASON`, then `Nothing was applied.`. A failure once
+the pin was written and before anything is applied (its record could not be
+written) says where the pin is, then how to finish:
+
+```text
+── Result ───────────────────────────────────────────
+  ✖ Upgrading failed once factory.json's pin moved: S3 answered SlowDown
+    Nothing was applied.
+
+  Operation record   s3://fff-abcd1234-state/fff-abcd1234-operations/2026-09-30T12:00:00.000Z-aaaaaaaa.json
+
+factory.json pins release 0.3.0.
+
+── Next ─────────────────────────────────────────────
+  Finish with this release:
+    $ fffactory apply
+```
 
 The operation record starts with a `pin` stage, `pending`, before the
 infrastructure stage; it ends `written`, `refused` (factory.json changed) or
@@ -1151,10 +1430,11 @@ unchanged by where the plan was made.
 | CLI adapter | `src/cli/presentation/plan.ts` | Every plan review and refusal in blocks: `planSection` (the target rows and an upgrade's pin move, the infrastructure tally and changes with Terraform's symbols, then each stage's row with each worker's change), `bootstrapSection`, `reviewBlocks`, `savedPlanReport` and `bootstrapFirstReport` (`plan`'s Next block), `planRefusalReport` (each `PlanRefusal`), `d11Report`, `staleReport`, `unknownPlanReport` and `damagedPlanReport`, with `describeStaleReason` and `describeUnexpectedPlan`, and the unready bucket's AWS CLI commands; `describeRemovalPlan`, still unstyled. |
 | CLI adapter | `src/cli/presentation/command-line.ts` | `fffactoryCommand`: a command a Next block names, with the `--instance` and `--profile` given, quoted for a POSIX shell (`shellWord`). |
 | CLI adapter | `src/cli/presentation/instance-source.ts` | `instanceHeader`: the command, its release, and the instance (`displayPath`, `describeSource`'s words). |
-| CLI adapter | `src/cli/presentation/workers.ts` | Apply's workers as text (`workerLines`): each outcome under its aligned label, and an installed worker's enrollment rendered from its `WorkerEnrollment` ([readiness §Where it is reported](readiness.md#where-it-is-reported)). |
+| CLI adapter | `src/cli/presentation/apply.ts` | Apply's and upgrade's run: the `Applying` rows (`applyingSection`, `applyingRow`, `applyingLabelWidth`, `infrastructureApplyingRow`, `pinnedRow`, `progressRow`), the `Result` and the one Next block laid out from the complete `FactoryApply`, each line on its stream (`appliedLines`, `failedLines`, `interruptedLines`), the runs that applied nothing (`refusedRunReport`), and an upgrade's pin notice (`pinNotice`). |
+| CLI adapter | `src/cli/presentation/workers.ts` | A worker's Result row across every stage that ran for it (`workerRow`, its status the worst stage's), and its enrollment's Next steps rendered from its `WorkerEnrollment` (`workerEnrollmentOf`, `enrollmentSteps`; [readiness §Where it is reported](readiness.md#where-it-is-reported)). |
 | CLI adapter | `src/cli/presentation/lock.ts` | A held lock and the lock refusal (`describeHeldLock`, `lockRefusalReport`; [provisioning §Lock](provisioning.md#lock)). |
-| CLI adapter | `src/cli/commands/plan.ts`, `src/cli/commands/apply.ts`, `src/cli/commands/upgrade.ts`, `src/cli/commands/planning.ts` | The commands, the approval at the terminal (`operatorApproval` shows the review), and what they share: the header (`planningBasis`), `printReport` and `printPlanRefusal`, and an upgrade's pin notice before a refusal's Next block (`Reporting.notice`). |
-| CLI adapter | `src/cli/diagnostics.ts`, `src/cli/run.ts` | The path of a failed Terraform command's diagnostics, printed with the failure. |
+| CLI adapter | `src/cli/commands/plan.ts`, `src/cli/commands/apply.ts`, `src/cli/commands/upgrade.ts`, `src/cli/commands/planning.ts` | The commands, the approval at the terminal (`operatorApproval` shows the review), the `Applying` section as it streams (`applyingProgress`), the exit code of every outcome, writing each line on its stream (`reportApply`), and what they share: the header (`planningBasis`), `printReport` and `printPlanRefusal`, and an upgrade's pin state (`ApplyReporting.pin`). |
+| CLI adapter | `src/cli/diagnostics.ts`, `src/cli/run.ts` | The path of a failed Terraform command's diagnostics outside apply's Result, printed with the failure. |
 | CLI adapter | `src/cli/interrupts.ts` | `interruptible`: the interrupt notice and flag, the sleep an interrupt wakes, stopping running tools, then, for a command that waits on an interrupt, waiting `RETURN_GRACE_MS` at most for it to return, before exiting with 128 plus the signal's number; a second signal kills and exits at once. |
 | CLI adapter | `src/cli/run.ts`, `src/cli/context.ts` | `waitsOnInterrupt`: only `apply`, `upgrade`, `doctor`, `status` and `worker` (`Command.waitsOnInterrupt`) are waited for. |
 | CLI adapter | `src/cli/main.ts` | Wires `terraformProvisioner`, `filesystemPlanStore`, and `interruptible` over the process, waiting on an interrupt as `waitsOnInterrupt` says for the command run. |
@@ -1244,12 +1524,29 @@ the plan file's digest as it is now),
 stubbed and against `tests/support/stub-s3.ts`),
 `tests/infrastructure/terminal-prompt.test.ts` (Ctrl-C cancels an echoed
 question), `tests/cli/presentation/workers.test.ts` (each worker outcome's
-lines, an installed worker's pending accounts or full enrollment),
+row and status across its later stages, an installed worker never ready while
+enrollment or a later stage is pending or failed, a stopped worker's start
+command with the instance and profile, the enrollment's login once and its
+accounts numbered), `tests/cli/presentation/apply.test.ts` (the 2026-10-05 run
+as [What apply prints](#what-apply-prints) shows it, plain and in color; the
+Applying rows; the Result and Next block with nothing pending, one and several
+workers to enroll, mixed failed, skipped and not-attempted workers on both
+streams in order, a failed worker's next action that a skipped one's shares
+on standard error, enrolled workers with pending or failed dispatch and the
+gate their enrollment covers said once, a repository gap, a deferred
+maintenance said once, stopped workers, an empty factory and a record that
+could not be finished; every failure, interrupt and run that applied nothing,
+with an upgrade's pin notice before the Next block), `tests/cli/apply-stages.test.ts`
+(the exit code of each stage's outcomes, each line on its stream in the order
+written, a failed worker's next action on standard error and the Next block
+of a run with no failed worker on standard output),
 `tests/cli/plan-apply.test.ts` (output, exit codes and every refusal
 in process, the plan's every stage including a placed repository and requested
 dispatch, `plan`'s Next block repeating a quoted instance and profile, a
 refusal's Next block repeating them, and human output colored only on the
-stream that is, the workers' lines and exit codes 0, 2 and 1; an empty factory
+stream that is, the complete pipeline's Result and enrollment Next block, the
+workers' rows and exit codes 0, 2 and 1, mixed outcomes written to both
+streams in order with every next action once; an empty factory
 planning its shared infrastructure alone with its `Workers` row `none declared`, and
 applying it, then nothing, with exit 0; a stopped worker
 shown skipped in the plan, listed `stopped` by apply with exit 0, its resize
@@ -1297,9 +1594,10 @@ converging; a failure writing the pin; a failure after the pin was written,
 recorded as the infrastructure stage's; an interrupt after the pin was written,
 its lock broken and apply finishing; every refusal before AWS: nothing to
 upgrade, a downgrade, no pin, base and schema D11),
-`tests/cli/upgrade.test.ts` (the output and question, plan passing the guard
-once upgraded, declined, a failed apply naming `fffactory apply`, a failure
-once the pin moved, no state bucket, no terminal, a held lock refusing it with
+`tests/cli/upgrade.test.ts` (the output and question, the pin row before the
+install, plan passing the guard once upgraded, declined, a failed apply naming
+`fffactory apply`, a failure once the pin moved and how to finish, no state
+bucket, factory.json changed, no terminal, a held lock refusing it, each with
 the pin notice before the Next block, nothing to upgrade and the other refusals
 without reaching AWS, usage),
 `tests/application/set-secret.test.ts` and `tests/cli/secret.test.ts` (the guard

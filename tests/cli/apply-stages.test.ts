@@ -1,14 +1,14 @@
 /**
- * How `fffactory apply` reports what each stage left (plan-apply §Apply report). The workers
- * stage's per-worker lines — an installed worker whose accounts are all enrolled, a failed
- * worker, and the workers never tried after it — and the phase-3 stages' output (repositories,
- * control plane, dispatch and the end-to-end verification), driven through the exported
- * `reportApply` over faithfully shaped `applied` results. A failed rollout returns before the
- * phase-3 stages run, so a `not_attempted` worker and the phase-3 outcomes never share one
- * apply; they are reported from two results here, each the shape the application produces.
+ * How `fffactory apply` reports what each stage left (plan-apply §Apply): the exit code of every
+ * outcome, and each line on its stream, in the order written, through the exported
+ * `reportApply` over faithfully shaped results. A failed rollout returns before the phase-3
+ * stages run, so a `not_attempted` worker and the phase-3 outcomes never share one apply; they
+ * are reported from two results here, each the shape the application produces. The layout of
+ * every outcome is `tests/cli/presentation/apply.test.ts`'s.
  */
 import { describe, expect, test } from "bun:test";
-import { type Reporting, reportApply } from "../../src/cli/commands/apply";
+import { reportApply } from "../../src/cli/commands/apply";
+import type { ApplyReporting } from "../../src/cli/presentation/apply";
 import type { FactoryApply } from "../../src/application/apply-factory";
 import type { ControlPlaneOutcome } from "../../src/application/apply-control-plane";
 import type { DispatchOutcome } from "../../src/application/apply-dispatch";
@@ -22,16 +22,19 @@ import { harness } from "../support/cli-harness";
 import { MemoryInstanceStore } from "../support/memory-instance-store";
 
 /** A plain apply's reporting, given no instance or profile. */
-const APPLYING: Reporting = { action: "apply", rerun: "apply", selection: {} };
+const APPLYING: ApplyReporting = { action: "apply", rerun: "apply", selection: {} };
 
 const BUCKET = "fff-abcd1234-state";
 const KEY = "fff-abcd1234-operations/2026-09-30T12:00:00.000Z-aaaaaaaa.json";
+const RECORD = `s3://${BUCKET}/${KEY}`;
+const rule = (title: string) => `── ${title} ${"─".repeat(Math.max(2, 49 - title.length))}`;
+const NEXT = rule("Next");
 
 /** A worker's hostname, as the factory's resource naming makes it. */
 const host = (key: string) => `fff-abcd1234-${key}`;
 
-/** An installed worker whose every account is enrolled, so nothing is pending. */
-function installed(key: string): WorkerOutcome {
+/** An installed worker whose accounts are enrolled unless `pending` names them. */
+function installed(key: string, pending: readonly string[] = []): WorkerOutcome {
   return {
     key: key as HostKey,
     hostname: host(key),
@@ -42,14 +45,17 @@ function installed(key: string): WorkerOutcome {
       hostname: host(key),
       verified_at: "2026-09-30T12:00:00.000Z",
       checks: [],
-      enrollment: ENROLLMENTS.map(({ id }) => ({ id, state: "enrolled" as const })),
+      enrollment: ENROLLMENTS.map(({ id }) => ({
+        id,
+        state: pending.includes(id) ? ("pending" as const) : ("enrolled" as const),
+      })),
     },
   };
 }
 
 /** The CLI context whose output this test reads, and an applied result over `fields`. */
 function applied(fields: Partial<Extract<FactoryApply, { readonly kind: "applied" }>>) {
-  const { context, out, err } = harness(new MemoryInstanceStore({}));
+  const cli = harness(new MemoryInstanceStore({}));
   const result: FactoryApply = {
     kind: "applied",
     bootstrapped: false,
@@ -59,21 +65,22 @@ function applied(fields: Partial<Extract<FactoryApply, { readonly kind: "applied
     recordFailure: undefined,
     ...fields,
   };
-  return { context, out, err, result };
+  return { ...cli, result };
 }
 
 describe("fffactory apply, worker report (plan-apply §Apply)", () => {
-  test("an installed worker all enrolled, a failed worker, and the workers never tried", () => {
-    const { context, out, err, result } = applied({
+  test("a failed rollout: each line on its stream, in order, the failed worker's next action on standard error", () => {
+    const readLog = "Read its output and fix the cause, then rerun `fffactory apply`";
+    const { context, out, err, written, result } = applied({
       workers: [
-        installed("builder-1"),
+        installed("builder-1", ["github"]),
         {
           key: "builder-2" as HostKey,
           hostname: host("builder-2"),
           kind: "failed",
           summary:
             "Step harness failed: exited with status 1; release 0.3.0 is active but unhealthy",
-          nextAction: "Read its output and fix the cause, then rerun `fffactory apply`",
+          nextAction: readLog,
         },
         { key: "builder-3" as HostKey, hostname: host("builder-3"), kind: "not_attempted" },
       ],
@@ -81,18 +88,66 @@ describe("fffactory apply, worker report (plan-apply §Apply)", () => {
 
     // A failed worker stops the rollout: exit 1, with no verification to lift it to 2.
     expect(reportApply(result, context, APPLYING)).toBe(1);
-    expect(out).toEqual([
-      "Infrastructure: no changes to apply.",
-      "Workers:",
-      "  installed  builder-1 (fff-abcd1234-builder-1): release 0.3.0 installed and verified; every account is enrolled",
-      "             Paseo clients: enrollment is checked from each client, not the worker",
-      `Operation record: s3://${BUCKET}/${KEY}`,
+    expect(out.slice(0, 5)).toEqual([
+      "",
+      rule("Result"),
+      "    Infrastructure     no changes",
+      "  ! builder-1          installed and verified · enrollment pending (1)",
+      `    Operation record   ${RECORD}`,
     ]);
+    const enrollment = [
+      "",
+      "  On builder-1, log in as factory (tailnet SSH policy must allow it):",
+      `    $ tailscale ssh factory@${host("builder-1")}`,
+      "",
+      "  1. GitHub",
+      "     $ gh auth login --hostname github.com --git-protocol https --web",
+      "     $ gh auth status",
+      "",
+      "  Return to your workstation:",
+      "    $ exit",
+      "  Refresh enrollment verification, reviewing the new plan:",
+      "    $ fffactory apply",
+      "  Then confirm:",
+      "    $ fffactory status",
+      "  Paseo clients: enrollment is checked from each client, not the worker",
+    ];
+    // The failed worker's row and its next action on standard error, as they always were; the
+    // enrollment on standard output, as an installed worker's always was.
+    expect(out.slice(5)).toEqual(enrollment);
     expect(err).toEqual([
-      "  failed     builder-2 (fff-abcd1234-builder-2): Step harness failed: exited with status 1; release 0.3.0 is active but unhealthy",
-      "             Next: Read its output and fix the cause, then rerun `fffactory apply`",
-      "  not tried  builder-3 (fff-abcd1234-builder-3): the rollout stopped at the failure above",
+      "  ✖ builder-2          failed · Step harness failed: exited with status 1; release 0.3.0 is active but unhealthy",
+      "  ◌ builder-3          not attempted · the rollout stopped at the failure above",
+      "",
+      NEXT,
+      `  builder-2: ${readLog}`,
     ]);
+    // Written in the Result's order across both streams, the record before the Next block.
+    expect(written.slice(0, 8)).toEqual([
+      { stream: "out", line: "" },
+      { stream: "out", line: rule("Result") },
+      { stream: "out", line: "    Infrastructure     no changes" },
+      {
+        stream: "out",
+        line: "  ! builder-1          installed and verified · enrollment pending (1)",
+      },
+      {
+        stream: "err",
+        line: "  ✖ builder-2          failed · Step harness failed: exited with status 1; release 0.3.0 is active but unhealthy",
+      },
+      {
+        stream: "err",
+        line: "  ◌ builder-3          not attempted · the rollout stopped at the failure above",
+      },
+      { stream: "out", line: `    Operation record   ${RECORD}` },
+      { stream: "err", line: "" },
+    ]);
+    expect(written.slice(8, 11)).toEqual([
+      { stream: "err", line: NEXT },
+      { stream: "err", line: `  builder-2: ${readLog}` },
+      { stream: "out", line: "" },
+    ]);
+    expect(written.filter(({ line }) => line === NEXT)).toHaveLength(1);
   });
 });
 
@@ -120,10 +175,13 @@ describe("fffactory apply, phase-3 report (plan-apply §Apply)", () => {
       };
 
       expect(reportApply(result, context, APPLYING)).toBe(1);
-      expect(err[0]).toStartWith(headline);
-      if (consequence !== undefined) expect(err).toContain(consequence);
-      expect(err.at(-1)?.toLowerCase()).toContain("rerun `fffactory apply`");
-      expect(out).toEqual([`Operation record: s3://${BUCKET}/${KEY}`]);
+      expect(err[2]).toBe(`  ✖ ${headline}: the worker returned an invalid result`);
+      if (consequence !== undefined) expect(err[3]).toBe(`    ${consequence}`);
+      expect(err.slice(-2)).toEqual([
+        "  Rerun: it plans again from what exists now and converges what remains:",
+        "    $ fffactory apply",
+      ]);
+      expect(out).toEqual(["", `  Operation record   ${RECORD}`]);
     },
   );
 
@@ -155,6 +213,9 @@ describe("fffactory apply, phase-3 report (plan-apply §Apply)", () => {
     };
     const pendingResult = applied({ workers: [installed("builder-1")], dispatch: [pending] });
     expect(reportApply(pendingResult.result, pendingResult.context, APPLYING)).toBe(2);
+    // Not a failure: its Next block stays on standard output.
+    expect(pendingResult.err).toEqual([]);
+    expect(pendingResult.out).toContain("  builder-1: Enroll GitHub");
 
     const failed: DispatchOutcome = {
       key: "builder-1" as HostKey,
@@ -165,6 +226,14 @@ describe("fffactory apply, phase-3 report (plan-apply §Apply)", () => {
     };
     const failedResult = applied({ workers: [installed("builder-1")], dispatch: [failed] });
     expect(reportApply(failedResult.result, failedResult.context, APPLYING)).toBe(1);
+    // A failure, but a stage's next action stays on standard output, where it always was.
+    expect(failedResult.err).toEqual([]);
+    expect(failedResult.out.slice(-4)).toEqual([
+      "",
+      NEXT,
+      "  builder-1: Repair Paseo",
+      "  Paseo clients: enrollment is checked from each client, not the worker",
+    ]);
 
     // A worker sent nothing because an earlier stage skipped it is not a failure (#134).
     const skipped: DispatchOutcome = {
@@ -179,12 +248,12 @@ describe("fffactory apply, phase-3 report (plan-apply §Apply)", () => {
     expect(reportApply(skippedResult.result, skippedResult.context, APPLYING)).toBe(2);
   });
 
-  test("reports every repository, control-plane, dispatch and verification branch", () => {
+  test("every repository, control-plane, dispatch and verification branch, each action once", () => {
     // builder-5's Paseo maintenance was deferred: the workers stage skipped it (#134).
     const close = `Close the active agents on ${host("builder-5")}, then rerun \`fffactory apply\``;
     const deferral = "Paseo maintenance is deferred while agents may be active";
     const workers: WorkerOutcome[] = [
-      ...["builder-1", "builder-2", "builder-3", "builder-4"].map(installed),
+      ...["builder-1", "builder-2", "builder-3", "builder-4"].map((key) => installed(key)),
       {
         key: "builder-5" as HostKey,
         hostname: host("builder-5"),
@@ -251,10 +320,7 @@ describe("fffactory apply, phase-3 report (plan-apply §Apply)", () => {
         gates: [],
         blocking: [],
         summary: "Dispatch pending",
-        nextActions: [
-          "Enroll GitHub on fff-abcd1234-builder-2",
-          "Synchronize repositories on fff-abcd1234-builder-2",
-        ],
+        nextActions: [`Adopt FFFlow on ${host("builder-2")}`],
       },
       {
         key: "builder-5" as HostKey,
@@ -278,43 +344,35 @@ describe("fffactory apply, phase-3 report (plan-apply §Apply)", () => {
     // A failed live dispatch reconciliation makes the command fail, even though other gaps are pending.
     expect(verification.ready).toBe(false);
     expect(reportApply(result, context, APPLYING)).toBe(1);
-    expect(err).toEqual([]);
-
-    const ready = verification.workers.find((worker) => worker.ready);
-    const notReady = verification.workers.filter((worker) => !worker.ready);
-    expect(ready?.summary).toBe("fff-abcd1234-builder-1 is ready and dispatching");
     expect(out).toEqual([
-      "Applied: the factory's infrastructure matches factory.json.",
-      "Workers:",
-      ...["builder-1", "builder-2", "builder-3", "builder-4"].flatMap((key) => [
-        `  installed  ${key} (${host(key)}): release 0.3.0 installed and verified; every account is enrolled`,
-        "             Paseo clients: enrollment is checked from each client, not the worker",
-      ]),
-      `  skipped    builder-5 (${host("builder-5")}): ${deferral}`,
-      `             Next: ${close}`,
-      "Repositories:",
-      "  synchronized  builder-1 (fff-abcd1234-builder-1)",
-      "  unresolved  builder-2 (fff-abcd1234-builder-2): builder-2 has divergent checkouts",
-      "    Next: Resolve them, then rerun `fffactory apply`",
-      "Control plane:",
-      "  applied  builder-1 (fff-abcd1234-builder-1)",
-      "  deferred  builder-5 (fff-abcd1234-builder-5): Maintenance (password) was deferred while agents may be active",
-      `    Next: ${close}`,
-      "Dispatch:",
-      "  active  builder-1 (fff-abcd1234-builder-1)",
-      "  not requested  builder-4 (fff-abcd1234-builder-4)",
-      "  failed  builder-3 (fff-abcd1234-builder-3): Reconciling dispatch failed",
-      "    Next: Check paseo.service, then rerun `fffactory apply`",
-      "  pending  builder-2 (fff-abcd1234-builder-2)",
-      "    Enroll GitHub on fff-abcd1234-builder-2",
-      "    Synchronize repositories on fff-abcd1234-builder-2",
-      `  skipped  builder-5 (fff-abcd1234-builder-5): ${deferral}`,
-      `    Next: ${close}`,
-      `End-to-end verification: ${verification.summary}`,
-      ...notReady.map((worker) => `  ${worker.summary}`),
-      `Operation record: s3://${BUCKET}/${KEY}`,
+      "",
+      rule("Result"),
+      "    Infrastructure     applied: matches factory.json",
+      "  ✔ builder-1          installed and verified · every account enrolled",
+      "    ✔ Control plane   applied",
+      "    ✔ Repositories    synchronized",
+      "    ✔ Dispatch        active",
+      "  ! builder-2          installed and verified · every account enrolled",
+      "    ! Repositories    unresolved · builder-2 has divergent checkouts",
+      "    ! Dispatch        pending",
+      "  ✖ builder-3          installed and verified · every account enrolled",
+      "    ✖ Dispatch        failed · Reconciling dispatch failed",
+      "  ✔ builder-4          installed and verified · every account enrolled",
+      "      Dispatch        not requested",
+      `  ! builder-5          skipped · ${deferral}`,
+      "    ! Control plane   deferred · Maintenance (password) was deferred while agents may be active",
+      "    ↷ Dispatch        skipped",
+      `  ! Verification       ${verification.summary}`,
+      `    Operation record   ${RECORD}`,
+      // Every stage's next action once, in the stages' order: the deferral three stages name, once.
+      "",
+      NEXT,
+      `  builder-5: ${close}`,
+      "  builder-2: Resolve them, then rerun `fffactory apply`",
+      "  builder-3: Check paseo.service, then rerun `fffactory apply`",
+      `  builder-2: Adopt FFFlow on ${host("builder-2")}`,
+      "  Paseo clients: enrollment is checked from each client, not the worker",
     ]);
-    // The ready worker is not among the lines the verification stage prints.
-    expect(out).not.toContain(`  ${ready?.summary}`);
+    expect(err).toEqual([]);
   });
 });

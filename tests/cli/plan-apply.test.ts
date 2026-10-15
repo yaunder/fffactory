@@ -96,16 +96,63 @@ const SAVED = [
   "  Apply exactly this plan:",
   "    $ fffactory apply --plan-id aaaaaaaa",
 ];
-const REPOSITORY_RESULTS = ["Repositories:", `  synchronized  builder-1 (${B1})`];
-/** What apply prints while it installs builder-1, and once it is installed. */
-const INSTALLED = [
-  "Installing release 0.3.0 on builder-1 (fff-abcd1234-builder-1): uploading 0.0 MiB.",
-  "Installing release 0.3.0 on builder-1 (fff-abcd1234-builder-1): host apply runs the install " +
-    "steps, then verifies; this can take many minutes.",
+/** The Applying section, once Terraform applies the plan's infrastructure changes. */
+const TERRAFORM = [
+  "",
+  rule("Applying"),
+  "  Infrastructure   applying with Terraform (its output is not shown; can take several minutes)",
 ];
-const ENROLLMENT_PENDING =
-  `  installed  builder-1 (${B1}): release 0.3.0 installed and verified; enrollment pending: ` +
-  "GitHub, OpenAI Codex, Claude Code";
+/** What apply prints while it installs builder-1, the labels as wide as Terraform's row. */
+const INSTALLED = [
+  "  builder-1        uploading 0.0 MiB",
+  "  builder-1        installing and verifying (can take many minutes)",
+];
+const RESULT = rule("Result");
+const APPLIED = "    Infrastructure     applied: matches factory.json";
+const UNCHANGED = "    Infrastructure     no changes";
+const ENROLLMENT_PENDING = "  ! builder-1          installed and verified · enrollment pending (3)";
+const RECORD_LINE = /^ {4}Operation record {3}s3:\/\/fff-abcd1234-state\/.+\.json$/;
+/** The Next block of builder-1's enrollment, after a blank line. */
+const ENROLL = [
+  "",
+  rule("Next: enroll 3 accounts on builder-1"),
+  "  Log in as factory (tailnet SSH policy must allow it):",
+  `    $ tailscale ssh factory@${B1}`,
+  "",
+  "  1. GitHub",
+  "     $ gh auth login --hostname github.com --git-protocol https --web",
+  "     $ gh auth status",
+  "  2. OpenAI Codex",
+  "     $ codex login --device-auth",
+  "     $ codex login status",
+  "  3. Claude Code",
+  "     $ claude auth login",
+  "     $ claude auth status",
+  "",
+  "  Return to your workstation:",
+  "    $ exit",
+  "  Refresh enrollment verification, reviewing the new plan:",
+  "    $ fffactory apply",
+  "  Then confirm:",
+  "    $ fffactory status",
+  "  Paseo clients: enrollment is checked from each client, not the worker",
+];
+/** What an interrupt that keeps the lock asks, after a blank line. */
+const BREAK_THEN_RERUN = [
+  "",
+  NEXT,
+  "  Once fffactory has exited, break the lock:",
+  "    $ fffactory lock break",
+  "  Then rerun:",
+  "    $ fffactory apply",
+];
+/** How a failure that may have changed something converges, after a blank line. */
+const CONVERGE = [
+  "",
+  NEXT,
+  "  Rerun: it plans again from what exists now and converges what remains:",
+  "    $ fffactory apply",
+];
 
 /** The plan's row for a factory that declares no worker. */
 const NO_WORKERS =
@@ -524,6 +571,8 @@ describe("fffactory apply (plan-apply §Apply)", () => {
     const { context, out, err, prompt, lockStore, terraform } = cli({
       interactive: true,
       answers: ["yes"],
+      controlPlane: fakeControlPlane("healthy", { kind: "idle" }).controlPlane,
+      workflowQueue: fakeWorkflowQueue().queue,
     });
     lockStore.buckets.add(BUCKET);
     expect(await run(["apply"], context)).toBe(0);
@@ -535,17 +584,18 @@ describe("fffactory apply (plan-apply §Apply)", () => {
       ...CREATES,
       ...STAGES,
       "",
-      "Applying. Terraform's output is not shown; this can take several minutes.",
+      ...TERRAFORM,
       ...INSTALLED,
-      "Applied: the factory's infrastructure matches factory.json.",
-      "Workers:",
+      "",
+      RESULT,
+      APPLIED,
       ENROLLMENT_PENDING,
-      `             GitHub: Authenticate GitHub as factory on ${B1} (tailnet SSH policy must let you log in as \`factory\`): run \`tailscale ssh factory@${B1}\`, then \`gh auth login --hostname github.com --git-protocol https --web\`, then \`gh auth status\``,
-      `             OpenAI Codex: Log in to OpenAI Codex as factory on ${B1} (tailnet SSH policy must let you log in as \`factory\`): run \`tailscale ssh factory@${B1}\`, then \`codex login --device-auth\`, then \`codex login status\``,
-      `             Claude Code: Log in to Claude Code as factory on ${B1} (tailnet SSH policy must let you log in as \`factory\`): run \`tailscale ssh factory@${B1}\`, then \`claude auth login\`, then \`claude auth status\``,
-      "             Paseo clients: enrollment is checked from each client, not the worker",
-      ...REPOSITORY_RESULTS,
-      `Operation record: s3://${BUCKET}/${key}`,
+      "    ✔ Control plane   applied",
+      "    ✔ Repositories    synchronized",
+      "      Dispatch        not requested",
+      "  ! Verification       The factory is ready: every worker is verified end to end · enrollment pending on 1 worker",
+      `    Operation record   s3://${BUCKET}/${key}`,
+      ...ENROLL,
     ]);
     expect(prompt.asked).toEqual(['Apply this plan? Only "yes" applies it: ']);
     expect(terraform.world.hosts.has("builder-1")).toBe(true);
@@ -558,7 +608,7 @@ describe("fffactory apply (plan-apply §Apply)", () => {
     async (answer) => {
       const { context, err, terraform, lockStore } = cli({ interactive: true, answers: [answer] });
       expect(await run(["apply"], context)).toBe(1);
-      expect(err).toEqual(["Not approved: nothing was applied."]);
+      expect(err).toEqual(["", "✖ Not approved: nothing was applied"]);
       expect(terraform.calls.some(({ call }) => call === "applyPlan")).toBe(false);
       expect(lockStore.locks.size).toBe(0);
     },
@@ -595,14 +645,15 @@ describe("fffactory apply (plan-apply §Apply)", () => {
       ...STAGES,
       "",
       "Applying saved plan aaaaaaaa, approved by naming its ID.",
-      "Applying. Terraform's output is not shown; this can take several minutes.",
+      ...TERRAFORM,
       ...INSTALLED,
-      "Applied: the factory's infrastructure matches factory.json.",
-      "Workers:",
+      "",
+      RESULT,
+      APPLIED,
       ENROLLMENT_PENDING,
-      ...Array(4).fill(expect.stringMatching(/^ {13}\S/)),
-      ...REPOSITORY_RESULTS,
-      expect.stringMatching(/^Operation record: s3:\/\//),
+      "    ✔ Repositories    synchronized",
+      expect.stringMatching(RECORD_LINE),
+      ...ENROLL,
     ]);
     expect(prompt.asked).toEqual([]);
     expect(terraform.calls.map(({ call }) => call)).toEqual(["showPlan", "applyPlan"]);
@@ -669,14 +720,18 @@ describe("fffactory apply (plan-apply §Apply)", () => {
   });
 
   test("a failed Terraform apply says what may have changed and how to converge", async () => {
-    const { context, err, terraform } = cli({ interactive: true, answers: ["yes"] });
+    const { context, out, err, terraform } = cli({ interactive: true, answers: ["yes"] });
     terraform.world.failNext = "applyPlan";
     expect(await run(["apply"], context)).toBe(1);
     expect(err).toEqual([
-      "Applying failed: `terraform apply` exited with status 1.",
-      "Terraform may have changed some of the infrastructure before it stopped.",
-      "Rerun `fffactory apply`: it plans again from what exists now and converges what remains.",
+      "",
+      RESULT,
+      "  ✖ Applying failed: `terraform apply` exited with status 1",
+      "    Terraform may have changed some of the infrastructure before it stopped.",
+      ...CONVERGE,
     ]);
+    // The record's location stays on standard output, between the failure and its Next block.
+    expect(out.slice(-2)).toEqual(["", expect.stringMatching(/^ {2}Operation record {3}s3:\/\//)]);
   });
 
   test("a failed Terraform plan says nothing was applied", async () => {
@@ -684,7 +739,10 @@ describe("fffactory apply (plan-apply §Apply)", () => {
     terraform.world.failNext = "plan";
     expect(await run(["apply"], context)).toBe(1);
     expect(err).toEqual([
-      "Planning failed: `terraform plan` exited with status 1. Nothing was applied.",
+      "",
+      RESULT,
+      "  ✖ Planning failed: `terraform plan` exited with status 1",
+      "    Nothing was applied.",
     ]);
   });
 
@@ -695,7 +753,8 @@ describe("fffactory apply (plan-apply §Apply)", () => {
       answers: ["yes"],
     });
     expect(await run(["apply"], context)).toBe(0);
-    expect(out).toContain("Infrastructure: no changes to apply.");
+    expect(out).toContain(UNCHANGED);
+    expect(out).not.toContain(TERRAFORM[2]);
     expect(out).toContain(ENROLLMENT_PENDING);
     expect(prompt.asked).toHaveLength(1);
     expect(terraform.calls.some(({ call }) => call === "applyPlan")).toBe(false);
@@ -712,13 +771,13 @@ describe("fffactory apply (plan-apply §Apply)", () => {
     });
     expect(await run(["apply"], context)).toBe(0);
     expect(err).toEqual([]);
-    expect(
-      out.slice(out.indexOf("Applied: the factory's infrastructure matches factory.json.")),
-    ).toEqual([
-      "Applied: the factory's infrastructure matches factory.json.",
-      "Workers: none declared.",
-      "End-to-end verification: The factory is ready: it declares no workers",
-      expect.stringMatching(/^Operation record: s3:\/\/fff-abcd1234-state\/.+\.json$/),
+    expect(out.slice(out.indexOf(RESULT))).toEqual([
+      RESULT,
+      APPLIED,
+      "    Workers            none declared. Declare a host in factory.json's hosts, then " +
+        "create it with `fffactory apply`.",
+      "  ✔ Verification       The factory is ready: it declares no workers",
+      expect.stringMatching(RECORD_LINE),
     ]);
     expect(terraform.world.network).toBe(true);
     expect(fleet.transport.calls).toEqual([]);
@@ -730,7 +789,7 @@ describe("fffactory apply (plan-apply §Apply)", () => {
         prompt: fakePrompt({ interactive: true, answers: ["yes"] }).prompt,
       }),
     ).toBe(0);
-    expect(out).toContain("Infrastructure: no changes to apply.");
+    expect(out).toContain(UNCHANGED);
   });
 
   test("a skipped worker exits 2 with its next action", async () => {
@@ -742,11 +801,11 @@ describe("fffactory apply (plan-apply §Apply)", () => {
     });
     expect(await run(["apply"], context)).toBe(2);
     expect(out).toContain(
-      `  skipped    builder-1 (${B1}): No Tailscale device named ${B1} is visible from this machine`,
+      `  ↷ builder-1          skipped · No Tailscale device named ${B1} is visible from this machine`,
     );
-    expect(out.find((line) => line.startsWith("             Next: "))).toEndWith(
-      ", then rerun `fffactory apply`.",
-    );
+    const next = out.slice(out.indexOf(NEXT));
+    expect(next[1]).toStartWith("  builder-1: ");
+    expect(next[1]).toEndWith(", then rerun `fffactory apply`.");
   });
 
   test("a stopped worker is listed, sent nothing, and exits 0 (plan-apply §Stopped workers)", async () => {
@@ -764,11 +823,12 @@ describe("fffactory apply (plan-apply §Apply)", () => {
     });
     expect(await run(["apply"], context)).toBe(0);
     const B2 = "fff-abcd1234-builder-2";
-    expect(out).toContain(`  stopped    builder-2 (${B2}): Stopped: nothing was sent to it`);
     expect(out).toContain(
-      "             Next: To install it, start it with `fffactory worker start builder-2`, then rerun `fffactory apply`.",
+      "  ◼ builder-2          stopped · nothing was sent to it; to install it, start it with " +
+        "`fffactory worker start builder-2`, then apply again",
     );
-    expect(out).toContain(`  stopped  builder-2 (${B2})`);
+    // A stopped worker is intentional: it leaves nothing for the operator to do.
+    expect(out).not.toContain(NEXT);
     expect(err).toEqual([]);
     expect(fleet.transport.calls.map(({ worker }) => worker.hostname)).not.toContain(B2);
   });
@@ -785,7 +845,7 @@ describe("fffactory apply (plan-apply §Apply)", () => {
     });
     expect(await run(["apply"], context)).toBe(2);
     expect(out).toContain(
-      "  skipped    builder-2 (fff-abcd1234-builder-2): No Tailscale device named fff-abcd1234-builder-2 is visible from this machine",
+      "  ↷ builder-2          skipped · No Tailscale device named fff-abcd1234-builder-2 is visible from this machine",
     );
   });
 
@@ -811,18 +871,24 @@ describe("fffactory apply (plan-apply §Apply)", () => {
       });
       expect(await run(["apply"], context)).toBe(2);
       expect(err).toEqual([]);
-      const dispatch = out.slice(out.indexOf("Dispatch:"));
-      expect(dispatch.slice(0, 3)).toEqual([
-        "Dispatch:",
-        `  skipped  builder-1 (${B1}): Paseo maintenance is deferred while agents may be active`,
-        `    Next: Close the active agents on ${B1}, then rerun \`fffactory apply\``,
+      // Skipped by the workers stage, deferred by the control plane and skipped by dispatch: one
+      // reason, one recovery instruction.
+      expect(out.slice(out.indexOf(RESULT))).toEqual([
+        RESULT,
+        UNCHANGED,
+        "  ! builder-1          skipped · Paseo maintenance is deferred while agents may be active",
+        "    ! Control plane   deferred · Maintenance (paseo-package, service-definition, " +
+          `listen-address) was deferred while agents may be active on ${B1}; it stays on its ` +
+          "complete current release",
+        "    ✔ Repositories    synchronized",
+        "    ↷ Dispatch        skipped",
+        "  ! Verification       The factory is not ready: 1 of 1 workers need attention",
+        expect.stringMatching(RECORD_LINE),
+        "",
+        NEXT,
+        `  builder-1: Close the active agents on ${B1}, then rerun \`fffactory apply\``,
       ]);
-      const verified = out.find((line) => line.startsWith(`  ${B1} is not ready: `));
-      expect(verified).toContain(
-        "Release left as is: Paseo maintenance is deferred while agents may be active",
-      );
-      expect(verified).not.toContain("absent");
-      expect(out.some((line) => line.includes("failed"))).toBe(false);
+      expect(out.some((line) => line.includes("failed") || line.includes("absent"))).toBe(false);
     });
 
     test("an offline worker is reported skipped by dispatch, with the workers stage's next action", async () => {
@@ -839,11 +905,18 @@ describe("fffactory apply (plan-apply §Apply)", () => {
       });
       expect(await run(["apply"], context)).toBe(2);
       expect(err).toEqual([]);
-      const dispatch = out.slice(out.indexOf("Dispatch:"));
-      expect(dispatch.slice(0, 3)).toEqual([
-        "Dispatch:",
-        `  skipped  builder-1 (${B1}): Offline in the tailnet`,
-        "    Next: Check that the instance is running and that Tailscale is up on it, then rerun `fffactory apply`.",
+      expect(out.slice(out.indexOf(RESULT))).toEqual([
+        RESULT,
+        UNCHANGED,
+        "  ↷ builder-1          skipped · Offline in the tailnet",
+        "    ↷ Repositories    skipped",
+        "    ↷ Dispatch        skipped",
+        "  ! Verification       The factory is not ready: 1 of 1 workers need attention",
+        expect.stringMatching(RECORD_LINE),
+        "",
+        NEXT,
+        "  builder-1: Check that the instance is running and that Tailscale is up on it, then " +
+          "rerun `fffactory apply`.",
       ]);
       expect(out.some((line) => line.includes("failed") || line.includes("absent"))).toBe(false);
     });
@@ -859,14 +932,14 @@ describe("fffactory apply (plan-apply §Apply)", () => {
     });
     expect(await run(["apply"], context)).toBe(0);
     expect(err).toEqual([]);
-    const applying = out.indexOf(
-      "Applying. Terraform's output is not shown; this can take several minutes.",
-    );
-    expect(out.slice(applying + 1, applying + 5)).toEqual([
-      `Waiting for builder-1 (${B1}) to finish its first boot (up to 15 min): this apply just ` +
-        "created its machine.",
+    const applying = out.indexOf(rule("Applying"));
+    expect(out.slice(applying - 1, applying + 8)).toEqual([
+      ...TERRAFORM,
+      "  builder-1        waiting for its first boot (up to 15 min): this apply just created its machine",
       ...INSTALLED,
-      "Applied: the factory's infrastructure matches factory.json.",
+      "",
+      RESULT,
+      APPLIED,
     ]);
     expect(out).toContain(ENROLLMENT_PENDING);
   });
@@ -879,13 +952,15 @@ describe("fffactory apply (plan-apply §Apply)", () => {
     });
     expect(await run(["apply"], context)).toBe(1);
     const missing = `No Tailscale device named ${B1} is visible from this machine`;
-    expect(out).toContain(
-      `Still waiting for builder-1 (${B1}) after 1 of up to 15 min: ${missing}.`,
+    expect(out).toContain(`  builder-1        still waiting after 1 of up to 15 min: ${missing}`);
+    expect(out.filter((line) => line.startsWith("  builder-1        still waiting "))).toHaveLength(
+      14,
     );
-    expect(out.filter((line) => line.startsWith("Still waiting for "))).toHaveLength(14);
     expect(err).toEqual([
-      `  failed     builder-1 (${B1}): Its first boot did not finish within 15 min (last seen: ${missing})`,
-      "             Next: Read the bootstrap in the instance's EC2 console output, and check that " +
+      `  ✖ builder-1          failed · Its first boot did not finish within 15 min (last seen: ${missing})`,
+      "",
+      NEXT,
+      "  builder-1: Read the bootstrap in the instance's EC2 console output, and check that " +
         "tailnet policy lets this device see the factory's tag. If the console output shows " +
         "the bootstrap failed, terminate it uninspected with " +
         "`fffactory worker terminate builder-1 --keep --force`; if it is still running, " +
@@ -905,10 +980,12 @@ describe("fffactory apply (plan-apply §Apply)", () => {
     };
     expect(await run(["apply"], context)).toBe(1);
     expect(err).toEqual([
-      `Interrupted while waiting for builder-1 (${B1}) to finish its first boot: no install ` +
-        "step ran on it.",
-      "Interrupted: the factory stays locked, with a record of this operation. Once fffactory " +
-        "has exited, break the lock with `fffactory lock break`, then rerun `fffactory apply`.",
+      "",
+      RESULT,
+      "  ! Interrupted: the factory stays locked, with a record of this operation",
+      "    Interrupted while waiting for builder-1 to finish its first boot: no install step " +
+        "ran on it.",
+      ...BREAK_THEN_RERUN,
     ]);
     expect(lockStore.locks.size).toBe(1);
   });
@@ -927,9 +1004,54 @@ describe("fffactory apply (plan-apply §Apply)", () => {
     });
     expect(await run(["apply"], context)).toBe(1);
     expect(err).toEqual([
-      `  failed     builder-1 (${B1}): Step harness failed: exited with status 1; release 0.3.0 is active but unhealthy`,
-      `             Next: Read its output with \`tailscale ssh fffactory-admin@${B1} cat /var/log/fffactory/harness.log\` and fix the cause; the steps are idempotent, so rerunning repairs the worker, then rerun \`fffactory apply\`.`,
+      "  ✖ builder-1          failed · Step harness failed: exited with status 1; release 0.3.0 is active but unhealthy",
+      "",
+      NEXT,
+      `  builder-1: Read its output with \`tailscale ssh fffactory-admin@${B1} cat /var/log/fffactory/harness.log\` and fix the cause; the steps are idempotent, so rerunning repairs the worker, then rerun \`fffactory apply\`.`,
     ]);
+  });
+
+  test("mixed outcomes: each line on its stream, in order, every next action once", async () => {
+    const B2 = "fff-abcd1234-builder-2";
+    const failing = appliedRecord(B2, "0.3.0", {
+      state: "failed",
+      steps: withStep(pendingSteps(), "harness", "failed", "exited with status 1"),
+      verification: null,
+    });
+    const { context, written } = cli({
+      declared: ["builder-1", "builder-2"],
+      hosts: ["builder-1", "builder-2"],
+      interactive: true,
+      answers: ["yes"],
+      fleet: workerFleet(["builder-1", "builder-2"], { [B2]: installableWorker(failing) }),
+    });
+    expect(await run(["apply"], context)).toBe(1);
+    const result = written.slice(written.findIndex(({ line }) => line === RESULT) - 1);
+    const readLog =
+      `Read its output with \`tailscale ssh fffactory-admin@${B2} cat /var/log/fffactory/harness.log\` ` +
+      "and fix the cause; the steps are idempotent, so rerunning repairs the worker, then rerun " +
+      "`fffactory apply`.";
+    expect(result).toEqual([
+      { stream: "out", line: "" },
+      { stream: "out", line: RESULT },
+      { stream: "out", line: UNCHANGED },
+      { stream: "out", line: ENROLLMENT_PENDING },
+      {
+        stream: "err",
+        line: "  ✖ builder-2          failed · Step harness failed: exited with status 1; release 0.3.0 is active but unhealthy",
+      },
+      { stream: "out", line: expect.stringMatching(RECORD_LINE) },
+      // Its one Next block: the failed worker's recovery on standard error, as its row, then
+      // the enrollment on standard output, as an installed worker's always was.
+      ...["", NEXT, `  builder-2: ${readLog}`].map((line) => ({ stream: "err" as const, line })),
+      ...[
+        "",
+        "  On builder-1, log in as factory (tailnet SSH policy must allow it):",
+        ...ENROLL.slice(3),
+      ].map((line) => ({ stream: "out" as const, line })),
+    ]);
+    expect(result.filter(({ line }) => line === NEXT)).toHaveLength(1);
+    expect(result.filter(({ line }) => line.includes(readLog))).toHaveLength(1);
   });
 
   test("prints only steps it names itself, never instructions a worker sends", async () => {
@@ -968,10 +1090,12 @@ describe("fffactory apply (plan-apply §Apply)", () => {
       }),
     });
     expect(await run(["apply"], context)).toBe(1);
-    expect(err.slice(0, 3)).toEqual([
-      "Installing the workers failed: the transport broke.",
-      "The worker being installed may be on the new release, unhealthy.",
-      "Rerun `fffactory apply`: it plans again from what exists now and converges what remains.",
+    expect(err).toEqual([
+      "",
+      RESULT,
+      "  ✖ Installing the workers failed: the transport broke",
+      "    The worker being installed may be on the new release, unhealthy.",
+      ...CONVERGE,
     ]);
   });
 
@@ -1000,10 +1124,12 @@ describe("fffactory apply (plan-apply §Apply)", () => {
     };
     expect(await run(["apply"], context)).toBe(1);
     expect(err).toEqual([
-      "Interrupted: the factory stays locked, with a record of this operation. Once fffactory " +
-        "has exited, break the lock with `fffactory lock break`, then rerun `fffactory apply`.",
+      "",
+      RESULT,
+      "  ! Interrupted: the factory stays locked, with a record of this operation",
+      ...BREAK_THEN_RERUN,
     ]);
-    expect(out.at(-1)).toMatch(/^Operation record: s3:\/\//);
+    expect(out.at(-1)).toMatch(/^ {2}Operation record {3}s3:\/\//);
     expect(lockStore.locks.size).toBe(1);
   });
 
@@ -1024,10 +1150,12 @@ describe("fffactory apply (plan-apply §Apply)", () => {
     holder.signal = signal;
     expect(await run(["apply"], context)).toBe(1);
     expect(err).toEqual([
-      `Interrupted while installing on builder-1 (${B1}): host apply may still be running ` +
-        "there, and a rerun skips that worker until it has finished.",
-      "Interrupted: the factory stays locked, with a record of this operation. Once fffactory " +
-        "has exited, break the lock with `fffactory lock break`, then rerun `fffactory apply`.",
+      "",
+      RESULT,
+      "  ! Interrupted: the factory stays locked, with a record of this operation",
+      "    Interrupted while installing on builder-1: host apply may still be running there, " +
+        "and a rerun skips that worker until it has finished.",
+      ...BREAK_THEN_RERUN,
     ]);
     expect(lockStore.locks.size).toBe(1);
   });
@@ -1041,9 +1169,10 @@ describe("fffactory apply (plan-apply §Apply)", () => {
     };
     expect(await run(["apply"], context)).toBe(1);
     expect(err).toEqual([
-      "Interrupted: the factory stays locked by this apply, which may have no operation " +
-        "record. Once fffactory has exited, break the lock with `fffactory lock break`, then " +
-        "rerun `fffactory apply`.",
+      "",
+      RESULT,
+      "  ! Interrupted: the factory stays locked by this apply, which may have no operation record",
+      ...BREAK_THEN_RERUN,
     ]);
     expect(lockStore.locks.size).toBe(1);
   });
@@ -1061,14 +1190,19 @@ describe("fffactory apply (plan-apply §Apply)", () => {
     };
     expect(await run(["apply"], context)).toBe(1);
     expect(err).toEqual([
-      "Interrupted before the factory was locked: it is not locked. Rerun `fffactory apply`: " +
-        "it plans again from what exists now.",
+      "",
+      RESULT,
+      "  ! Interrupted before the factory was locked: it is not locked",
+      "",
+      NEXT,
+      "  Rerun: it plans again from what exists now:",
+      "    $ fffactory apply",
     ]);
     expect(lockStore.locks.size).toBe(0);
   });
 
   test("an operation record that cannot be finished is reported after applying", async () => {
-    const { context, err, lockStore } = cli({ interactive: true, answers: ["yes"] });
+    const { context, out, err, lockStore } = cli({ interactive: true, answers: ["yes"] });
     const write = lockStore.writeOperation.bind(lockStore);
     lockStore.writeOperation = async (bucket, record) => {
       if (record.status === "succeeded")
@@ -1077,8 +1211,11 @@ describe("fffactory apply (plan-apply §Apply)", () => {
     };
     expect(await run(["apply"], context)).toBe(0);
     expect(err).toEqual([
-      "The operation record could not be finished: S3 PutObject on the state bucket failed: SlowDown",
+      "",
+      "  ✖ The operation record could not be finished: S3 PutObject on the state bucket failed: SlowDown",
     ]);
+    // Said before the Next block, which stays on standard output: the apply succeeded.
+    expect(out.slice(out.indexOf(RESULT)).slice(-ENROLL.length)).toEqual(ENROLL);
   });
 
   test("a failed apply whose record cannot be finished reports both", async () => {
@@ -1092,10 +1229,13 @@ describe("fffactory apply (plan-apply §Apply)", () => {
     };
     expect(await run(["apply"], context)).toBe(1);
     expect(err).toEqual([
-      "Applying failed: `terraform apply` exited with status 1.",
-      "Terraform may have changed some of the infrastructure before it stopped.",
-      "Rerun `fffactory apply`: it plans again from what exists now and converges what remains.",
-      "The operation record could not be finished: S3 PutObject on the state bucket failed: SlowDown",
+      "",
+      RESULT,
+      "  ✖ Applying failed: `terraform apply` exited with status 1",
+      "    Terraform may have changed some of the infrastructure before it stopped.",
+      "",
+      "  ✖ The operation record could not be finished: S3 PutObject on the state bucket failed: SlowDown",
+      ...CONVERGE,
     ]);
   });
 
@@ -1172,7 +1312,10 @@ describe("Terraform's diagnostics (plan-apply §Failure)", () => {
 
   /** The one diagnostics file a line names, checked to be private and to hold `STDERR`. */
   async function namedFile(line: string | undefined, directory: string) {
-    const file = /^Terraform's diagnostics: (.+)$/.exec(line ?? "")?.[1] ?? "";
+    const file = /^(?:Terraform's diagnostics: | {2}Terraform's diagnostics {3})(.+)$/.exec(
+      line ?? "",
+    )?.[1];
+    if (file === undefined) throw new Error(`no diagnostics file named in ${line}`);
     expect(dirname(file)).toBe(directory);
     expect(await readFile(file, "utf8")).toBe(STDERR);
     expect((await stat(file)).mode & 0o777).toBe(0o600);
@@ -1185,14 +1328,17 @@ describe("Terraform's diagnostics (plan-apply §Failure)", () => {
       apply: { exitCode: 1, stderr: STDERR },
     });
     expect(await run(["apply"], context)).toBe(1);
-    expect(err.slice(0, 3)).toEqual([
-      "Applying failed: `terraform apply` exited with status 1.",
-      "Terraform may have changed some of the infrastructure before it stopped.",
-      "Rerun `fffactory apply`: it plans again from what exists now and converges what remains.",
+    expect(err.slice(0, 5)).toEqual([
+      "",
+      RESULT,
+      "  ✖ Applying failed: `terraform apply` exited with status 1",
+      "    Terraform may have changed some of the infrastructure before it stopped.",
+      "",
     ]);
-    await namedFile(err[3], diagnostics);
-    expect(err).toHaveLength(4);
-    expect(out.at(-1)).toMatch(/^Operation record: s3:\/\//);
+    // The diagnostics' path, then the record's, aligned though on two streams.
+    await namedFile(err[5], diagnostics);
+    expect(err.slice(6)).toEqual(CONVERGE);
+    expect(out.at(-1)).toMatch(/^ {2}Operation record {10}s3:\/\//);
     expect([...out, ...err].join("\n")).not.toContain(MARKER);
     const records = JSON.stringify(lockStore.operationWrites);
     expect(records).not.toContain(MARKER);

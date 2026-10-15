@@ -4,7 +4,8 @@
 `domain/` (pure, no fakes), `application/` (use cases against in-memory ports
 from `support/`), `infrastructure/` (real temporary directories), `cli/`
 (in-process `run` through `support/cli-harness.ts`, whose streams are plain unless a test
-colors one with `styles`, and the spawned `main.ts`; `cli/presentation/` checks the text laid
+colors one with `styles`, and which keeps both streams' lines in the order written
+(`written`), and the spawned `main.ts`; `cli/presentation/` checks the text laid
 out from domain data, pure like `domain/`, while `application/` tests assert that data, never
 its text).
 Each test maps to a section of a spec in `docs/specs/`. Areas with their own rules:

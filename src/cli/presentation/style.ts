@@ -6,8 +6,22 @@
  */
 import { styleText } from "node:util";
 
-/** The statuses a glyph shows: readiness, and the changes a plan makes. */
-export const STATUSES = ["ready", "attention", "error", "create", "update", "delete"] as const;
+/**
+ * The statuses a glyph shows: readiness, the changes a plan makes, and the outcomes that are
+ * neither ready nor failed: skipped for a known reason, not attempted after a failure, and
+ * stopped, an operator's intentional state.
+ */
+export const STATUSES = [
+  "ready",
+  "attention",
+  "error",
+  "create",
+  "update",
+  "delete",
+  "skipped",
+  "not_attempted",
+  "stopped",
+] as const;
 export type Status = (typeof STATUSES)[number];
 
 /** Each status's glyph, shown in plain output and in color: color is never the only signal. */
@@ -18,10 +32,14 @@ export const GLYPHS: Readonly<Record<Status, string>> = {
   create: "+",
   update: "~",
   delete: "-",
+  skipped: "↷",
+  not_attempted: "◌",
+  stopped: "◼",
 };
 
 type Format = Parameters<typeof styleText>[0];
-type Color = "green" | "yellow" | "red";
+/** A status's color; the neutral outcomes are dim, as muted text is. */
+type Color = "green" | "yellow" | "red" | "dim";
 
 const COLORS: Readonly<Record<Status, Color>> = {
   ready: "green",
@@ -30,6 +48,9 @@ const COLORS: Readonly<Record<Status, Color>> = {
   create: "green",
   update: "yellow",
   delete: "red",
+  skipped: "yellow",
+  not_attempted: "dim",
+  stopped: "dim",
 };
 
 /** The roles text takes in human output. Each returns `text` as a terminal shows it. */
