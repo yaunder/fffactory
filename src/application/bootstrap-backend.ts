@@ -12,18 +12,20 @@
 import type { CredentialSelection } from "../domain/aws-account";
 import {
   bootstrapPlanVerdict,
-  describeBootstrapPlan,
-  missingHardening,
-  unreadyBucketRefusal,
+  type UnreadyBucket,
+  unreadyBucket,
 } from "../domain/backend-bootstrap";
 import {
   bootstrapStaleness,
+  type BootstrapPlanReview,
   changesSomething,
   type PlanCircumstances,
   type ResourceChange,
   resourceChanges,
   sameChanges,
   type SavedBootstrapPlan,
+  type StaleReason,
+  type UnexpectedPlan,
 } from "../domain/plan";
 import type { HeldLock } from "../domain/factory-lock";
 import type { RandomBytes } from "../domain/initialization";
@@ -77,11 +79,11 @@ export type BackendBootstrap =
   | { readonly kind: "present"; readonly bucket: StateBucket }
   /**
    * The bucket exists without every setting backend bootstrap applies: an interrupted
-   * bootstrap. `refusal` names what it lacks and how to complete it. Nothing is changed.
+   * bootstrap. `bucket` is where it is and what it lacks. Nothing is changed.
    */
-  | { readonly kind: "unready"; readonly refusal: readonly string[] }
+  | { readonly kind: "unready"; readonly bucket: UnreadyBucket }
   /** The plan would do something other than create, or could not be read. Nothing applied. */
-  | { readonly kind: "unexpected_plan"; readonly unexpected: readonly string[] }
+  | { readonly kind: "unexpected_plan"; readonly unexpected: readonly UnexpectedPlan[] }
   | { readonly kind: "declined" }
   | { readonly kind: "created"; readonly bucket: StateBucket }
   /** The bucket does not exist, and the request did not allow bootstrapping it. */
@@ -92,9 +94,9 @@ const OTHER_ACCOUNT: Issue = {
   message: "is not the account the account check allowed",
 };
 
-function unexpected(...reasons: string[]): {
+function unexpected(...reasons: UnexpectedPlan[]): {
   readonly kind: "unexpected_plan";
-  readonly unexpected: readonly string[];
+  readonly unexpected: readonly UnexpectedPlan[];
 } {
   return { kind: "unexpected_plan", unexpected: reasons };
 }
@@ -103,7 +105,7 @@ export type StateBucketState =
   | { readonly kind: "missing" }
   | { readonly kind: "present" }
   /** It exists without every setting backend bootstrap applies: an interrupted bootstrap. */
-  | { readonly kind: "unready"; readonly refusal: readonly string[] };
+  | { readonly kind: "unready"; readonly bucket: UnreadyBucket };
 
 /**
  * Whether the state bucket exists, and if it does, whether it has every setting backend
@@ -114,9 +116,8 @@ export async function stateBucketState(
   bucket: StateBucket,
 ): Promise<StateBucketState> {
   if (!(await lockStore.bucketExists(bucket))) return { kind: "missing" };
-  const readiness = await lockStore.bucketReadiness(bucket);
-  if (missingHardening(readiness).length === 0) return { kind: "present" };
-  return { kind: "unready", refusal: unreadyBucketRefusal(bucket, readiness) };
+  const unready = unreadyBucket(bucket, await lockStore.bucketReadiness(bucket));
+  return unready === undefined ? { kind: "present" } : { kind: "unready", bucket: unready };
 }
 
 export interface BootstrapPlanRequest {
@@ -131,14 +132,14 @@ export interface BootstrapPlanRequest {
 
 export type BootstrapPlanning =
   /** The plan would do something other than create, or could not be read. */
-  | { readonly kind: "unexpected_plan"; readonly unexpected: readonly string[] }
+  | { readonly kind: "unexpected_plan"; readonly unexpected: readonly UnexpectedPlan[] }
   /**
-   * The plan, saved at `saved.planFile`, the lines an operator approves it from, and what it
+   * The plan, saved at `saved.planFile`, the review an operator approves it from, and what it
    * changes, each only a create.
    */
   | {
       readonly kind: "planned";
-      readonly plan: readonly string[];
+      readonly review: BootstrapPlanReview;
       readonly changes: readonly ResourceChange[];
       readonly saved: SavedPlanRequest;
     };
@@ -159,13 +160,13 @@ function backendPlanFile(
 }
 
 type ReadBack =
-  | { readonly kind: "unexpected_plan"; readonly unexpected: readonly string[] }
+  | { readonly kind: "unexpected_plan"; readonly unexpected: readonly UnexpectedPlan[] }
   | {
       readonly kind: "read";
       /** What the plan changes, each only a create. */
       readonly changes: readonly ResourceChange[];
-      /** The lines an operator approves it from. */
-      readonly plan: readonly string[];
+      /** The review an operator approves it from. */
+      readonly review: BootstrapPlanReview;
     };
 
 /**
@@ -179,13 +180,16 @@ async function readBackBootstrapPlan(
 ): Promise<ReadBack> {
   const { bucket } = request;
   const changes = resourceChanges(await provisioner.showPlan(saved));
-  if (changes === undefined) return unexpected("Terraform's plan could not be read");
+  if (changes === undefined) return unexpected({ kind: "unreadable_plan" });
   const verdict = bootstrapPlanVerdict(changes);
-  if (!verdict.ok) return unexpected(...verdict.unexpected);
-  if (verdict.creates.length === 0)
-    return unexpected("the plan creates nothing, though the state bucket does not exist");
-  const plan = describeBootstrapPlan(
-    {
+  if (!verdict.ok)
+    return unexpected(
+      ...verdict.unexpected.map((change) => ({ kind: "not_create", change }) as const),
+    );
+  if (verdict.creates.length === 0) return unexpected({ kind: "creates_nothing" });
+  const review: BootstrapPlanReview = {
+    kind: "backend_bootstrap",
+    target: {
       instancePath: request.instancePath,
       name: request.instance.name,
       factoryId: bucket.factoryId,
@@ -194,9 +198,9 @@ async function readBackBootstrapPlan(
       release: request.release,
       bucket: bucket.bucket,
     },
-    verdict.creates,
-  );
-  return { kind: "read", changes: changes.filter(changesSomething), plan };
+    creates: verdict.creates,
+  };
+  return { kind: "read", changes: changes.filter(changesSomething), review };
 }
 
 /**
@@ -211,7 +215,7 @@ export async function planBackendBootstrap(
   await provisioner.plan({ ...saved, variables: { ...request.variables } });
   const read = await readBackBootstrapPlan(provisioner, saved, request);
   if (read.kind !== "read") return read;
-  return { kind: "planned", plan: read.plan, changes: read.changes, saved };
+  return { kind: "planned", review: read.review, changes: read.changes, saved };
 }
 
 /**
@@ -244,7 +248,7 @@ export async function bootstrapBackend(
     variables: projection.variables,
   });
   if (planning.kind !== "planned") return planning;
-  if (!(await approval.approve(planning.plan))) return { kind: "declined" };
+  if (!(await approval.approve(planning.review))) return { kind: "declined" };
   await provisioner.applyPlan(planning.saved);
   return { kind: "created", bucket };
 }
@@ -315,11 +319,11 @@ export interface SavedBootstrapRequest
 export type SavedBootstrapStart =
   | { readonly kind: "refused"; readonly issues: readonly Issue[] }
   /** It is no longer the plan to apply, the state bucket now existing among the reasons. */
-  | { readonly kind: "stale"; readonly planId: string; readonly reasons: readonly string[] }
+  | { readonly kind: "stale"; readonly planId: string; readonly reasons: readonly StaleReason[] }
   /** Its `backend.tfplan` is not the file loaded, or makes other changes than its record. */
   | { readonly kind: "damaged_plan"; readonly planId: string }
   /** Its `backend.tfplan` would do more than create, creates nothing, or cannot be read. */
-  | { readonly kind: "unexpected_plan"; readonly unexpected: readonly string[] }
+  | { readonly kind: "unexpected_plan"; readonly unexpected: readonly UnexpectedPlan[] }
   | { readonly kind: "declined" }
   /** fffactory was interrupted before the lock was taken: it takes none. */
   | { readonly kind: "interrupted" }
@@ -370,7 +374,7 @@ async function checkSavedBootstrap(
   if (read.kind !== "read") return read;
   if (!sameChanges(read.changes, request.saved.changes))
     return { kind: "damaged_plan", planId: request.saved.plan_id };
-  if (!(await deps.approval.approve(read.plan))) return { kind: "declined" };
+  if (!(await deps.approval.approve(read.review))) return { kind: "declined" };
   return savedBootstrapChanged(deps, request, bucket);
 }
 

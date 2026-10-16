@@ -8,10 +8,16 @@ import {
   type SavedBootstrapRequest,
 } from "../../src/application/bootstrap-backend";
 import type { AllowedAccount } from "../../src/application/require-expected-account";
-import { unreadyBucketRefusal } from "../../src/domain/backend-bootstrap";
 import { newLockRecord } from "../../src/domain/factory-lock";
 import type { FactoryId, FactoryInstance, Release } from "../../src/domain/instance";
-import { newSavedBootstrapPlan, PLAN_TTL_MS } from "../../src/domain/plan";
+import {
+  newSavedBootstrapPlan,
+  PLAN_TTL_MS,
+  type PlanCircumstances,
+  type PlanReview,
+  type StaleReason,
+  type UnexpectedPlan,
+} from "../../src/domain/plan";
 import { FAKE_CALLER } from "../support/doctor-fakes";
 import { fakeProvisioner } from "../support/fake-provisioner";
 import { MemoryLockStore, READY_BUCKET } from "../support/memory-lock-store";
@@ -55,12 +61,12 @@ function request(overrides: Partial<BackendBootstrapRequest> = {}): BackendBoots
   };
 }
 
-/** Approval that records what it was shown and answers `answer`. */
+/** Approval that records the reviews it was shown and answers `answer`. */
 function approval(answer: boolean) {
-  const shown: (readonly string[])[] = [];
+  const shown: PlanReview[] = [];
   const port: Approval = {
-    approve: async (plan) => {
-      shown.push(plan);
+    approve: async (review) => {
+      shown.push(review);
       return answer;
     },
   };
@@ -94,12 +100,14 @@ describe("backend bootstrap", () => {
     const readiness = { ...READY_BUCKET, versioning: undefined, tlsOnly: false };
     store.readiness.set(BUCKET, readiness);
     const result = await bootstrapBackend(deps, request());
+    // Where the bucket is and what it lacks, as data: the CLI words how to complete it.
     expect(result).toEqual({
       kind: "unready",
-      refusal: unreadyBucketRefusal(
-        { bucket: BUCKET, accountId: "123456789012", region: "eu-west-2" },
+      bucket: {
+        location: { bucket: BUCKET, accountId: "123456789012", region: "eu-west-2" },
         readiness,
-      ),
+        missing: ["versioning", "tls_only_policy"],
+      },
     });
     expect(terraform.calls).toEqual([]);
     expect(approver.shown).toEqual([]);
@@ -133,16 +141,22 @@ describe("backend bootstrap", () => {
       { call: "applyPlan", request: { ...target, planFile: "/tmp/op/backend.tfplan" } },
     ]);
     expect(approver.shown).toEqual([
-      [
-        `Backend bootstrap: the state bucket ${BUCKET} does not exist yet.`,
-        "  Configuration: /work/.fffactory/factory.json",
-        "  Factory: Test factory (fff-abcd1234)",
-        "  AWS account: 123456789012, Region: eu-west-2",
-        "  Release: 0.3.0",
-        "Terraform will create:",
-        "  + module.state_bucket.aws_s3_bucket.state",
-        "  + module.state_bucket.aws_s3_bucket_versioning.state",
-      ],
+      {
+        kind: "backend_bootstrap",
+        target: {
+          instancePath: "/work/.fffactory/factory.json",
+          name: "Test factory",
+          factoryId: "fff-abcd1234" as FactoryId,
+          accountId: "123456789012",
+          region: "eu-west-2",
+          release: "0.3.0" as Release,
+          bucket: BUCKET,
+        },
+        creates: [
+          "module.state_bucket.aws_s3_bucket.state",
+          "module.state_bucket.aws_s3_bucket_versioning.state",
+        ],
+      },
     ]);
     expect(store.buckets.has(BUCKET)).toBe(true);
   });
@@ -153,7 +167,7 @@ describe("backend bootstrap", () => {
     expect(terraform.calls.map(({ call }) => call)).toEqual(["plan", "showPlan"]);
   });
 
-  test.each([
+  test.each<[string, unknown, UnexpectedPlan[]]>([
     [
       "a plan that would change or replace anything",
       {
@@ -162,14 +176,10 @@ describe("backend bootstrap", () => {
           { address: "a.y", change: { actions: ["delete", "create"] } },
         ],
       },
-      ["a.y (delete, create)"],
+      [{ kind: "not_create", change: { address: "a.y", actions: ["delete", "create"] } }],
     ],
-    ["an unreadable plan", { resource_changes: "nope" }, ["Terraform's plan could not be read"]],
-    [
-      "a plan that creates nothing",
-      { resource_changes: [] },
-      ["the plan creates nothing, though the state bucket does not exist"],
-    ],
+    ["an unreadable plan", { resource_changes: "nope" }, [{ kind: "unreadable_plan" }]],
+    ["a plan that creates nothing", { resource_changes: [] }, [{ kind: "creates_nothing" }]],
   ])("%s is refused before approval", async (_, shown, unexpected) => {
     const { deps, terraform, approver } = world({ shown });
     expect(await bootstrapBackend(deps, request())).toEqual({
@@ -445,16 +455,22 @@ describe("applying a saved bootstrap plan (plan-apply §Apply)", () => {
     ]);
     expect(world.events).toEqual(["applyPlan", `remove ${PLAN_ID}`, "lock"]);
     expect(world.approver.shown).toEqual([
-      [
-        `Backend bootstrap: the state bucket ${BUCKET} does not exist yet.`,
-        "  Configuration: /work/.fffactory/factory.json",
-        "  Factory: Test factory (fff-abcd1234)",
-        "  AWS account: 123456789012, Region: eu-west-2",
-        "  Release: 0.3.0",
-        "Terraform will create:",
-        "  + module.state_bucket.aws_s3_bucket.state",
-        "  + module.state_bucket.aws_s3_bucket_versioning.state",
-      ],
+      {
+        kind: "backend_bootstrap",
+        target: {
+          instancePath: "/work/.fffactory/factory.json",
+          name: "Test factory",
+          factoryId: "fff-abcd1234" as FactoryId,
+          accountId: "123456789012",
+          region: "eu-west-2",
+          release: "0.3.0" as Release,
+          bucket: BUCKET,
+        },
+        creates: [
+          "module.state_bucket.aws_s3_bucket.state",
+          "module.state_bucket.aws_s3_bucket_versioning.state",
+        ],
+      },
     ]);
     // The bucket is checked missing before the read-back, and again right before the apply.
     expect(world.store.calls.filter((call) => call.startsWith("bucketExists"))).toHaveLength(2);
@@ -462,36 +478,32 @@ describe("applying a saved bootstrap plan (plan-apply §Apply)", () => {
     expect(world.planStore.saved.size).toBe(0);
   });
 
-  test.each([
+  test.each<[string, Partial<PlanCircumstances>, StaleReason]>([
     [
       "factory.json changed",
       { configurationSha256: "e".repeat(64) },
-      "factory.json changed after it was planned",
+      { kind: "configuration_changed" },
     ],
     [
       "another factory.json",
       { instancePath: "/elsewhere/factory.json" },
-      "it was planned for another factory.json, /work/.fffactory/factory.json",
+      { kind: "other_instance", instancePath: "/work/.fffactory/factory.json" },
     ],
     [
       "another release",
       { release: "0.3.1" as Release },
-      "it was planned by fffactory 0.3.0, not this release",
+      { kind: "other_release", release: "0.3.0" as Release },
     ],
-    [
-      "other assets",
-      { assetsSha256: "f".repeat(64) },
-      "it was planned with other release assets than this fffactory's",
-    ],
+    ["other assets", { assetsSha256: "f".repeat(64) }, { kind: "other_assets" }],
     [
       "another account",
       { accountId: "210987654321" },
-      "it was planned in AWS account 123456789012, not this one",
+      { kind: "other_account", accountId: "123456789012" },
     ],
     [
       "its expiry",
       { now: new Date(NOW.getTime() + PLAN_TTL_MS + 1) },
-      `it expired at ${new Date(NOW.getTime() + PLAN_TTL_MS).toISOString()}`,
+      { kind: "expired", expiresAt: new Date(NOW.getTime() + PLAN_TTL_MS).toISOString() },
     ],
   ])("a plan stale by %s is refused with nothing changed", async (_, changed, reason) => {
     const world = await savedWorld();
@@ -514,7 +526,7 @@ describe("applying a saved bootstrap plan (plan-apply §Apply)", () => {
     expect(await applySavedBootstrap(world.deps, world.savedRequest())).toEqual({
       kind: "stale",
       planId: PLAN_ID,
-      reasons: ["the state bucket was created after it was planned"],
+      reasons: [{ kind: "state_bucket_created" }],
     });
     expect(world.terraform.calls).toEqual([]);
     nothingChanged(world);
@@ -534,7 +546,7 @@ describe("applying a saved bootstrap plan (plan-apply §Apply)", () => {
     expect(await applySavedBootstrap(world.deps, world.savedRequest())).toEqual({
       kind: "stale",
       planId: PLAN_ID,
-      reasons: ["the state bucket was created after it was planned"],
+      reasons: [{ kind: "state_bucket_created" }],
     });
     nothingChanged(world);
   });
@@ -584,7 +596,7 @@ describe("applying a saved bootstrap plan (plan-apply §Apply)", () => {
     nothingChanged(world);
   });
 
-  test.each([
+  test.each<[string, unknown, UnexpectedPlan[]]>([
     [
       "does more than create",
       {
@@ -596,14 +608,18 @@ describe("applying a saved bootstrap plan (plan-apply §Apply)", () => {
           },
         ],
       },
-      ["module.state_bucket.aws_s3_bucket_versioning.state (delete, create)"],
+      [
+        {
+          kind: "not_create",
+          change: {
+            address: "module.state_bucket.aws_s3_bucket_versioning.state",
+            actions: ["delete", "create"],
+          },
+        },
+      ],
     ],
-    ["cannot be read", { resource_changes: "nope" }, ["Terraform's plan could not be read"]],
-    [
-      "creates nothing",
-      { resource_changes: [] },
-      ["the plan creates nothing, though the state bucket does not exist"],
-    ],
+    ["cannot be read", { resource_changes: "nope" }, [{ kind: "unreadable_plan" }]],
+    ["creates nothing", { resource_changes: [] }, [{ kind: "creates_nothing" }]],
   ])("a read-back that %s is an unexpected plan", async (_, shown, unexpected) => {
     const world = await savedWorld({ shown });
     expect(await applySavedBootstrap(world.deps, world.savedRequest())).toEqual({

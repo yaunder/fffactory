@@ -2,15 +2,11 @@ import { describe, expect, test } from "bun:test";
 import type { FactoryId, HostKey, Release } from "../../src/domain/instance";
 import {
   bootstrapStaleness,
+  changeKind,
+  changeTally,
   createdWorkers,
   declaredWorkers,
-  describeD11Refusal,
-  describeInfrastructure,
-  describePlan,
-  describeRepositories,
-  describeStoppedResizeRefusal,
-  describeWorkers,
-  describeTarget,
+  factoryPlanReview,
   hostKeyRemovalRefusal,
   hostMachineRefusal,
   isPlanId,
@@ -20,6 +16,7 @@ import {
   PLAN_SCHEMA_VERSION,
   PLAN_TTL_MS,
   type PlanCircumstances,
+  type PlannedWorker,
   type ResourceChange,
   parseSavedPlan,
   pinRefusal,
@@ -33,7 +30,7 @@ import {
   type SavedFactoryPlan,
   type SavedPlan,
   serializeSavedPlan,
-  staleRefusal,
+  type StaleReason,
   stateStaleness,
   stoppedStaleness,
 } from "../../src/domain/plan";
@@ -53,9 +50,42 @@ function change(address: string, actions: string[], type?: string): ResourceChan
   return type === undefined ? { address, actions } : { address, type, actions };
 }
 
-/** The plan's line for a factory that declares no worker. */
-const NO_WORKERS =
-  "Workers: none declared. Declare a host in factory.json's hosts, then create it with `fffactory apply`.";
+describe("changes and their tally (plan-apply §Layer mapping)", () => {
+  test("each change is of one kind, by its actions", () => {
+    expect(
+      [
+        ["create"],
+        ["update"],
+        ["delete"],
+        ["delete", "create"],
+        ["create", "delete"],
+        ["forget"],
+        ["read"],
+      ].map((actions) => changeKind(change(HOST, actions))),
+    ).toEqual(["create", "update", "delete", "replace", "replace", "other", "other"]);
+  });
+
+  test("counts what changes: additions, in-place changes and destructions, reads and no-ops left out", () => {
+    expect(
+      changeTally([
+        change(HOST, ["create"]),
+        change("module.network.aws_vpc.this", ["update"]),
+        change("module.network.aws_subnet.public", ["delete", "create"]),
+        change("module.network.aws_route_table.public", ["create", "delete"]),
+        change("module.host_identity.aws_iam_role_policy.read_secrets", ["delete"]),
+        change("module.x.aws_thing.gone", ["forget"]),
+        change("data.aws_ssm_parameter.al2023", ["read"]),
+        change("module.network.aws_internet_gateway.this", ["no-op"]),
+      ]),
+    ).toEqual({ changing: 6, add: 3, change: 1, destroy: 3 });
+    expect(changeTally([change("data.aws_ssm_parameter.al2023", ["read"])])).toEqual({
+      changing: 0,
+      add: 0,
+      change: 0,
+      destroy: 0,
+    });
+  });
+});
 
 describe("plan IDs", () => {
   test("are eight random lowercase letters or digits", () => {
@@ -97,131 +127,55 @@ describe("the CLI/pin match guard", () => {
   });
 });
 
-describe("the plan's presentation", () => {
-  test("the target shows the configuration path, factory, account, Region and release", () => {
-    expect(describeTarget(TARGET)).toEqual([
-      "  Configuration: /work/.fffactory/factory.json",
-      "  Factory: Test factory (fff-abcd1234)",
-      "  AWS account: 123456789012, Region: eu-west-2",
-      "  Release: 0.3.0",
-    ]);
-    const { name: _, ...unnamed } = TARGET;
-    expect(describeTarget(unnamed)[1]).toBe("  Factory: fff-abcd1234");
-  });
-
-  test("each change is shown with its action, and reads and no-ops are left out", () => {
-    expect(
-      describeInfrastructure([
-        change(HOST, ["create"]),
-        change("module.network.aws_vpc.this", ["update"]),
-        change("module.network.aws_subnet.public", ["delete", "create"]),
-        change("module.network.aws_route_table.public", ["create", "delete"]),
-        change("module.host_identity.aws_iam_role_policy.read_secrets", ["delete"]),
-        change("module.x.aws_thing.gone", ["forget"]),
-        change("data.aws_ssm_parameter.al2023", ["read"]),
-        change("module.network.aws_internet_gateway.this", ["no-op"]),
-      ]),
-    ).toEqual([
-      "Infrastructure changes:",
-      `  + ${HOST}`,
-      "  ~ module.network.aws_vpc.this",
-      "  -/+ module.network.aws_subnet.public",
-      "  +/- module.network.aws_route_table.public",
-      "  - module.host_identity.aws_iam_role_policy.read_secrets",
-      "  module.x.aws_thing.gone (forget)",
-      "  3 to add, 1 to change, 3 to destroy.",
-    ]);
-  });
-
-  test("a plan that changes nothing says so", () => {
-    expect(describeInfrastructure([change("data.aws_ssm_parameter.al2023", ["read"])])).toEqual([
-      "Infrastructure: no changes.",
-    ]);
-  });
-
-  test("the whole plan is its title, target and infrastructure changes", () => {
-    expect(describePlan(TARGET, [change(HOST, ["create"])])).toEqual([
-      "Factory plan:",
-      ...describeTarget(TARGET),
-      "Infrastructure changes:",
-      `  + ${HOST}`,
-      "  1 to add, 0 to change, 0 to destroy.",
-      NO_WORKERS,
-    ]);
-  });
-
-  test("an empty factory's plan says it declares no worker, and how to add one", () => {
-    expect(describePlan(TARGET, [], [], { schema_version: 1, hosts: [] })).toEqual([
-      "Factory plan:",
-      ...describeTarget(TARGET),
-      "Infrastructure: no changes.",
-      NO_WORKERS,
-    ]);
-  });
-
-  test("then each worker's install of the release, in the order they are updated", () => {
-    const workers = [
-      { key: "builder-1" as HostKey, hostname: "fff-abcd1234-builder-1" },
-      { key: "builder-2" as HostKey, hostname: "fff-abcd1234-builder-2" },
-    ];
-    expect(describePlan(TARGET, [], workers)).toEqual([
-      "Factory plan:",
-      ...describeTarget(TARGET),
-      "Infrastructure: no changes.",
-      "Worker changes, one worker at a time:",
-      "  ~ builder-1 (fff-abcd1234-builder-1): install release 0.3.0 and its host configuration, then verify it",
-      "  ~ builder-2 (fff-abcd1234-builder-2): install release 0.3.0 and its host configuration, then verify it",
-    ]);
-    expect(describeWorkers([], "0.3.0" as Release)).toEqual([NO_WORKERS]);
-    expect(
-      describeRepositories(workers, {
-        schema_version: 1,
-        hosts: [
-          { key: "builder-1" as HostKey, repositories: ["factory"] },
-          { key: "builder-2" as HostKey, repositories: [] },
-        ],
-      }),
-    ).toEqual([
-      "Repository changes, one worker at a time:",
-      "  ~ builder-1 (fff-abcd1234-builder-1): reconcile 1 placed repository as factory; preserve and report unmanaged checkouts",
-      "  ~ builder-2 (fff-abcd1234-builder-2): reconcile 0 placed repositories as factory; preserve and report unmanaged checkouts",
-    ]);
-  });
-
-  test("a stopped worker's install, and every later stage's change, is shown skipped (plan-apply §Stopped workers)", () => {
-    const workers = [
-      { key: "builder-1" as HostKey, hostname: "fff-abcd1234-builder-1" },
-      { key: "builder-2" as HostKey, hostname: "fff-abcd1234-builder-2" },
-    ];
+describe("the plan's workers and review (plan-apply §Layer mapping)", () => {
+  test("a factory review carries every approved stage: workers, their repositories, control plane, dispatch and stopped workers", () => {
     const instance = {
       schema_version: 1 as const,
-      hosts: [{ key: "builder-1" as HostKey }, { key: "builder-2" as HostKey }],
+      hosts: [
+        { key: "builder-1" as HostKey, repositories: ["factory", "tools"] },
+        { key: "builder-2" as HostKey },
+      ],
     };
+    const [builder1, builder2] = declaredWorkers(instance, TARGET.factoryId) as [
+      PlannedWorker,
+      PlannedWorker,
+    ];
+    const workers = [builder1, builder2];
     const controlPlane = workers.map((worker) => ({
       ...worker,
-      observation: "unavailable:blocked",
+      observation: "no-release",
       changes: ["listen-address" as const],
     }));
     const dispatch = workers.map((worker) => ({ ...worker, requested: false, schedule: null }));
+    const changes = [change(HOST, ["create"])];
     const stopped = ["builder-2" as HostKey];
-    expect(describePlan(TARGET, [], workers, instance, controlPlane, dispatch, stopped)).toEqual([
-      "Factory plan:",
-      ...describeTarget(TARGET),
-      "Infrastructure: no changes.",
-      "Worker changes, one worker at a time:",
-      "  ~ builder-1 (fff-abcd1234-builder-1): install release 0.3.0 and its host configuration, then verify it",
-      "  = builder-2 (fff-abcd1234-builder-2): skipped: stopped; start it with `fffactory worker start builder-2`, then apply again to install it",
-      "Control-plane changes, before worker activation:",
-      "  ~ builder-1 (fff-abcd1234-builder-1): listen-address",
-      "  = builder-2 (fff-abcd1234-builder-2): skipped: stopped",
-      "Repository changes, one worker at a time:",
-      "  ~ builder-1 (fff-abcd1234-builder-1): reconcile 0 placed repositories as factory; preserve and report unmanaged checkouts",
-      "  = builder-2 (fff-abcd1234-builder-2): skipped: stopped",
-      "Dispatch changes, after every readiness gate:",
-      "  ~ builder-1 (fff-abcd1234-builder-1): remove the factory dispatch schedule if it exists",
-      "  = builder-2 (fff-abcd1234-builder-2): skipped: stopped",
-      "End-to-end verification: observe each worker's release, repositories, Paseo and actual dispatch schedule.",
-    ]);
+    expect(
+      factoryPlanReview({ target: TARGET, changes, instance, controlPlane, dispatch, stopped }),
+    ).toEqual({
+      kind: "factory",
+      target: TARGET,
+      changes,
+      workers,
+      repositories: [
+        { ...builder1, placed: ["factory", "tools"] },
+        { ...builder2, placed: [] },
+      ],
+      controlPlane,
+      dispatch,
+      stopped,
+    });
+    const move = { from: "0.2.0" as Release, to: TARGET.release };
+    expect(
+      factoryPlanReview({
+        target: TARGET,
+        changes: [],
+        instance: { schema_version: 1 },
+        controlPlane: [],
+        dispatch: [],
+        stopped: [],
+        pinMove: move,
+      }),
+    ).toMatchObject({ workers: [], repositories: [], pinMove: move });
   });
 
   test("the workers a factory.json declares, by their namespaced hostnames", () => {
@@ -286,15 +240,6 @@ describe("D11 refusals", () => {
       ],
       instead: "Change factory.json so the plan keeps every host machine, then plan again.",
     });
-    expect(describeD11Refusal(refusal as NonNullable<typeof refusal>)).toEqual([
-      "Refusing: this change needs host replacement, which fffactory does not " +
-        "have yet (D11; it arrives in milestone M3):",
-      `  ${HOST} would be replaced`,
-      '  module.hosts.aws_instance.host["old"] would be destroyed',
-      '  module.hosts.aws_instance.host["x"] would be replaced',
-      '  module.hosts.aws_instance.host["y"] would be forgotten by Terraform',
-      "Nothing was applied. Change factory.json so the plan keeps every host machine, then plan again.",
-    ]);
   });
 
   test("a worker terminated outside fffactory plans as a create, which is not refused", () => {
@@ -378,13 +323,6 @@ describe("D11 refusals", () => {
         "Declare every provisioned host key in factory.json again, then remove a host with " +
         "`fffactory worker terminate KEY`.",
     });
-    expect(describeD11Refusal(refusal as NonNullable<typeof refusal>)).toEqual([
-      "Refusing: this change needs host removal, which only `fffactory worker terminate KEY` " +
-        "does (D11):",
-      '  hosts: host key "builder-1" is provisioned but no longer declared',
-      "Nothing was applied. Declare every provisioned host key in factory.json again, then " +
-        "remove a host with `fffactory worker terminate KEY`.",
-    ]);
     expect(hostKeyRemovalRefusal([])).toBeUndefined();
   });
 });
@@ -407,16 +345,11 @@ describe("an instance type change on a stopped worker (plan-apply §Stopped work
   test("is refused: Terraform starts a stopped instance to change its type", () => {
     const plan = { resource_changes: [resize(HOST)] };
     expect(resizedStoppedWorkers(plan, STOPPED)).toEqual(STOPPED);
-    expect(
-      describeStoppedResizeRefusal("plan", {
-        inventory: "read",
-        workers: [{ ...BUILDER_1, machine: "stopped" }],
-      }),
-    ).toEqual([
-      "Refusing to plan: the plan changes the instance type of a stopped worker, and Terraform starts a stopped instance to change its type:",
-      `  builder-1 (fff-abcd1234-builder-1): ${HOST} would be updated in place`,
-      "Nothing was applied. Start it first with `fffactory worker start builder-1`, then plan again.",
-    ]);
+    const stopped = { ...BUILDER_1, machine: "stopped" as const };
+    expect(resizeRefusal(plan, { inventory: "read", workers: [stopped] })).toEqual({
+      inventory: "read",
+      workers: [stopped],
+    });
   });
 
   test("an update it cannot read is taken as one, failing closed", () => {
@@ -461,9 +394,10 @@ describe("an instance type change on a stopped worker (plan-apply §Stopped work
         { key: "b" as HostKey, hostname: "fff-abcd1234-b", machine: "stopped" },
       ],
     };
-    expect(describeStoppedResizeRefusal("apply", both).at(-1)).toBe(
-      "Nothing was applied. Start each first with `fffactory worker start builder-1` and `fffactory worker start b`, then plan again.",
-    );
+    const plan = {
+      resource_changes: [resize(HOST), resize('module.hosts.aws_instance.host["b"]')],
+    };
+    expect(resizeRefusal(plan, both)).toEqual(both);
   });
 
   test("a stopping worker is refused as a stopped one: the provider waits for it to stop, then starts it", () => {
@@ -475,11 +409,6 @@ describe("an instance type change on a stopped worker (plan-apply §Stopped work
     const plan = { resource_changes: [resize(HOST)] };
     const refusal = resizeRefusal(plan, guard);
     expect(refusal).toEqual({ inventory: "read", workers: [stopping] });
-    expect(describeStoppedResizeRefusal("plan", refusal as ResizeGuard)).toEqual([
-      "Refusing to plan: the plan changes the instance type of a stopped worker, and Terraform starts a stopped instance to change its type:",
-      `  builder-1 (fff-abcd1234-builder-1): ${HOST} would be updated in place, and it is stopping`,
-      "Nothing was applied. Start it first with `fffactory worker start builder-1` once it has stopped, then plan again.",
-    ]);
   });
 
   test("with the EC2 inventory unreadable, any worker's resize is refused, failing closed", () => {
@@ -489,11 +418,6 @@ describe("an instance type change on a stopped worker (plan-apply §Stopped work
     };
     const refusal = resizeRefusal({ resource_changes: [resize(HOST)] }, guard);
     expect(refusal).toEqual({ inventory: "unreadable", workers: STOPPED });
-    expect(describeStoppedResizeRefusal("apply", refusal as ResizeGuard)).toEqual([
-      "Refusing to apply: the plan changes the instance type of a worker the EC2 inventory could not be read to check is not stopped, and Terraform starts a stopped instance to change its type:",
-      `  builder-1 (fff-abcd1234-builder-1): ${HOST} would be updated in place`,
-      "Nothing was applied. Plan again once the EC2 inventory can be read.",
-    ]);
     // Without a resize nothing is refused, whatever the inventory.
     const other = update(HOST, {
       before: { instance_type: "m7i.large", tags: { a: "1" } },
@@ -686,25 +610,25 @@ describe("saved plans", () => {
         now: new Date(Date.parse(SAVED.expires_at) + 1),
       }),
     ).toEqual([
-      `it expired at ${SAVED.expires_at}`,
-      "it was planned for another factory.json, /work/.fffactory/factory.json",
-      "factory.json changed after it was planned",
-      "it was planned by fffactory 0.3.0, not this release",
-      "it was planned in AWS account 123456789012, not this one",
+      { kind: "expired", expiresAt: SAVED.expires_at },
+      { kind: "other_instance", instancePath: "/work/.fffactory/factory.json" },
+      { kind: "configuration_changed" },
+      { kind: "other_release", release: "0.3.0" as Release },
+      { kind: "other_account", accountId: "123456789012" },
     ]);
     expect(planStaleness(SAVED, { ...CURRENT, assetsSha256: "d".repeat(64) })).toEqual([
-      "it was planned with other release assets than this fffactory's",
+      { kind: "other_assets" },
     ]);
     expect(planStaleness(SAVED, { ...CURRENT, now: new Date(SAVED.expires_at) })).toEqual([]);
   });
 
   test("a changed Terraform state makes it stale, and so does state appearing or vanishing", () => {
-    const changed = "the factory's Terraform state changed after it was planned";
-    expect(stateStaleness(SAVED, "state-v2")).toBe(changed);
-    expect(stateStaleness(SAVED, undefined)).toBe(changed);
+    const changed: StaleReason = { kind: "state_changed" };
+    expect(stateStaleness(SAVED, "state-v2")).toEqual(changed);
+    expect(stateStaleness(SAVED, undefined)).toEqual(changed);
     const first = { ...SAVED, state_revision: null };
     expect(stateStaleness(first, undefined)).toBeUndefined();
-    expect(stateStaleness(first, "state-v1")).toBe(changed);
+    expect(stateStaleness(first, "state-v1")).toEqual(changed);
   });
 
   test("a worker stopped or started since it was planned makes it stale (plan-apply §Stopped workers)", () => {
@@ -712,25 +636,15 @@ describe("saved plans", () => {
     const b1 = "builder-1" as HostKey;
     const b2 = "builder-2" as HostKey;
     expect(stoppedStaleness(SAVED, [b1])).toEqual([]);
-    expect(stoppedStaleness(SAVED, [])).toEqual([
-      "worker builder-1 was stopped when it was planned, and is not now",
+    expect(stoppedStaleness(SAVED, [])).toEqual([{ kind: "worker_started", key: b1 }]);
+    expect(stoppedStaleness(SAVED, [b1, b2])).toEqual([{ kind: "worker_stopped", key: b2 }]);
+    expect(stoppedStaleness(SAVED, [b2])).toEqual([
+      { kind: "worker_started", key: b1 },
+      { kind: "worker_stopped", key: b2 },
     ]);
-    expect(stoppedStaleness(SAVED, [b1, b2])).toEqual([
-      "worker builder-2 is stopped now, and was not when it was planned",
-    ]);
-    expect(stoppedStaleness(SAVED, undefined)).toEqual([
-      "the EC2 inventory could not be read to check that worker builder-1 is still stopped",
-    ]);
+    expect(stoppedStaleness(SAVED, undefined)).toEqual([{ kind: "inventory_unreadable", key: b1 }]);
     const none = { ...SAVED, stopped_workers: [] };
     expect(stoppedStaleness(none, undefined)).toEqual([]);
-  });
-
-  test("a stale plan is refused with every reason and the way forward", () => {
-    expect(staleRefusal("k3x9q2ab", ["factory.json changed after it was planned"])).toEqual([
-      "Refusing to apply plan k3x9q2ab: it is no longer the plan to apply:",
-      "  factory.json changed after it was planned",
-      "Nothing was applied. Review a new plan with `fffactory plan`.",
-    ]);
   });
 });
 
@@ -873,26 +787,18 @@ describe("saved bootstrap plans (plan-apply §Saved plans)", () => {
         true,
       ),
     ).toEqual([
-      `it expired at ${BOOTSTRAP.expires_at}`,
-      "it was planned for another factory.json, /work/.fffactory/factory.json",
-      "factory.json changed after it was planned",
-      "it was planned by fffactory 0.3.0, not this release",
-      "it was planned in AWS account 123456789012, not this one",
-      "the state bucket was created after it was planned",
+      { kind: "expired", expiresAt: BOOTSTRAP.expires_at },
+      { kind: "other_instance", instancePath: "/work/.fffactory/factory.json" },
+      { kind: "configuration_changed" },
+      { kind: "other_release", release: "0.3.0" as Release },
+      { kind: "other_account", accountId: "123456789012" },
+      { kind: "state_bucket_created" },
     ]);
     expect(
       bootstrapStaleness(BOOTSTRAP, { ...CURRENT, assetsSha256: "d".repeat(64) }, false),
-    ).toEqual(["it was planned with other release assets than this fffactory's"]);
+    ).toEqual([{ kind: "other_assets" }]);
     expect(bootstrapStaleness(BOOTSTRAP, CURRENT, true)).toEqual([
-      "the state bucket was created after it was planned",
-    ]);
-  });
-
-  test("a stale bootstrap plan is refused like any other, with the bucket's reason", () => {
-    expect(staleRefusal("b00tstr4", bootstrapStaleness(BOOTSTRAP, CURRENT, true))).toEqual([
-      "Refusing to apply plan b00tstr4: it is no longer the plan to apply:",
-      "  the state bucket was created after it was planned",
-      "Nothing was applied. Review a new plan with `fffactory plan`.",
+      { kind: "state_bucket_created" },
     ]);
   });
 });

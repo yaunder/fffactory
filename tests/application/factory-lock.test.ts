@@ -11,7 +11,7 @@ import {
 } from "../../src/application/factory-lock";
 import type { StateBucket } from "../../src/application/lock-store";
 import type { AllowedAccount } from "../../src/application/require-expected-account";
-import { lockRefusal, newLockRecord } from "../../src/domain/factory-lock";
+import { newLockRecord } from "../../src/domain/factory-lock";
 import type { FactoryId, FactoryInstance, Release } from "../../src/domain/instance";
 import { FAKE_CALLER } from "../support/doctor-fakes";
 import { MemoryLockStore } from "../support/memory-lock-store";
@@ -75,10 +75,11 @@ describe("acquiring the factory lock", () => {
     const second = await acquireFactoryLock(store, request(SECOND, 1));
     expect(first.acquired).toBe(true);
     if (second.acquired) throw new Error("second apply acquired a held lock");
-    expect(second.held?.record?.holder).toEqual(FIRST);
-    expect(lockRefusal(second.held, NOW)).toContain(
-      "  Lock aaaaaaaa: apply by arn:aws:sts::123456789012:assumed-role/Admin/first on laptop",
-    );
+    expect(second.held?.record).toMatchObject({
+      lock_id: "aaaaaaaa",
+      operation: "apply",
+      holder: FIRST,
+    });
     expect(store.locks.get(BUCKET.bucket)?.record?.holder).toEqual(FIRST);
   });
 

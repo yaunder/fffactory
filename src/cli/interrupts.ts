@@ -6,7 +6,7 @@
  * running tools, gracefully where a tool allows it (Terraform saves its state and releases its
  * lock). Once they have stopped, `fffactory` exits with 128 + the signal number, whatever the
  * command returned. A command that waits on an interrupt (`waitsOnInterrupt`) first has
- * `RETURN_GRACE_MS` to return and report what the interrupt left; any other is not waited
+ * `RETURN_GRACE_MS` to return and flush its report of what the interrupt left; any other is not waited
  * for, since it may not check `interrupted` and would go on with its work. Another signal, at
  * any point after the first, kills the tools and exits at once.
  *
@@ -38,6 +38,10 @@ export interface InterruptHost {
   readonly on: (signal: InterruptSignal, handler: (signal: InterruptSignal) => void) => void;
   readonly off: (signal: InterruptSignal, handler: (signal: InterruptSignal) => void) => void;
   readonly exit: (code: number) => void;
+  /** Flush queued output while signal handlers still protect the exit. */
+  readonly flushOutput: () => Promise<void>;
+  /** Discard output at exit; an unread pipe must not hold an interrupted command open. */
+  readonly cancelOutput: () => void;
   readonly signalNumber: (signal: InterruptSignal) => number;
   readonly stopRunningTools: () => Promise<void>;
   readonly killRunningTools: () => void;
@@ -71,7 +75,7 @@ const ignore = () => {};
 export function interruptible(host: InterruptHost): Interruptible {
   /** Set by the first interrupt; settles once fffactory has exited. */
   let interruption: Promise<void> | undefined;
-  /** The running command, settled whether it returns or throws. */
+  /** The running command and its output flush, settled whether it returns or throws. */
   let returned: Promise<void> = new Promise(ignore);
   /** The running command's `RunOptions.waitsOnInterrupt`. */
   let waits = false;
@@ -79,11 +83,12 @@ export function interruptible(host: InterruptHost): Interruptible {
   const exit = (code: number) => {
     if (exited) return;
     exited = true;
+    host.cancelOutput();
     host.exit(code);
   };
   const sleepers = new Set<() => void>();
 
-  /** The command's return, or the grace's end, whichever comes first. */
+  /** The command's return and output flush, or the grace's end, whichever comes first. */
   function returnedWithinGrace(): Promise<void> {
     let timer: ReturnType<typeof setTimeout> | undefined;
     const grace = new Promise<void>((resolve) => {
@@ -129,7 +134,10 @@ export function interruptible(host: InterruptHost): Interruptible {
     async run(command, options) {
       waits = options.waitsOnInterrupt;
       listening(host.on);
-      const running = command();
+      const running = command().then(async (code) => {
+        await host.flushOutput();
+        return code;
+      });
       returned = running.then(ignore, ignore);
       let code: number;
       try {

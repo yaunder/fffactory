@@ -1,36 +1,50 @@
 import { parseArgs } from "node:util";
-import {
-  applyFactory,
-  type FactoryApply,
-  type OperationLocation,
-} from "../../application/apply-factory";
+import { applyFactory, type FactoryApply } from "../../application/apply-factory";
 import type { WorkerProgress } from "../../application/apply-workers";
 import type { ControlPlaneOutcome } from "../../application/apply-control-plane";
 import type { DispatchOutcome } from "../../application/apply-dispatch";
-import type { RepositoryOutcome } from "../../application/apply-repositories";
-import type { FactoryVerification } from "../../application/verify-factory";
 import type { Approval } from "../../application/approval";
-import { isPlanId, staleRefusal } from "../../domain/plan";
-import {
-  enrollmentReport,
-  PASEO_CLIENTS,
-  pendingEnrollment,
-  pendingEnrollmentLines,
-  type Verification,
-} from "../../domain/readiness";
+import type { PlanRefusal } from "../../application/plan-factory";
+import { isPlanId, type PlanReview } from "../../domain/plan";
 import { FIRST_BOOT_DEADLINE_MS, type WorkerOutcome } from "../../domain/rollout";
 import type { CliContext, Command } from "../context";
 import { sha256Text } from "../../infrastructure/release-tarball";
-import { printDiagnostics } from "../diagnostics";
-import { commandLine, planningBasis, printPlanRefusal, type SelectionFlags } from "./planning";
+import {
+  type ApplyReporting,
+  appliedLines,
+  applyingLabelWidth,
+  applyingRow,
+  applyingSection,
+  bootstrappedLines,
+  failedLines,
+  infrastructureApplyingRow,
+  interruptedLines,
+  pinNotice,
+  pinnedRow,
+  progressRow,
+  refusedRunReport,
+  savedPlanApproved,
+  type StreamLine,
+} from "../presentation/apply";
+import { type Report, type Row, render, renderInSection } from "../presentation/blocks";
+import type { Selection } from "../presentation/command-line";
+import {
+  damagedPlanReport,
+  planRefusalReport,
+  reviewBlocks,
+  staleReport,
+  unknownPlanReport,
+} from "../presentation/plan";
+import type { Writer } from "../presentation/style";
+import { planningBasis, printReport, withNotice } from "./planning";
 
 const USAGE = [
   "Usage: fffactory apply [--instance PATH] [--profile NAME] [--plan-id ID]",
   "",
   "Applies the factory's plan under the factory-wide lock. Without --plan-id it",
   "plans afresh from factory.json and what exists now, shows the plan (the",
-  "configuration path, factory, AWS account, Region and release, the",
-  "infrastructure changes, then each worker's install) and applies exactly that",
+  "factory, AWS account, Region and release, the infrastructure changes, then",
+  "every stage's changes for each worker) and applies exactly that",
   "plan once you type yes, so it needs a terminal. With --plan-id ID it applies",
   "exactly the plan `fffactory plan` saved under that ID, which naming it",
   "approves, and refuses it once factory.json, the fffactory release, the AWS",
@@ -75,285 +89,96 @@ const USAGE = [
 ];
 
 const APPROVAL_QUESTION = 'Apply this plan? Only "yes" applies it: ';
-const APPLYING = "Applying. Terraform's output is not shown; this can take several minutes.";
 
 /**
- * Shows each plan and asks the operator to approve exactly it. A saved plan was approved by
- * naming its ID, so it is shown and applied without asking.
+ * The Applying section as it streams: its rule once something is applied, then a row per
+ * step, Terraform's apply, an upgrade's pin and each worker's progress, labels aligned to
+ * the widest the approved review can have. A review shown afterwards, such as the factory's
+ * plan after backend bootstrap's, starts a new section.
+ */
+export interface ApplyingProgress {
+  /** A review is shown: what is applied next is its. */
+  readonly review: (review: PlanReview) => void;
+  /** It was approved and Terraform applies it now, when it has anything to apply. */
+  readonly applying: () => void;
+  /** An upgrade's pin was written, before Terraform applies anything. */
+  readonly pinned: (release: string) => void;
+  readonly progress: (event: WorkerProgress) => void;
+}
+
+export function applyingProgress(writer: Writer): ApplyingProgress {
+  let started = false;
+  let width = 0;
+  let infrastructure: Row | undefined;
+  const row = (shown: Row) => {
+    if (!started) {
+      writer("");
+      for (const line of render(writer.style, [applyingSection()])) writer(line);
+      started = true;
+    }
+    for (const line of renderInSection(writer.style, [applyingRow(shown, width)])) writer(line);
+  };
+  const applying = () => {
+    if (infrastructure !== undefined) row(infrastructure);
+    infrastructure = undefined;
+  };
+  return {
+    review: (review) => {
+      started = false;
+      width = applyingLabelWidth(review);
+      infrastructure = infrastructureApplyingRow(review);
+    },
+    applying,
+    pinned: (release) => {
+      row(pinnedRow(release));
+      applying();
+    },
+    progress: (event) => row(progressRow(event)),
+  };
+}
+
+/** How an approval is asked: the question, and whether Terraform waits for the pin's write. */
+export interface Asking {
+  readonly question: string;
+  readonly afterPin: boolean;
+}
+
+/**
+ * Shows each plan's review and asks the operator to approve exactly it. A saved plan was
+ * approved by naming its ID, so it is shown and applied without asking. The commands a review
+ * names repeat the instance and profile in `selection`. Once approved, the Applying section
+ * says Terraform applies it, or, for an upgrade, waits to say so until the pin is written.
  */
 export function operatorApproval(
   planId: string | undefined,
   context: CliContext,
-  question = APPROVAL_QUESTION,
+  selection: Selection,
+  applying: ApplyingProgress,
+  asking: Asking = { question: APPROVAL_QUESTION, afterPin: false },
 ): Approval {
   return {
-    approve: async (plan) => {
-      for (const line of plan) context.out(line);
+    approve: async (review) => {
+      printReport(context.out, { blocks: reviewBlocks(review, selection) });
+      applying.review(review);
       if (planId !== undefined) {
-        context.out(`Applying saved plan ${planId}, approved by naming its ID.`);
-        context.out(APPLYING);
+        printReport(context.out, { blocks: [savedPlanApproved(planId)] });
+        applying.applying();
         return true;
       }
-      const approved = (await context.prompt.ask(question))?.trim() === "yes";
-      if (approved) context.out(APPLYING);
+      context.out("");
+      const approved = (await context.prompt.ask(asking.question))?.trim() === "yes";
+      if (approved && !asking.afterPin) applying.applying();
       return approved;
     },
   };
 }
 
-function printRecord(operation: OperationLocation, context: CliContext): void {
-  context.out(`Operation record: s3://${operation.bucket}/${operation.key}`);
-}
-
-/**
- * How a result is reported: the action refused, such as `apply`, and the command a rerun
- * uses, `apply`, or `upgrade` for an upgrade whose pin was not moved.
- */
-export interface Reporting {
-  readonly action: "apply" | "upgrade";
-  readonly rerun: "apply" | "upgrade";
-  /** The `--instance` and `--profile` given, which a command named next repeats. */
-  readonly flags?: SelectionFlags;
-}
-
-const APPLYING_REPORT: Reporting = { action: "apply", rerun: "apply" };
-
-const rerunLine = ({ rerun }: Reporting) =>
-  `Rerun \`fffactory ${rerun}\`: it plans again from what exists now and converges what remains.`;
-
-const breakThenRerun = ({ rerun }: Reporting) =>
-  "Once fffactory has exited, break the lock with `fffactory lock break`, then rerun " +
-  `\`fffactory ${rerun}\`.`;
-
-/**
- * What an interrupted saved bootstrap plan's apply left, to standard error. Not a rerun of
- * apply, which the plan, possibly spent, cannot repeat and which needs a terminal: plan again,
- * repeating the `--instance` and `--profile` given.
- */
-function reportBootstrapInterrupted(
-  result: Extract<FactoryApply, { readonly kind: "interrupted" }>,
-  planId: string,
-  context: CliContext,
-  reporting: Reporting,
-): void {
-  const plan = `  ${commandLine(["fffactory", "plan"], reporting.flags ?? {})}`;
-  if (!result.locked) {
-    context.err(
-      `Interrupted before the factory was locked: it is not locked. Saved plan ${planId} may ` +
-        "be spent and the state bucket created, so plan again from what exists now:",
-    );
-    context.err(plan);
-    return;
-  }
-  const left =
-    result.record === undefined
-      ? `the factory stays locked by this ${reporting.action}, which may have no operation record`
-      : "the factory stays locked, with a record of this operation";
-  context.err(
-    `Interrupted: ${left}. Once fffactory has exited, break the lock with ` +
-      "`fffactory lock break`, then plan the factory next:",
-  );
-  context.err(plan);
-  if (result.record !== undefined) printRecord(result.record, context);
-}
-
-/** What an interrupt left: no lock, the lock alone, or the lock and a record of the apply. */
-function reportInterrupted(
-  result: Extract<FactoryApply, { readonly kind: "interrupted" }>,
-  context: CliContext,
-  reporting: Reporting,
-): void {
-  if (result.bootstrapPlan !== undefined) {
-    reportBootstrapInterrupted(result, result.bootstrapPlan, context, reporting);
-    return;
-  }
-  if (!result.locked) {
-    context.err(
-      `Interrupted before the factory was locked: it is not locked. Rerun \`fffactory ${reporting.rerun}\`: ` +
-        "it plans again from what exists now.",
-    );
-    return;
-  }
-  if (result.installing !== undefined) {
-    const { key, hostname } = result.installing;
-    context.err(
-      `Interrupted while installing on ${key} (${hostname}): host apply may still be running ` +
-        "there, and a rerun skips that worker until it has finished.",
-    );
-  }
-  if (result.waiting !== undefined) {
-    const { key, hostname } = result.waiting;
-    context.err(
-      `Interrupted while waiting for ${key} (${hostname}) to finish its first boot: no ` +
-        "install step ran on it.",
-    );
-  }
-  if (result.record === undefined) {
-    context.err(
-      `Interrupted: the factory stays locked by this ${reporting.action}, which may have no ` +
-        `operation record. ${breakThenRerun(reporting)}`,
-    );
-    return;
-  }
-  context.err(
-    "Interrupted: the factory stays locked, with a record of this operation. " +
-      breakThenRerun(reporting),
-  );
-  printRecord(result.record, context);
-}
-
-const LABELS: Readonly<Record<WorkerOutcome["kind"], string>> = {
-  installed: "installed",
-  skipped: "skipped",
-  failed: "failed",
-  not_attempted: "not tried",
-  stopped: "stopped",
-};
-const LABEL_WIDTH = Math.max(...Object.values(LABELS).map((label) => label.length));
-const INDENT = " ".repeat(2 + LABEL_WIDTH + 2);
-
-/**
- * What an installed worker still waits for: nothing, or accounts to enroll and how, in steps
- * the CLI names for `hostname`, the worker it resolved, never in the worker's own words.
- */
-function installedLines(release: string, verification: Verification, hostname: string): string[] {
-  const report = enrollmentReport(verification, hostname);
-  const pending = pendingEnrollment(report);
-  if (pending.length === 0)
-    return [
-      `release ${release} installed and verified; every account is enrolled`,
-      `${INDENT}${PASEO_CLIENTS}`,
-    ];
-  return [
-    `release ${release} installed and verified; enrollment pending: ${pending
-      .map((entry) => entry.title)
-      .join(", ")}`,
-    ...pendingEnrollmentLines(report).map((line) => `${INDENT}${line}`),
-  ];
-}
-
-function workerLines(outcome: WorkerOutcome): string[] {
-  const head = `  ${LABELS[outcome.kind].padEnd(LABEL_WIDTH)}  ${outcome.key} (${outcome.hostname}): `;
-  switch (outcome.kind) {
-    case "installed": {
-      const [first = "", ...rest] = installedLines(
-        outcome.release,
-        outcome.verification,
-        outcome.hostname,
-      );
-      return [head + first, ...rest];
-    }
-    case "not_attempted":
-      return [`${head}the rollout stopped at the failure above`];
-    default:
-      return [head + outcome.summary, `${INDENT}Next: ${outcome.nextAction}`];
-  }
-}
-
-/**
- * Standard output for installed, stopped and skipped workers, standard error for the rest. A
- * stopped worker is not a skip: it keeps the exit status 0.
- */
-function printWorkers(outcomes: readonly WorkerOutcome[], context: CliContext): number {
-  if (outcomes.length === 0) {
-    context.out("Workers: none declared.");
-    return 0;
-  }
-  context.out("Workers:");
-  for (const outcome of outcomes) {
-    const print =
-      outcome.kind === "failed" || outcome.kind === "not_attempted" ? context.err : context.out;
-    for (const line of workerLines(outcome)) print(line);
-  }
+/** A failed worker stops the rollout: 1; a skipped one leaves it partial: 2. */
+function workersExit(outcomes: readonly WorkerOutcome[]): 0 | 1 | 2 {
   if (outcomes.some((outcome) => outcome.kind === "failed")) return 1;
   return outcomes.some((outcome) => outcome.kind !== "installed" && outcome.kind !== "stopped")
     ? 2
     : 0;
-}
-
-const FIRST_BOOT_MINUTES = FIRST_BOOT_DEADLINE_MS / 60_000;
-
-export function progressLine(event: WorkerProgress, release: string): string {
-  const worker = `${event.key} (${event.hostname})`;
-  switch (event.kind) {
-    case "waiting":
-      return `Waiting for ${worker} to finish its first boot (up to ${FIRST_BOOT_MINUTES} min): this apply just created its machine.`;
-    case "still_waiting":
-      return `Still waiting for ${worker} after ${Math.floor(event.waitedMs / 60_000)} of up to ${FIRST_BOOT_MINUTES} min: ${event.lastSeen}.`;
-    case "uploading":
-      return `Installing release ${release} on ${worker}: uploading ${(event.bytes / 1024 ** 2).toFixed(1)} MiB.`;
-    case "installing":
-      return `Installing release ${release} on ${worker}: host apply runs the install steps, then verifies; this can take many minutes.`;
-  }
-}
-
-function printRecordFailure(recordFailure: string | undefined, context: CliContext): void {
-  if (recordFailure !== undefined)
-    context.err(`The operation record could not be finished: ${recordFailure}`);
-}
-
-const worker = (outcome: { readonly key: string; readonly hostname: string }) =>
-  `${outcome.key} (${outcome.hostname})`;
-
-/** The repository stage's result: each worker's synchronization, with the next step for any gap. */
-function printRepositories(outcomes: readonly RepositoryOutcome[], context: CliContext): void {
-  context.out("Repositories:");
-  for (const outcome of outcomes) {
-    if (outcome.kind === "synchronized" || outcome.kind === "stopped") {
-      context.out(`  ${outcome.kind}  ${worker(outcome)}`);
-      continue;
-    }
-    context.out(`  ${outcome.kind}  ${worker(outcome)}: ${outcome.summary}`);
-    context.out(`    Next: ${outcome.nextAction}`);
-  }
-}
-
-/** The control-plane stage's result: each worker's reconciliation, with deferrals and failures. */
-function printControlPlane(outcomes: readonly ControlPlaneOutcome[], context: CliContext): void {
-  context.out("Control plane:");
-  for (const outcome of outcomes) {
-    if (outcome.kind === "applied" || outcome.kind === "stopped") {
-      context.out(`  ${outcome.kind}  ${worker(outcome)}`);
-      continue;
-    }
-    context.out(`  ${outcome.kind}  ${worker(outcome)}: ${outcome.summary}`);
-    context.out(`    Next: ${outcome.nextAction}`);
-  }
-}
-
-/**
- * The dispatch stage's result: requested-versus-active, with each pending gate's next action, and
- * for a failed or skipped worker its summary and next action.
- */
-function printDispatch(outcomes: readonly DispatchOutcome[], context: CliContext): void {
-  context.out("Dispatch:");
-  for (const outcome of outcomes) {
-    switch (outcome.kind) {
-      case "active":
-        context.out(`  active  ${worker(outcome)}`);
-        break;
-      case "not_requested":
-        context.out(`  not requested  ${worker(outcome)}`);
-        break;
-      case "stopped":
-        context.out(`  stopped  ${worker(outcome)}`);
-        break;
-      case "failed":
-      case "skipped":
-        context.out(`  ${outcome.kind}  ${worker(outcome)}: ${outcome.summary}`);
-        context.out(`    Next: ${outcome.nextAction}`);
-        break;
-      case "pending":
-        context.out(`  pending  ${worker(outcome)}`);
-        for (const action of outcome.nextActions) context.out(`    ${action}`);
-        break;
-    }
-  }
-}
-
-function printVerification(verification: FactoryVerification, context: CliContext): void {
-  context.out(`End-to-end verification: ${verification.summary}`);
-  for (const worker of verification.workers) if (!worker.ready) context.out(`  ${worker.summary}`);
 }
 
 function controlPlaneExit(outcomes: readonly ControlPlaneOutcome[] | undefined): 0 | 1 | 2 {
@@ -369,10 +194,13 @@ function dispatchExit(outcomes: readonly DispatchOutcome[] | undefined): 0 | 1 |
     : 0;
 }
 
-function appliedExit(
-  result: Extract<FactoryApply, { readonly kind: "applied" }>,
-  workerCode: number,
-): number {
+/**
+ * An applied run's exit code: 1 when a stage failed; 2 when it installed every worker but has
+ * not reached its requested end state (a skip, a repository gap, dispatch pending, a deferred
+ * maintenance), as a skip is; 0 otherwise. A stopped worker keeps 0.
+ */
+function appliedExit(result: Extract<FactoryApply, { readonly kind: "applied" }>): number {
+  const workerCode = workersExit(result.workers);
   const repositoriesReady =
     result.repositories === undefined ||
     result.repositories.every(
@@ -389,151 +217,85 @@ function appliedExit(
   return pending ? Math.max(workerCode, 2) : workerCode;
 }
 
-function reportApplied(
-  result: Extract<FactoryApply, { readonly kind: "applied" }>,
-  context: CliContext,
-): number {
-  context.out(
-    result.infrastructure === "applied"
-      ? "Applied: the factory's infrastructure matches factory.json."
-      : "Infrastructure: no changes to apply.",
-  );
-  const code = printWorkers(result.workers, context);
-  // A factory that declares no worker has nothing to report per worker after the workers stage.
-  const some = <T>(outcomes: readonly T[] | undefined) =>
-    outcomes !== undefined && outcomes.length > 0 ? outcomes : undefined;
-  const repositories = some(result.repositories);
-  const controlPlane = some(result.controlPlane);
-  const dispatch = some(result.dispatch);
-  if (repositories !== undefined) printRepositories(repositories, context);
-  if (controlPlane !== undefined) printControlPlane(controlPlane, context);
-  if (dispatch !== undefined) printDispatch(dispatch, context);
-  if (result.verification !== undefined) printVerification(result.verification, context);
-  printRecord(result.operation, context);
-  printRecordFailure(result.recordFailure, context);
-  // A factory that installed every worker but has not reached its requested end state (dispatch
-  // pending, a deferred maintenance) is not fully ready: report it like a skip, exit 2.
-  return appliedExit(result, code);
+/** The outcomes that refuse the plan before anything is applied: restyled, with a Next block. */
+type Refused =
+  | PlanRefusal
+  | Extract<FactoryApply, { readonly kind: "stale" | "no_plan" | "damaged_plan" }>;
+
+/** Every refusal's kind: a kind added to `Refused` but not here fails to compile. */
+const REFUSED: Readonly<Record<Refused["kind"], true>> = {
+  refused: true,
+  release_mismatch: true,
+  d11: true,
+  stopped_resize: true,
+  unready: true,
+  unexpected_plan: true,
+  locked: true,
+  stale: true,
+  no_plan: true,
+  damaged_plan: true,
+};
+
+const isRefused = (result: FactoryApply): result is Refused => Object.hasOwn(REFUSED, result.kind);
+
+function refusalReport(result: Refused, context: CliContext, reporting: ApplyReporting): Report {
+  const { selection } = reporting;
+  switch (result.kind) {
+    case "stale":
+      return staleReport(result.planId, result.reasons, selection);
+    case "no_plan":
+      return unknownPlanReport(result.planId, selection);
+    case "damaged_plan":
+      return damagedPlanReport(result.planId, selection);
+    default:
+      return planRefusalReport(result, { action: reporting.action, now: context.now(), selection });
+  }
+}
+
+/** Writes each line on the stream it is laid out for. */
+function write(lines: readonly StreamLine[], context: CliContext): void {
+  for (const { stream, line } of lines) context[stream](line);
 }
 
 /**
- * A saved bootstrap plan created the state bucket and apply stopped: the factory is planned
- * next, with the same factory.json and profile.
+ * Reports how apply, or upgrade's apply, ended, and returns the exit code. What refused or
+ * applied nothing is laid out as a refusal, on standard error; what ran is its Result and one
+ * Next block, each line on its stream (`docs/specs/plan-apply.md` §Apply); an upgrade's pin
+ * notice comes before the Next block either way.
  */
-function reportBootstrapped(
-  result: Extract<FactoryApply, { readonly kind: "bootstrapped" }>,
-  context: CliContext,
-  reporting: Reporting,
-): number {
-  context.out("Created the state bucket. Plan the factory next:");
-  context.out(`  ${commandLine(["fffactory", "plan"], reporting.flags ?? {})}`);
-  printRecord(result.operation, context);
-  printRecordFailure(result.recordFailure, context);
-  return 0;
-}
-
-/** What each step's failure may have changed. */
-const FAILED: Readonly<
-  Record<
-    Extract<FactoryApply, { readonly kind: "failed" }>["step"],
-    (reason: string, reporting: Reporting) => string[]
-  >
-> = {
-  planning: (reason) => [`Planning failed: ${reason}. Nothing was applied.`],
-  pinning: (reason) => [`Moving factory.json's pin failed: ${reason}. Nothing was applied.`],
-  pinned: (reason) => [
-    `Upgrading failed once factory.json's pin moved: ${reason}. Nothing was applied.`,
-  ],
-  applying: (reason, reporting) => [
-    `Applying failed: ${reason}.`,
-    "Terraform may have changed some of the infrastructure before it stopped.",
-    rerunLine(reporting),
-  ],
-  installing: (reason, reporting) => [
-    `Installing the workers failed: ${reason}.`,
-    "The worker being installed may be on the new release, unhealthy.",
-    rerunLine(reporting),
-  ],
-  repositories: (reason, reporting) => [
-    `Repository synchronization failed: ${reason}.`,
-    "Completed repository changes were left in place.",
-    rerunLine(reporting),
-  ],
-  "control-plane": (reason, reporting) => [
-    `Control-plane reconciliation failed: ${reason}.`,
-    rerunLine(reporting),
-  ],
-  dispatch: (reason, reporting) => [
-    `Dispatch reconciliation failed: ${reason}.`,
-    rerunLine(reporting),
-  ],
-  verification: (reason, reporting) => [
-    `End-to-end verification failed: ${reason}.`,
-    rerunLine(reporting),
-  ],
-};
-
-function reportFailed(
-  result: Extract<FactoryApply, { readonly kind: "failed" }>,
-  context: CliContext,
-  reporting: Reporting,
-): number {
-  for (const line of FAILED[result.step](result.reason, reporting)) context.err(line);
-  printDiagnostics(result.diagnosticsFile, context);
-  printRecord(result.operation, context);
-  printRecordFailure(result.recordFailure, context);
-  return 1;
-}
-
-/** Reports how apply, or upgrade's apply, ended, and returns the exit code. */
 export function reportApply(
   result: FactoryApply,
   context: CliContext,
-  reporting: Reporting = APPLYING_REPORT,
+  reporting: ApplyReporting,
 ): number {
+  if (isRefused(result)) {
+    printReport(
+      context.err,
+      withNotice(refusalReport(result, context, reporting), pinNotice(reporting)),
+    );
+    return 1;
+  }
+  const styles = { out: context.out.style, err: context.err.style };
   switch (result.kind) {
-    case "applied":
-      return reportApplied(result, context);
+    case "applied": {
+      const code = appliedExit(result);
+      write(appliedLines(result, reporting, styles), context);
+      return code;
+    }
     case "bootstrapped":
-      return reportBootstrapped(result, context, reporting);
-    case "declined":
-      context.err("Not approved: nothing was applied.");
-      return 1;
-    case "configuration_changed":
-      context.err(
-        `Refusing to ${reporting.action}: factory.json changed after the plan was made. ` +
-          `Nothing was applied. Review a new plan with \`fffactory ${reporting.rerun}\`.`,
-      );
-      return 1;
-    case "no_state_bucket":
-      context.err(
-        "Refusing to upgrade: the factory has no state bucket yet, and an upgrade never " +
-          "creates it. Nothing was created or applied. Run `fffactory apply` with the release " +
-          "factory.json pins first, then rerun `fffactory upgrade`.",
-      );
-      return 1;
+      write(bootstrappedLines(result, reporting, styles), context);
+      return 0;
     case "failed":
-      return reportFailed(result, context, reporting);
+      write(failedLines(result, reporting, styles), context);
+      return 1;
     case "interrupted":
-      reportInterrupted(result, context, reporting);
-      return 1;
-    case "no_plan":
-      context.err(
-        `There is no saved plan ${result.planId} for this factory here: it expired, was ` +
-          "applied, or was saved elsewhere. Review a new plan with `fffactory plan`.",
-      );
-      return 1;
-    case "damaged_plan":
-      context.err(
-        `Saved plan ${result.planId} cannot be applied: its record cannot be read, or its ` +
-          "Terraform plan changed after it was saved. Review a new plan with `fffactory plan`.",
-      );
-      return 1;
-    case "stale":
-      for (const line of staleRefusal(result.planId, result.reasons)) context.err(line);
+      write(interruptedLines(result, reporting, styles), context);
       return 1;
     default:
-      printPlanRefusal(reporting.action, result, context);
+      printReport(
+        context.err,
+        withNotice(refusedRunReport(result, reporting), pinNotice(reporting)),
+      );
       return 1;
   }
 }
@@ -569,20 +331,21 @@ async function apply(args: readonly string[], context: CliContext): Promise<numb
   }
   const basis = await planningBasis("apply", values, context);
   if (!basis) return 1;
+  const applying = applyingProgress(context.out);
   const result = await applyFactory(
     {
       lockStore: context.lockStore,
       provisioner: context.provisioner,
       planStore: context.planStore,
       machines: context.machines,
-      approval: operatorApproval(planId, context),
+      approval: operatorApproval(planId, context, values, applying),
       interrupted: context.interrupted,
       peers: context.tailnet,
       transport: context.transport,
       controlPlane: context.controlPlane,
       workflowQueue: context.workflowQueue,
       assets: context.assets,
-      progress: (event) => context.out(progressLine(event, context.release)),
+      progress: applying.progress,
       sleep: context.sleep,
       sha256: sha256Text,
     },
@@ -594,7 +357,7 @@ async function apply(args: readonly string[], context: CliContext): Promise<numb
       randomBytes: context.randomBytes,
     },
   );
-  return reportApply(result, context, { ...APPLYING_REPORT, flags: values });
+  return reportApply(result, context, { action: "apply", rerun: "apply", selection: values });
 }
 
 export const applyCommand: Command = {

@@ -20,13 +20,23 @@ import { appliedRecord, installableWorker, machine } from "../support/fake-worke
 import { hostAddress, NETWORK, STATE_BUCKET_ADDRESS } from "../support/fake-provisioner";
 import { READY_BUCKET } from "../support/memory-lock-store";
 
-const HEADER = [
-  "Factory plan:",
-  "  Configuration: /work/.fffactory/factory.json",
-  "  Factory: Test factory (fff-abcd1234)",
-  "  AWS account: 123456789012, Region: eu-west-2",
-  "  Release: 0.3.0",
-];
+/** What every plan review shows first. */
+const TARGET = {
+  instancePath: "/work/.fffactory/factory.json",
+  name: "Test factory",
+  factoryId: FACTORY,
+  accountId: "123456789012",
+  region: "eu-west-2",
+  release: "0.3.0" as Release,
+};
+const BUILDER_1 = { key: "builder-1" as HostKey, hostname: "fff-abcd1234-builder-1" };
+const BUILDER_2 = { key: "builder-2" as HostKey, hostname: "fff-abcd1234-builder-2" };
+
+/** The infrastructure changes a planned review shows, as `ACTIONS ADDRESS`. */
+function shownChanges(result: Awaited<ReturnType<typeof planFactory>>): string[] {
+  if (result.kind !== "planned") throw new Error(`expected planned, got ${result.kind}`);
+  return result.review.changes.map(({ address, actions }) => `${actions.join()} ${address}`);
+}
 
 describe("fffactory plan (plan-apply §Plan)", () => {
   test("a first plan reads no host keys, plans the factory root and saves the plan", async () => {
@@ -34,22 +44,25 @@ describe("fffactory plan (plan-apply §Plan)", () => {
     const result = await planFactory(deps, planRequest());
     expect(result).toEqual({
       kind: "planned",
-      plan: [
-        ...HEADER,
-        "Infrastructure changes:",
-        `  + ${NETWORK}`,
-        `  + ${hostAddress("builder-1")}`,
-        "  2 to add, 0 to change, 0 to destroy.",
-        "Worker changes, one worker at a time:",
-        "  ~ builder-1 (fff-abcd1234-builder-1): install release 0.3.0 and its host configuration, then verify it",
-        "Control-plane changes, before worker activation:",
-        "  ~ builder-1 (fff-abcd1234-builder-1): paseo-package, service-definition, listen-address",
-        "Repository changes, one worker at a time:",
-        "  ~ builder-1 (fff-abcd1234-builder-1): reconcile 0 placed repositories as factory; preserve and report unmanaged checkouts",
-        "Dispatch changes, after every readiness gate:",
-        "  ~ builder-1 (fff-abcd1234-builder-1): remove the factory dispatch schedule if it exists",
-        "End-to-end verification: observe each worker's release, repositories, Paseo and actual dispatch schedule.",
-      ],
+      review: {
+        kind: "factory",
+        target: TARGET,
+        changes: [
+          { address: NETWORK, type: "aws_vpc", actions: ["create"] },
+          { address: hostAddress("builder-1"), type: "aws_instance", actions: ["create"] },
+        ],
+        workers: [BUILDER_1],
+        repositories: [{ ...BUILDER_1, placed: [] }],
+        controlPlane: [
+          {
+            ...BUILDER_1,
+            observation: "no-release",
+            changes: ["paseo-package", "service-definition", "listen-address"],
+          },
+        ],
+        dispatch: [{ ...BUILDER_1, requested: false, schedule: null }],
+        stopped: [],
+      },
       saved: {
         schema_version: 1,
         plan_id: "aaaaaaaa",
@@ -124,19 +137,16 @@ describe("fffactory plan (plan-apply §Plan)", () => {
     const result = await planFactory(deps, planRequest());
     expect(result).toMatchObject({
       kind: "planned",
-      plan: [
-        ...HEADER,
-        "Infrastructure: no changes.",
-        "Worker changes, one worker at a time:",
-        "  ~ builder-1 (fff-abcd1234-builder-1): install release 0.3.0 and its host configuration, then verify it",
-        "Control-plane changes, before worker activation:",
-        "  ~ builder-1 (fff-abcd1234-builder-1): paseo-package, service-definition, listen-address",
-        "Repository changes, one worker at a time:",
-        "  ~ builder-1 (fff-abcd1234-builder-1): reconcile 0 placed repositories as factory; preserve and report unmanaged checkouts",
-        "Dispatch changes, after every readiness gate:",
-        "  ~ builder-1 (fff-abcd1234-builder-1): remove the factory dispatch schedule if it exists",
-        "End-to-end verification: observe each worker's release, repositories, Paseo and actual dispatch schedule.",
-      ],
+      review: {
+        changes: [],
+        workers: [BUILDER_1],
+        repositories: [{ ...BUILDER_1, placed: [] }],
+        controlPlane: [
+          { ...BUILDER_1, changes: ["paseo-package", "service-definition", "listen-address"] },
+        ],
+        dispatch: [{ ...BUILDER_1, requested: false, schedule: null }],
+        stopped: [],
+      },
       saved: { changes: [] },
     });
     expect(planStore.directories.size).toBe(1);
@@ -157,8 +167,9 @@ describe("fffactory plan (plan-apply §Plan)", () => {
         control_plane: [{ key: "builder-1", hostname, changes: [] }],
       },
     });
-    if (result.kind === "planned")
-      expect(result.plan).toContain(`  = builder-1 (${hostname}): Paseo is unchanged`);
+    expect(result).toMatchObject({
+      review: { controlPlane: [{ key: "builder-1", hostname, changes: [] }] },
+    });
   });
 
   test("the CLI/pin match guard refuses before anything is read", async () => {
@@ -202,12 +213,11 @@ describe("fffactory plan (plan-apply §Plan)", () => {
     const result = await planFactory(deps, planRequest());
     expect(result).toEqual({
       kind: "bootstrap_planned",
-      plan: [
-        `Backend bootstrap: the state bucket ${BUCKET} does not exist yet.`,
-        ...HEADER.slice(1),
-        "Terraform will create:",
-        `  + ${STATE_BUCKET_ADDRESS}`,
-      ],
+      review: {
+        kind: "backend_bootstrap",
+        target: { ...TARGET, bucket: BUCKET },
+        creates: [STATE_BUCKET_ADDRESS],
+      },
       saved: {
         schema_version: 1,
         kind: "bootstrap",
@@ -260,7 +270,16 @@ describe("fffactory plan (plan-apply §Plan)", () => {
     };
     expect(await planFactory(deps, planRequest())).toEqual({
       kind: "unexpected_plan",
-      unexpected: [`${STATE_BUCKET_ADDRESS} (delete, create)`],
+      unexpected: [
+        {
+          kind: "not_create",
+          change: {
+            address: STATE_BUCKET_ADDRESS,
+            type: "aws_s3_bucket",
+            actions: ["delete", "create"],
+          },
+        },
+      ],
     });
     expect(planStore.saved.size).toBe(0);
     expect(planStore.directories.size).toBe(0);
@@ -335,7 +354,7 @@ describe("fffactory plan (plan-apply §Plan)", () => {
     terraform.world.outputs = { host_keys: "builder-1" };
     expect(await planFactory(deps, planRequest())).toEqual({
       kind: "unexpected_plan",
-      unexpected: ["the factory's Terraform state records host keys that cannot be read"],
+      unexpected: [{ kind: "unreadable_host_keys" }],
     });
   });
 
@@ -344,7 +363,7 @@ describe("fffactory plan (plan-apply §Plan)", () => {
     terraform.world.shown = { resource_changes: "garbled" };
     expect(await planFactory(deps, planRequest())).toEqual({
       kind: "unexpected_plan",
-      unexpected: ["Terraform's plan could not be read"],
+      unexpected: [{ kind: "unreadable_plan" }],
     });
     expect(planStore.directories.size).toBe(0);
   });
@@ -373,12 +392,14 @@ describe("fffactory plan (plan-apply §Plan)", () => {
     );
     expect(result).toMatchObject({ kind: "planned", saved: { stopped_workers: ["builder-2"] } });
     if (result.kind !== "planned") return;
-    expect(result.plan).toContain(
-      "  = builder-2 (fff-abcd1234-builder-2): skipped: stopped; start it with `fffactory worker start builder-2`, then apply again to install it",
-    );
-    expect(result.plan).toContain(
-      "  ~ builder-1 (fff-abcd1234-builder-1): install release 0.3.0 and its host configuration, then verify it",
-    );
+    // Every stage still lists the stopped worker, which the review shows skipped.
+    expect(result.review).toMatchObject({
+      workers: [BUILDER_1, BUILDER_2],
+      repositories: [BUILDER_1, BUILDER_2],
+      controlPlane: [BUILDER_1, BUILDER_2],
+      dispatch: [BUILDER_1, BUILDER_2],
+      stopped: ["builder-2"],
+    });
     const record = planStore.saved.get("fff-abcd1234/aaaaaaaa");
     expect(record?.kind === undefined ? record?.stopped_workers : "a bootstrap plan").toEqual([
       "builder-2" as HostKey,
@@ -419,8 +440,7 @@ describe("fffactory plan (plan-apply §Plan)", () => {
     fleet.machines.inventory = { kind: "machines", machines: [machine("builder-1", "running")] };
     const running = await planFactory(deps, planRequest());
     expect(running).toMatchObject({ kind: "planned" });
-    if (running.kind === "planned")
-      expect(running.plan).toContain(`  ~ ${hostAddress("builder-1")}`);
+    expect(shownChanges(running)).toContain(`update ${hostAddress("builder-1")}`);
   });
 
   test("an EC2 inventory it cannot read refuses any resize, failing closed", async () => {
@@ -440,10 +460,7 @@ describe("fffactory plan (plan-apply §Plan)", () => {
     fleet.machines.inventory = { kind: "unavailable", reason: "EC2 DescribeInstances failed: x" };
     const result = await planFactory(deps, planRequest());
     expect(result).toMatchObject({ kind: "planned", saved: { stopped_workers: [] } });
-    if (result.kind === "planned")
-      expect(result.plan).toContain(
-        "  ~ builder-1 (fff-abcd1234-builder-1): install release 0.3.0 and its host configuration, then verify it",
-      );
+    expect(result).toMatchObject({ review: { workers: [BUILDER_1], stopped: [] } });
   });
 
   test("plans long expired are pruned first", async () => {

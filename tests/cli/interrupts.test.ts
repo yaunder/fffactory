@@ -39,6 +39,8 @@ function standIn(options: { graceMs?: number; graceful?: boolean } = {}) {
       exits.push(code);
       exited.resolve(code);
     },
+    flushOutput: async () => {},
+    cancelOutput: () => {},
     signalNumber: (signal) => constants.signals[signal],
     stopRunningTools: () => {
       calls.push("stop");

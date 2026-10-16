@@ -1,8 +1,7 @@
 import type { AccountRequirement } from "../../application/require-expected-account";
 import {
-  describeSource,
   INSTANCE_ENVIRONMENT_VARIABLE,
-  type InstanceResolution,
+  type FoundInstance,
   resolveInstance,
 } from "../../application/resolve-instance";
 import { validateInstance } from "../../application/validate-instance";
@@ -12,19 +11,21 @@ import {
   type CredentialSelection,
 } from "../../domain/aws-account";
 import type { FactoryInstance, Issue } from "../../domain/instance";
+import { render } from "../presentation/blocks";
+import { instanceHeader, instanceLine } from "../presentation/instance-source";
 import type { CliContext } from "../context";
-
-type Found = Extract<InstanceResolution, { readonly found: true }>;
 
 /**
  * Resolves the instance a command acts on and prints which it is, or prints why there is
  * none. The same precedence as every command: --instance, FFFACTORY_INSTANCE, the nearest
- * .fffactory/factory.json, then ~/.fffactory/factory.json.
+ * .fffactory/factory.json, then ~/.fffactory/factory.json. A restyled command names itself,
+ * `command`, and is printed with its header; any other prints its `Instance:` line.
  */
 export async function selectInstance(
   flag: string | undefined,
   context: CliContext,
-): Promise<Found | undefined> {
+  command?: string,
+): Promise<FoundInstance | undefined> {
   const resolution = await resolveInstance(context.store, {
     flag,
     environment: context.env[INSTANCE_ENVIRONMENT_VARIABLE],
@@ -35,7 +36,11 @@ export async function selectInstance(
     context.err(resolution.message);
     return undefined;
   }
-  context.out(`Instance: ${resolution.path} (${describeSource(resolution.source)})`);
+  if (command === undefined) context.out(instanceLine(resolution));
+  else {
+    const header = instanceHeader(command, context.release, resolution, context.home);
+    for (const line of render(context.out.style, [header])) context.out(line);
+  }
   return resolution;
 }
 
@@ -63,12 +68,16 @@ export async function validatedInstance(
   return undefined;
 }
 
-/** Selects, reads and validates the instance, printing why when it cannot be used. */
+/**
+ * Selects, reads and validates the instance, printing why when it cannot be used; a restyled
+ * `command` is printed with its header.
+ */
 export async function loadInstance(
   flag: string | undefined,
   context: CliContext,
+  command?: string,
 ): Promise<LoadedInstance | undefined> {
-  const selected = await selectInstance(flag, context);
+  const selected = await selectInstance(flag, context, command);
   if (!selected) return undefined;
   return validatedInstance(selected.path, context);
 }

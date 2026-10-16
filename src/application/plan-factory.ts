@@ -22,12 +22,15 @@ import {
   type Release,
 } from "../domain/instance";
 import { poweredDownWorkers, stoppedWorkers } from "../domain/status";
+import type { UnreadyBucket } from "../domain/backend-bootstrap";
 import {
+  type BootstrapPlanReview,
   changesSomething,
   type D11Refusal,
   declaredWorkers,
   createdWorkers,
-  describePlan,
+  type FactoryPlanReview,
+  factoryPlanReview,
   hostKeyRemovalRefusal,
   hostMachineRefusal,
   newPlanId,
@@ -44,6 +47,7 @@ import {
   resourceChanges,
   type SavedBootstrapPlan,
   type SavedFactoryPlan,
+  type UnexpectedPlan,
 } from "../domain/plan";
 import { checkStableHostKeys, recordedHostKeys } from "../domain/stable-host-keys";
 import { planBackendBootstrap, stateBucketState } from "./bootstrap-backend";
@@ -100,26 +104,26 @@ export type PlanRefusal =
    */
   | ({ readonly kind: "stopped_resize" } & ResizeGuard)
   /** The state bucket exists without every setting backend bootstrap applies. */
-  | { readonly kind: "unready"; readonly refusal: readonly string[] }
+  | { readonly kind: "unready"; readonly bucket: UnreadyBucket }
   /** Terraform's plan or outputs could not be read, or a bootstrap plan did more than create. */
-  | { readonly kind: "unexpected_plan"; readonly unexpected: readonly string[] }
+  | { readonly kind: "unexpected_plan"; readonly unexpected: readonly UnexpectedPlan[] }
   | { readonly kind: "locked"; readonly held: HeldLock | undefined };
 
 export type FactoryPlanning =
   | PlanRefusal
   /**
-   * The state bucket does not exist yet: `plan` is backend bootstrap's plan, saved as the
+   * The state bucket does not exist yet: `review` is backend bootstrap's plan, saved as the
    * bootstrap plan `saved`. The factory is planned once the bucket exists.
    */
   | {
       readonly kind: "bootstrap_planned";
-      readonly plan: readonly string[];
+      readonly review: BootstrapPlanReview;
       readonly saved: SavedBootstrapPlan;
     }
-  /** `plan` is what an operator reviews, saved as `saved`. */
+  /** `review` is what an operator reviews, saved as `saved`. */
   | {
       readonly kind: "planned";
-      readonly plan: readonly string[];
+      readonly review: FactoryPlanReview;
       readonly saved: SavedFactoryPlan;
     };
 
@@ -221,10 +225,7 @@ export async function planInfrastructure(
   const target = factoryTarget(bucket, request.terraformDirectory);
   const recorded = recordedHostKeys(await provisioner.output(target));
   if (recorded === undefined)
-    return {
-      kind: "unexpected_plan",
-      unexpected: ["the factory's Terraform state records host keys that cannot be read"],
-    };
+    return { kind: "unexpected_plan", unexpected: [{ kind: "unreadable_host_keys" }] };
   const removal = hostKeyRemovalRefusal(checkStableHostKeys(recorded, instance));
   if (removal !== undefined) return { kind: "d11", refusal: removal };
   const projection = projectFactoryVariables(instance, recorded);
@@ -238,7 +239,7 @@ export async function planInfrastructure(
   const shown = await provisioner.showPlan(saved);
   const changes = resourceChanges(shown);
   if (changes === undefined)
-    return { kind: "unexpected_plan", unexpected: ["Terraform's plan could not be read"] };
+    return { kind: "unexpected_plan", unexpected: [{ kind: "unreadable_plan" }] };
   const lost = hostMachineRefusal(changes);
   if (lost !== undefined) return { kind: "d11", refusal: lost };
   const resized = resizeRefusal(shown, request.resizeGuard);
@@ -331,7 +332,7 @@ async function planAndSaveBootstrap(
     changes: planning.changes,
   });
   await planStore.save(saved);
-  return { kind: "bootstrap_planned", plan: planning.plan, saved };
+  return { kind: "bootstrap_planned", review: planning.review, saved };
 }
 
 /**
@@ -371,15 +372,14 @@ async function planAndSaveFactory(
   );
   const dispatch = plannedDispatch(request.instance, target.factoryId);
   const stoppedKeys = stopped.map(({ key }) => key);
-  const plan = describePlan(
+  const review = factoryPlanReview({
     target,
-    infrastructure.changes,
-    declaredWorkers(request.instance, target.factoryId),
-    request.instance,
+    changes: infrastructure.changes,
+    instance: request.instance,
     controlPlane,
     dispatch,
-    stoppedKeys,
-  );
+    stopped: stoppedKeys,
+  });
   const saved = newSavedPlan({
     ...circumstances(request, target),
     planId,
@@ -390,7 +390,7 @@ async function planAndSaveFactory(
     stopped: stoppedKeys,
   });
   await deps.planStore.save(saved);
-  return { kind: "planned", plan, saved };
+  return { kind: "planned", review, saved };
 }
 
 /** Whether planning saved its plan, which keeps its plan directory. */

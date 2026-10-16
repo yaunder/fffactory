@@ -9,7 +9,9 @@ import { applyFactory } from "../../src/application/apply-factory";
 import { planFactory, planInfrastructure } from "../../src/application/plan-factory";
 import { ProvisioningFailed } from "../../src/application/provisioner";
 import { withoutHost } from "../../src/domain/host-removal";
+import { changeTally, type PlanReview } from "../../src/domain/plan";
 import {
+  type PowerProgress,
   startWorker,
   stopWorker,
   type TerminateRequest,
@@ -1949,18 +1951,22 @@ describe("fffactory worker terminate (worker-lifecycle §Terminate (remove))", (
       { kind: "planning_removal", key: KEY },
       {
         kind: "removal_plan",
-        plan: [
-          "Removal plan:",
-          `  Configuration: ${PATH}`,
-          `  Factory: Test factory (${FACTORY})`,
-          "  AWS account: 123456789012, Region: eu-west-2",
-          `  Release: ${RELEASE}`,
-          "Infrastructure changes:",
-          `  - module.hosts.aws_instance.host["${KEY}"]`,
-          "  0 to add, 0 to change, 1 to destroy.",
-          `factory.json: remove host ${KEY}.`,
-          `Tailnet: delete the devices named ${HOSTNAME} that carry the factory's tag.`,
+        target: {
+          instancePath: PATH,
+          name: "Test factory",
+          factoryId: FACTORY,
+          accountId: "123456789012",
+          region: "eu-west-2",
+          release: RELEASE,
+        },
+        changes: [
+          {
+            address: `module.hosts.aws_instance.host["${KEY}"]`,
+            type: "aws_instance",
+            actions: ["delete"],
+          },
         ],
+        worker: { key: KEY, hostname: HOSTNAME },
       },
       { kind: "applying_removal" },
       { kind: "configuration_written", key: KEY, path: PATH },
@@ -2064,15 +2070,15 @@ describe("fffactory worker terminate (worker-lifecycle §Terminate (remove))", (
       now: NOW,
     });
     if (planned.kind !== "planned") throw new Error(`expected planned, got ${planned.kind}`);
-    expect(planned.plan).toEqual([
-      "Factory plan:",
-      `  Configuration: ${PATH}`,
-      `  Factory: Test factory (${FACTORY})`,
-      "  AWS account: 123456789012, Region: eu-west-2",
-      `  Release: ${RELEASE}`,
-      "Infrastructure: no changes.",
-      "Workers: none declared. Declare a host in factory.json's hosts, then create it with `fffactory apply`.",
-    ]);
+    expect(planned.review).toMatchObject({
+      kind: "factory",
+      changes: [],
+      workers: [],
+      repositories: [],
+      controlPlane: [],
+      dispatch: [],
+      stopped: [],
+    });
     expect(planned.saved.changes).toEqual([]);
     const status = await factoryStatus(
       {
@@ -2096,7 +2102,7 @@ describe("fffactory worker terminate (worker-lifecycle §Terminate (remove))", (
         hosts: [{ key: key as HostKey, instance_type: "m7i.2xlarge", root_volume_gib: 128 }],
       };
       const fleet = workerFleet([key]);
-      const approvals: (readonly string[])[] = [];
+      const approvals: PlanReview[] = [];
       const result = await applyFactory(
         {
           ...fleet.deps,
@@ -2104,8 +2110,8 @@ describe("fffactory worker terminate (worker-lifecycle §Terminate (remove))", (
           provisioner: w.terraform.provisioner,
           planStore: w.planStore,
           approval: {
-            approve: async (plan) => {
-              approvals.push(plan);
+            approve: async (review) => {
+              approvals.push(review);
               return true;
             },
           },
@@ -2117,8 +2123,15 @@ describe("fffactory worker terminate (worker-lifecycle §Terminate (remove))", (
       expect(result.kind === "applied" && result.workers.map((w) => `${w.key} ${w.kind}`)).toEqual([
         `${key} installed`,
       ]);
-      expect(approvals[0]).toContain(`  + module.hosts.aws_instance.host["${key}"]`);
-      expect(approvals[0]).toContain("  1 to add, 0 to change, 0 to destroy.");
+      const [approved] = approvals;
+      if (approved?.kind !== "factory") throw new Error("expected a factory plan review");
+      expect(approved.changes).toContainEqual(
+        expect.objectContaining({
+          address: `module.hosts.aws_instance.host["${key}"]`,
+          actions: ["create"],
+        }),
+      );
+      expect(changeTally(approved.changes)).toMatchObject({ add: 1, change: 0, destroy: 0 });
       const plans = w.terraform.calls.filter((call) => call.call === "plan");
       expect(plans.at(-1)?.request.variables.hosts).toEqual({
         [key]: { instance_type: "m7i.2xlarge", root_volume_gib: 128 },
@@ -2399,14 +2412,15 @@ describe("fffactory worker terminate (worker-lifecycle §Terminate (remove))", (
     expect(plan?.call === "plan" && plan.request.variables.paseo_password_secret_arns).toEqual({
       "builder-2": PASEO_2,
     });
-    expect(w.progress).toContainEqual({
-      kind: "removal_plan",
-      plan: expect.arrayContaining([
-        `  ~ ${SECRETS_POLICY}`,
-        `  - module.hosts.aws_instance.host["${KEY}"]`,
-        "  0 to add, 1 to change, 1 to destroy.",
+    const shown = (w.progress as PowerProgress[]).find(({ kind }) => kind === "removal_plan");
+    if (shown?.kind !== "removal_plan") throw new Error("expected the removal plan");
+    expect(shown.changes.map(({ address, actions }) => `${actions.join()} ${address}`)).toEqual(
+      expect.arrayContaining([
+        `update ${SECRETS_POLICY}`,
+        `delete module.hosts.aws_instance.host["${KEY}"]`,
       ]),
-    });
+    );
+    expect(changeTally(shown.changes)).toMatchObject({ add: 0, change: 1, destroy: 1 });
     expect(calls(w)).toEqual(["output", "plan", "showPlan", "applyPlan", "output"]);
     expect(w.terraform.world.secretArns).toEqual([AUTH, PASEO_2]);
     expect([...w.terraform.world.hosts]).toEqual(["builder-2"]);

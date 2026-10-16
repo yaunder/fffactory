@@ -39,7 +39,6 @@ import {
   serializeInstance,
 } from "../domain/instance";
 import {
-  describeRemovalPlan,
   failedAfterRemoval,
   recordedKeysUnreadable,
   removalApplyFailed,
@@ -234,8 +233,16 @@ export type PowerProgress =
   | { readonly kind: "absent"; readonly key: HostKey; readonly hostname: string }
   /** Terminate removing the host: Terraform plans its removal. */
   | { readonly kind: "planning_removal"; readonly key: HostKey }
-  /** The removal plan, shown before the host key is asked for. */
-  | { readonly kind: "removal_plan"; readonly plan: readonly string[] }
+  /**
+   * The removal plan, shown before the host key is asked for: what it targets, Terraform's
+   * changes, and the worker it removes from factory.json and the tailnet.
+   */
+  | {
+      readonly kind: "removal_plan";
+      readonly target: PlanTarget;
+      readonly changes: readonly ResourceChange[];
+      readonly worker: WorkerIdentity;
+    }
   /** Terraform applies the removal plan. */
   | { readonly kind: "applying_removal" }
   /** factory.json no longer declares the host. */
@@ -1334,7 +1341,9 @@ async function planAndRemove(
   const target = removalTarget(power);
   deps.progress({
     kind: "removal_plan",
-    plan: describeRemovalPlan(target, planning.changes, power.worker),
+    target,
+    changes: planning.changes,
+    worker: power.worker,
   });
   const ended = await unconfirmed(deps, power, log, progress, removing.machine);
   if (ended !== undefined) return ended;

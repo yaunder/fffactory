@@ -19,7 +19,7 @@ import {
   type WorkerPower,
 } from "../../application/worker-lifecycle";
 import type { CredentialSelection } from "../../domain/aws-account";
-import { lockRefusal } from "../../domain/factory-lock";
+import { lockRefusal } from "../presentation/lock";
 import type { HostKey } from "../../domain/instance";
 import { ADMIN_CONSOLE, type Verdict } from "../../domain/status";
 import {
@@ -36,6 +36,7 @@ import {
 import { sha256Text } from "../../infrastructure/release-tarball";
 import type { CliContext, Command } from "../context";
 import { printDiagnostics } from "../diagnostics";
+import { describeRemovalPlan } from "../presentation/plan";
 import { loadInstance, printAccountRefusal } from "./selected-instance";
 
 const USAGE = [
@@ -118,7 +119,7 @@ const UNINSPECTED: Readonly<Record<Exclude<PowerAction, "start">, string>> = {
 };
 
 function progressLines(event: PowerProgress): readonly string[] {
-  return event.kind === "removal_plan" ? event.plan : [progressLine(event)];
+  return event.kind === "removal_plan" ? describeRemovalPlan(event) : [progressLine(event)];
 }
 
 function progressLine(event: Exclude<PowerProgress, { readonly kind: "removal_plan" }>): string {

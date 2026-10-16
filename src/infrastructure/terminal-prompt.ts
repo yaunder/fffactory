@@ -9,6 +9,8 @@ export type PromptInput = NodeJS.ReadableStream & {
 /** Where questions go: standard error, so standard output stays the command's result. */
 export interface PromptOutput {
   write(text: string): unknown;
+  /** Wait for prior output; false cancels the question without accepting an answer. */
+  flush(): Promise<boolean>;
 }
 
 type Step<T> = { readonly value: T } | undefined;
@@ -146,19 +148,23 @@ function wholeInput(limit: number): {
  * the question instead of interrupting fffactory; an echoed answer is echoed by the prompt
  * itself, and a hidden one is never written anywhere. Standard input that is a terminal is always
  * interactive, even with standard error redirected: reading it whole would echo a secret.
+ * Questions first flush the preceding review before reading or entering raw mode; a cancelled
+ * flush returns no answer. Question, echo and newline writes share the report's output queue.
  */
 export function terminalPrompt(input: PromptInput, output: PromptOutput): OperatorPrompt {
   return {
     interactive: input.isTTY === true,
 
-    ask(question) {
+    async ask(question) {
+      if (!(await output.flush())) return undefined;
       output.write(question);
       if (input.isTTY === true && input.setRawMode !== undefined)
         return inRawMode(input, output, true);
       return readChunks(input, echoedLine(), () => undefined);
     },
 
-    askHidden(question) {
+    async askHidden(question) {
+      if (!(await output.flush())) return undefined;
       output.write(question);
       return inRawMode(input, output, false);
     },
