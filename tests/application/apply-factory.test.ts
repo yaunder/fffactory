@@ -7,9 +7,16 @@ import { newLockRecord } from "../../src/domain/factory-lock";
 import type { HostKey, Release } from "../../src/domain/instance";
 import { pendingSteps, withStep } from "../../src/domain/installation";
 import { type OperationRecord, operationKey } from "../../src/domain/operation";
-import { PLAN_KEPT_MS, PLAN_TTL_MS, type SavedPlan } from "../../src/domain/plan";
+import {
+  newSavedBootstrapPlan,
+  PLAN_KEPT_MS,
+  PLAN_TTL_MS,
+  type SavedPlan,
+} from "../../src/domain/plan";
 import { FIRST_BOOT_POLL_MS } from "../../src/domain/rollout";
 import {
+  ACCOUNT,
+  ASSETS_SHA256,
   BUCKET,
   declaring,
   FACTORY,
@@ -17,6 +24,7 @@ import {
   NOW,
   fleetView,
   planRequest,
+  RELEASE,
   TERRAFORM,
   workerFleet,
 } from "../support/factory-world";
@@ -1017,6 +1025,33 @@ describe("applying a saved plan (plan-apply §Saved plans)", () => {
       kind: "damaged_plan",
       planId: saved.plan_id,
     });
+  });
+
+  test("a saved bootstrap plan is refused as damaged until apply can apply one", async () => {
+    // TODO(re-evaluate when #60 lands): apply --plan-id applies a fresh bootstrap plan.
+    const { deps, terraform, lockStore, planStore, approver } = applying({ bucket: false });
+    await planStore.create(FACTORY, "b00tstr4");
+    const bootstrap = newSavedBootstrapPlan({
+      planId: "b00tstr4",
+      factoryId: FACTORY,
+      instancePath: "/work/.fffactory/factory.json",
+      configurationSha256: "a".repeat(64),
+      release: RELEASE,
+      assetsSha256: ASSETS_SHA256,
+      accountId: ACCOUNT.verdict.caller.account,
+      now: NOW,
+      changes: [{ address: STATE_BUCKET_ADDRESS, actions: ["create"] }],
+    });
+    await planStore.save(bootstrap);
+    expect(await applyFactory(deps, withPlan(bootstrap))).toEqual({
+      kind: "damaged_plan",
+      planId: "b00tstr4",
+    });
+    expect(terraform.calls).toEqual([]);
+    expect(approver.shown).toEqual([]);
+    expect(lockStore.buckets.has(BUCKET)).toBe(false);
+    expect(lockStore.calls.some((call) => call.startsWith("create"))).toBe(false);
+    expect(planStore.saved.has(`${FACTORY}/b00tstr4`)).toBe(true);
   });
 
   test("a saved plan never bootstraps: a vanished state bucket makes it stale", async () => {

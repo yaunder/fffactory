@@ -3,7 +3,14 @@ import { mkdir, mkdtemp, readdir, rm, stat, utimes, writeFile } from "node:fs/pr
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { FactoryId, Release } from "../../src/domain/instance";
-import { newSavedPlan, PLAN_KEPT_MS, PLAN_TTL_MS, type SavedPlan } from "../../src/domain/plan";
+import {
+  newSavedBootstrapPlan,
+  newSavedPlan,
+  PLAN_KEPT_MS,
+  PLAN_TTL_MS,
+  type SavedBootstrapPlan,
+  type SavedPlan,
+} from "../../src/domain/plan";
 import { filesystemPlanStore } from "../../src/infrastructure/plan-store";
 import { sha256Hex } from "../../src/infrastructure/release-tarball";
 
@@ -35,6 +42,20 @@ function plan(planId: string, now = NOW): SavedPlan {
   });
 }
 
+function bootstrapPlan(planId: string, now = NOW): SavedBootstrapPlan {
+  return newSavedBootstrapPlan({
+    planId,
+    factoryId: FACTORY,
+    instancePath: "/work/.fffactory/factory.json",
+    configurationSha256: "a".repeat(64),
+    release: "0.3.0" as Release,
+    assetsSha256: "b".repeat(64),
+    accountId: "123456789012",
+    now,
+    changes: [{ address: "module.state_bucket.aws_s3_bucket.state", actions: ["create"] }],
+  });
+}
+
 async function fresh() {
   const directory = await mkdtemp(join(scratch, "store-"));
   return { directory, store: filesystemPlanStore(directory) };
@@ -45,6 +66,18 @@ async function saved(store: ReturnType<typeof filesystemPlanStore>, planId: stri
   const files = await store.create(FACTORY, planId);
   await writeFile(files.factory, `terraform plan ${planId}`);
   await store.save(plan(planId, now));
+  return files;
+}
+
+/** Creates and saves bootstrap plan `planId`, once Terraform wrote backend bootstrap's plan. */
+async function savedBootstrap(
+  store: ReturnType<typeof filesystemPlanStore>,
+  planId: string,
+  now = NOW,
+) {
+  const files = await store.create(FACTORY, planId);
+  await writeFile(files.backend, `backend plan ${planId}`);
+  await store.save(bootstrapPlan(planId, now));
   return files;
 }
 
@@ -99,16 +132,62 @@ describe("the local plan store", () => {
     const { store } = await fresh();
     const files = await saved(store, "swapped1");
     const loaded = await store.load(FACTORY, "swapped1");
-    expect(await store.digest(FACTORY, "swapped1")).toBe(
+    expect(await store.digest(plan("swapped1"))).toBe(
       loaded.kind === "found" ? loaded.digest : "not found",
     );
     await writeFile(files.factory, "a swapped plan");
-    expect(await store.digest(FACTORY, "swapped1")).toBe(
+    expect(await store.digest(plan("swapped1"))).toBe(
       sha256Hex(new TextEncoder().encode("a swapped plan")),
     );
     await rm(files.factory);
-    expect(await store.digest(FACTORY, "swapped1")).toBeUndefined();
-    await expect(store.digest(FACTORY, "../escape")).rejects.toThrow("Not a plan ID");
+    expect(await store.digest(plan("swapped1"))).toBeUndefined();
+    await expect(store.digest(plan("../escape"))).rejects.toThrow("Not a plan ID");
+  });
+
+  test("binds a bootstrap plan to backend bootstrap's Terraform plan file", async () => {
+    const { directory, store } = await fresh();
+    const files = await savedBootstrap(store, "b00tstr4");
+    const digest = sha256Hex(new TextEncoder().encode("backend plan b00tstr4"));
+    expect(await store.load(FACTORY, "b00tstr4")).toEqual({
+      kind: "found",
+      plan: bootstrapPlan("b00tstr4"),
+      files,
+      digest,
+    });
+    const planDirectory = join(directory, FACTORY, "b00tstr4");
+    expect((await readdir(planDirectory)).sort()).toEqual([
+      "backend.tfplan",
+      "backend.tfplan.sha256",
+      "plan.json",
+    ]);
+    expect((await stat(join(planDirectory, "backend.tfplan.sha256"))).mode & 0o777).toBe(0o600);
+    expect(await store.digest(bootstrapPlan("b00tstr4"))).toBe(digest);
+    // A factory plan file beside it is not the file it binds.
+    await writeFile(files.factory, "terraform plan b00tstr4");
+    expect(await store.load(FACTORY, "b00tstr4")).toMatchObject({ kind: "found", digest });
+    await writeFile(files.backend, "a swapped plan");
+    expect(await store.digest(bootstrapPlan("b00tstr4"))).toBe(
+      sha256Hex(new TextEncoder().encode("a swapped plan")),
+    );
+  });
+
+  test("a bootstrap plan whose backend plan changed or vanished after saving is damaged", async () => {
+    const { store } = await fresh();
+    const files = await savedBootstrap(store, "changed1");
+    await writeFile(files.backend, "another plan");
+    expect(await store.load(FACTORY, "changed1")).toEqual({ kind: "damaged" });
+    const gone = await savedBootstrap(store, "vanished");
+    await rm(gone.backend);
+    expect(await store.load(FACTORY, "vanished")).toEqual({ kind: "damaged" });
+    expect(await store.digest(bootstrapPlan("vanished"))).toBeUndefined();
+  });
+
+  test("saving refuses a bootstrap plan whose backend plan was never written", async () => {
+    const { store } = await fresh();
+    const files = await store.create(FACTORY, "noplan11");
+    await writeFile(files.factory, "a factory plan, not the backend's");
+    await expect(store.save(bootstrapPlan("noplan11"))).rejects.toThrow();
+    expect(await store.load(FACTORY, "noplan11")).toEqual({ kind: "missing" });
   });
 
   test("a plan whose record cannot be read, or is another plan's, is damaged", async () => {
@@ -159,11 +238,15 @@ describe("the local plan store", () => {
     await writeFile(join(directory, FACTORY, "garbled1", "plan.json"), "{not json");
     await utimes(join(directory, FACTORY, "garbled1"), old, old);
     await mkdir(join(directory, FACTORY, "Not-A-Plan"));
+    const longAgo = new Date(now.getTime() - PLAN_TTL_MS - PLAN_KEPT_MS - 1);
+    await savedBootstrap(store, "bexpire1", longAgo);
+    await savedBootstrap(store, "bcurrent", now);
 
     await store.prune(FACTORY, now);
 
     expect((await readdir(join(directory, FACTORY))).sort()).toEqual([
       "Not-A-Plan",
+      "bcurrent",
       "current1",
       "expired2",
       "unsaved1",

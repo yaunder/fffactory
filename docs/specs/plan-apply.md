@@ -464,8 +464,9 @@ A plan with changes is saved in the operator's local plan store,
 | Entry | Holds |
 | --- | --- |
 | `factory.tfplan` | The factory root's Terraform plan file, written by Terraform. |
-| `backend.tfplan` | Backend bootstrap's plan, on a first apply. |
-| `factory.tfplan.sha256` | The factory plan file's SHA-256 when the plan was saved. |
+| `backend.tfplan` | Backend bootstrap's plan, as a saved bootstrap plan or on a first apply. |
+| `factory.tfplan.sha256` | A saved factory plan's `factory.tfplan` SHA-256 when it was saved. |
+| `backend.tfplan.sha256` | A saved bootstrap plan's `backend.tfplan` SHA-256 when it was saved. |
 | `plan.json` | The plan's record, written last: its presence saves the plan. |
 
 The plan ID is eight random lowercase letters or digits. Only a well-formed
@@ -493,6 +494,40 @@ configuration value:
 }
 ```
 
+A record has a kind. A record without `kind` is a **factory plan**, as above,
+bound to `factory.tfplan`; every record made before bootstrap plans existed is
+one and reads unchanged. A record with `"kind": "bootstrap"` is a **bootstrap
+plan**: backend bootstrap's plan, made while the state bucket does not exist,
+bound to `backend.tfplan`. Any other `kind` is unreadable. `schema_version`
+stays 1 for both.
+
+```json
+{
+  "schema_version": 1,
+  "kind": "bootstrap",
+  "plan_id": "b00tstr4",
+  "factory_id": "fff-abcd1234",
+  "instance_path": "/work/.fffactory/factory.json",
+  "configuration_sha256": "<SHA-256 of factory.json's exact text>",
+  "release": "0.3.0",
+  "assets_sha256": "<SHA-256 of the release assets>",
+  "account_id": "123456789012",
+  "created_at": "2026-09-30T12:00:00.000Z",
+  "expires_at": "2026-09-30T13:00:00.000Z",
+  "changes": [{ "address": "module.state_bucket.aws_s3_bucket.state", "type": "aws_s3_bucket", "actions": ["create"] }]
+}
+```
+
+A bootstrap plan has no `state_revision`, `control_plane`, `dispatch` or
+`stopped_workers`: there is no state, and no worker is reached, before the
+bucket exists. A bootstrap record carrying any of them, or with no changes, or
+with a change that does anything but create, is unreadable, and so is a factory
+record without `state_revision` or `dispatch`.
+
+Bootstrap plans are not made or applied yet: `fffactory plan` still shows a
+missing bucket's bootstrap plan without saving it, and `apply --plan-id` refuses
+a bootstrap record as damaged, applying nothing.
+
 ### Freshness
 
 A saved plan may be applied only in the circumstances it was planned in. Its
@@ -509,6 +544,16 @@ live assumptions are the AWS account and the factory's Terraform state:
 | `state_revision` | The factory's Terraform state object (`factory/terraform.tfstate` in the state bucket) has another revision, or appeared or vanished: another apply, or anything else, wrote it. |
 | `control_plane[].observation` | The existing worker's active release or host-projection digest changed before activation. |
 | `stopped_workers` | A worker it skipped as stopped is not stopped now, or one it installs is ([Stopped workers](#stopped-workers)); or it skips one and the EC2 inventory cannot be read to check it. A record without the field skips none. |
+
+A bootstrap plan is bound to the same `expires_at`, `instance_path`,
+`configuration_sha256`, `release`, `assets_sha256` and `account_id`, and is
+stale for the same reasons. The account is the only part of the AWS caller
+either kind binds: the caller's principal ARN, whose role-session name changes
+from run to run, is not. A bootstrap plan has no state revision. In its place
+it is stale when the state bucket exists at apply, ready or not: `the state
+bucket was created after it was planned`. Its plan file is `backend.tfplan`,
+bound and checked by its SHA-256 as a factory plan's `factory.tfplan` is: a
+missing or changed file makes the plan damaged.
 
 The revision is the state object's S3 version ID and entity tag, read with
 HeadObject (`ExpectedBucketOwner` set); every write changes it. It is read
@@ -538,7 +583,8 @@ PATH`, `it was planned by fffactory R, not this release`, `it was planned with
 other release assets than this fffactory's` (only when the release is the
 same), `it was planned in AWS account A, not this one`, `the factory's
 Terraform state changed after it was planned`, `the state bucket no longer
-exists`, `worker KEY was stopped when it was planned, and is not now`, `worker
+exists`, `the state bucket was created after it was planned` (a bootstrap
+plan's), `worker KEY was stopped when it was planned, and is not now`, `worker
 KEY is stopped now, and was not when it was planned`, and `the EC2 inventory
 could not be read to check that worker KEY is still stopped`. An unknown or
 pruned plan ID: `There is no saved plan ID for this factory here: ...`; a
@@ -966,7 +1012,7 @@ refused (D11).
 
 | Layer | Module | Responsibility |
 | --- | --- | --- |
-| Domain | `src/domain/plan.ts` | Plan IDs, the CLI/pin match guard, reading a JSON plan's resource changes, the plan's presentation (stopped workers skipped), the D11 refusals, the refusal to resize a stopped or stopping worker, or any while the EC2 inventory cannot be read (`resizeRefusal`), the saved plan record, its freshness rule (`stoppedStaleness` too), `FACTORY_STATE_KEY`, `PLAN_TTL_MS`. Pure. |
+| Domain | `src/domain/plan.ts` | Plan IDs, the CLI/pin match guard, reading a JSON plan's resource changes, the plan's presentation (stopped workers skipped), the D11 refusals, the refusal to resize a stopped or stopping worker, or any while the EC2 inventory cannot be read (`resizeRefusal`), the saved plan record and its two kinds (`SavedFactoryPlan`, `SavedBootstrapPlan`), its freshness rule (`stoppedStaleness` and `bootstrapStaleness` too), `FACTORY_STATE_KEY`, `PLAN_TTL_MS`. Pure. |
 | Domain | `src/domain/release-compatibility.ts` | `RELEASE_COMPATIBILITY`, release precedence, upgrade's assessment of the pin, the schema version check, the base generation and schema D11 refusals, the pin move's preview. Pure. |
 | Domain | `src/domain/operation.ts` | The operation record, its key, stage transitions (upgrade's `pin` stage too), workers, repositories and control-plane outcomes. Pure. |
 | Domain | `src/domain/repository-placement.ts` | The per-worker repository manifest, fixed worker protocol commands, and completed-result parser. Pure. |
@@ -979,10 +1025,10 @@ refused (D11).
 | Application | `src/application/upgrade.ts` | `upgradeFactory`: the refusals, then apply's operation with the pin move written under the lock once approved. |
 | Application | `src/application/set-secret.ts` | The CLI/pin match guard on `secret set`. |
 | Domain | `src/domain/rollout.ts` | A worker's outcome (`stoppedOutcome` too), the rollout rule, and the first boot wait's rules: its deadline, poll and report intervals, which tailnet states are still joining, a bootstrap refusal to wait for, and the timed-out failure. Pure. |
-| Application | `src/application/plan-store.ts` | The `PlanStore` port, with `digest` for the check under the lock, and `planStoreDirectory`. |
+| Application | `src/application/plan-store.ts` | The `PlanStore` port, which binds a record to the Terraform plan file its kind names, with `digest` for the check under the lock, and `planStoreDirectory`. |
 | Application | `src/application/factory-lock.ts` | `Interrupted` and `settleFactoryLock`: an interrupted operation keeps its lock. |
 | Application | `src/application/lock-store.ts` | `writeOperation` and `stateRevision` on the state bucket port. |
-| Infrastructure | `src/infrastructure/plan-store.ts` | `filesystemPlanStore`: private plan directories, the plan file's digest, pruning. |
+| Infrastructure | `src/infrastructure/plan-store.ts` | `filesystemPlanStore`: private plan directories, the bound plan file's digest (`factory.tfplan` or `backend.tfplan`), pruning either kind. |
 | Infrastructure | `src/infrastructure/aws-s3-lock-store.ts` | PutObject of operation records; HeadObject of the state object. |
 | CLI adapter | `src/cli/commands/plan.ts`, `src/cli/commands/apply.ts`, `src/cli/commands/upgrade.ts`, `src/cli/commands/planning.ts` | The commands, the approval at the terminal, and what they share. |
 | CLI adapter | `src/cli/diagnostics.ts`, `src/cli/run.ts` | The path of a failed Terraform command's diagnostics, printed with the failure. |
@@ -992,7 +1038,8 @@ refused (D11).
 
 Tests: `tests/domain/plan.test.ts` (plan IDs, the pin guard, presentation, both
 D11 refusals, unknown host machine actions refused, the record round trip and
-unreadable records, every staleness reason, the workers whose machine a plan
+unreadable records, the bootstrap record's round trip beside factory records
+without `kind`, every staleness reason of either kind, the workers whose machine a plan
 creates, stopped workers shown skipped, the resize of a stopped or stopping
 worker, or of any with the inventory unreadable, refused and an unreadable
 change failing closed, `stopped_workers` round-tripping and every stopped
@@ -1021,7 +1068,8 @@ refused after factory.json changes, from another release or with other assets,
 expired, after the state changed, unknown, damaged, whose record no longer
 matches its Terraform plan, unreadable, replacing a host, without its bucket,
 or whose Terraform plan file was swapped after it was loaded or after it was
-read back; a lock taken after bootstrap and never after an interrupt
+read back, and a saved bootstrap plan refused as damaged with nothing created,
+locked or applied; a lock taken after bootstrap and never after an interrupt
 (`tests/application/bootstrap-backend.test.ts`); the workers stage after the
 infrastructure under the same lock and record, without infrastructure changes
 still approved and installed with no Terraform apply, a failed install stopping
@@ -1056,7 +1104,8 @@ approval, whether approved or declined, while Terraform reads a plan back (no
 more of the record written), once the record is written, while taking the lock
 and before it), `tests/application/factory-lock.test.ts` (an interrupted
 operation keeps its lock), `tests/infrastructure/plan-store.test.ts` (including
-the plan file's digest as it is now),
+the plan file's digest as it is now, a bootstrap plan bound to `backend.tfplan`,
+damaged once that file changes or vanishes, and pruned once long expired),
 `tests/infrastructure/aws-s3-lock-store.test.ts` (records and state revisions,
 stubbed and against `tests/support/stub-s3.ts`),
 `tests/infrastructure/terminal-prompt.test.ts` (Ctrl-C cancels an echoed

@@ -320,7 +320,8 @@ describe("fffactory plan (plan-apply §Plan)", () => {
     expect(result.plan).toContain(
       "  ~ builder-1 (fff-abcd1234-builder-1): install release 0.3.0 and its host configuration, then verify it",
     );
-    expect(planStore.saved.get("fff-abcd1234/aaaaaaaa")?.stopped_workers).toEqual([
+    const record = planStore.saved.get("fff-abcd1234/aaaaaaaa");
+    expect(record?.kind === undefined ? record?.stopped_workers : "a bootstrap plan").toEqual([
       "builder-2" as HostKey,
     ]);
     expect(fleet.machines.reads).toBe(1);

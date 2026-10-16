@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { FactoryId, HostKey, Release } from "../../src/domain/instance";
 import {
+  bootstrapStaleness,
   createdWorkers,
   declaredWorkers,
   describeD11Refusal,
@@ -14,7 +15,9 @@ import {
   hostMachineRefusal,
   isPlanId,
   newPlanId,
+  newSavedBootstrapPlan,
   newSavedPlan,
+  PLAN_SCHEMA_VERSION,
   PLAN_TTL_MS,
   type PlanCircumstances,
   type ResourceChange,
@@ -25,6 +28,8 @@ import {
   resizedStoppedWorkers,
   resizeRefusal,
   resourceChanges,
+  type SavedBootstrapPlan,
+  type SavedFactoryPlan,
   type SavedPlan,
   serializeSavedPlan,
   staleRefusal,
@@ -500,7 +505,7 @@ describe("an instance type change on a stopped worker (plan-apply §Stopped work
   });
 });
 
-const SAVED: SavedPlan = newSavedPlan({
+const SAVED: SavedFactoryPlan = newSavedPlan({
   planId: "k3x9q2ab",
   factoryId: "fff-abcd1234" as FactoryId,
   instancePath: "/work/.fffactory/factory.json",
@@ -632,7 +637,7 @@ describe("saved plans", () => {
       requested: false,
       schedule: null,
     };
-    const plan: SavedPlan = { ...SAVED, dispatch: [requested, disabled] };
+    const plan: SavedFactoryPlan = { ...SAVED, dispatch: [requested, disabled] };
     expect(parseSavedPlan(serializeSavedPlan(plan), plan.factory_id, plan.plan_id)).toEqual(plan);
 
     const brokenItems: unknown[] = [
@@ -723,6 +728,150 @@ describe("saved plans", () => {
     expect(staleRefusal("k3x9q2ab", ["factory.json changed after it was planned"])).toEqual([
       "Refusing to apply plan k3x9q2ab: it is no longer the plan to apply:",
       "  factory.json changed after it was planned",
+      "Nothing was applied. Review a new plan with `fffactory plan`.",
+    ]);
+  });
+});
+
+const BUCKET = "module.state_bucket.aws_s3_bucket.state";
+const VERSIONING = "module.state_bucket.aws_s3_bucket_versioning.state";
+
+const BOOTSTRAP: SavedBootstrapPlan = newSavedBootstrapPlan({
+  planId: "b00tstr4",
+  factoryId: "fff-abcd1234" as FactoryId,
+  instancePath: "/work/.fffactory/factory.json",
+  configurationSha256: "a".repeat(64),
+  release: "0.3.0" as Release,
+  assetsSha256: "b".repeat(64),
+  accountId: "123456789012",
+  now: NOW,
+  changes: [change(BUCKET, ["create"], "aws_s3_bucket"), change(VERSIONING, ["create"])],
+});
+
+describe("saved bootstrap plans (plan-apply §Saved plans)", () => {
+  test("record the kind and what they are bound to, and no factory state", () => {
+    expect(BOOTSTRAP).toEqual({
+      schema_version: 1,
+      kind: "bootstrap",
+      plan_id: "b00tstr4",
+      factory_id: "fff-abcd1234" as FactoryId,
+      instance_path: "/work/.fffactory/factory.json",
+      configuration_sha256: "a".repeat(64),
+      release: "0.3.0" as Release,
+      assets_sha256: "b".repeat(64),
+      account_id: "123456789012",
+      created_at: "2026-09-30T12:00:00.000Z",
+      expires_at: new Date(NOW.getTime() + PLAN_TTL_MS).toISOString(),
+      changes: [
+        { address: BUCKET, type: "aws_s3_bucket", actions: ["create"] },
+        { address: VERSIONING, actions: ["create"] },
+      ],
+    });
+    expect(PLAN_SCHEMA_VERSION).toBe(1);
+  });
+
+  test("only ever create", () => {
+    for (const changes of [
+      [],
+      [change(BUCKET, ["update"])],
+      [change(BUCKET, ["delete", "create"])],
+    ])
+      expect(() => newSavedBootstrapPlan({ ...CURRENT, planId: "b00tstr4", changes })).toThrow();
+  });
+
+  test("round-trip through their text, beside factory records without a kind", () => {
+    const text = serializeSavedPlan(BOOTSTRAP);
+    expect(text).toContain('"kind": "bootstrap"');
+    const read: SavedPlan | undefined = parseSavedPlan(text, BOOTSTRAP.factory_id, "b00tstr4");
+    expect(read).toEqual(BOOTSTRAP);
+    expect(read?.kind).toBe("bootstrap");
+    expect(serializeSavedPlan(SAVED)).not.toContain('"kind"');
+    const factory = parseSavedPlan(serializeSavedPlan(SAVED), SAVED.factory_id, SAVED.plan_id);
+    expect(factory).toEqual(SAVED);
+    expect(factory?.kind).toBeUndefined();
+  });
+
+  test("a bootstrap record with a factory plan's fields, or anything not create, is unreadable", () => {
+    const record = JSON.parse(serializeSavedPlan(BOOTSTRAP)) as Record<string, unknown>;
+    const broken: Record<string, unknown>[] = [
+      { ...record, state_revision: null },
+      { ...record, state_revision: "state-v1" },
+      { ...record, control_plane: [] },
+      { ...record, dispatch: [] },
+      { ...record, stopped_workers: [] },
+      { ...record, kind: "backend" },
+      { ...record, kind: null },
+      { ...record, changes: [] },
+      { ...record, changes: [{ address: BUCKET, actions: ["update"] }] },
+      { ...record, changes: [{ address: BUCKET, actions: ["create", "delete"] }] },
+      { ...record, changes: [{ address: BUCKET, actions: ["create"] }, { address: BUCKET }] },
+      { ...record, release: "nope" },
+      { ...record, account_id: 1 },
+      { ...record, created_at: "yesterday" },
+      { ...record, expires_at: undefined },
+      { ...record, schema_version: 2 },
+    ];
+    for (const document of broken)
+      expect(
+        parseSavedPlan(JSON.stringify(document), BOOTSTRAP.factory_id, "b00tstr4"),
+      ).toBeUndefined();
+    const text = serializeSavedPlan(BOOTSTRAP);
+    expect(parseSavedPlan(text, "fff-other000" as FactoryId, "b00tstr4")).toBeUndefined();
+    expect(parseSavedPlan(text, BOOTSTRAP.factory_id, "zzzzzzzz")).toBeUndefined();
+  });
+
+  test("a factory record that names another kind, or lacks its factory fields, is unreadable", () => {
+    const record = JSON.parse(serializeSavedPlan(SAVED)) as Record<string, unknown>;
+    const { dispatch: _dispatch, ...noDispatch } = record;
+    const { state_revision: _revision, ...noRevision } = record;
+    for (const document of [{ ...record, kind: "factory" }, noDispatch, noRevision])
+      expect(
+        parseSavedPlan(JSON.stringify(document), SAVED.factory_id, SAVED.plan_id),
+      ).toBeUndefined();
+  });
+
+  test("a bootstrap plan applied in the circumstances it was planned in, no bucket yet, is fresh", () => {
+    expect(bootstrapStaleness(BOOTSTRAP, CURRENT, false)).toEqual([]);
+    expect(
+      bootstrapStaleness(BOOTSTRAP, { ...CURRENT, now: new Date(BOOTSTRAP.expires_at) }, false),
+    ).toEqual([]);
+  });
+
+  test("every factory-plan reason but the state revision makes it stale, and so does the bucket", () => {
+    expect(
+      bootstrapStaleness(
+        BOOTSTRAP,
+        {
+          ...CURRENT,
+          instancePath: "/elsewhere/factory.json",
+          configurationSha256: "c".repeat(64),
+          release: "0.3.1" as Release,
+          assetsSha256: "d".repeat(64),
+          accountId: "210987654321",
+          now: new Date(Date.parse(BOOTSTRAP.expires_at) + 1),
+        },
+        true,
+      ),
+    ).toEqual([
+      `it expired at ${BOOTSTRAP.expires_at}`,
+      "it was planned for another factory.json, /work/.fffactory/factory.json",
+      "factory.json changed after it was planned",
+      "it was planned by fffactory 0.3.0, not this release",
+      "it was planned in AWS account 123456789012, not this one",
+      "the state bucket was created after it was planned",
+    ]);
+    expect(
+      bootstrapStaleness(BOOTSTRAP, { ...CURRENT, assetsSha256: "d".repeat(64) }, false),
+    ).toEqual(["it was planned with other release assets than this fffactory's"]);
+    expect(bootstrapStaleness(BOOTSTRAP, CURRENT, true)).toEqual([
+      "the state bucket was created after it was planned",
+    ]);
+  });
+
+  test("a stale bootstrap plan is refused like any other, with the bucket's reason", () => {
+    expect(staleRefusal("b00tstr4", bootstrapStaleness(BOOTSTRAP, CURRENT, true))).toEqual([
+      "Refusing to apply plan b00tstr4: it is no longer the plan to apply:",
+      "  the state bucket was created after it was planned",
       "Nothing was applied. Review a new plan with `fffactory plan`.",
     ]);
   });

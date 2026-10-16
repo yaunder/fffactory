@@ -1,8 +1,9 @@
 /**
  * Factory plans: what `fffactory plan` shows and saves, and what `fffactory apply` applies.
  * A saved plan is bound to the circumstances it was planned in (factory.json's exact text,
- * the release and its assets, the AWS account and the factory's Terraform state); applying
- * it in any others is refused, as is a plan older than its lifetime. A plan that would
+ * the release and its assets, the AWS account and the factory's Terraform state, or for a
+ * bootstrap plan the state bucket's absence); applying it in any others is refused, as is a
+ * plan older than its lifetime. A plan that would
  * remove a host key is refused, naming `fffactory worker terminate KEY`, the only command that
  * removes a host (`host-removal.ts`); until host replacement lands in milestone M3, one that
  * would destroy or replace a host machine is refused, naming the capability it needs (D11).
@@ -560,11 +561,8 @@ export function describeStoppedResizeRefusal(action: string, refusal: ResizeGuar
   ];
 }
 
-/**
- * A saved plan's record, kept beside its Terraform plan file in the local plan store. It
- * holds no configuration values: factory.json is bound by its SHA-256.
- */
-export interface SavedPlan {
+/** What every saved plan's record binds, whatever its kind. */
+interface SavedPlanBinding {
   readonly schema_version: typeof PLAN_SCHEMA_VERSION;
   readonly plan_id: string;
   readonly factory_id: FactoryId;
@@ -575,17 +573,26 @@ export interface SavedPlan {
   /** The fffactory release that planned it, and the SHA-256 of that release's assets. */
   readonly release: Release;
   readonly assets_sha256: string;
-  /** The AWS account the account check allowed. */
+  /** The AWS account the account check allowed: the only part of the caller it binds. */
   readonly account_id: string;
+  readonly created_at: string;
+  readonly expires_at: string;
+  /** The changes the plan makes, as shown when it was saved. */
+  readonly changes: readonly ResourceChange[];
+}
+
+/**
+ * A saved factory plan's record, kept beside its factory Terraform plan file
+ * (`factory.tfplan`) in the local plan store. It holds no configuration values: factory.json
+ * is bound by its SHA-256. A record without `kind` is one.
+ */
+export interface SavedFactoryPlan extends SavedPlanBinding {
+  readonly kind?: never;
   /**
    * The revision of the factory's Terraform state object in the state bucket, read before
    * planning; null when there was no state yet.
    */
   readonly state_revision: string | null;
-  readonly created_at: string;
-  readonly expires_at: string;
-  /** The changes the plan makes, as shown when it was saved. */
-  readonly changes: readonly ResourceChange[];
   readonly control_plane?: readonly PlannedControlPlane[];
   readonly dispatch: readonly PlannedDispatch[];
   /**
@@ -594,6 +601,18 @@ export interface SavedPlan {
    */
   readonly stopped_workers: readonly HostKey[];
 }
+
+/**
+ * A saved bootstrap plan's record, kept beside backend bootstrap's Terraform plan file
+ * (`backend.tfplan`): made while the state bucket does not exist, so it has no state
+ * revision, and nothing of the factory's workers. Its changes only create.
+ */
+export interface SavedBootstrapPlan extends SavedPlanBinding {
+  readonly kind: "bootstrap";
+}
+
+/** A saved plan's record: a factory plan, or a bootstrap plan (`kind: "bootstrap"`). */
+export type SavedPlan = SavedFactoryPlan | SavedBootstrapPlan;
 
 /** The circumstances a plan is made or applied in. */
 export interface PlanCircumstances {
@@ -615,7 +634,16 @@ export interface NewSavedPlan extends PlanCircumstances {
   readonly stopped?: readonly HostKey[];
 }
 
-export function newSavedPlan(plan: NewSavedPlan): SavedPlan {
+function copyChanges(changes: readonly ResourceChange[]): ResourceChange[] {
+  return changes.map(({ address, type, mode, actions }) => ({
+    address,
+    ...(type === undefined ? {} : { type }),
+    ...(mode === undefined ? {} : { mode }),
+    actions: [...actions],
+  }));
+}
+
+export function newSavedPlan(plan: NewSavedPlan): SavedFactoryPlan {
   return {
     schema_version: PLAN_SCHEMA_VERSION,
     plan_id: plan.planId,
@@ -628,12 +656,7 @@ export function newSavedPlan(plan: NewSavedPlan): SavedPlan {
     state_revision: plan.stateRevision ?? null,
     created_at: plan.now.toISOString(),
     expires_at: new Date(plan.now.getTime() + PLAN_TTL_MS).toISOString(),
-    changes: plan.changes.map(({ address, type, mode, actions }) => ({
-      address,
-      ...(type === undefined ? {} : { type }),
-      ...(mode === undefined ? {} : { mode }),
-      actions: [...actions],
-    })),
+    changes: copyChanges(plan.changes),
     control_plane: (plan.controlPlane ?? []).map(({ key, hostname, observation, changes }) => ({
       key,
       hostname,
@@ -647,6 +670,39 @@ export function newSavedPlan(plan: NewSavedPlan): SavedPlan {
       schedule,
     })),
     stopped_workers: [...(plan.stopped ?? [])],
+  };
+}
+
+export interface NewSavedBootstrapPlan extends PlanCircumstances {
+  readonly planId: string;
+  /** Backend bootstrap's changes, as its plan verdict passed them: each only creates. */
+  readonly changes: readonly ResourceChange[];
+}
+
+/** Whether a bootstrap plan's changes are what it may make: one or more, each only a create. */
+function onlyCreates(changes: readonly ResourceChange[]): boolean {
+  return changes.length > 0 && changes.every(({ actions }) => actions.join() === "create");
+}
+
+/**
+ * A saved bootstrap plan's record. Throws unless its changes only create: backend bootstrap
+ * refuses any other plan before one is saved.
+ */
+export function newSavedBootstrapPlan(plan: NewSavedBootstrapPlan): SavedBootstrapPlan {
+  if (!onlyCreates(plan.changes)) throw new Error("a bootstrap plan may only create");
+  return {
+    schema_version: PLAN_SCHEMA_VERSION,
+    kind: "bootstrap",
+    plan_id: plan.planId,
+    factory_id: plan.factoryId,
+    instance_path: plan.instancePath,
+    configuration_sha256: plan.configurationSha256,
+    release: plan.release,
+    assets_sha256: plan.assetsSha256,
+    account_id: plan.accountId,
+    created_at: plan.now.toISOString(),
+    expires_at: new Date(plan.now.getTime() + PLAN_TTL_MS).toISOString(),
+    changes: copyChanges(plan.changes),
   };
 }
 
@@ -749,7 +805,8 @@ function readStoppedWorkers(value: unknown): HostKey[] | undefined {
   return new Set(value).size === value.length ? (value as HostKey[]) : undefined;
 }
 
-function hasPlanFields(document: Record<string, unknown>): boolean {
+/** The fields every saved plan binds, but its changes, are readable. */
+function hasBindingFields(document: Record<string, unknown>): boolean {
   const { instance_path, configuration_sha256, release, assets_sha256, account_id } = document;
   return (
     printable(instance_path) &&
@@ -758,15 +815,65 @@ function hasPlanFields(document: Record<string, unknown>): boolean {
     parseRelease(release).ok &&
     printable(assets_sha256) &&
     printable(account_id) &&
-    (document.state_revision === null || printable(document.state_revision)) &&
     isoTime(document.created_at) &&
     isoTime(document.expires_at)
   );
 }
 
+/** What only a factory plan records; a bootstrap record holding any of them is unreadable. */
+const FACTORY_PLAN_FIELDS = ["state_revision", "control_plane", "dispatch", "stopped_workers"];
+
+function parseBootstrapPlan(document: Record<string, unknown>): SavedBootstrapPlan | undefined {
+  if (FACTORY_PLAN_FIELDS.some((field) => document[field] !== undefined)) return undefined;
+  const changes = readChanges(document.changes);
+  if (changes === undefined || !onlyCreates(changes) || !hasBindingFields(document))
+    return undefined;
+  return {
+    schema_version: PLAN_SCHEMA_VERSION,
+    kind: "bootstrap",
+    plan_id: document.plan_id as string,
+    factory_id: document.factory_id as FactoryId,
+    instance_path: document.instance_path as string,
+    configuration_sha256: document.configuration_sha256 as string,
+    release: document.release as Release,
+    assets_sha256: document.assets_sha256 as string,
+    account_id: document.account_id as string,
+    created_at: document.created_at as string,
+    expires_at: document.expires_at as string,
+    changes,
+  };
+}
+
+function parseFactoryPlan(
+  document: Record<string, unknown>,
+  factoryId: FactoryId,
+): SavedFactoryPlan | undefined {
+  const changes = readChanges(document.changes);
+  const controlPlane = readControlPlane(document.control_plane, factoryId);
+  const dispatch = readDispatch(document.dispatch, factoryId);
+  const stopped = readStoppedWorkers(document.stopped_workers);
+  if (
+    changes === undefined ||
+    controlPlane === undefined ||
+    dispatch === undefined ||
+    stopped === undefined ||
+    !(document.state_revision === null || printable(document.state_revision)) ||
+    !hasBindingFields(document)
+  )
+    return undefined;
+  return {
+    ...(document as unknown as SavedFactoryPlan),
+    changes,
+    control_plane: controlPlane,
+    dispatch,
+    stopped_workers: stopped,
+  };
+}
+
 /**
  * Reads a saved plan record of `factoryId` with `planId`, or undefined when the text is not
- * one: a plan that cannot be read is never applied.
+ * one: a plan that cannot be read is never applied. A record without `kind` is a factory
+ * plan; `"bootstrap"` is a bootstrap plan; any other kind is unreadable.
  */
 export function parseSavedPlan(
   text: string,
@@ -781,31 +888,14 @@ export function parseSavedPlan(
   }
   if (!isRecord(document) || document.schema_version !== PLAN_SCHEMA_VERSION) return undefined;
   if (document.factory_id !== factoryId || document.plan_id !== planId) return undefined;
-  const changes = readChanges(document.changes);
-  const controlPlane = readControlPlane(document.control_plane, factoryId);
-  const dispatch = readDispatch(document.dispatch, factoryId);
-  const stopped = readStoppedWorkers(document.stopped_workers);
-  if (
-    changes === undefined ||
-    controlPlane === undefined ||
-    dispatch === undefined ||
-    stopped === undefined ||
-    !hasPlanFields(document)
-  )
-    return undefined;
-  return {
-    ...(document as unknown as SavedPlan),
-    changes,
-    control_plane: controlPlane,
-    dispatch,
-    stopped_workers: stopped,
-  };
+  if (document.kind === undefined) return parseFactoryPlan(document, factoryId);
+  return document.kind === "bootstrap" ? parseBootstrapPlan(document) : undefined;
 }
 
 /**
- * Why a saved plan may no longer be applied in `current`, before the state is read: every
- * reason, or none when it is fresh. The same factory.json text, release and assets, and
- * account, within the plan's lifetime, are required.
+ * Why a saved plan of either kind may no longer be applied in `current`, before the state is
+ * read: every reason, or none when it is fresh. The same factory.json text, release and
+ * assets, and account, within the plan's lifetime, are required.
  */
 export function planStaleness(plan: SavedPlan, current: PlanCircumstances): string[] {
   const reasons: [boolean, string][] = [
@@ -834,11 +924,30 @@ export function planStaleness(plan: SavedPlan, current: PlanCircumstances): stri
   return reasons.filter(([stale]) => stale).map(([, reason]) => reason);
 }
 
+/** The bootstrap plan's reason in place of the state revision's. */
+const BUCKET_CREATED = "the state bucket was created after it was planned";
+
+/**
+ * Why a saved bootstrap plan may no longer be applied: every reason a factory plan has but the
+ * state revision, which a bootstrap plan has none of, and in its place the state bucket
+ * existing now (`bucketExists`), ready or not. Every reason, or none when it is fresh.
+ */
+export function bootstrapStaleness(
+  plan: SavedBootstrapPlan,
+  current: PlanCircumstances,
+  bucketExists: boolean,
+): string[] {
+  return [...planStaleness(plan, current), ...(bucketExists ? [BUCKET_CREATED] : [])];
+}
+
 /**
  * Why a saved plan may no longer be applied once the factory lock is held: the factory's
  * Terraform state is not the revision it was planned against (or appeared or vanished).
  */
-export function stateStaleness(plan: SavedPlan, revision: string | undefined): string | undefined {
+export function stateStaleness(
+  plan: SavedFactoryPlan,
+  revision: string | undefined,
+): string | undefined {
   if ((revision ?? null) === plan.state_revision) return undefined;
   return "the factory's Terraform state changed after it was planned";
 }
@@ -850,7 +959,7 @@ export function stateStaleness(plan: SavedPlan, revision: string | undefined): s
  * before stopped workers were planned.
  */
 export function stoppedStaleness(
-  plan: SavedPlan,
+  plan: SavedFactoryPlan,
   stopped: readonly HostKey[] | undefined,
 ): string[] {
   const planned = plan.stopped_workers;

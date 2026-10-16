@@ -3,9 +3,13 @@
  * (directories 0700, records 0600), one directory per plan:
  *
  *   factory.tfplan         the factory root's Terraform plan, written by Terraform
- *   backend.tfplan         backend bootstrap's plan, on a first apply
- *   factory.tfplan.sha256  the factory plan's SHA-256 when the plan was saved
+ *   backend.tfplan         backend bootstrap's plan, as a saved bootstrap plan or on a first apply
+ *   factory.tfplan.sha256  a saved factory plan's factory.tfplan SHA-256 when it was saved
+ *   backend.tfplan.sha256  a saved bootstrap plan's backend.tfplan SHA-256 when it was saved
  *   plan.json              the saved plan's record, written last: its presence saves the plan
+ *
+ * A record binds the one Terraform plan file its kind names: a factory plan `factory.tfplan`,
+ * a bootstrap plan (`"kind": "bootstrap"`) `backend.tfplan`.
  *
  * A plan is short-lived: plans long expired, and plans never saved that are long made (an
  * interrupted `plan` or `apply` leaves one), are pruned (`PLAN_KEPT_MS`).
@@ -27,7 +31,7 @@ import { sha256Hex } from "./release-tarball";
 const RECORD = "plan.json";
 const FACTORY_PLAN = "factory.tfplan";
 const BACKEND_PLAN = "backend.tfplan";
-const DIGEST = "factory.tfplan.sha256";
+const DIGEST_SUFFIX = ".sha256";
 const ABSENT = new Set(["ENOENT", "ENOTDIR"]);
 
 function isAbsent(error: unknown): boolean {
@@ -58,6 +62,11 @@ async function writeAtomically(path: string, text: string): Promise<void> {
   const staged = `${path}.staged`;
   await writeFile(staged, text, { mode: 0o600 });
   await rename(staged, path);
+}
+
+/** The Terraform plan file a saved plan of this kind binds. */
+function boundFile(plan: SavedPlan): string {
+  return plan.kind === "bootstrap" ? BACKEND_PLAN : FACTORY_PLAN;
 }
 
 /** PlanStore over the local filesystem, rooted at `directory` (`<cache>/plans`). */
@@ -100,10 +109,11 @@ export function filesystemPlanStore(directory: string): PlanStore {
 
     async save(plan: SavedPlan) {
       const path = planDirectory(plan.factory_id, plan.plan_id);
-      const digest = await digestOf(join(path, FACTORY_PLAN));
+      const bound = boundFile(plan);
+      const digest = await digestOf(join(path, bound));
       if (digest === undefined)
         throw new Error(`Plan ${plan.plan_id} has no Terraform plan to save`);
-      await writeAtomically(join(path, DIGEST), `${digest}\n`);
+      await writeAtomically(join(path, `${bound}${DIGEST_SUFFIX}`), `${digest}\n`);
       await writeAtomically(join(path, RECORD), serializeSavedPlan(plan));
     },
 
@@ -112,15 +122,16 @@ export function filesystemPlanStore(directory: string): PlanStore {
       const text = await textOf(join(path, RECORD));
       if (text === undefined) return { kind: "missing" };
       const plan = parseSavedPlan(text, factoryId, planId);
-      const recorded = (await textOf(join(path, DIGEST)))?.trim();
-      const digest = await digestOf(join(path, FACTORY_PLAN));
-      if (plan === undefined || digest === undefined || digest !== recorded)
-        return { kind: "damaged" };
+      if (plan === undefined) return { kind: "damaged" };
+      const bound = boundFile(plan);
+      const recorded = (await textOf(join(path, `${bound}${DIGEST_SUFFIX}`)))?.trim();
+      const digest = await digestOf(join(path, bound));
+      if (digest === undefined || digest !== recorded) return { kind: "damaged" };
       return { kind: "found", plan, files: filesOf(path), digest };
     },
 
-    async digest(factoryId, planId) {
-      return digestOf(join(planDirectory(factoryId, planId), FACTORY_PLAN));
+    async digest(plan) {
+      return digestOf(join(planDirectory(plan.factory_id, plan.plan_id), boundFile(plan)));
     },
 
     async remove(factoryId, planId) {

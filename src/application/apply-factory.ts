@@ -60,7 +60,7 @@ import {
   planStaleness,
   type ResourceChange,
   resourceChanges,
-  type SavedPlan,
+  type SavedFactoryPlan,
   stateStaleness,
   stoppedStaleness,
   plannedDispatch,
@@ -216,12 +216,20 @@ export type FactoryApply =
       readonly recordFailure: string | undefined;
     };
 
+/** A loaded saved plan that is a factory plan. */
+type FoundFactoryPlan = Omit<Extract<StoredPlan, { readonly kind: "found" }>, "plan"> & {
+  readonly plan: SavedFactoryPlan;
+};
+
 type SavedPlanChoice =
   | { readonly kind: "none" }
-  | Extract<StoredPlan, { readonly kind: "found" }>
+  | FoundFactoryPlan
   | Extract<FactoryApply, { readonly kind: "no_plan" | "damaged_plan" | "stale" }>;
 
-/** The saved plan the request names, only if it is fresh as far as can be told locally. */
+/**
+ * The saved plan the request names, only if it is fresh as far as can be told locally. A
+ * saved bootstrap plan is refused as damaged, before anything else is read or changed.
+ */
 async function savedPlan(
   deps: FactoryApplyDependencies,
   request: FactoryApplyRequest,
@@ -233,9 +241,12 @@ async function savedPlan(
   const stored = await deps.planStore.load(target.factoryId, planId);
   if (stored.kind === "missing") return { kind: "no_plan", planId };
   if (stored.kind === "damaged") return { kind: "damaged_plan", planId };
-  const reasons = planStaleness(stored.plan, circumstances({ ...request, now }, target));
+  const { plan } = stored;
+  // TODO(re-evaluate when #60 lands): apply exactly a fresh saved bootstrap plan.
+  if (plan.kind === "bootstrap") return { kind: "damaged_plan", planId };
+  const reasons = planStaleness(plan, circumstances({ ...request, now }, target));
   if (reasons.length > 0) return { kind: "stale", planId, reasons };
-  return stored;
+  return { ...stored, plan };
 }
 
 /**
@@ -246,7 +257,7 @@ interface LockedApply {
   readonly lock: FactoryLock;
   readonly target: PlanTarget;
   readonly files: PlanFiles;
-  readonly saved: SavedPlan | undefined;
+  readonly saved: SavedFactoryPlan | undefined;
   readonly savedDigest: string | undefined;
   readonly bootstrapped: boolean;
   readonly planId: string;
@@ -273,7 +284,7 @@ async function swappedPlanFile(
   { saved, savedDigest }: LockedApply,
 ): Promise<Extract<FactoryApply, { readonly kind: "damaged_plan" }> | undefined> {
   if (saved === undefined) return undefined;
-  const digest = await deps.planStore.digest(saved.factory_id, saved.plan_id);
+  const digest = await deps.planStore.digest(saved);
   return digest === savedDigest ? undefined : { kind: "damaged_plan", planId: saved.plan_id };
 }
 
@@ -285,7 +296,7 @@ async function swappedPlanFile(
  */
 async function savedChanges(
   deps: FactoryApplyDependencies,
-  saved: SavedPlan,
+  saved: SavedFactoryPlan,
   terraformDirectory: string,
   locked: LockedApply,
   machines: DeclaredMachines,

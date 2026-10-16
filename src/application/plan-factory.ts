@@ -39,7 +39,7 @@ import {
   resizeRefusal,
   type ResourceChange,
   resourceChanges,
-  type SavedPlan,
+  type SavedFactoryPlan,
 } from "../domain/plan";
 import { checkStableHostKeys, recordedHostKeys } from "../domain/stable-host-keys";
 import { planBackendBootstrap, stateBucketState } from "./bootstrap-backend";
@@ -112,7 +112,7 @@ export type FactoryPlanning =
   | {
       readonly kind: "planned";
       readonly plan: readonly string[];
-      readonly saved: SavedPlan;
+      readonly saved: SavedFactoryPlan;
     };
 
 const OTHER_ACCOUNT: Issue = {
@@ -326,7 +326,7 @@ export async function planFactory(
   if (state.kind === "unready") return state;
   const planId = newPlanId(request.randomBytes);
   const files = await deps.planStore.create(bucket.factoryId, planId);
-  let saved: SavedPlan | undefined;
+  let saved: SavedFactoryPlan | undefined;
   try {
     if (state.kind === "missing")
       return await planBootstrap(deps.provisioner, request, bucket, files.backend);
