@@ -26,6 +26,28 @@ import {
 
 export type PlanningBasis = Omit<FactoryPlanRequest, "now" | "randomBytes">;
 
+/** The `--instance` and `--profile` a command was given, which the commands it names repeat. */
+export interface SelectionFlags {
+  readonly instance?: string;
+  readonly profile?: string;
+}
+
+/** A word for a POSIX shell: as is when it is plainly safe, else single-quoted. */
+function shellWord(word: string): string {
+  return /^[A-Za-z0-9_./:=@%+-]+$/.test(word) ? word : `'${word.replaceAll("'", "'\\''")}'`;
+}
+
+/**
+ * The command `words`, then the `--instance` and `--profile` given, quoted for a POSIX shell
+ * where needed: the commands `plan` and `apply` name next repeat them.
+ */
+export function commandLine(words: readonly string[], flags: SelectionFlags): string {
+  const all = [...words];
+  if (flags.instance !== undefined) all.push("--instance", flags.instance);
+  if (flags.profile !== undefined) all.push("--profile", flags.profile);
+  return all.map(shellWord).join(" ");
+}
+
 /**
  * Loads factory.json and runs the account check, refusing (and saying why) unless the caller
  * is in the factory's account; then materializes this release's assets. `action` names what

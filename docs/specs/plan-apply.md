@@ -524,9 +524,11 @@ bucket exists. A bootstrap record carrying any of them, or with no changes, or
 with a change that does anything but create, is unreadable, and so is a factory
 record without `state_revision` or `dispatch`.
 
-Bootstrap plans are not made or applied yet: `fffactory plan` still shows a
-missing bucket's bootstrap plan without saving it, and `apply --plan-id` refuses
-a bootstrap record as damaged, applying nothing.
+`apply --plan-id` applies a bootstrap plan exactly
+([Applying a saved bootstrap plan](#applying-a-saved-bootstrap-plan)).
+`fffactory plan` does not save one yet: it still shows a missing bucket's
+bootstrap plan without saving it
+([#61](https://github.com/yaunder/factory/issues/61)).
 
 ### Freshness
 
@@ -595,8 +597,10 @@ that expired over a day ago, and plan directories never saved that were made
 over a day ago (`PLAN_KEPT_MS`; an interrupted command leaves one). Until then
 an expired plan is refused as expired, a plan in use as it expires is never
 removed under its apply, and an apply waiting at its approval question keeps
-its plan. A saved plan is removed once apply held the lock for it, whatever
-came of it: it is spent.
+its plan. A saved factory plan is removed once apply held the lock for it,
+whatever came of it: it is spent. A saved bootstrap plan is spent earlier,
+once its Terraform apply starts, before any lock exists
+([Applying a saved bootstrap plan](#applying-a-saved-bootstrap-plan)).
 
 ## Apply
 
@@ -607,15 +611,23 @@ fffactory apply [--instance PATH] [--profile NAME] [--plan-id ID]
 Without `--plan-id`, apply needs a terminal to ask for approval; without one it
 is refused before reaching AWS: `Applying needs your approval of the plan:
 rerun at a terminal, or save a plan with `fffactory plan` and apply exactly it
-with --plan-id ID.` A malformed plan ID is refused before anything else.
+with --plan-id ID.` A malformed plan ID is refused before anything else. With
+`--plan-id ID`, naming the ID approves exactly that saved plan, of either kind,
+and no terminal is needed: a factory plan is applied as below, and a bootstrap
+plan creates the state bucket and stops
+([Applying a saved bootstrap plan](#applying-a-saved-bootstrap-plan)). Nothing
+escalates the approval: a plan ID approves only the plan saved under it.
 
 After the checks above, and a saved plan's local freshness:
 
 1. [`beginFactoryOperation`](provisioning.md#backend-bootstrap) bootstraps the
    backend when it is missing, after its own approval, and takes the
    factory-wide lock, recording the time it is taken, after any bootstrap. An
-   interrupt before then takes no lock. A saved plan never bootstraps: it was made against an
-   existing bucket, so a missing one makes it stale. A held lock refuses the
+   interrupt before then takes no lock. A saved factory plan never bootstraps: it was made against an
+   existing bucket, so a missing one makes it stale (`the state bucket no
+   longer exists`). A saved bootstrap plan is applied exactly instead, and the
+   apply ends once it is recorded
+   ([below](#applying-a-saved-bootstrap-plan)). A held lock refuses the
    apply, showing its holder.
 2. Under the lock, the operation's record is written (next section), led by
    the `backend` stage when this apply created the bucket.
@@ -657,6 +669,76 @@ After the checks above, and a saved plan's local freshness:
 
 Every refusal exits 1 and applies nothing. Apply's Terraform deadline is an
 hour ([provisioning §Operations](provisioning.md#operations)).
+
+### Applying a saved bootstrap plan
+
+`fffactory apply --plan-id B`, where B is a saved
+[bootstrap plan](#saved-plans), is the unattended way to create the state
+bucket: it needs no terminal, and naming B approves exactly B. After the checks
+every apply runs ([above](#before-anything-reaches-aws): the account check
+first, then the assets, the CLI/pin match guard and completeness),
+`applySavedBootstrap` (`src/application/bootstrap-backend.ts`):
+
+1. checks B's local [freshness](#freshness): factory.json's path and text, the
+   release and its assets, the account, and its expiry. A stale plan is
+   refused with the reasons, `Refusing to apply plan B: it is no longer the
+   plan to apply: ...`, and nothing changes;
+2. requires the state bucket to be still missing (HeadBucket, as
+   [backend bootstrap](provisioning.md#backend-bootstrap) checks it). A bucket
+   that exists, ready or not, makes B stale, `the state bucket was created
+   after it was planned`, and nothing changes;
+3. requires `backend.tfplan` to still have the SHA-256 it was saved with, and
+   reads it back with `showPlan`: its changes must be its record's, and may
+   only create, and must create something. A file that changed, or whose
+   changes differ from the record's, is damaged (`Saved plan B cannot be
+   applied: ...`); one that would do more than create, creates nothing or
+   cannot be read is refused as Terraform's plan fffactory cannot apply.
+   Nothing is applied;
+4. shows the plan as backend bootstrap shows it, then `Applying saved plan B,
+   approved by naming its ID.` and `Applying. Terraform's output is not shown;
+   this can take several minutes.`;
+5. checks again, immediately before the apply, that the bucket is still
+   missing and `backend.tfplan` still the file read back; either refuses as in
+   2 or 3;
+6. applies exactly that file (`terraform apply PLANFILE`), never a new plan.
+   B is spent once its apply starts: it is removed, whatever comes of it;
+7. takes the factory-wide lock in the new bucket. A held lock is refused,
+   showing its holder, as any apply is ([provisioning §Lock](provisioning.md#lock)),
+   with the bucket already created;
+8. writes the operation record ([below](#operation-records)): `plan_id` B, the
+   one stage `{ "name": "backend", "status": "applied" }`, status
+   `succeeded`; then releases the lock.
+
+It then stops, exit 0. It never plans or applies the factory: that is a plan
+of its own, with its own approval.
+
+```text
+Created the state bucket. Plan the factory next:
+  fffactory plan
+Operation record: s3://fff-abcd1234-state/fff-abcd1234-operations/2026-09-30T12:00:00.000Z-aaaaaaaa.json
+```
+
+The `fffactory plan` line repeats the `--instance` and `--profile` given,
+quoted for a POSIX shell as `plan`'s apply command is. A record that cannot be
+written is reported as any apply's final record is (`The operation record could
+not be finished: REASON`), and the exit stays 0.
+
+A Terraform apply that fails is reported as backend bootstrap's failure is,
+`fffactory: REASON` and the diagnostics' path, with no record: no lock was
+taken. A rerun of `fffactory plan` finds the bucket missing, and a new plan is
+needed, or created but unready, and shows how to complete it. An interrupt
+before the lock is taken, including one that stops the Terraform apply, takes
+none and says so (`Interrupted before the factory was locked: ...`); one once
+it is taken leaves it, as any interrupted apply does
+([Interruption](#interruption)).
+
+Bootstrap stays the one step before the lock, which lives in the bucket
+([provisioning §Backend bootstrap](provisioning.md#backend-bootstrap)). The
+lock is taken right after the bucket is created, and the bucket-missing check
+comes right before the apply, so another first apply racing B has only that
+window. The AWS account is the only part of the caller B binds: the account
+check runs again before anything else, and the backend root's
+`allowed_account_ids` is Terraform's own backstop.
 
 ### Failure
 
@@ -732,7 +814,9 @@ when the lock is taken and again at every step:
 `plan_id` is null when apply planned for itself. An apply that created the
 state bucket (backend bootstrap) writes its first record, once the lock is
 taken, with the stages starting `{ "name": "backend", "status": "applied" }`,
-before the infrastructure stage. The `backend` stage is only ever `applied`,
+before the infrastructure stage. A saved bootstrap plan's apply writes one
+record, with its `plan_id`, that one stage alone and status `succeeded`
+([above](#applying-a-saved-bootstrap-plan)). The `backend` stage is only ever `applied`,
 and present only when this apply created the bucket: an apply that found the
 bucket already there has none. A bootstrap that fails or is declined leaves no
 record, since without a bucket there is nowhere to write one and no lock is
@@ -1012,13 +1096,14 @@ refused (D11).
 
 | Layer | Module | Responsibility |
 | --- | --- | --- |
-| Domain | `src/domain/plan.ts` | Plan IDs, the CLI/pin match guard, reading a JSON plan's resource changes, the plan's presentation (stopped workers skipped), the D11 refusals, the refusal to resize a stopped or stopping worker, or any while the EC2 inventory cannot be read (`resizeRefusal`), the saved plan record and its two kinds (`SavedFactoryPlan`, `SavedBootstrapPlan`), its freshness rule (`stoppedStaleness` and `bootstrapStaleness` too), `FACTORY_STATE_KEY`, `PLAN_TTL_MS`. Pure. |
+| Domain | `src/domain/plan.ts` | Plan IDs, the CLI/pin match guard, reading a JSON plan's resource changes and comparing them with a record's (`sameChanges`), the plan's presentation (stopped workers skipped), the D11 refusals, the refusal to resize a stopped or stopping worker, or any while the EC2 inventory cannot be read (`resizeRefusal`), the saved plan record and its two kinds (`SavedFactoryPlan`, `SavedBootstrapPlan`), its freshness rule (`stoppedStaleness` and `bootstrapStaleness` too), `FACTORY_STATE_KEY`, `PLAN_TTL_MS`. Pure. |
 | Domain | `src/domain/release-compatibility.ts` | `RELEASE_COMPATIBILITY`, release precedence, upgrade's assessment of the pin, the schema version check, the base generation and schema D11 refusals, the pin move's preview. Pure. |
 | Domain | `src/domain/operation.ts` | The operation record, its key, stage transitions (upgrade's `pin` stage too), workers, repositories and control-plane outcomes. Pure. |
 | Domain | `src/domain/repository-placement.ts` | The per-worker repository manifest, fixed worker protocol commands, and completed-result parser. Pure. |
 | Domain | `src/domain/stable-host-keys.ts` | `recordedHostKeys`, reading the factory root's `host_keys` output. |
 | Application | `src/application/plan-factory.ts` | `checkPlannable`, `planInfrastructure`, `planFactory`, `declaredMachines` (the one inventory read: the stopped workers and the resize guard). |
-| Application | `src/application/apply-factory.ts` | `applyFactory`: saved-plan freshness, the lock, infrastructure, workers, repository and control-plane stages, operation records, interruption. |
+| Application | `src/application/apply-factory.ts` | `applyFactory`: saved-plan freshness, the lock, infrastructure, workers, repository and control-plane stages, operation records, interruption; a saved bootstrap plan routed to `applySavedBootstrap`, then its record. |
+| Application | `src/application/bootstrap-backend.ts` | `applySavedBootstrap`: a saved bootstrap plan's bucket and file checks, its read-back, its exact apply, then the lock. |
 | Application | `src/application/plan-control-plane.ts` | Derives Paseo changes and saved live observations from worker inspections. |
 | Application | `src/application/apply-workers.ts` | `applyWorkers`: the workers stage ([host protocol §apply](host-protocol.md#apply)). |
 | Application | `src/application/apply-repositories.ts` | `applyRepositories`: projects each approved worker manifest through the fixed repository host protocol and records synchronized, unresolved, and unmanaged results. |
@@ -1030,13 +1115,14 @@ refused (D11).
 | Application | `src/application/lock-store.ts` | `writeOperation` and `stateRevision` on the state bucket port. |
 | Infrastructure | `src/infrastructure/plan-store.ts` | `filesystemPlanStore`: private plan directories, the bound plan file's digest (`factory.tfplan` or `backend.tfplan`), pruning either kind. |
 | Infrastructure | `src/infrastructure/aws-s3-lock-store.ts` | PutObject of operation records; HeadObject of the state object. |
-| CLI adapter | `src/cli/commands/plan.ts`, `src/cli/commands/apply.ts`, `src/cli/commands/upgrade.ts`, `src/cli/commands/planning.ts` | The commands, the approval at the terminal, and what they share. |
+| CLI adapter | `src/cli/commands/plan.ts`, `src/cli/commands/apply.ts`, `src/cli/commands/upgrade.ts`, `src/cli/commands/planning.ts` | The commands, the approval at the terminal, and what they share (`commandLine`, the next command with the `--instance` and `--profile` given). |
 | CLI adapter | `src/cli/diagnostics.ts`, `src/cli/run.ts` | The path of a failed Terraform command's diagnostics, printed with the failure. |
 | CLI adapter | `src/cli/interrupts.ts` | `interruptible`: the interrupt notice and flag, the sleep an interrupt wakes, stopping running tools, then, for a command that waits on an interrupt, waiting `RETURN_GRACE_MS` at most for it to return, before exiting with 128 plus the signal's number; a second signal kills and exits at once. |
 | CLI adapter | `src/cli/run.ts`, `src/cli/context.ts` | `waitsOnInterrupt`: only `apply`, `upgrade`, `doctor`, `status` and `worker` (`Command.waitsOnInterrupt`) are waited for. |
 | CLI adapter | `src/cli/main.ts` | Wires `terraformProvisioner`, `filesystemPlanStore`, and `interruptible` over the process, waiting on an interrupt as `waitsOnInterrupt` says for the command run. |
 
-Tests: `tests/domain/plan.test.ts` (plan IDs, the pin guard, presentation, both
+Tests: `tests/domain/plan.test.ts` (plan IDs, the pin guard, presentation, a
+plan's changes compared with its record's, both
 D11 refusals, unknown host machine actions refused, the record round trip and
 unreadable records, the bootstrap record's round trip beside factory records
 without `kind`, every staleness reason of either kind, the workers whose machine a plan
@@ -1047,7 +1133,8 @@ staleness reason), `tests/domain/rollout.test.ts` (a stopped worker neither
 stopping the rollout nor making it partial, the first boot's deadline, the
 tailnet states still joining, the bootstrap refusal waited for, the timed-out
 failure and the rollout going on after it), `tests/domain/operation.test.ts`
-(the backend stage leading a bootstrapping apply's stages),
+(the backend stage leading a bootstrapping apply's stages, and alone in a saved
+bootstrap plan's record),
 `tests/domain/stable-host-keys.test.ts` (recorded host keys),
 `tests/application/plan-factory.test.ts` (a first plan, the state revision
 bound before planning, no infrastructure changes still saved with the workers,
@@ -1068,9 +1155,18 @@ refused after factory.json changes, from another release or with other assets,
 expired, after the state changed, unknown, damaged, whose record no longer
 matches its Terraform plan, unreadable, replacing a host, without its bucket,
 or whose Terraform plan file was swapped after it was loaded or after it was
-read back, and a saved bootstrap plan refused as damaged with nothing created,
-locked or applied; a lock taken after bootstrap and never after an interrupt
-(`tests/application/bootstrap-backend.test.ts`); the workers stage after the
+read back; a saved bootstrap plan applied exactly, then the lock, its record
+and the release in that order and nothing of the factory planned, spent so a
+rerun names it missing, refused with nothing applied, locked or recorded when
+stale (factory.json, release, assets, path, expiry), when the bucket exists,
+ready or not, tampered, read back other than its record or doing more than
+create, its failed Terraform apply spending it with no lock or record, an
+interrupt before the lock taking none and one after it keeping it, an
+unwritable record reported, and a lock held meanwhile refused; a lock taken
+after bootstrap and never after an interrupt, and `applySavedBootstrap`'s every
+refusal, the bucket rechecked and the file checked again right before the
+apply, a declined approval, another account, a failed or interrupted apply
+spending the plan (`tests/application/bootstrap-backend.test.ts`); the workers stage after the
 infrastructure under the same lock and record, without infrastructure changes
 still approved and installed with no Terraform apply, a failed install stopping
 the rollout and failing the operation and a rerun repairing it, a skip making
@@ -1113,7 +1209,12 @@ question), `tests/cli/plan-apply.test.ts` (output, exit codes and every refusal
 in process, the workers' lines and exit codes 0, 2 and 1; an empty factory
 planning its shared infrastructure alone with `Workers: none declared.`, and
 applying it, then nothing, with exit 0; a first apply's record led by
-`backend: applied`, and none for an apply that found the bucket; a stopped worker
+`backend: applied`, and none for an apply that found the bucket; a saved
+bootstrap plan applied with no terminal, its lines, the next step with the
+instance and profile quoted, exit 0 and its record's `plan_id`, then refused as
+missing; one refused after factory.json changed or once the bucket exists, and
+for another account before anything is planned or applied, with nothing
+changed; its failed Terraform apply and an interrupt before the lock; a stopped worker
 shown skipped in the plan, listed `stopped` by apply with exit 0, its resize
 refused, and with the inventory unreadable skipped with exit 2 as before and a
 resize refused; one apply creating, waiting for and installing a worker; the

@@ -14,6 +14,10 @@
  * state revision (checked under the lock). Naming the plan ID is the approval of exactly
  * that plan, which `fffactory plan` showed.
  *
+ * A saved bootstrap plan, made while the state bucket did not exist, is applied exactly by
+ * `applySavedBootstrap`; apply then takes the lock, records the bootstrap and stops: the
+ * factory is planned next, for its own approval.
+ *
  * An operation record in the state bucket follows each step, led by the backend stage when
  * this apply created the state bucket. An interrupted apply changes
  * nothing more and leaves its lock and record; after `fffactory lock break`, a rerun plans
@@ -25,6 +29,7 @@
  */
 import type { FactoryId, FactoryInstance, Host, HostKey } from "../domain/instance";
 import {
+  BACKEND_STAGE,
   finishOperation,
   INFRASTRUCTURE_STAGE,
   type OperationRecord,
@@ -34,6 +39,7 @@ import {
   operationKey,
   type StageStatus,
   startOperation,
+  startStageOperation,
   WORKERS_STAGE,
   withStage,
   withRepositories,
@@ -60,6 +66,8 @@ import {
   planStaleness,
   type ResourceChange,
   resourceChanges,
+  sameChanges,
+  type SavedBootstrapPlan,
   type SavedFactoryPlan,
   stateStaleness,
   stoppedStaleness,
@@ -84,7 +92,7 @@ import { verifyFactory, type FactoryVerification } from "./verify-factory";
 import type { ControlPlane, ControlPlaneHealth } from "./control-plane";
 import type { WorkflowQueue } from "./workflow-queue";
 import type { Approval } from "./approval";
-import { beginFactoryOperation } from "./bootstrap-backend";
+import { applySavedBootstrap, beginFactoryOperation } from "./bootstrap-backend";
 import { type FactoryLock, type Interrupted, settleFactoryLock } from "./factory-lock";
 import {
   checkPlannable,
@@ -178,6 +186,17 @@ export type FactoryApply =
       readonly installing?: WorkerIdentity | undefined;
       readonly waiting?: WorkerIdentity;
     }
+  /**
+   * A saved bootstrap plan created the state bucket: the lock was taken, the operation
+   * recorded and the lock released. Nothing of the factory was planned or applied.
+   */
+  | {
+      readonly kind: "bootstrapped";
+      readonly planId: string;
+      readonly operation: OperationLocation;
+      /** Why the operation's record could not be written, when it could not. */
+      readonly recordFailure: string | undefined;
+    }
   | {
       readonly kind: "applied";
       readonly bootstrapped: boolean;
@@ -216,19 +235,26 @@ export type FactoryApply =
       readonly recordFailure: string | undefined;
     };
 
+type Found = Extract<StoredPlan, { readonly kind: "found" }>;
+
 /** A loaded saved plan that is a factory plan. */
-type FoundFactoryPlan = Omit<Extract<StoredPlan, { readonly kind: "found" }>, "plan"> & {
-  readonly plan: SavedFactoryPlan;
+type FoundFactoryPlan = Omit<Found, "plan"> & { readonly plan: SavedFactoryPlan };
+
+/** A loaded saved plan that is a bootstrap plan. */
+type FoundBootstrapPlan = Omit<Found, "kind" | "plan"> & {
+  readonly kind: "found_bootstrap";
+  readonly plan: SavedBootstrapPlan;
 };
 
 type SavedPlanChoice =
   | { readonly kind: "none" }
   | FoundFactoryPlan
+  | FoundBootstrapPlan
   | Extract<FactoryApply, { readonly kind: "no_plan" | "damaged_plan" | "stale" }>;
 
 /**
- * The saved plan the request names, only if it is fresh as far as can be told locally. A
- * saved bootstrap plan is refused as damaged, before anything else is read or changed.
+ * The saved plan the request names, of either kind, only if it is fresh as far as can be told
+ * locally, before anything reaches AWS.
  */
 async function savedPlan(
   deps: FactoryApplyDependencies,
@@ -242,11 +268,74 @@ async function savedPlan(
   if (stored.kind === "missing") return { kind: "no_plan", planId };
   if (stored.kind === "damaged") return { kind: "damaged_plan", planId };
   const { plan } = stored;
-  // TODO(re-evaluate when #60 lands): apply exactly a fresh saved bootstrap plan.
-  if (plan.kind === "bootstrap") return { kind: "damaged_plan", planId };
   const reasons = planStaleness(plan, circumstances({ ...request, now }, target));
   if (reasons.length > 0) return { kind: "stale", planId, reasons };
+  if (plan.kind === "bootstrap") return { ...stored, kind: "found_bootstrap", plan };
   return { ...stored, plan };
+}
+
+/**
+ * Records a saved bootstrap plan's operation under the lock it took once the bucket existed:
+ * one record, `plan_id` the plan's, the applied backend stage alone, succeeded. Then releases
+ * the lock, unless interrupted, which leaves it and writes nothing more.
+ */
+async function recordBootstrap(
+  deps: FactoryApplyDependencies,
+  request: FactoryApplyRequest,
+  lock: FactoryLock,
+  planId: string,
+): Promise<FactoryApply> {
+  const record = finishOperation(
+    startStageOperation(lock.record, BACKEND_STAGE, "applied", planId),
+    "succeeded",
+    request.clock(),
+  );
+  const operation = { bucket: lock.bucket.bucket, key: operationKey(record) };
+  try {
+    if (deps.interrupted()) return { kind: "interrupted", locked: true, record: undefined };
+    const recordFailure = await deps.lockStore
+      .writeOperation(lock.bucket, record)
+      .then(() => undefined, reasonOf);
+    if (deps.interrupted())
+      return {
+        kind: "interrupted",
+        locked: true,
+        record: recordFailure === undefined ? operation : undefined,
+      };
+    return { kind: "bootstrapped", planId, operation, recordFailure };
+  } finally {
+    await settleFactoryLock(deps.lockStore, lock, deps.interrupted);
+  }
+}
+
+/**
+ * Applies exactly a saved bootstrap plan, already fresh as far as can be told locally, then
+ * takes the lock, records it and stops (D2): the factory is planned next.
+ */
+async function applyBootstrapPlan(
+  deps: FactoryApplyDependencies,
+  request: FactoryApplyRequest,
+  target: PlanTarget,
+  found: FoundBootstrapPlan,
+): Promise<FactoryApply> {
+  const start = await applySavedBootstrap(deps, {
+    ...request,
+    operation: request.operation ?? "apply",
+    saved: found.plan,
+    files: found.files,
+    digest: found.digest,
+    current: circumstances({ ...request, now: request.clock() }, target),
+  });
+  switch (start.kind) {
+    case "acquired":
+      return recordBootstrap(deps, request, start.lock, found.plan.plan_id);
+    case "declined":
+      return { kind: "declined", stage: "backend" };
+    case "interrupted":
+      return { kind: "interrupted", locked: false };
+    default:
+      return start;
+  }
 }
 
 /**
@@ -267,13 +356,6 @@ type InfrastructureChanges =
   | Exclude<InfrastructurePlan, { readonly kind: "planned" }>
   | Extract<FactoryApply, { readonly kind: "stale" | "damaged_plan" }>
   | { readonly kind: "ready"; readonly changes: readonly ResourceChange[] };
-
-/** Whether two plans make the same changes to the same resources. */
-function sameChanges(a: readonly ResourceChange[], b: readonly ResourceChange[]): boolean {
-  const key = (changes: readonly ResourceChange[]) =>
-    JSON.stringify(changes.map(({ address, actions }) => [address, actions]));
-  return key(a) === key(b);
-}
 
 /**
  * A saved plan is damaged once its Terraform plan file is not the one loaded before the lock,
@@ -1276,7 +1358,8 @@ async function lockAndApply(
  * Applies the factory after the account check allowed the caller: the CLI/pin match guard
  * and factory.json's completeness first, then a named saved plan's local freshness, then
  * backend bootstrap if needed and the lock, then under the lock the infrastructure stage and
- * the workers stage.
+ * the workers stage. A named saved bootstrap plan is applied exactly instead, and apply stops
+ * once it is recorded.
  */
 export async function applyFactory(
   deps: FactoryApplyDependencies,
@@ -1288,6 +1371,7 @@ export async function applyFactory(
   const now = request.clock();
   await deps.planStore.prune(bucket.factoryId, now);
   const choice = await savedPlan(deps, request, target, now);
+  if (choice.kind === "found_bootstrap") return applyBootstrapPlan(deps, request, target, choice);
   if (choice.kind !== "none" && choice.kind !== "found") return choice;
   const saved = choice.kind === "found" ? choice : undefined;
   const planId = saved?.plan.plan_id ?? newPlanId(request.randomBytes);

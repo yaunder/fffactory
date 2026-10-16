@@ -2,7 +2,7 @@ import { parseArgs } from "node:util";
 import { planFactory } from "../../application/plan-factory";
 import type { CliContext, Command } from "../context";
 import { sha256Text } from "../../infrastructure/release-tarball";
-import { planningBasis, printPlanRefusal } from "./planning";
+import { commandLine, planningBasis, printPlanRefusal, type SelectionFlags } from "./planning";
 
 const USAGE = [
   "Usage: fffactory plan [--instance PATH] [--profile NAME]",
@@ -27,20 +27,9 @@ const USAGE = [
   "credentials belong to the factory's account.",
 ];
 
-/** A word for a POSIX shell: as is when it is plainly safe, else single-quoted. */
-function shellWord(word: string): string {
-  return /^[A-Za-z0-9_./:=@%+-]+$/.test(word) ? word : `'${word.replaceAll("'", "'\\''")}'`;
-}
-
 /** The command that applies exactly this plan, with the instance and profile it was made with. */
-function applyCommandFor(
-  planId: string,
-  flags: { readonly instance?: string; readonly profile?: string },
-): string {
-  const words = ["fffactory", "apply", "--plan-id", planId];
-  if (flags.instance !== undefined) words.push("--instance", flags.instance);
-  if (flags.profile !== undefined) words.push("--profile", flags.profile);
-  return words.map(shellWord).join(" ");
+function applyCommandFor(planId: string, flags: SelectionFlags): string {
+  return commandLine(["fffactory", "apply", "--plan-id", planId], flags);
 }
 
 async function plan(args: readonly string[], context: CliContext): Promise<number> {

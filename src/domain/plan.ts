@@ -140,6 +140,13 @@ export function changesSomething({ actions }: ResourceChange): boolean {
   return !actions.every((action) => UNCHANGED.has(action));
 }
 
+/** Whether two plans make the same changes to the same resources, in the same order. */
+export function sameChanges(a: readonly ResourceChange[], b: readonly ResourceChange[]): boolean {
+  const key = (changes: readonly ResourceChange[]) =>
+    JSON.stringify(changes.map(({ address, actions }) => [address, actions]));
+  return key(a) === key(b);
+}
+
 /** What every plan shows first: which factory.json, factory, account, Region and release. */
 export interface PlanTarget {
   readonly instancePath: string;

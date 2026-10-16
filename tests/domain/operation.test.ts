@@ -265,6 +265,22 @@ describe("operation records", () => {
     });
   });
 
+  test("of a saved bootstrap plan's apply hold the applied backend stage alone, and its plan ID", () => {
+    const record = finishOperation(
+      startStageOperation(LOCK, BACKEND_STAGE, "applied", "b00tstr4"),
+      "succeeded",
+      END,
+    );
+    expect(record).toMatchObject({
+      plan_id: "b00tstr4",
+      status: "succeeded",
+      stages: [{ name: BACKEND_STAGE, status: "applied" }],
+      finished_at: END.toISOString(),
+      failure: null,
+    });
+    expect(startStageOperation(LOCK, "stop", "locating").plan_id).toBeNull();
+  });
+
   test("are written as indented JSON", () => {
     const record = startOperation(LOCK, undefined);
     expect(JSON.parse(serializeOperation(record))).toEqual(record);

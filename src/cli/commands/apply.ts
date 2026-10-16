@@ -22,7 +22,7 @@ import { FIRST_BOOT_DEADLINE_MS, type WorkerOutcome } from "../../domain/rollout
 import type { CliContext, Command } from "../context";
 import { sha256Text } from "../../infrastructure/release-tarball";
 import { printDiagnostics } from "../diagnostics";
-import { planningBasis, printPlanRefusal } from "./planning";
+import { commandLine, planningBasis, printPlanRefusal, type SelectionFlags } from "./planning";
 
 const USAGE = [
   "Usage: fffactory apply [--instance PATH] [--profile NAME] [--plan-id ID]",
@@ -35,6 +35,11 @@ const USAGE = [
   "exactly the plan `fffactory plan` saved under that ID, which naming it",
   "approves, and refuses it once factory.json, the fffactory release, the AWS",
   "account or the factory's Terraform state has changed, or after an hour.",
+  "",
+  "A saved bootstrap plan, made while the state bucket does not exist, is applied",
+  "the same way with --plan-id ID, without a terminal: it creates the bucket",
+  "exactly as planned, and is refused once the bucket exists. Apply then records it",
+  "and stops; plan the factory next with `fffactory plan`.",
   "",
   "The first apply creates the state bucket first, after its own approval.",
   "Terraform's output is not shown while it runs, which can take several minutes.",
@@ -105,6 +110,8 @@ function printRecord(operation: OperationLocation, context: CliContext): void {
 export interface Reporting {
   readonly action: "apply" | "upgrade";
   readonly rerun: "apply" | "upgrade";
+  /** The `--instance` and `--profile` given, which a command named next repeats. */
+  readonly flags?: SelectionFlags;
 }
 
 const APPLYING_REPORT: Reporting = { action: "apply", rerun: "apply" };
@@ -371,6 +378,22 @@ function reportApplied(
   return appliedExit(result, code);
 }
 
+/**
+ * A saved bootstrap plan created the state bucket and apply stopped: the factory is planned
+ * next, with the same factory.json and profile.
+ */
+function reportBootstrapped(
+  result: Extract<FactoryApply, { readonly kind: "bootstrapped" }>,
+  context: CliContext,
+  reporting: Reporting,
+): number {
+  context.out("Created the state bucket. Plan the factory next:");
+  context.out(`  ${commandLine(["fffactory", "plan"], reporting.flags ?? {})}`);
+  printRecord(result.operation, context);
+  printRecordFailure(result.recordFailure, context);
+  return 0;
+}
+
 /** What each step's failure may have changed. */
 const FAILED: Readonly<
   Record<
@@ -433,6 +456,8 @@ export function reportApply(
   switch (result.kind) {
     case "applied":
       return reportApplied(result, context);
+    case "bootstrapped":
+      return reportBootstrapped(result, context, reporting);
     case "declined":
       context.err("Not approved: nothing was applied.");
       return 1;
@@ -531,7 +556,7 @@ async function apply(args: readonly string[], context: CliContext): Promise<numb
       randomBytes: context.randomBytes,
     },
   );
-  return reportApply(result, context);
+  return reportApply(result, context, { ...APPLYING_REPORT, flags: values });
 }
 
 export const applyCommand: Command = {

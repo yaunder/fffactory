@@ -225,13 +225,17 @@ export function startOperation(
   ]);
 }
 
-/** The record of an operation that has just taken `lock` and runs one stage, `name`. */
+/**
+ * The record of an operation that has just taken `lock` and runs one stage, `name`, applying
+ * saved plan `planId` when it has one.
+ */
 export function startStageOperation(
   lock: LockRecord,
   name: string,
   status: StageStatus,
+  planId?: string,
 ): OperationRecord {
-  return openOperation(lock, undefined, [{ name, status }]);
+  return openOperation(lock, planId, [{ name, status }]);
 }
 
 function openOperation(

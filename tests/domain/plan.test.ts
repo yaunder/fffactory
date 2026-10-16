@@ -28,6 +28,7 @@ import {
   resizedStoppedWorkers,
   resizeRefusal,
   resourceChanges,
+  sameChanges,
   type SavedBootstrapPlan,
   type SavedFactoryPlan,
   type SavedPlan,
@@ -746,6 +747,25 @@ const BOOTSTRAP: SavedBootstrapPlan = newSavedBootstrapPlan({
   accountId: "123456789012",
   now: NOW,
   changes: [change(BUCKET, ["create"], "aws_s3_bucket"), change(VERSIONING, ["create"])],
+});
+
+describe("comparing a plan's changes with its record (plan-apply §Freshness)", () => {
+  const bucket = { address: "a.bucket", type: "aws_s3_bucket", actions: ["create"] };
+  const versioning = { address: "a.versioning", actions: ["create"] };
+
+  test("the same addresses and actions, in order, are the same changes", () => {
+    expect(sameChanges([bucket, versioning], [{ ...bucket, type: undefined }, versioning])).toBe(
+      true,
+    );
+    expect(sameChanges([], [])).toBe(true);
+  });
+
+  test("another action, another resource, another order or one more is not", () => {
+    expect(sameChanges([bucket], [{ ...bucket, actions: ["delete", "create"] }])).toBe(false);
+    expect(sameChanges([bucket], [versioning])).toBe(false);
+    expect(sameChanges([bucket, versioning], [versioning, bucket])).toBe(false);
+    expect(sameChanges([bucket], [bucket, versioning])).toBe(false);
+  });
 });
 
 describe("saved bootstrap plans (plan-apply §Saved plans)", () => {
