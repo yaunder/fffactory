@@ -2,13 +2,11 @@ import { describe, expect, test } from "bun:test";
 import {
   bootstrapPlanVerdict,
   deniesInsecureTransport,
-  describeBootstrapPlan,
   missingHardening,
   type StateBucketReadiness,
   tlsOnlyPolicy,
-  unreadyBucketRefusal,
+  unreadyBucket,
 } from "../../src/domain/backend-bootstrap";
-import type { FactoryId, Release } from "../../src/domain/instance";
 import { resourceChanges } from "../../src/domain/plan";
 
 const change = (address: string, ...actions: string[]) => ({
@@ -105,49 +103,13 @@ describe("bootstrapPlanVerdict", () => {
         { address: "a.y", actions: ["update"] },
         { address: "a.z", actions: ["delete", "create"] },
       ]),
-    ).toEqual({ ok: false, unexpected: ["a.y (update)", "a.z (delete, create)"] });
-  });
-});
-
-describe("describeBootstrapPlan", () => {
-  test("names the configuration, factory, account, Region, release and each creation", () => {
-    expect(
-      describeBootstrapPlan(
-        {
-          instancePath: "/work/.fffactory/factory.json",
-          name: "Test factory",
-          factoryId: "fff-abcd1234" as FactoryId,
-          accountId: "123456789012",
-          region: "eu-west-2",
-          release: "0.3.0" as Release,
-          bucket: "fff-abcd1234-state",
-        },
-        ["module.state_bucket.aws_s3_bucket.state"],
-      ),
-    ).toEqual([
-      "Backend bootstrap: the state bucket fff-abcd1234-state does not exist yet.",
-      "  Configuration: /work/.fffactory/factory.json",
-      "  Factory: Test factory (fff-abcd1234)",
-      "  AWS account: 123456789012, Region: eu-west-2",
-      "  Release: 0.3.0",
-      "Terraform will create:",
-      "  + module.state_bucket.aws_s3_bucket.state",
-    ]);
-  });
-
-  test("a factory without a name shows its ID alone", () => {
-    const lines = describeBootstrapPlan(
-      {
-        instancePath: "/f.json",
-        factoryId: "fff-abcd1234" as FactoryId,
-        accountId: "123456789012",
-        region: "eu-west-2",
-        release: "0.3.0" as Release,
-        bucket: "fff-abcd1234-state",
-      },
-      [],
-    );
-    expect(lines[2]).toBe("  Factory: fff-abcd1234");
+    ).toEqual({
+      ok: false,
+      unexpected: [
+        { address: "a.y", actions: ["update"] },
+        { address: "a.z", actions: ["delete", "create"] },
+      ],
+    });
   });
 });
 
@@ -217,49 +179,22 @@ describe("state bucket readiness", () => {
   });
 
   const CONTEXT = { bucket: BUCKET, accountId: "123456789012", region: "eu-west-2" };
-  const TARGET = `--region eu-west-2 --bucket ${BUCKET} --expected-bucket-owner 123456789012`;
 
-  test("the refusal names what is missing and the commands that complete it", () => {
-    const lines = unreadyBucketRefusal(CONTEXT, {
-      ...READY,
-      versioning: undefined,
-      tlsOnly: false,
-    });
-    expect(lines).toEqual([
-      `The state bucket ${BUCKET} exists, but backend bootstrap did not finish it. It lacks:`,
-      "  versioning (never enabled)",
-      "  TLS-only bucket policy",
-      "If another first apply is still bootstrapping it, wait for that to finish, then retry.",
-      "Otherwise complete the bucket with these AWS CLI commands, using credentials for account " +
-        "123456789012, then retry:",
-      `  aws s3api put-bucket-versioning ${TARGET} --versioning-configuration Status=Enabled`,
-      `  aws s3api put-bucket-policy ${TARGET} --policy '${tlsOnlyPolicy(BUCKET)}'`,
-      "put-bucket-policy replaces the whole bucket policy: add any statements it already has.",
-    ]);
-  });
-
-  test("the commands restore every setting, in the order bootstrap applies them", () => {
-    const lines = unreadyBucketRefusal(CONTEXT, {
+  test("an unready bucket carries where it is, what S3 reports and what it lacks, in bootstrap's order", () => {
+    const readiness = {
       versioning: "Suspended",
-      publicAccessBlocked: false,
+      publicAccessBlocked: true,
       encrypted: false,
       tlsOnly: false,
+    };
+    // Only the location is carried, never anything else the caller's bucket holds.
+    const bucket = { ...CONTEXT, factoryId: "fff-abcd1234" };
+    expect(unreadyBucket(bucket, readiness)).toEqual({
+      location: CONTEXT,
+      readiness,
+      missing: ["versioning", "default_encryption", "tls_only_policy"],
     });
-    expect(lines.slice(1, 5)).toEqual([
-      "  versioning (Suspended)",
-      "  public access block",
-      "  default encryption",
-      "  TLS-only bucket policy",
-    ]);
-    expect(lines.slice(-5)).toEqual([
-      `  aws s3api put-bucket-versioning ${TARGET} --versioning-configuration Status=Enabled`,
-      `  aws s3api put-public-access-block ${TARGET} --public-access-block-configuration ` +
-        "BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true",
-      `  aws s3api put-bucket-encryption ${TARGET} --server-side-encryption-configuration ` +
-        '\'{"Rules":[{"ApplyServerSideEncryptionByDefault":{"SSEAlgorithm":"AES256"}}]}\'',
-      `  aws s3api put-bucket-policy ${TARGET} --policy '${tlsOnlyPolicy(BUCKET)}'`,
-      "put-bucket-policy replaces the whole bucket policy: add any statements it already has.",
-    ]);
+    expect(unreadyBucket(CONTEXT, READY)).toBeUndefined();
   });
 
   test("the policy command writes the bucket's TLS-only policy", () => {

@@ -12,6 +12,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import manifest from "../../package.json";
+import { fffactoryCommand } from "../../src/cli/presentation/command-line";
 import { SUPPORTED_TERRAFORM } from "../../src/domain/managed-terraform";
 import { isolatedAwsEnvironment } from "../support/aws-isolation";
 import { declaring } from "../support/factory-world";
@@ -22,10 +23,21 @@ import { type StubS3, stubS3 } from "../support/stub-s3";
 import { EXAMPLE_CREDENTIALS, type StubSts, stubSts } from "../support/stub-sts";
 
 const BUCKET = "fff-abcd1234-state";
-const B1 = "fff-abcd1234-builder-1";
 const FIRST_BOOT_MAIN = resolve(import.meta.dir, "../support/apply-first-boot-main.ts");
 const LOCK = `${BUCKET}/fff-abcd1234-lock.json`;
 const HOST = 'module.hosts.aws_instance.host["builder-1"]';
+/** A section's rule line, 53 columns wide. */
+const rule = (title: string) => `── ${title} ${"─".repeat(Math.max(2, 49 - title.length))}`;
+/** What an interrupt that keeps the lock asks, naming the instance given, as lines. */
+const breakThenRerun = (selection: { instance?: string } = {}) =>
+  [
+    "",
+    rule("Next"),
+    "  Once fffactory has exited, break the lock:",
+    `    $ ${fffactoryCommand(["lock", "break"], selection)}`,
+    "  Then rerun:",
+    `    $ ${fffactoryCommand(["apply"], selection)}`,
+  ].join("\n");
 const PLAN_JSON = JSON.stringify({
   format_version: "1.2",
   resource_changes: [{ address: HOST, type: "aws_instance", change: { actions: ["create"] } }],
@@ -136,16 +148,16 @@ describe("fffactory apply, interrupted (plan-apply §Interruption)", () => {
     expect(stderr).toBe(
       "Interrupted: stopping running tools. Interrupt again to kill them at once " +
         "(Terraform may lose state).\n" +
-        "Interrupted: the factory stays locked, with a record of this operation. Once " +
-        "fffactory has exited, break the lock with `fffactory lock break`, then rerun " +
-        "`fffactory apply`.\n",
+        `\n${rule("Result")}\n` +
+        "  ! Interrupted: the factory stays locked, with a record of this operation\n" +
+        `${breakThenRerun({ instance })}\n`,
     );
     expect(await terraform.signals()).toEqual([{ subcommand: "apply", signal: "SIGINT" }]);
     const lock = JSON.parse(s3.objects.get(LOCK)?.body ?? "null");
     expect(lock).toMatchObject({ operation: "apply", factory_id: "fff-abcd1234" });
     expect(stdout).toMatch(
       new RegExp(
-        `Operation record: s3://${BUCKET}/fff-abcd1234-operations/[^/\\n]+-${lock.lock_id}\\.json\\n$`,
+        `\\n {2}Operation record {3}s3://${BUCKET}/fff-abcd1234-operations/[^/\\n]+-${lock.lock_id}\\.json\\n$`,
       ),
     );
     expect(operationRecords()).toEqual([
@@ -173,17 +185,13 @@ describe("fffactory apply, interrupted (plan-apply §Interruption)", () => {
       env,
     });
     expect(rerun.stderr).toBe("");
-    expect(rerun.stdout).toContain("Applied: the factory's infrastructure matches factory.json.");
+    expect(rerun.stdout).toContain("    Infrastructure     applied: matches factory.json");
     // Run from source, fffactory carries no worker executable: the worker is skipped, and
     // dispatch, sending it nothing, skips it too (dispatch §Skipped workers): exit 2, not 1.
     const noExecutable =
       "This fffactory carries no worker executable: it runs from source, not from a built release";
-    expect(rerun.stdout).toContain(
-      `  skipped    builder-1 (fff-abcd1234-builder-1): ${noExecutable}`,
-    );
-    expect(rerun.stdout).toContain(
-      `  skipped  builder-1 (fff-abcd1234-builder-1): ${noExecutable}`,
-    );
+    expect(rerun.stdout).toContain(`  ↷ builder-1          skipped · ${noExecutable}`);
+    expect(rerun.stdout).toContain("    ↷ Dispatch        skipped");
     expect(rerun.code).toBe(2);
     expect(s3.objects.has(LOCK)).toBe(false);
     expect(
@@ -204,9 +212,7 @@ describe("fffactory apply, interrupted (plan-apply §Interruption)", () => {
     survivors.push(apply.pid);
     const stdout = collected(apply.stdout);
     const waiting = await eventually(15_000, () =>
-      stdout.text.includes(`Waiting for builder-1 (${B1}) to finish its first boot`)
-        ? true
-        : undefined,
+      stdout.text.includes("  builder-1        waiting for its first boot") ? true : undefined,
     );
     expect(waiting).toBe(true);
     apply.kill("SIGINT");
@@ -215,13 +221,13 @@ describe("fffactory apply, interrupted (plan-apply §Interruption)", () => {
     expect(apply.signalCode).toBeNull();
     expect(await new Response(apply.stderr).text()).toBe(
       "Interrupted: stopping running tools.\n" +
-        `Interrupted while waiting for builder-1 (${B1}) to finish its first boot: no install ` +
+        `\n${rule("Result")}\n` +
+        "  ! Interrupted: the factory stays locked, with a record of this operation\n" +
+        "    Interrupted while waiting for builder-1 to finish its first boot: no install " +
         "step ran on it.\n" +
-        "Interrupted: the factory stays locked, with a record of this operation. Once " +
-        "fffactory has exited, break the lock with `fffactory lock break`, then rerun " +
-        "`fffactory apply`.\n",
+        `${breakThenRerun()}\n`,
     );
     await stdout.done;
-    expect(stdout.text).toMatch(/Operation record: s3:\/\/[^\n]+\n$/);
+    expect(stdout.text).toMatch(/\n {2}Operation record {3}s3:\/\/[^\n]+\n$/);
   }, 30_000);
 });

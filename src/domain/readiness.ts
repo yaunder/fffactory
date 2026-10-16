@@ -51,6 +51,8 @@ export const RUNTIME_ACCOUNT = "factory";
 
 /** What a human does to enroll one account on one worker. */
 export interface NextAction {
+  // TODO(re-evaluate when the status report schema next bumps its version): drop the tailnet-policy caveat from NextAction.summary; WorkerEnrollment.requirement carries it.
+  /** Published wording: status's `next_action.summary` and `details` carry it. */
   readonly summary: string;
   /** How to log in to the worker as the runtime account. */
   readonly login: string;
@@ -161,7 +163,8 @@ export function pendingEnrollment(report: readonly EnrollmentReport[]): Enrollme
 
 /**
  * Each account still to enroll as a line, its title and exact steps, then what Paseo clients
- * wait for.
+ * wait for. Published wording: status's `details` for a worker with enrollment pending, in
+ * text and `--json` alike. Human layout renders a `WorkerEnrollment` instead.
  */
 export function pendingEnrollmentLines(report: readonly EnrollmentReport[]): string[] {
   return [
@@ -172,10 +175,49 @@ export function pendingEnrollmentLines(report: readonly EnrollmentReport[]): str
   ];
 }
 
-/** A next action as one sentence: its summary, then how to get there and what to run. */
+/**
+ * A next action as one sentence: its summary, then how to get there and what to run. Published
+ * wording: the sentence in status's `details` and a dispatch gate's next action.
+ */
 export function describeNextAction(action: NextAction): string {
   const steps = [action.login, ...action.commands].map((command) => `\`${command}\``);
   return `${action.summary}: run ${steps.join(", then ")}`;
+}
+
+/** One account still to enroll on a worker: the commands to run once logged in. */
+export interface EnrollmentAccount {
+  readonly id: EnrollmentId;
+  readonly title: string;
+  readonly commands: readonly string[];
+}
+
+/**
+ * A worker's enrollment grouped for an operator: one login to the runtime account, what that
+ * login requires (`tailnet_ssh_as_runtime`: tailnet SSH policy must let the operator log in as
+ * `factory`, `RUNTIME_LOGIN_POLICY`), then each account still to enroll, in `ENROLLMENTS`'
+ * order. The structure human output renders from; status's published `details` and
+ * `next_action` keep their own wording.
+ */
+export interface WorkerEnrollment {
+  readonly hostname: string;
+  readonly login: string;
+  readonly requirement: "tailnet_ssh_as_runtime";
+  readonly accounts: readonly EnrollmentAccount[];
+}
+
+/** `report`'s accounts still to enroll on the worker `hostname` the CLI resolved, grouped. */
+export function workerEnrollment(
+  report: readonly EnrollmentReport[],
+  hostname: string,
+): WorkerEnrollment {
+  return {
+    hostname,
+    login: runtimeLogin(hostname),
+    requirement: "tailnet_ssh_as_runtime",
+    accounts: pendingEnrollment(report).flatMap(({ id, title, next_action }) =>
+      next_action === null ? [] : [{ id, title, commands: [...next_action.commands] }],
+    ),
+  };
 }
 
 /**

@@ -1,43 +1,28 @@
 /**
  * Backend bootstrap's plan rules. The first apply creates the state bucket, which must
  * exist before the factory's Terraform state and the factory-wide lock can live in it. Its
- * small plan is shown and approved on its own, and may only create.
+ * small plan is shown and approved on its own, and may only create. A bucket an interrupted
+ * bootstrap left without all its settings is refused (`unreadyBucket`); the CLI lays out how
+ * to complete it (`cli/presentation/plan.ts`).
  */
-import { changesSomething, describeTarget, type PlanTarget, type ResourceChange } from "./plan";
+import { changesSomething, type PlanTarget, type ResourceChange } from "./plan";
 import { isRecord } from "./validation";
 
 export type BootstrapPlanVerdict =
   | { readonly ok: true; readonly creates: readonly string[] }
-  | { readonly ok: false; readonly unexpected: readonly string[] };
+  | { readonly ok: false; readonly unexpected: readonly ResourceChange[] };
 
 /** A backend bootstrap plan may only create resources; anything else is refused. */
 export function bootstrapPlanVerdict(changes: readonly ResourceChange[]): BootstrapPlanVerdict {
   const changing = changes.filter(changesSomething);
   const unexpected = changing.filter(({ actions }) => actions.join() !== "create");
-  if (unexpected.length > 0)
-    return {
-      ok: false,
-      unexpected: unexpected.map(({ address, actions }) => `${address} (${actions.join(", ")})`),
-    };
+  if (unexpected.length > 0) return { ok: false, unexpected };
   return { ok: true, creates: changing.map(({ address }) => address) };
 }
 
 /** What the bootstrap plan shows before its changes: the plan's target and the bucket. */
 export interface BootstrapContext extends PlanTarget {
   readonly bucket: string;
-}
-
-/** The lines an operator approves the backend bootstrap plan from. */
-export function describeBootstrapPlan(
-  context: BootstrapContext,
-  creates: readonly string[],
-): string[] {
-  return [
-    `Backend bootstrap: the state bucket ${context.bucket} does not exist yet.`,
-    ...describeTarget(context),
-    "Terraform will create:",
-    ...creates.map((address) => `  + ${address}`),
-  ];
 }
 
 /**
@@ -152,60 +137,25 @@ export interface StateBucketLocation {
   readonly region: string;
 }
 
-function hardeningLabel(setting: BucketHardening, readiness: StateBucketReadiness): string {
-  const labels: Record<BucketHardening, string> = {
-    versioning: `versioning (${readiness.versioning ?? "never enabled"})`,
-    public_access_block: "public access block",
-    default_encryption: "default encryption",
-    tls_only_policy: "TLS-only bucket policy",
-  };
-  return labels[setting];
-}
-
-function hardeningCommand(setting: BucketHardening, location: StateBucketLocation): string {
-  const commands: Record<BucketHardening, readonly [string, string]> = {
-    versioning: ["put-bucket-versioning", "--versioning-configuration Status=Enabled"],
-    public_access_block: [
-      "put-public-access-block",
-      "--public-access-block-configuration BlockPublicAcls=true,IgnorePublicAcls=true," +
-        "BlockPublicPolicy=true,RestrictPublicBuckets=true",
-    ],
-    default_encryption: [
-      "put-bucket-encryption",
-      "--server-side-encryption-configuration " +
-        `'${JSON.stringify({ Rules: [{ ApplyServerSideEncryptionByDefault: { SSEAlgorithm: "AES256" } }] })}'`,
-    ],
-    tls_only_policy: ["put-bucket-policy", `--policy '${tlsOnlyPolicy(location.bucket)}'`],
-  };
-  const [command, settings] = commands[setting];
-  return (
-    `aws s3api ${command} --region ${location.region} --bucket ${location.bucket} ` +
-    `--expected-bucket-owner ${location.accountId} ${settings}`
-  );
-}
-
-// TODO(re-evaluate when the state-bucket module's hardening changes, or when apply can import
-// existing resources into the backend root): converge the state bucket's hardening on rerun
-// through the reviewed backend plan instead of printing AWS CLI commands.
 /**
- * Why an operation refuses a state bucket that exists but lacks some of backend bootstrap's
- * settings, and how to complete it. The backend root keeps no state and a rerun skips a bucket
- * that exists, so fffactory itself cannot finish an interrupted bootstrap.
+ * A state bucket that exists but lacks some of backend bootstrap's settings: where it is, what
+ * S3 reports of it, and each setting it lacks, in the order bootstrap applies them. The backend
+ * root keeps no state and a rerun skips a bucket that exists, so fffactory itself cannot finish
+ * an interrupted bootstrap: the operator completes it.
  */
-export function unreadyBucketRefusal(
+export interface UnreadyBucket {
+  readonly location: StateBucketLocation;
+  readonly readiness: StateBucketReadiness;
+  readonly missing: readonly BucketHardening[];
+}
+
+/** The bucket at `location` as an unready one, or undefined when it has every setting. */
+export function unreadyBucket(
   location: StateBucketLocation,
   readiness: StateBucketReadiness,
-): string[] {
+): UnreadyBucket | undefined {
   const missing = missingHardening(readiness);
-  return [
-    `The state bucket ${location.bucket} exists, but backend bootstrap did not finish it. It lacks:`,
-    ...missing.map((setting) => `  ${hardeningLabel(setting, readiness)}`),
-    "If another first apply is still bootstrapping it, wait for that to finish, then retry.",
-    "Otherwise complete the bucket with these AWS CLI commands, using credentials for account " +
-      `${location.accountId}, then retry:`,
-    ...missing.map((setting) => `  ${hardeningCommand(setting, location)}`),
-    ...(missing.includes("tls_only_policy")
-      ? ["put-bucket-policy replaces the whole bucket policy: add any statements it already has."]
-      : []),
-  ];
+  if (missing.length === 0) return undefined;
+  const { bucket, accountId, region } = location;
+  return { location: { bucket, accountId, region }, readiness, missing };
 }

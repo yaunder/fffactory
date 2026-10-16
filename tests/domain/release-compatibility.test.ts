@@ -1,10 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import { type Release, SCHEMA_VERSION } from "../../src/domain/instance";
-import { describeD11Refusal } from "../../src/domain/plan";
 import {
   assessUpgrade,
   compareReleases,
-  describePinMove,
+  pinMove,
   RELEASE_COMPATIBILITY,
   type ReleaseCompatibility,
   schemaVersionChange,
@@ -97,14 +96,18 @@ describe("upgrade compatibility (plan-apply §Upgrade)", () => {
       base_generation_since: release("0.3.0"),
     };
     const assessment = assessUpgrade("0.2.9-SECRETLIKE", release("0.3.1"), newerBase);
-    expect(assessment.kind).toBe("d11");
-    if (assessment.kind !== "d11") return;
-    expect(describeD11Refusal(assessment.refusal)).toEqual([
-      "Refusing: this change needs base migration, which fffactory does not have yet (D11; it arrives in milestone M3):",
-      "  release 0.3.1 needs base generation 2, which arrived in release 0.3.0: workers set up by the release factory.json pins have an older base",
-      "Nothing was applied. factory.json still pins its release; keep using that release until base migration arrives.",
-    ]);
-    expect(describeD11Refusal(assessment.refusal).join("\n")).not.toContain("SECRETLIKE");
+    expect(assessment).toEqual({
+      kind: "d11",
+      refusal: {
+        capability: "base migration",
+        reasons: [
+          "release 0.3.1 needs base generation 2, which arrived in release 0.3.0: workers set up by the release factory.json pins have an older base",
+        ],
+        instead:
+          "factory.json still pins its release; keep using that release until base migration arrives.",
+      },
+    });
+    expect(JSON.stringify(assessment)).not.toContain("SECRETLIKE");
   });
 
   test("a pin at or after the release that brought the base generation may move", () => {
@@ -129,14 +132,17 @@ describe("the schema version check before factory.json is validated (plan-apply 
   });
 
   test("an earlier schema version needs schema migration, refused until M3 (D11)", () => {
-    const change = schemaVersionChange(document(1), { ...COMPATIBLE, schema_version: 2 });
-    expect(change?.kind).toBe("d11");
-    if (change?.kind !== "d11") return;
-    expect(describeD11Refusal(change.refusal)).toEqual([
-      "Refusing: this change needs schema migration, which fffactory does not have yet (D11; it arrives in milestone M3):",
-      "  factory.json has schema version 1, and this release reads and writes schema version 2",
-      "Nothing was applied. factory.json still pins its release; keep using that release until schema migration arrives.",
-    ]);
+    expect(schemaVersionChange(document(1), { ...COMPATIBLE, schema_version: 2 })).toEqual({
+      kind: "d11",
+      refusal: {
+        capability: "schema migration",
+        reasons: [
+          "factory.json has schema version 1, and this release reads and writes schema version 2",
+        ],
+        instead:
+          "factory.json still pins its release; keep using that release until schema migration arrives.",
+      },
+    });
   });
 
   test("a later schema version was written by a later release: a downgrade", () => {
@@ -151,16 +157,19 @@ describe("the schema version check before factory.json is validated (plan-apply 
   });
 });
 
-describe("the pin move's preview", () => {
+describe("the pin move shown with an upgrade's plan (plan-apply §Upgrade)", () => {
   test("names both releases when the pin is a plain release", () => {
-    expect(describePinMove("0.2.0", release("0.3.0"))).toEqual([
-      "Upgrade: factory.json's release pin moves from 0.2.0 to 0.3.0. It is written once you approve this plan, before anything is applied.",
-    ]);
+    expect(pinMove("0.2.0", release("0.3.0"))).toEqual({
+      from: release("0.2.0"),
+      to: release("0.3.0"),
+    });
   });
 
-  test("never echoes a pin whose prerelease text could hold anything", () => {
-    expect(describePinMove("0.2.9-SECRETLIKE", release("0.3.0"))).toEqual([
-      "Upgrade: factory.json's release pin moves from the release it pins now to 0.3.0. It is written once you approve this plan, before anything is applied.",
-    ]);
+  test("never carries a pin whose prerelease text could hold anything", () => {
+    for (const pin of ["0.2.9-SECRETLIKE", "0.2.9+build", "v0.2.9"]) {
+      const move = pinMove(pin, release("0.3.0"));
+      expect(move).toEqual({ from: "unshown", to: release("0.3.0") });
+      expect(JSON.stringify(move)).not.toContain(pin);
+    }
   });
 });

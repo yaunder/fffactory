@@ -3,7 +3,11 @@
 `bun test` suites mirroring `src/`, plus `assets/` for the release assets:
 `domain/` (pure, no fakes), `application/` (use cases against in-memory ports
 from `support/`), `infrastructure/` (real temporary directories), `cli/`
-(in-process `run` through `support/cli-harness.ts`, and the spawned `main.ts`).
+(in-process `run` through `support/cli-harness.ts`, whose streams are plain unless a test
+colors one with `styles`, and which keeps both streams' lines in the order written
+(`written`), and the spawned `main.ts`; `cli/presentation/` checks the text laid
+out from domain data, pure like `domain/`, while `application/` tests assert that data, never
+its text).
 Each test maps to a section of a spec in `docs/specs/`. Areas with their own rules:
 
 - [`host/`](host/CLAUDE.md): the worker side of the host protocol, and its shared contract
@@ -113,4 +117,12 @@ as the managed Terraform's cache hit and interrupts a spawned `apply`, and
 `cli/plan-apply.test.ts` runs the real provisioner over it in process to check where a failed
 command's diagnostics go. `stopRunningTools`
 refuses every later command in its process, so it is tested only in a child process,
-`support/stop-tools-main.ts`.
+`support/stop-tools-main.ts`. `descriptorOutput` is tested over a real pipe in
+`support/descriptor-lines-main.ts`, read by a deliberately slow reader (`sleep` before `wc`)
+so the pipe fills: a delay in the reader, not a wait for the process. The undrained-pipe
+regression (`cli/descriptor-interrupted.test.ts`) keeps both pipes open without reading,
+waits for a real EAGAIN marker, then verifies first-signal stopping and bounded exit,
+including during normal output flushing and a prompt waiting to show its review, and
+second-signal killing. The merged-pipe prompt case verifies its question, echo and
+newline follow the full review. `infrastructure/terminal-prompt.test.ts` verifies a
+cancelled review flush never enters raw mode or reads an answer.

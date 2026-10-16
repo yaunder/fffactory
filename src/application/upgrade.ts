@@ -18,7 +18,7 @@
 import { type FactoryInstance, serializeInstance } from "../domain/instance";
 import {
   assessUpgrade,
-  describePinMove,
+  pinMove,
   type ReleaseCompatibility,
   schemaVersionChange,
   type UpgradeAssessment,
@@ -28,7 +28,7 @@ import {
   type FactoryApply,
   type FactoryApplyDependencies,
   type FactoryApplyRequest,
-  type PinMove,
+  type PinUpdate,
 } from "./apply-factory";
 import type { InstanceStore } from "./instance-store";
 
@@ -40,7 +40,7 @@ export interface UpgradeDependencies extends FactoryApplyDependencies {
 }
 
 export interface UpgradeRequest
-  extends Omit<FactoryApplyRequest, "planId" | "operation" | "pinMove"> {
+  extends Omit<FactoryApplyRequest, "planId" | "operation" | "pinUpdate"> {
   /** factory.json's exact text, as `instance` was read from it. */
   readonly text: string;
   /** What the running release declares. */
@@ -68,8 +68,8 @@ export async function upgradeFactory(
   if (assessment.kind !== "upgrade") return assessment;
   const upgraded: FactoryInstance = { ...request.instance, release: request.release };
   let pinned = false;
-  const pinMove: PinMove = {
-    preview: describePinMove(assessment.from, request.release),
+  const pinUpdate: PinUpdate = {
+    move: pinMove(assessment.from, request.release),
     write: async () => {
       if ((await deps.store.read(request.instancePath)) !== text) return false;
       await deps.store.write(request.instancePath, serializeInstance(upgraded));
@@ -82,7 +82,7 @@ export async function upgradeFactory(
     ...applying,
     instance: upgraded,
     operation: "upgrade",
-    pinMove,
+    pinUpdate,
   });
   return { kind: "upgrade", apply, pinned };
 }

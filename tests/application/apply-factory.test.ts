@@ -7,7 +7,14 @@ import { newLockRecord } from "../../src/domain/factory-lock";
 import type { HostKey, Release } from "../../src/domain/instance";
 import { pendingSteps, withStep } from "../../src/domain/installation";
 import { type OperationRecord, operationKey } from "../../src/domain/operation";
-import { PLAN_KEPT_MS, PLAN_TTL_MS, type SavedPlan } from "../../src/domain/plan";
+import {
+  changeTally,
+  type FactoryPlanReview,
+  PLAN_KEPT_MS,
+  PLAN_TTL_MS,
+  type PlanReview,
+  type SavedPlan,
+} from "../../src/domain/plan";
 import { FIRST_BOOT_POLL_MS } from "../../src/domain/rollout";
 import {
   BUCKET,
@@ -23,17 +30,29 @@ import {
 import { appliedRecord, installableWorker, machine } from "../support/fake-workers";
 import { hostAddress, NETWORK, STATE_BUCKET_ADDRESS } from "../support/fake-provisioner";
 
-/** Approval that records every plan it is shown and answers from `answers` in turn. */
+/** Approval that records every plan review it is shown and answers from `answers` in turn. */
 function approval(...answers: boolean[]) {
-  const shown: (readonly string[])[] = [];
+  const shown: PlanReview[] = [];
   const port: Approval = {
-    approve: async (plan) => {
-      shown.push(plan);
+    approve: async (review) => {
+      shown.push(review);
       return answers.shift() ?? false;
     },
   };
   return { port, shown };
 }
+
+/** A review an approval was shown, which must be a factory plan's. */
+function factoryReview(review: PlanReview | undefined): FactoryPlanReview {
+  if (review?.kind !== "factory") throw new Error("expected a factory plan review");
+  return review;
+}
+
+/** The addresses of the infrastructure changes a factory plan review shows. */
+const addresses = (review: PlanReview | undefined) =>
+  factoryReview(review).changes.map(({ address }) => address);
+
+const worker = (key: string) => ({ key: key as HostKey, hostname: `${FACTORY}-${key}` });
 
 /** A factory to apply: the world, an approval answering `answers`, and an interrupt switch. */
 function applying(
@@ -93,31 +112,28 @@ describe("fffactory apply (plan-apply §Apply)", () => {
       "builder-1 installed",
       "builder-2 installed",
     ]);
-    expect(approver.shown).toEqual([
-      [
-        "Factory plan:",
-        "  Configuration: /work/.fffactory/factory.json",
-        "  Factory: Test factory (fff-abcd1234)",
-        "  AWS account: 123456789012, Region: eu-west-2",
-        "  Release: 0.3.0",
-        "Infrastructure changes:",
-        `  + ${hostAddress("builder-2")}`,
-        "  1 to add, 0 to change, 0 to destroy.",
-        "Worker changes, one worker at a time:",
-        "  ~ builder-1 (fff-abcd1234-builder-1): install release 0.3.0 and its host configuration, then verify it",
-        "  ~ builder-2 (fff-abcd1234-builder-2): install release 0.3.0 and its host configuration, then verify it",
-        "Control-plane changes, before worker activation:",
-        "  ~ builder-1 (fff-abcd1234-builder-1): paseo-package, service-definition, listen-address",
-        "  ~ builder-2 (fff-abcd1234-builder-2): paseo-package, service-definition, listen-address",
-        "Repository changes, one worker at a time:",
-        "  ~ builder-1 (fff-abcd1234-builder-1): reconcile 0 placed repositories as factory; preserve and report unmanaged checkouts",
-        "  ~ builder-2 (fff-abcd1234-builder-2): reconcile 0 placed repositories as factory; preserve and report unmanaged checkouts",
-        "Dispatch changes, after every readiness gate:",
-        "  ~ builder-1 (fff-abcd1234-builder-1): remove the factory dispatch schedule if it exists",
-        "  ~ builder-2 (fff-abcd1234-builder-2): remove the factory dispatch schedule if it exists",
-        "End-to-end verification: observe each worker's release, repositories, Paseo and actual dispatch schedule.",
-      ],
+    const paseo = ["paseo-package", "service-definition", "listen-address"];
+    const builders = [worker("builder-1"), worker("builder-2")];
+    expect(approver.shown).toMatchObject([
+      {
+        kind: "factory",
+        target: {
+          instancePath: "/work/.fffactory/factory.json",
+          name: "Test factory",
+          factoryId: FACTORY,
+          accountId: "123456789012",
+          region: "eu-west-2",
+          release: "0.3.0",
+        },
+        changes: [{ address: hostAddress("builder-2"), actions: ["create"] }],
+        workers: builders,
+        repositories: builders.map((builder) => ({ ...builder, placed: [] })),
+        controlPlane: builders.map((builder) => ({ ...builder, changes: paseo })),
+        dispatch: builders.map((builder) => ({ ...builder, requested: false, schedule: null })),
+        stopped: [],
+      },
     ]);
+    expect(factoryReview(approver.shown[0]).pinMove).toBeUndefined();
     const planned = terraform.calls.find(({ call }) => call === "plan")?.request;
     const applied = terraform.calls.find(({ call }) => call === "applyPlan")?.request;
     expect(applied?.configuration).toEqual(TARGET);
@@ -366,10 +382,10 @@ describe("fffactory apply (plan-apply §Apply)", () => {
     const request = applyRequest();
     const approve = deps.approval.approve;
     deps.approval = {
-      approve: async (plan) => {
+      approve: async (review) => {
         // Only a factory.json changed under the running apply could lose it.
         (request.instance as { tailscale?: unknown }).tailscale = {};
-        return approve(plan);
+        return approve(review);
       },
     };
     const result = await applyFactory(deps, request);
@@ -394,11 +410,16 @@ describe("fffactory apply (plan-apply §Apply)", () => {
     });
     const result = await applyFactory(deps, applyRequest());
     expect(result).toMatchObject({ kind: "applied", bootstrapped: true });
-    expect(approver.shown.map((plan) => plan.at(-1))).toEqual([
-      `  + ${STATE_BUCKET_ADDRESS}`,
-      "End-to-end verification: observe each worker's release, repositories, Paseo and actual dispatch schedule.",
-    ]);
-    expect(approver.shown[1]).toContain("  2 to add, 0 to change, 0 to destroy.");
+    expect(approver.shown.map(({ kind }) => kind)).toEqual(["backend_bootstrap", "factory"]);
+    const [bootstrap] = approver.shown;
+    expect(bootstrap?.kind === "backend_bootstrap" && bootstrap.creates.at(-1)).toBe(
+      STATE_BUCKET_ADDRESS,
+    );
+    expect(changeTally(factoryReview(approver.shown[1]).changes)).toMatchObject({
+      add: 2,
+      change: 0,
+      destroy: 0,
+    });
     expect(
       terraform.calls.map(({ call, request }) => `${call} ${request.configuration.root}`),
     ).toEqual([
@@ -444,11 +465,8 @@ describe("fffactory apply (plan-apply §Apply)", () => {
     const { deps, approver, lockStore, terraform } = applying({ hosts: ["builder-1"] });
     const result = await applyFactory(deps, applyRequest());
     expect(result).toMatchObject({ kind: "applied", infrastructure: "unchanged" });
-    expect(approver.shown).toEqual([
-      expect.arrayContaining([
-        "Infrastructure: no changes.",
-        "  ~ builder-1 (fff-abcd1234-builder-1): install release 0.3.0 and its host configuration, then verify it",
-      ]),
+    expect(approver.shown).toMatchObject([
+      { kind: "factory", changes: [], workers: [worker("builder-1")], stopped: [] },
     ]);
     expect(terraform.calls.some(({ call }) => call === "applyPlan")).toBe(false);
     expect(lockStore.operationWrites.at(-1)).toMatchObject({
@@ -604,9 +622,10 @@ describe("a stopped worker (plan-apply §Stopped workers)", () => {
       deps,
       applyRequest({ instance: declaring("builder-1", "builder-2") }),
     );
-    expect(approver.shown[0]).toContain(
-      "  = builder-2 (fff-abcd1234-builder-2): skipped: stopped; start it with `fffactory worker start builder-2`, then apply again to install it",
-    );
+    expect(approver.shown[0]).toMatchObject({
+      workers: [worker("builder-1"), worker("builder-2")],
+      stopped: ["builder-2"],
+    });
     expect(result.kind === "applied" && result.workers.map((w) => w.kind)).toEqual([
       "installed",
       "stopped",
@@ -723,9 +742,17 @@ describe("a stopped worker (plan-apply §Stopped workers)", () => {
     expect(saved.stopped_workers).toEqual(["builder-2" as HostKey]);
     workers.transport.calls.length = 0;
     const result = await apply();
-    expect(approver.shown[0]).toContain(
-      "  = builder-2 (fff-abcd1234-builder-2): skipped: stopped; start it with `fffactory worker start builder-2`, then apply again to install it",
-    );
+    // The review a saved plan is applied from keeps every stage it was saved with.
+    expect(approver.shown[0]).toMatchObject({
+      workers: [worker("builder-1"), worker("builder-2")],
+      repositories: [
+        { ...worker("builder-1"), placed: [] },
+        { ...worker("builder-2"), placed: [] },
+      ],
+      controlPlane: saved.control_plane,
+      dispatch: saved.dispatch,
+      stopped: ["builder-2"],
+    });
     expect(result.kind === "applied" && result.workers.map((w) => `${w.key} ${w.kind}`)).toEqual([
       "builder-1 installed",
       "builder-2 stopped",
@@ -742,7 +769,7 @@ describe("a stopped worker (plan-apply §Stopped workers)", () => {
     expect(await started.apply()).toEqual({
       kind: "stale",
       planId: started.saved.plan_id,
-      reasons: ["worker builder-2 was stopped when it was planned, and is not now"],
+      reasons: [{ kind: "worker_started", key: "builder-2" as HostKey }],
     });
     expect(started.terraform.calls.some(({ call }) => call === "applyPlan")).toBe(false);
     expect(started.lockStore.operationWrites.at(-1)).toMatchObject({ status: "refused" });
@@ -751,16 +778,14 @@ describe("a stopped worker (plan-apply §Stopped workers)", () => {
     stopped.workers.machines.inventory = stopped.machines(["builder-1"]);
     expect(await stopped.apply()).toMatchObject({
       kind: "stale",
-      reasons: ["worker builder-1 is stopped now, and was not when it was planned"],
+      reasons: [{ kind: "worker_stopped", key: "builder-1" }],
     });
 
     const unknown = await plannedWhile(["builder-2"]);
     unknown.workers.machines.inventory = { kind: "unavailable", reason: "x" };
     expect(await unknown.apply()).toMatchObject({
       kind: "stale",
-      reasons: [
-        "the EC2 inventory could not be read to check that worker builder-2 is still stopped",
-      ],
+      reasons: [{ kind: "inventory_unreadable", key: "builder-2" }],
     });
   });
 
@@ -868,7 +893,7 @@ describe("applying a saved plan (plan-apply §Saved plans)", () => {
         planFile: `/plans/${FACTORY}/${saved.plan_id}/factory.tfplan`,
       });
     expect(approver.shown).toHaveLength(1);
-    expect(approver.shown[0]).toContain(`  + ${hostAddress("builder-2")}`);
+    expect(addresses(approver.shown[0])).toContain(hostAddress("builder-2"));
     expect(lockStore.operationWrites[0]?.plan_id).toBe(saved.plan_id);
     expect(planStore.saved.size).toBe(0);
     expect(terraform.world.hosts.has("builder-2")).toBe(true);
@@ -883,7 +908,7 @@ describe("applying a saved plan (plan-apply §Saved plans)", () => {
     expect(result).toEqual({
       kind: "stale",
       planId: saved.plan_id,
-      reasons: ["factory.json changed after it was planned"],
+      reasons: [{ kind: "configuration_changed" }],
     });
     expect(terraform.calls).toEqual([]);
     expect(lockStore.calls.some((call) => call.startsWith("create"))).toBe(false);
@@ -895,15 +920,54 @@ describe("applying a saved plan (plan-apply §Saved plans)", () => {
     deps.planStore.saved.set(`${FACTORY}/${saved.plan_id}`, plan);
     expect(await applyFactory(deps, withPlan(saved))).toMatchObject({
       kind: "stale",
-      reasons: ["it was planned by fffactory 0.2.0, not this release"],
+      reasons: [{ kind: "other_release", release: "0.2.0" }],
     });
     deps.planStore.saved.set(`${FACTORY}/${saved.plan_id}`, saved);
     expect(
       await applyFactory(deps, withPlan(saved, { assetsSha256: "d".repeat(64) })),
     ).toMatchObject({
       kind: "stale",
-      reasons: ["it was planned with other release assets than this fffactory's"],
+      reasons: [{ kind: "other_assets" }],
     });
+  });
+
+  test("a plan made for another factory.json, or in another AWS account, is refused", async () => {
+    const { deps, saved, terraform } = await planned();
+    expect(
+      await applyFactory(deps, withPlan(saved, { instancePath: "/elsewhere/factory.json" })),
+    ).toMatchObject({
+      kind: "stale",
+      reasons: [{ kind: "other_instance", instancePath: "/work/.fffactory/factory.json" }],
+    });
+    deps.planStore.saved.set(`${FACTORY}/${saved.plan_id}`, {
+      ...saved,
+      account_id: "210987654321",
+    });
+    expect(await applyFactory(deps, withPlan(saved))).toMatchObject({
+      kind: "stale",
+      reasons: [{ kind: "other_account", accountId: "210987654321" }],
+    });
+    expect(terraform.calls).toEqual([]);
+  });
+
+  test("a saved plan whose worker's Paseo state changed is stale, naming the worker", async () => {
+    const { deps, saved, lockStore } = await planned();
+    const observed = saved.control_plane ?? [];
+    expect(observed.map(({ key }) => `${key}`)).toEqual(["builder-1", "builder-2"]);
+    deps.planStore.saved.set(`${FACTORY}/${saved.plan_id}`, {
+      ...saved,
+      control_plane: observed.map((plan) =>
+        plan.key === "builder-1" ? { ...plan, observation: "unavailable:blocked" } : plan,
+      ),
+    });
+    expect(await applyFactory(deps, withPlan(saved))).toEqual({
+      kind: "stale",
+      planId: saved.plan_id,
+      reasons: [
+        { kind: "paseo_changed", key: "builder-1" as HostKey, hostname: `${FACTORY}-builder-1` },
+      ],
+    });
+    expect(lockStore.operationWrites.at(-1)).toMatchObject({ status: "refused" });
   });
 
   test("an expired plan is refused as expired, and pruned once long expired", async () => {
@@ -912,7 +976,7 @@ describe("applying a saved plan (plan-apply §Saved plans)", () => {
     expect(await applyFactory(deps, withPlan(saved, { clock: late }))).toEqual({
       kind: "stale",
       planId: saved.plan_id,
-      reasons: [`it expired at ${saved.expires_at}`],
+      reasons: [{ kind: "expired", expiresAt: saved.expires_at }],
     });
     expect(lockStore.calls.some((call) => call.startsWith("create"))).toBe(false);
     const later = () => new Date(Date.parse(saved.expires_at) + PLAN_KEPT_MS + 1);
@@ -929,7 +993,7 @@ describe("applying a saved plan (plan-apply §Saved plans)", () => {
     expect(result).toEqual({
       kind: "stale",
       planId: saved.plan_id,
-      reasons: ["the factory's Terraform state changed after it was planned"],
+      reasons: [{ kind: "state_changed" }],
     });
     expect(terraform.calls).toEqual([]);
     expect(lockStore.operationWrites.at(-1)).toMatchObject({ status: "refused" });
@@ -1025,7 +1089,7 @@ describe("applying a saved plan (plan-apply §Saved plans)", () => {
     expect(await applyFactory(deps, withPlan(saved))).toEqual({
       kind: "stale",
       planId: saved.plan_id,
-      reasons: ["the state bucket no longer exists"],
+      reasons: [{ kind: "state_bucket_missing" }],
     });
     expect(terraform.calls).toEqual([]);
   });
@@ -1092,13 +1156,13 @@ describe("an interrupted apply (plan-apply §Interruption)", () => {
 
     expect(rerun).toMatchObject({ kind: "applied" });
     // The rerun planned from what the interrupted apply left: only the missing host.
-    expect(approver.shown.at(-1)).toEqual(
-      expect.arrayContaining([
-        `  + ${hostAddress("builder-2")}`,
-        "  1 to add, 0 to change, 0 to destroy.",
-      ]),
-    );
-    expect(approver.shown.at(-1)).not.toContain(`  + ${NETWORK}`);
+    expect(addresses(approver.shown.at(-1))).toContain(hostAddress("builder-2"));
+    expect(changeTally(factoryReview(approver.shown.at(-1)).changes)).toMatchObject({
+      add: 1,
+      change: 0,
+      destroy: 0,
+    });
+    expect(addresses(approver.shown.at(-1))).not.toContain(NETWORK);
     expect([...terraform.world.hosts].sort()).toEqual(["builder-1", "builder-2"]);
     expect(lockStore.locks.size).toBe(0);
     expect(lockStore.operationWrites.at(-1)).toMatchObject({ status: "succeeded" });

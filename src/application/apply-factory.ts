@@ -18,7 +18,7 @@
  * nothing more and leaves its lock and record; after `fffactory lock break`, a rerun plans
  * again from what exists and converges.
  *
- * `fffactory upgrade` runs the same operation with a `PinMove`: its plan is made for the
+ * `fffactory upgrade` runs the same operation with a `PinUpdate`: its plan is made for the
  * running release, shown after the pin move and approved with it, and the new pin is written
  * under the lock once approved, before anything is applied.
  */
@@ -48,10 +48,10 @@ import {
   changesSomething,
   createdWorkers,
   declaredWorkers,
-  describePlan,
+  type FactoryPlanReview,
+  factoryPlanReview,
   hostMachineRefusal,
   newPlanId,
-  type PlannedWorker,
   type PlannedControlPlane,
   resizeRefusal,
   type PlannedDispatch,
@@ -60,10 +60,12 @@ import {
   type ResourceChange,
   resourceChanges,
   type SavedPlan,
+  type StaleReason,
   stateStaleness,
   stoppedStaleness,
   plannedDispatch,
 } from "../domain/plan";
+import type { PinMove } from "../domain/release-compatibility";
 import { rolloutResult, skipped, type WorkerIdentity, type WorkerOutcome } from "../domain/rollout";
 import {
   type ChangeType,
@@ -120,9 +122,9 @@ export interface FactoryApplyDependencies
  * `fffactory upgrade`'s move of factory.json's release pin to the running release, approved
  * with the plan and written under the lock once approved, before anything is applied.
  */
-export interface PinMove {
-  /** What the plan shows first. */
-  readonly preview: readonly string[];
+export interface PinUpdate {
+  /** The pin move the plan's review shows first; only shown, never what writes the pin. */
+  readonly move: PinMove;
   /**
    * Writes the new pin. False, writing nothing, when factory.json is no longer the text the
    * plan was made from.
@@ -136,7 +138,7 @@ export interface FactoryApplyRequest extends Omit<FactoryPlanRequest, "now"> {
   /** The operation the lock and its record name; `apply` unless given. */
   readonly operation?: string;
   /** Upgrade's pin move. Never with a saved plan: an upgrade always plans afresh. */
-  readonly pinMove?: PinMove;
+  readonly pinUpdate?: PinUpdate;
   /** This machine's name, recorded as the lock holder's host. */
   readonly host: string;
   readonly clock: () => Date;
@@ -153,7 +155,7 @@ export type FactoryApply =
   | { readonly kind: "no_plan"; readonly planId: string }
   /** The saved plan's record cannot be read, or its Terraform plan changed after saving. */
   | { readonly kind: "damaged_plan"; readonly planId: string }
-  | { readonly kind: "stale"; readonly planId: string; readonly reasons: readonly string[] }
+  | { readonly kind: "stale"; readonly planId: string; readonly reasons: readonly StaleReason[] }
   | { readonly kind: "declined"; readonly stage: "backend" | "infrastructure" }
   /** factory.json changed after the upgrade's plan was made: the pin was not moved. */
   | { readonly kind: "configuration_changed" }
@@ -305,7 +307,7 @@ async function savedChanges(
   });
   const shown = resourceChanges(plan);
   if (shown === undefined)
-    return { kind: "unexpected_plan", unexpected: ["Terraform's plan could not be read"] };
+    return { kind: "unexpected_plan", unexpected: [{ kind: "unreadable_plan" }] };
   const changes = shown.filter(changesSomething);
   if (!sameChanges(changes, saved.changes)) return { kind: "damaged_plan", planId: saved.plan_id };
   const lost = hostMachineRefusal(changes);
@@ -358,7 +360,7 @@ function operationLog(
   let record = startOperation(
     locked.lock.record,
     locked.saved?.plan_id,
-    request.pinMove === undefined ? [] : [PIN_STAGE],
+    request.pinUpdate === undefined ? [] : [PIN_STAGE],
   );
   let written = false;
   const write = async (next: OperationRecord) => {
@@ -457,27 +459,17 @@ function interruptedUnder(
   };
 }
 
-/** The infrastructure stage's changes and the workers the approved plan installs. */
-interface ApprovedChanges {
-  readonly changes: readonly ResourceChange[];
-  readonly workers: readonly PlannedWorker[];
-  readonly controlPlane: readonly PlannedControlPlane[];
-  readonly dispatch: readonly PlannedDispatch[];
-  /** The workers the plan skips as stopped. */
-  readonly stopped: readonly HostKey[];
-}
-
 /**
  * Upgrade's pin, once its plan is approved: written unless factory.json changed after the
  * plan was made. Undefined when the operation may go on.
  */
 async function movePin(
   deps: FactoryApplyDependencies,
-  pinMove: PinMove,
+  pinUpdate: PinUpdate,
   { log, progress }: Tracking,
 ): Promise<FactoryApply | undefined> {
   progress.step = "pinning";
-  const written = await pinMove.write();
+  const written = await pinUpdate.write();
   // Past pinning once the pin is written: a later failure is not the pin's.
   if (written) progress.step = "pinned";
   if (deps.interrupted()) return interruptedUnder(log);
@@ -499,25 +491,19 @@ async function approveAndApply(
   request: FactoryApplyRequest,
   locked: LockedApply,
   tracking: Tracking,
-  {
-    plan,
-    changes,
-    workers,
-    controlPlane,
-    dispatch,
-    stopped,
-  }: ApprovedChanges & { readonly plan: readonly string[] },
+  review: FactoryPlanReview,
 ): Promise<FactoryApply> {
+  const { changes, workers, controlPlane, dispatch, stopped } = review;
   const { log, progress } = tracking;
   await log.stage("awaiting_approval");
-  const approved = await deps.approval.approve(plan);
+  const approved = await deps.approval.approve(review);
   if (deps.interrupted()) return interruptedUnder(log);
   if (!approved) {
     await log.finish("declined", "declined");
     return { kind: "declined", stage: "infrastructure" };
   }
-  if (request.pinMove !== undefined) {
-    const stopped = await movePin(deps, request.pinMove, tracking);
+  if (request.pinUpdate !== undefined) {
+    const stopped = await movePin(deps, request.pinUpdate, tracking);
     if (stopped !== undefined) return stopped;
   }
   const swapped = await swappedPlanFile(deps, locked);
@@ -601,7 +587,7 @@ async function workersStage(
       return {
         kind: "stale",
         planId: locked.planId,
-        reasons: [`Paseo state on ${approved.hostname} changed after it was planned`],
+        reasons: [{ kind: "paseo_changed", key: approved.key, hostname: approved.hostname }],
       };
     }
   }
@@ -1151,9 +1137,6 @@ async function infrastructureStage(
     await log.finish("refused", "refused");
     return ready;
   }
-  // Every declared worker is in the workers stage; a factory that declares none has no worker
-  // changes, and its plan says so.
-  const workers = declaredWorkers(request.instance, locked.target.factoryId);
   // A saved plan skips the workers stopped when it was made, which are stopped still.
   const stopped = locked.saved?.stopped_workers ?? (machines.stopped ?? []).map(({ key }) => key);
   const controlPlane =
@@ -1164,31 +1147,23 @@ async function infrastructureStage(
       requireTag(request.instance),
       request.instance.hosts ?? [],
       request.assetsSha256,
-      new Set(createdWorkers(ready.changes, workers)),
+      new Set(
+        createdWorkers(ready.changes, declaredWorkers(request.instance, locked.target.factoryId)),
+      ),
       new Set(stopped),
     ));
   const dispatch =
     locked.saved?.dispatch ?? plannedDispatch(request.instance, locked.target.factoryId);
-  const plan = [
-    ...(request.pinMove?.preview ?? []),
-    ...describePlan(
-      locked.target,
-      ready.changes,
-      workers,
-      request.instance,
-      controlPlane,
-      dispatch,
-      stopped,
-    ),
-  ];
-  return approveAndApply(deps, request, locked, tracking, {
-    plan,
+  const review = factoryPlanReview({
+    target: locked.target,
     changes: ready.changes,
-    workers,
+    instance: request.instance,
     controlPlane,
     dispatch,
     stopped,
+    pinMove: request.pinUpdate?.move,
   });
+  return approveAndApply(deps, request, locked, tracking, review);
 }
 
 /** Every step of the operation that runs under the lock, which it settles at the end. */
@@ -1239,7 +1214,7 @@ async function lockAndApply(
     ...request,
     planFile: files.backend,
     operation: request.operation ?? "apply",
-    mayBootstrap: saved === undefined && request.pinMove === undefined,
+    mayBootstrap: saved === undefined && request.pinUpdate === undefined,
   });
   switch (start.kind) {
     case "acquired":
@@ -1250,8 +1225,8 @@ async function lockAndApply(
         bootstrapped: start.bootstrapped,
       });
     case "missing":
-      if (request.pinMove !== undefined) return { kind: "no_state_bucket" };
-      return { kind: "stale", planId, reasons: ["the state bucket no longer exists"] };
+      if (request.pinUpdate !== undefined) return { kind: "no_state_bucket" };
+      return { kind: "stale", planId, reasons: [{ kind: "state_bucket_missing" }] };
     case "declined":
       return { kind: "declined", stage: "backend" };
     case "interrupted":

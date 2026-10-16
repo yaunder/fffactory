@@ -149,12 +149,19 @@ and exits 1.
 A worker the workers stage skipped keeps whatever release it had: its release
 verdict is `skipped`, `Release left as is: SUMMARY`, never `absent`, and a
 skipped dispatch is `Dispatch left as is` (with its own summary when the
-workers stage installed the worker). The verdict ends with the skips' next
-actions, each named once:
+workers stage installed the worker); the operation record keeps each worker's
+verdict and these details. Apply's Result shows the factory's verdict as its
+`Verification` row, and each worker's stages under its row, a dispatch skipped
+for the workers stage's reason saying only `skipped`; the skips' next actions
+are said once, in the Next block
+([plan and apply §What apply prints](plan-apply.md#what-apply-prints)):
 
 ```text
-End-to-end verification: The factory is not ready: 1 of 1 workers need attention
-  fff-abcd1234-builder-1 is not ready: Release left as is: Paseo maintenance is deferred while agents may be active; Control plane is deferred; Dispatch left as is; Close the active agents on fff-abcd1234-builder-1, then rerun `fffactory apply`
+  ! builder-1          skipped · Paseo maintenance is deferred while agents may be active
+    ! Control plane   deferred · Maintenance (paseo-package, service-definition, listen-address) was deferred while agents may be active on fff-abcd1234-builder-1; it stays on its complete current release
+    ✔ Repositories    synchronized
+    ↷ Dispatch        skipped
+  ! Verification       The factory is not ready: 1 of 1 workers need attention
 ```
 
 ## Readiness progression

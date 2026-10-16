@@ -143,6 +143,8 @@ function instanceCheck(loaded: LoadedInstance): CheckResult {
       `with --instance PATH or ${INSTANCE_ENVIRONMENT_VARIABLE}`;
     return notReady(INSTANCE_CHECK, "No factory instance found", thenRerun(action));
   }
+  // Published wording: the source's words are `describeSource`'s, the same the CLI's
+  // `Instance:` line uses, and doctor's JSON summary carries them.
   const named = `${loaded.path} (${describeSource(loaded.source)})`;
   const result = loaded.validation;
   if (!result.valid) {

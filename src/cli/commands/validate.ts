@@ -1,11 +1,8 @@
 import { parseArgs } from "node:util";
-import {
-  describeSource,
-  INSTANCE_ENVIRONMENT_VARIABLE,
-  resolveInstance,
-} from "../../application/resolve-instance";
+import { INSTANCE_ENVIRONMENT_VARIABLE, resolveInstance } from "../../application/resolve-instance";
 import { validateInstance } from "../../application/validate-instance";
 import { SCHEMA_VERSION } from "../../domain/instance";
+import { instanceLine } from "../presentation/instance-source";
 import type { CliContext, Command } from "../context";
 import { printCompleteness } from "./completeness";
 
@@ -27,7 +24,7 @@ async function validate(args: readonly string[], context: CliContext): Promise<n
     return 1;
   }
   const result = await validateInstance(context.store, resolution.path);
-  const heading = `Instance: ${resolution.path} (${describeSource(resolution.source)})`;
+  const heading = instanceLine(resolution);
   if (!result.valid) {
     context.err(heading);
     context.err("Invalid factory.json:");

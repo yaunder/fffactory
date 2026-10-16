@@ -16,7 +16,7 @@ function terminal(options: { tty?: boolean } = {}) {
     },
   });
   const written: string[] = [];
-  const output = { write: (text: string) => written.push(text) };
+  const output = { write: (text: string) => written.push(text), flush: async () => true };
   return { input, output, written, prompt: terminalPrompt(input, output) };
 }
 
@@ -25,7 +25,9 @@ describe("terminalPrompt", () => {
     expect(terminal().prompt.interactive).toBe(true);
     expect(terminal({ tty: false }).prompt.interactive).toBe(false);
     const input = Object.assign(new PassThrough(), { isTTY: true });
-    expect(terminalPrompt(input, { write: () => true }).interactive).toBe(true);
+    expect(terminalPrompt(input, { write: () => true, flush: async () => true }).interactive).toBe(
+      true,
+    );
   });
 
   test("a hidden answer is read in raw mode and never written back", async () => {
@@ -150,5 +152,51 @@ describe("terminalPrompt", () => {
     const read = prompt.readInput(8);
     input.destroy(new Error("EIO"));
     await expect(read).rejects.toThrow("EIO");
+  });
+});
+
+describe("prompt output barriers (cli-output §Plain output)", () => {
+  test.each(["ask", "askHidden"] as const)(
+    "%s does not read or enter raw mode when the prior output flush is cancelled",
+    async (method) => {
+      const { input, written, output } = terminal();
+      let ready!: (visible: boolean) => void;
+      const prompt = terminalPrompt(input, {
+        ...output,
+        flush: () =>
+          new Promise<boolean>((resolve) => {
+            ready = resolve;
+          }),
+      });
+      const answer = prompt[method]("Apply? ");
+      input.write("yes\r");
+      expect(input.modes).toEqual([]);
+      expect(input.listenerCount("data")).toBe(0);
+      expect(written).toEqual([]);
+      ready(false);
+      expect(await answer).toBeUndefined();
+      expect(input.modes).toEqual([]);
+      expect(input.listenerCount("data")).toBe(0);
+    },
+  );
+
+  test("starts reading only after the complete prior review has flushed", async () => {
+    const { input, written, output } = terminal();
+    let ready!: (visible: boolean) => void;
+    const prompt = terminalPrompt(input, {
+      ...output,
+      flush: () =>
+        new Promise<boolean>((resolve) => {
+          ready = resolve;
+        }),
+    });
+    const answer = prompt.ask("Apply? ");
+    input.write("yes\r");
+    expect(input.listenerCount("data")).toBe(0);
+    expect(written).toEqual([]);
+    ready(true);
+    expect(await answer).toBe("yes");
+    expect(written.join("")).toBe("Apply? yes\n");
+    expect(input.modes).toEqual([true, false]);
   });
 });

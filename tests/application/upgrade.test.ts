@@ -3,8 +3,9 @@ import { applyFactory, type FactoryApplyRequest } from "../../src/application/ap
 import type { Approval } from "../../src/application/approval";
 import { breakFactoryLock } from "../../src/application/factory-lock";
 import { type UpgradeRequest, upgradeFactory } from "../../src/application/upgrade";
-import type { FactoryInstance, Release } from "../../src/domain/instance";
+import type { FactoryInstance, HostKey, Release } from "../../src/domain/instance";
 import type { OperationRecord } from "../../src/domain/operation";
+import type { PlanReview } from "../../src/domain/plan";
 import type { ReleaseCompatibility } from "../../src/domain/release-compatibility";
 import { BUCKET, declaring, FACTORY, factory, NOW, planRequest } from "../support/factory-world";
 import { MemoryInstanceStore } from "../support/memory-instance-store";
@@ -39,12 +40,12 @@ function upgrading(
   const text = textOf(instance);
   const store = new MemoryInstanceStore({ [PATH]: text });
   const events: Event[] = [];
-  const shown: (readonly string[])[] = [];
+  const shown: PlanReview[] = [];
   const answers = [...(options.answers ?? [true])];
   let beforeAnswer: (() => void) | undefined;
   const approval: Approval = {
-    approve: async (plan) => {
-      shown.push(plan);
+    approve: async (review) => {
+      shown.push(review);
       beforeAnswer?.();
       return answers.shift() ?? false;
     },
@@ -115,9 +116,16 @@ describe("fffactory upgrade (plan-apply §Upgrade)", () => {
       pinned: true,
       apply: { kind: "applied", infrastructure: "unchanged", workers: [] },
     });
-    expect(shown[0]?.slice(-2)).toEqual([
-      "Infrastructure: no changes.",
-      "Workers: none declared. Declare a host in factory.json's hosts, then create it with `fffactory apply`.",
+    expect(shown).toMatchObject([
+      {
+        kind: "factory",
+        changes: [],
+        workers: [],
+        repositories: [],
+        controlPlane: [],
+        dispatch: [],
+        pinMove: { from: "0.2.0", to: "0.3.0" },
+      },
     ]);
     expect(JSON.parse(store.files[PATH] ?? "")).toEqual({ ...instance, release: "0.3.0" });
     expect(lockStore.locks.size).toBe(0);
@@ -127,25 +135,33 @@ describe("fffactory upgrade (plan-apply §Upgrade)", () => {
     const { deps, request, store, events, shown, lockStore, pinned } = upgrading();
     const result = await upgradeFactory(deps, request);
     expect(result).toMatchObject({ kind: "upgrade", pinned: true, apply: { kind: "applied" } });
+    // The pin move, and every stage of the plan made for the running release.
+    const builder = { key: "builder-1" as HostKey, hostname: "fff-abcd1234-builder-1" };
     expect(shown).toEqual([
-      [
-        "Upgrade: factory.json's release pin moves from 0.2.0 to 0.3.0. It is written once you approve this plan, before anything is applied.",
-        "Factory plan:",
-        `  Configuration: ${PATH}`,
-        "  Factory: Test factory (fff-abcd1234)",
-        "  AWS account: 123456789012, Region: eu-west-2",
-        "  Release: 0.3.0",
-        "Infrastructure: no changes.",
-        "Worker changes, one worker at a time:",
-        "  ~ builder-1 (fff-abcd1234-builder-1): install release 0.3.0 and its host configuration, then verify it",
-        "Control-plane changes, before worker activation:",
-        "  ~ builder-1 (fff-abcd1234-builder-1): paseo-package, service-definition, listen-address",
-        "Repository changes, one worker at a time:",
-        "  ~ builder-1 (fff-abcd1234-builder-1): reconcile 0 placed repositories as factory; preserve and report unmanaged checkouts",
-        "Dispatch changes, after every readiness gate:",
-        "  ~ builder-1 (fff-abcd1234-builder-1): remove the factory dispatch schedule if it exists",
-        "End-to-end verification: observe each worker's release, repositories, Paseo and actual dispatch schedule.",
-      ],
+      {
+        kind: "factory",
+        target: {
+          instancePath: PATH,
+          name: "Test factory",
+          factoryId: FACTORY,
+          accountId: "123456789012",
+          region: "eu-west-2",
+          release: RUNNING,
+        },
+        changes: [],
+        workers: [builder],
+        repositories: [{ ...builder, placed: [] }],
+        controlPlane: [
+          {
+            ...builder,
+            observation: "no-release",
+            changes: ["paseo-package", "service-definition", "listen-address"],
+          },
+        ],
+        dispatch: [{ ...builder, requested: false, schedule: null }],
+        stopped: [],
+        pinMove: { from: "0.2.0" as Release, to: RUNNING },
+      },
     ]);
     expect(pinOf(store)).toBe("0.3.0");
     // The rest of factory.json is unchanged: only the pin moved.

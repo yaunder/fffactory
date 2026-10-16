@@ -24,6 +24,8 @@ export type InstanceResolution =
   /** `path` is set when an explicit selection named a path that is not a file. */
   | { readonly found: false; readonly message: string; readonly path?: string };
 
+export type FoundInstance = Extract<InstanceResolution, { readonly found: true }>;
+
 const SOURCE_DESCRIPTIONS: Readonly<Record<InstanceSource, string>> = {
   "--instance": "--instance",
   FFFACTORY_INSTANCE: INSTANCE_ENVIRONMENT_VARIABLE,
@@ -31,7 +33,13 @@ const SOURCE_DESCRIPTIONS: Readonly<Record<InstanceSource, string>> = {
   home: "~/.fffactory/factory.json",
 };
 
-/** How an operator would name the discovery source, such as `nearest .fffactory/factory.json`. */
+/**
+ * How an operator would name the discovery source, such as `nearest .fffactory/factory.json`.
+ * Published wording, not layout: doctor embeds it in its JSON `summary` (`application/doctor.ts`),
+ * so it stays here, where doctor can reach it, and changing it changes doctor's report. The
+ * human `Instance:` line reuses it (`cli/presentation/instance-source.ts`); there is no second
+ * mapping.
+ */
 export function describeSource(source: InstanceSource): string {
   return SOURCE_DESCRIPTIONS[source];
 }

@@ -984,9 +984,9 @@ describe("fffactory worker terminate (worker-lifecycle §Terminate (remove))", (
     expect(await run(["validate"], after())).toBe(0);
     expect(cli.out.at(-1)).toBe("Complete: nothing further is needed.");
     expect(await run(["plan"], after())).toBe(0);
-    expect(cli.out).toContain("Infrastructure: no changes.");
+    expect(cli.out).toContain("  Infrastructure   no changes");
     expect(cli.out).toContain(
-      "Workers: none declared. Declare a host in factory.json's hosts, then create it with `fffactory apply`.",
+      "  Workers          none declared. Declare a host in factory.json's hosts, then create it with `fffactory apply`.",
     );
     expect(await run(["status"], after())).toBe(0);
     expect(cli.out.at(-1)).toBe("Ready: no workers are declared.");
@@ -999,8 +999,8 @@ describe("fffactory worker terminate (worker-lifecycle §Terminate (remove))", (
     // Another plan ID than the first plan's, which is still saved.
     const randomBytes = (count: number) => new Uint8Array(count).fill(1);
     expect(await run(["plan"], after({ randomBytes }))).toBe(0);
-    expect(cli.out).toContain('  + module.hosts.aws_instance.host["builder-3"]');
-    expect(cli.out).toContain("  1 to add, 0 to change, 0 to destroy.");
+    expect(cli.out).toContain('    + module.hosts.aws_instance.host["builder-3"]');
+    expect(cli.out).toContain("  Infrastructure   1 to add, 0 to change, 0 to destroy");
     const planned = cli.terraform.calls.filter((entry) => entry.call === "plan").at(-1);
     expect(planned?.request.variables.hosts).toEqual({
       "builder-3": { instance_type: "m7i.2xlarge", root_volume_gib: 128 },

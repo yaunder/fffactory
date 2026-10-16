@@ -8,6 +8,7 @@
  */
 import { constants } from "node:os";
 import { interruptible, RETURN_GRACE_MS } from "../../src/cli/interrupts";
+import { plainStyle, writer } from "../../src/cli/presentation/style";
 import { run } from "../../src/cli/run";
 import {
   killRunningTools,
@@ -27,6 +28,8 @@ const interrupts = interruptible({
   on: (signal, handler) => process.on(signal, handler),
   off: (signal, handler) => process.off(signal, handler),
   exit: (code) => process.exit(code),
+  flushOutput: async () => {},
+  cancelOutput: () => {},
   signalNumber: (signal) => constants.signals[signal],
   stopRunningTools,
   killRunningTools,
@@ -60,8 +63,8 @@ await interrupts.run(
   () =>
     run(["apply"], {
       ...context,
-      out: (line) => console.log(line),
-      err: (line) => console.error(line),
+      out: writer((line) => console.log(line), plainStyle),
+      err: writer((line) => console.error(line), plainStyle),
     }),
   { waitsOnInterrupt: true },
 );

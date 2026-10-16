@@ -10,7 +10,8 @@ import {
   requireExpectedAccount,
 } from "../../application/require-expected-account";
 import { accountExpectation } from "../../domain/aws-account";
-import { describeHeldLock, type HeldLock } from "../../domain/factory-lock";
+import type { HeldLock } from "../../domain/factory-lock";
+import { describeHeldLock } from "../presentation/lock";
 import type { CliContext, Command } from "../context";
 import { loadInstance, printAccountRefusal, printIssues } from "./selected-instance";
 

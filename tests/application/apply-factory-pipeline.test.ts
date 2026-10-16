@@ -13,6 +13,7 @@ import { planFactory } from "../../src/application/plan-factory";
 import { hostProjection, hostProjectionJson } from "../../src/domain/host-projection";
 import type { HostInspection } from "../../src/domain/host-protocol";
 import type { FactoryInstance, HostKey } from "../../src/domain/instance";
+import type { PlanReview } from "../../src/domain/plan";
 import { sha256Text } from "../../src/infrastructure/release-tarball";
 import { fakeCallerIdentity } from "../support/doctor-fakes";
 import { fakeControlPlane, fakeWorkflowQueue as fakeQueue } from "../support/fake-control-plane";
@@ -478,12 +479,12 @@ describe("apply's full pipeline (dispatch §Requested versus active, §End-to-en
       machines: [machine("builder-1"), machine("builder-2", "stopped", "i-0000000000000000b")],
     };
     const world = factory({ hosts: ["builder-1", "builder-2"], workers: fleet });
-    const shown: (readonly string[])[] = [];
+    const shown: PlanReview[] = [];
     const deps = {
       ...world.deps,
       approval: {
-        approve: async (plan: readonly string[]) => {
-          shown.push(plan);
+        approve: async (review: PlanReview) => {
+          shown.push(review);
           return true;
         },
       },
@@ -504,12 +505,16 @@ describe("apply's full pipeline (dispatch §Requested versus active, §End-to-en
       clock: () => new Date(NOW.getTime() + 1000),
     });
     if (result.kind !== "applied") throw new Error(`expected applied, got ${result.kind}`);
-    expect(shown[0]).toEqual(
-      expect.arrayContaining([
-        `  = builder-2 (${B2}): skipped: stopped; start it with \`fffactory worker start builder-2\`, then apply again to install it`,
-        `  = builder-2 (${B2}): skipped: stopped`,
-      ]),
-    );
+    // Every stage the plan shows for the stopped worker is skipped, not left out.
+    const keys = ["builder-1", "builder-2"];
+    expect(shown[0]).toMatchObject({
+      kind: "factory",
+      workers: keys.map((key) => ({ key })),
+      repositories: keys.map((key) => ({ key })),
+      controlPlane: keys.map((key) => ({ key })),
+      dispatch: keys.map((key) => ({ key })),
+      stopped: ["builder-2"],
+    });
     expect(result.workers.map((w) => w.kind)).toEqual(["installed", "stopped"]);
     expect(result.repositories?.map((r) => r.kind)).toEqual(["synchronized", "stopped"]);
     expect(result.controlPlane?.map((c) => c.kind)).toEqual(["applied", "stopped"]);

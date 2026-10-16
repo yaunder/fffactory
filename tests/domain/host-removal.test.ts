@@ -1,6 +1,5 @@
 import { describe, expect, test } from "bun:test";
 import {
-  describeRemovalPlan,
   failedAfterRemoval,
   HOST_SECRETS_POLICY,
   type HostRemoval,
@@ -23,8 +22,6 @@ import {
   type SecretReference,
   serializeInstance,
 } from "../../src/domain/instance";
-import type { PlanTarget, ResourceChange } from "../../src/domain/plan";
-import type { Release } from "../../src/domain/instance";
 
 const KEY = "builder-1" as HostKey;
 const WORKER = { key: KEY, hostname: "fff-abcd1234-builder-1" };
@@ -342,34 +339,6 @@ describe("the scoped removal plan (worker-lifecycle §Terminate (remove))", () =
           details: [`${HOST_SECRETS_POLICY} would be updated in place`],
         });
     });
-  });
-});
-
-describe("the removal plan shown for approval (worker-lifecycle §Terminate (remove))", () => {
-  const target: PlanTarget = {
-    instancePath: "/work/.fffactory/factory.json",
-    name: "Test factory",
-    factoryId: "fff-abcd1234" as FactoryId,
-    accountId: "123456789012",
-    region: "eu-west-2",
-    release: "0.3.0" as Release,
-  };
-  const deleting: ResourceChange[] = [{ address: HOST, type: "aws_instance", actions: ["delete"] }];
-
-  test("names the factory, Terraform's changes, the factory.json edit and the devices", () => {
-    expect(describeRemovalPlan(target, deleting, WORKER)).toEqual([
-      "Removal plan:",
-      "  Configuration: /work/.fffactory/factory.json",
-      "  Factory: Test factory (fff-abcd1234)",
-      "  AWS account: 123456789012, Region: eu-west-2",
-      "  Release: 0.3.0",
-      "Infrastructure changes:",
-      `  - ${HOST}`,
-      "  0 to add, 0 to change, 1 to destroy.",
-      "factory.json: remove host builder-1.",
-      "Tailnet: delete the devices named fff-abcd1234-builder-1 that carry the factory's tag.",
-    ]);
-    expect(describeRemovalPlan(target, [], WORKER)).toContain("Infrastructure: no changes.");
   });
 });
 

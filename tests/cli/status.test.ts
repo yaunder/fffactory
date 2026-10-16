@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import Ajv2020 from "ajv/dist/2020";
 import schema from "../../schemas/status-report.schema.json";
+import { ansiStyle } from "../../src/cli/presentation/style";
 import { run } from "../../src/cli/run";
 import type { SecretReference } from "../../src/domain/instance";
 import { harness } from "../support/cli-harness";
@@ -431,6 +432,24 @@ describe("fffactory status --json", () => {
       await Bun.file(`${import.meta.dir}/fixtures/status-report.json`).text(),
     );
     expect(schemaAccepts(document)).toBe(true);
+  });
+
+  test("the document is the same unstyled bytes when both streams are colored (cli output §JSON)", async () => {
+    const { context, out } = harness(
+      store(),
+      {},
+      {
+        machines: RUNNING,
+        tailnet: fakeTailnet(peers(peer(B1, { online: false }), peer(B2))).tailnet,
+        transport: ready().transport,
+        styles: { out: ansiStyle, err: ansiStyle },
+      },
+    );
+    expect(await run(["status", "--json"], context)).toBe(2);
+    expect(out.join("\n")).not.toContain("\x1b");
+    expect(`${out[0]}\n`).toBe(
+      await Bun.file(`${import.meta.dir}/fixtures/status-report.json`).text(),
+    );
   });
 
   test("every worker state validates against the schema", async () => {
