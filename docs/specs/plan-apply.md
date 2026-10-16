@@ -623,6 +623,12 @@ host key issue ([provisioning §Stable host keys](provisioning.md#stable-host-ke
 each naming the command for its key. The refusals of an upgrade that needs a newer base generation or
 changes the schema version are [upgrade's](#compatibility-refusals-d11).
 
+Every removal command in the headline, host key reasons and Next block repeats
+the explicit `--instance` and `--profile` of the refused command, with POSIX
+shell quoting for spaces and single quotes. Literal backticks in those values
+remain part of the command in both plain and colored output. Replacement and
+migration refusals keep their existing guidance without adding a removal command.
+
 ## Saved plans
 
 A plan with changes is saved in the operator's local plan store,

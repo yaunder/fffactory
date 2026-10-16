@@ -439,6 +439,37 @@ describe("fffactory plan (plan-apply §Plan)", () => {
     ]);
   });
 
+  test.each(["plan", "apply"])(
+    "D11: %s repeats the selected instance and profile in every removal command",
+    async (action) => {
+      const { context, err, store, planStore } = cli({
+        hosts: ["builder-1", "builder-2"],
+        interactive: true,
+      });
+      const path = "/elsewhere/it's my factory.json";
+      const profile = "production's account";
+      store.files[path] = store.files[PATH] as string;
+      expect(await run([action, "--instance", path, "--profile", profile], context)).toBe(1);
+      const selection =
+        " --instance '/elsewhere/it'\\''s my factory.json' --profile 'production'\\''s account'";
+      const command = `fffactory worker terminate KEY${selection}`;
+      expect(err).toEqual([
+        "",
+        `✖ Refusing: this change needs host removal, which only \`${command}\` does (D11):`,
+        '  hosts: host key "builder-2" is provisioned but no longer declared: host keys cannot ' +
+          `be renamed, and only \`fffactory worker terminate builder-2${selection}\` removes a host. Restore ` +
+          "it, and declare any new host under a new key beside it",
+        "",
+        "Nothing was applied.",
+        "",
+        NEXT,
+        "  Declare every provisioned host key in factory.json again, then remove a host with " +
+          `\`${command}\`.`,
+      ]);
+      expect(planStore.saved.size).toBe(0);
+    },
+  );
+
   test("a stopped worker's install is shown skipped (plan-apply §Stopped workers)", async () => {
     const fleet = workerFleet(["builder-1"]);
     fleet.machines.inventory = { kind: "machines", machines: [machine("builder-1", "stopped")] };

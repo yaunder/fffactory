@@ -388,18 +388,34 @@ const refused = (text: Inline, reasons: readonly Inline[] = []): Block => ({
 /** What every refusal of a change says once it has given its reasons. */
 const NOTHING_APPLIED: Block = { kind: "text", lines: ["Nothing was applied."] };
 
+/** Preserve D11's published wording, rendering its removal commands with this selection. */
+function d11Text(text: string, selection: Selection): Inline {
+  const spans: Span[] = [];
+  let from = 0;
+  for (const match of text.matchAll(/`fffactory worker terminate (KEY|[a-z][a-z0-9-]*)`/g)) {
+    spans.push(text.slice(from, match.index));
+    spans.push(commandCode(["worker", "terminate", match[1] as string], selection));
+    from = match.index + match[0].length;
+  }
+  spans.push(text.slice(from));
+  return spans;
+}
+
 /** A change that needs a lifecycle capability fffactory does not have, or another command (D11). */
-export function d11Report(refusal: D11Refusal): Report {
+export function d11Report(refusal: D11Refusal, selection: Selection = {}): Report {
   const missing =
     refusal.command === undefined
       ? "which fffactory does not have yet (D11; it arrives in milestone M3):"
       : `which only \`${refusal.command}\` does (D11):`;
   return {
     blocks: [
-      refused(`Refusing: this change needs ${refusal.capability}, ${missing}`, refusal.reasons),
+      refused(
+        d11Text(`Refusing: this change needs ${refusal.capability}, ${missing}`, selection),
+        refusal.reasons.map((reason) => d11Text(reason, selection)),
+      ),
       NOTHING_APPLIED,
     ],
-    next: nextSteps(step(refusal.instead)),
+    next: nextSteps(step(d11Text(refusal.instead, selection))),
   };
 }
 
@@ -632,7 +648,7 @@ export function planRefusalReport(refusal: PlanRefusal, context: RefusalContext)
         ],
       };
     case "d11":
-      return d11Report(refusal.refusal);
+      return d11Report(refusal.refusal, context.selection);
     case "stopped_resize":
       return stoppedResizeReport(refusal, context);
     case "unready":

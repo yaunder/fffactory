@@ -671,6 +671,53 @@ describe("D11 refusals (plan-apply §Refusals until lifecycle work lands (D11))"
       `${ansiStyle.verdict("error", "✖")} ${ansiStyle.verdict("error", "Refusing: this change needs host removal, which only ")}${ansiStyle.code("fffactory worker terminate KEY")}`,
     );
   });
+
+  test("removal commands preserve literal backticks in the selection, plain and colored", () => {
+    const refused = hostKeyRemovalRefusal([
+      { path: "hosts", message: "Restore it, then run `fffactory worker terminate builder-1`." },
+    ]);
+    if (refused === undefined) throw new Error("expected a D11 refusal");
+    const report = planRefusalReport(
+      { kind: "d11", refusal: refused },
+      {
+        action: "plan",
+        now: new Date(0),
+        selection: { instance: "/my `factory`/it's.json", profile: "production's `account`" },
+      },
+    );
+    const selection =
+      " --instance '/my `factory`/it'\\''s.json' --profile 'production'\\''s `account`'";
+    const command = `fffactory worker terminate KEY${selection}`;
+    const keyed = `fffactory worker terminate builder-1${selection}`;
+    const plain = shown(report);
+    expect(plain[0]).toContain(`\`${command}\``);
+    expect(plain[1]).toContain(`\`${keyed}\``);
+    expect(plain.at(-1)).toContain(`\`${command}\``);
+    const colored = render(ansiStyle, report.blocks, report.next);
+    expect(colored[0]).toContain(ansiStyle.code(command));
+    expect(colored[1]).toContain(ansiStyle.code(keyed));
+    expect(colored.at(-1)).toContain(ansiStyle.code(command));
+  });
+
+  test("selection leaves host replacement and migration guidance unchanged", () => {
+    const replacement = hostMachineRefusal([change(HOST, ["delete"], "aws_instance")]);
+    const base = assessUpgrade("0.2.9", release("0.3.1"), {
+      ...COMPATIBLE,
+      base_generation: 2,
+      base_generation_since: release("0.3.0"),
+    });
+    const schema = schemaVersionChange(JSON.stringify({ schema_version: 1 }), {
+      ...COMPATIBLE,
+      schema_version: 2,
+    });
+    if (replacement === undefined || base.kind !== "d11" || schema?.kind !== "d11")
+      throw new Error("expected D11 refusals");
+    for (const refused of [replacement, base.refusal, schema.refusal]) {
+      expect(
+        shown(d11Report(refused, { instance: "/other/factory.json", profile: "production" })),
+      ).toEqual(shown(d11Report(refused)));
+    }
+  });
 });
 
 describe("an instance type change on a stopped worker (plan-apply §Instance type of a stopped worker)", () => {
