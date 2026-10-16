@@ -1202,8 +1202,9 @@ rerun names it missing, refused with nothing applied, locked or recorded when
 stale (factory.json, release, assets, path, expiry), when the bucket exists,
 ready or not, tampered, read back other than its record or doing more than
 create, its failed Terraform apply spending it with no lock or record, an
-interrupt before the lock taking none and one after it keeping it, an
-unwritable record reported, and a lock held meanwhile refused; a lock taken
+interrupt before the lock taking none, one after it keeping it, and one once
+its record is written keeping the lock and the record, an unwritable record
+reported, and a lock held meanwhile refused; a lock taken
 after bootstrap and never after an interrupt, and `applySavedBootstrap`'s every
 refusal, the bucket rechecked and the file checked again right before the
 apply, a declined approval, another account, a failed or interrupted apply
@@ -1255,7 +1256,8 @@ bootstrap plan applied with no terminal, its lines, the next step with the
 instance and profile quoted, exit 0 and its record's `plan_id`, then refused as
 missing; one refused after factory.json changed or once the bucket exists, and
 for another account before anything is planned or applied, with nothing
-changed; its failed Terraform apply and an interrupt before the lock; `plan`
+changed; its failed Terraform apply and an interrupt before the lock, once it
+is taken, and once its record is written, printing the record; `plan`
 with no bucket printing the bootstrap plan, its exact `apply --plan-id` command
 with the instance and profile and the line to plan again, exit 0, and saving
 nothing when refused; the unattended first apply over fakes with no terminal,

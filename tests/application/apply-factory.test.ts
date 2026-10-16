@@ -1334,6 +1334,28 @@ describe("applying a saved bootstrap plan (plan-apply §Apply)", () => {
     expect(world.lockStore.operationWrites).toEqual([]);
   });
 
+  test("an interrupt once the record is written keeps the lock and the record", async () => {
+    const world = await bootstrapPlanned();
+    const write = world.lockStore.writeOperation.bind(world.lockStore);
+    world.lockStore.writeOperation = async (bucket, record) => {
+      await write(bucket, record);
+      world.signal.interrupted = true;
+    };
+    expect(await applyFactory(world.deps, withBootstrapPlan())).toEqual({
+      kind: "interrupted",
+      locked: true,
+      record: { bucket: BUCKET, key: expect.stringMatching(/^fff-abcd1234-operations\//) },
+      bootstrapPlan: PLAN_ID,
+    });
+    expect(world.lockStore.locks.size).toBe(1);
+    expect(world.lockStore.calls.some((call) => call.startsWith("remove"))).toBe(false);
+    expect(world.lockStore.operationWrites).toHaveLength(1);
+    expect(world.lockStore.operationWrites[0]).toMatchObject({
+      plan_id: PLAN_ID,
+      stages: [{ name: "backend", status: "applied" }],
+    });
+  });
+
   test("a record that cannot be written is reported, and the lock still released", async () => {
     const world = await bootstrapPlanned();
     world.lockStore.writeOperation = async () => {

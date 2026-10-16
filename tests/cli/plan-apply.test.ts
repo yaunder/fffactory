@@ -1120,6 +1120,30 @@ describe("fffactory apply (plan-apply §Apply)", () => {
       expect(lockStore.buckets.has(BUCKET)).toBe(true);
       expect(lockStore.locks.size).toBe(1);
     });
+
+    test("an interrupt once B's record is written keeps the lock, and prints the record", async () => {
+      const world = cli({ bucket: false });
+      await saveBootstrapPlan(world);
+      const { lockStore, signal } = world;
+      const write = lockStore.writeOperation.bind(lockStore);
+      lockStore.writeOperation = async (bucket, record) => {
+        await write(bucket, record);
+        signal.interrupted = true;
+      };
+      const args = ["apply", "--plan-id", PLAN_ID, "--profile", "factory"];
+      expect(await run(args, world.context)).toBe(1);
+      expect(world.err).toEqual([
+        "Interrupted: the factory stays locked, with a record of this operation. Once " +
+          "fffactory has exited, break the lock with `fffactory lock break`, then plan the " +
+          "factory next:",
+        "  fffactory plan --profile factory",
+      ]);
+      expect(world.out.at(-1)).toMatch(
+        /^Operation record: s3:\/\/fff-abcd1234-state\/fff-abcd1234-operations\/.+\.json$/,
+      );
+      expect(lockStore.locks.size).toBe(1);
+      expect(lockStore.operations.size).toBe(1);
+    });
   });
 
   describe("a fresh factory with no terminal (epic #54)", () => {
