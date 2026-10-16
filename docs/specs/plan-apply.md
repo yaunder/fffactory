@@ -571,7 +571,8 @@ After the checks above, and a saved plan's local freshness:
    interrupt before then takes no lock. A saved plan never bootstraps: it was made against an
    existing bucket, so a missing one makes it stale. A held lock refuses the
    apply, showing its holder.
-2. Under the lock, the operation's record is written (next section).
+2. Under the lock, the operation's record is written (next section), led by
+   the `backend` stage when this apply created the bucket.
 3. With a saved plan, the state revision is compared, and the saved Terraform
    plan file is read back: its changes, which must be its record's, are the
    plan, and the D11 refusals apply to them. Without one, the infrastructure stage is planned
@@ -682,7 +683,14 @@ when the lock is taken and again at every step:
 }
 ```
 
-`plan_id` is null when apply planned for itself. The infrastructure stage goes
+`plan_id` is null when apply planned for itself. An apply that created the
+state bucket (backend bootstrap) writes its first record, once the lock is
+taken, with the stages starting `{ "name": "backend", "status": "applied" }`,
+before the infrastructure stage. The `backend` stage is only ever `applied`,
+and present only when this apply created the bucket: an apply that found the
+bucket already there has none. A bootstrap that fails or is declined leaves no
+record, since without a bucket there is nowhere to write one and no lock is
+taken. `schema_version` stays 1: the stage is an addition. The infrastructure stage goes
 `planning`, `awaiting_approval`, `applying`, and ends `applied`, `unchanged`,
 `declined`, `refused` or `failed`. The workers stage (`workers`) goes
 `installing` and ends `installed`, `partial` or `failed`; `workers` lists each
@@ -991,7 +999,8 @@ change failing closed, `stopped_workers` round-tripping and every stopped
 staleness reason), `tests/domain/rollout.test.ts` (a stopped worker neither
 stopping the rollout nor making it partial, the first boot's deadline, the
 tailnet states still joining, the bootstrap refusal waited for, the timed-out
-failure and the rollout going on after it), `tests/domain/operation.test.ts`,
+failure and the rollout going on after it), `tests/domain/operation.test.ts`
+(the backend stage leading a bootstrapping apply's stages),
 `tests/domain/stable-host-keys.test.ts` (recorded host keys),
 `tests/application/plan-factory.test.ts` (a first plan, the state revision
 bound before planning, no infrastructure changes still saved with the workers,
@@ -1054,7 +1063,8 @@ stubbed and against `tests/support/stub-s3.ts`),
 question), `tests/cli/plan-apply.test.ts` (output, exit codes and every refusal
 in process, the workers' lines and exit codes 0, 2 and 1; an empty factory
 planning its shared infrastructure alone with `Workers: none declared.`, and
-applying it, then nothing, with exit 0; a stopped worker
+applying it, then nothing, with exit 0; a first apply's record led by
+`backend: applied`, and none for an apply that found the bucket; a stopped worker
 shown skipped in the plan, listed `stopped` by apply with exit 0, its resize
 refused, and with the inventory unreadable skipped with exit 2 as before and a
 resize refused; one apply creating, waiting for and installing a worker; the

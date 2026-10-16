@@ -860,6 +860,23 @@ describe("fffactory apply (plan-apply §Apply)", () => {
     expect(prompt.asked).toHaveLength(2);
     expect(out[1]).toBe(`Backend bootstrap: the state bucket ${BUCKET} does not exist yet.`);
     expect(lockStore.buckets.has(BUCKET)).toBe(true);
+    // Its record, written once the lock is taken, leads with the bootstrap it did first.
+    const [record] = [...lockStore.operations.values()];
+    expect(lockStore.operations.size).toBe(1);
+    expect(record?.plan_id).toBeNull();
+    expect(record?.stages.slice(0, 2)).toEqual([
+      { name: "backend", status: "applied" },
+      { name: "infrastructure", status: "applied" },
+    ]);
+    expect(record?.status).toBe("succeeded");
+  });
+
+  test("an apply that found the state bucket records no backend stage", async () => {
+    const { context, lockStore } = cli({ interactive: true, answers: ["yes"] });
+    expect(await run(["apply"], context)).toBe(0);
+    const [record] = [...lockStore.operations.values()];
+    expect(record?.stages[0]).toEqual({ name: "infrastructure", status: "applied" });
+    expect(record?.stages.map(({ name }) => name)).not.toContain("backend");
   });
 
   test("an interrupted apply keeps the lock and says how to recover", async () => {

@@ -14,7 +14,8 @@
  * state revision (checked under the lock). Naming the plan ID is the approval of exactly
  * that plan, which `fffactory plan` showed.
  *
- * An operation record in the state bucket follows each step. An interrupted apply changes
+ * An operation record in the state bucket follows each step, led by the backend stage when
+ * this apply created the state bucket. An interrupted apply changes
  * nothing more and leaves its lock and record; after `fffactory lock break`, a rerun plans
  * again from what exists and converges.
  *
@@ -355,11 +356,10 @@ function operationLog(
   request: FactoryApplyRequest,
 ) {
   const { clock } = request;
-  let record = startOperation(
-    locked.lock.record,
-    locked.saved?.plan_id,
-    request.pinMove === undefined ? [] : [PIN_STAGE],
-  );
+  let record = startOperation(locked.lock.record, locked.saved?.plan_id, {
+    pending: request.pinMove === undefined ? [] : [PIN_STAGE],
+    bootstrapped: locked.bootstrapped,
+  });
   let written = false;
   const write = async (next: OperationRecord) => {
     if (deps.interrupted()) return;
