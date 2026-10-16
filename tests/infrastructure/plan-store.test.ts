@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { mkdir, mkdtemp, readdir, rm, stat, utimes, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { FactoryId, Release } from "../../src/domain/instance";
@@ -222,6 +222,29 @@ describe("the local plan store", () => {
     expect(await readdir(join(directory, FACTORY))).toEqual([]);
   });
 
+  test("spends a saved plan durably: never loadable again, its Terraform plan kept", async () => {
+    const { directory, store } = await fresh();
+    const files = await savedBootstrap(store, "b00tstr4");
+    const digest = sha256Hex(new TextEncoder().encode("backend plan b00tstr4"));
+    expect(await store.spend(FACTORY, "b00tstr4")).toBe(true);
+    expect(await store.load(FACTORY, "b00tstr4")).toEqual({ kind: "missing" });
+    // The record alone goes: the Terraform plan stays for the apply about to read it.
+    expect((await readdir(join(directory, FACTORY, "b00tstr4"))).sort()).toEqual([
+      "backend.tfplan",
+      "backend.tfplan.sha256",
+    ]);
+    expect(await readFile(files.backend, "utf8")).toBe("backend plan b00tstr4");
+    expect(await store.digest(bootstrapPlan("b00tstr4"))).toBe(digest);
+    // Only the first spend spends it; a plan never saved, or not there, was never one to spend.
+    expect(await store.spend(FACTORY, "b00tstr4")).toBe(false);
+    await store.create(FACTORY, "unsaved1");
+    expect(await store.spend(FACTORY, "unsaved1")).toBe(false);
+    expect(await store.spend(FACTORY, "nothere1")).toBe(false);
+    await expect(store.spend(FACTORY, "../escape")).rejects.toThrow("Not a plan ID");
+    await store.remove(FACTORY, "b00tstr4");
+    expect(await readdir(join(directory, FACTORY))).toEqual(["unsaved1"]);
+  });
+
   test("prunes plans long expired and long unsaved, keeping the rest", async () => {
     const { directory, store } = await fresh();
     // Unsaved plans age by their directory's time, so this test runs on the real clock.
@@ -241,12 +264,19 @@ describe("the local plan store", () => {
     const longAgo = new Date(now.getTime() - PLAN_TTL_MS - PLAN_KEPT_MS - 1);
     await savedBootstrap(store, "bexpire1", longAgo);
     await savedBootstrap(store, "bcurrent", now);
+    // A plan spent by an apply a hard kill stopped leaves its Terraform plan, aged as unsaved.
+    await savedBootstrap(store, "bspent11", now);
+    await store.spend(FACTORY, "bspent11");
+    await utimes(join(directory, FACTORY, "bspent11"), old, old);
+    await savedBootstrap(store, "bspent22", now);
+    await store.spend(FACTORY, "bspent22");
 
     await store.prune(FACTORY, now);
 
     expect((await readdir(join(directory, FACTORY))).sort()).toEqual([
       "Not-A-Plan",
       "bcurrent",
+      "bspent22",
       "current1",
       "expired2",
       "unsaved1",

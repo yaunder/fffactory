@@ -368,8 +368,8 @@ describe("applying a saved bootstrap plan (plan-apply §Apply)", () => {
 
   /**
    * A factory with no state bucket and a saved bootstrap plan B for it, as `fffactory plan`
-   * saves one. `events` orders what changes anything: the Terraform apply, B's removal and the
-   * lock's creation.
+   * saves one. `events` orders what changes anything: B's spending, the Terraform apply, B's
+   * removal and the lock's creation.
    */
   async function savedWorld(options: { shown?: unknown; approve?: boolean } = {}) {
     const events: string[] = [];
@@ -399,6 +399,11 @@ describe("applying a saved bootstrap plan (plan-apply §Apply)", () => {
     store.create = async (bucket, record) => {
       events.push("lock");
       return create(bucket, record);
+    };
+    const spend = planStore.spend.bind(planStore);
+    planStore.spend = async (factoryId, planId) => {
+      events.push(`spend ${planId}`);
+      return spend(factoryId, planId);
     };
     const remove = planStore.remove.bind(planStore);
     planStore.remove = async (factoryId, planId) => {
@@ -435,14 +440,15 @@ describe("applying a saved bootstrap plan (plan-apply §Apply)", () => {
   }
 
   /** Nothing was applied, locked or recorded, and B is kept: it was never spent. */
-  function nothingChanged(world: Awaited<ReturnType<typeof savedWorld>>) {
+  async function nothingChanged(world: Awaited<ReturnType<typeof savedWorld>>) {
     expect(world.terraform.calls.some(({ call }) => call === "applyPlan")).toBe(false);
     expect(world.store.calls.some((call) => call.startsWith("create"))).toBe(false);
     expect(world.store.operationWrites).toEqual([]);
-    expect(world.planStore.saved.has(`${FACTORY_ID}/${PLAN_ID}`)).toBe(true);
+    expect(world.events).toEqual([]);
+    expect(await world.planStore.load(FACTORY_ID, PLAN_ID)).toMatchObject({ kind: "found" });
   }
 
-  test("applies exactly B's file, approved by its ID, then spends B and takes the lock", async () => {
+  test("applies exactly B's file, approved by its ID, spending B first, then takes the lock", async () => {
     const world = await savedWorld();
     const result = await applySavedBootstrap(world.deps, world.savedRequest());
     if (result.kind !== "acquired") throw new Error(`not acquired: ${result.kind}`);
@@ -453,7 +459,7 @@ describe("applying a saved bootstrap plan (plan-apply §Apply)", () => {
       { call: "showPlan", request: BACKEND_TARGET },
       { call: "applyPlan", request: BACKEND_TARGET },
     ]);
-    expect(world.events).toEqual(["applyPlan", `remove ${PLAN_ID}`, "lock"]);
+    expect(world.events).toEqual([`spend ${PLAN_ID}`, "applyPlan", `remove ${PLAN_ID}`, "lock"]);
     expect(world.approver.shown).toEqual([
       {
         kind: "backend_bootstrap",
@@ -513,7 +519,7 @@ describe("applying a saved bootstrap plan (plan-apply §Apply)", () => {
     );
     expect(result).toEqual({ kind: "stale", planId: PLAN_ID, reasons: [reason] });
     expect(world.terraform.calls).toEqual([]);
-    nothingChanged(world);
+    await nothingChanged(world);
   });
 
   test.each([
@@ -529,7 +535,7 @@ describe("applying a saved bootstrap plan (plan-apply §Apply)", () => {
       reasons: [{ kind: "state_bucket_created" }],
     });
     expect(world.terraform.calls).toEqual([]);
-    nothingChanged(world);
+    await nothingChanged(world);
   });
 
   test("a bucket created after the read-back is caught right before the apply", async () => {
@@ -548,7 +554,7 @@ describe("applying a saved bootstrap plan (plan-apply §Apply)", () => {
       planId: PLAN_ID,
       reasons: [{ kind: "state_bucket_created" }],
     });
-    nothingChanged(world);
+    await nothingChanged(world);
   });
 
   test("a backend.tfplan swapped after B was loaded is damaged, and never read back", async () => {
@@ -559,7 +565,7 @@ describe("applying a saved bootstrap plan (plan-apply §Apply)", () => {
       planId: PLAN_ID,
     });
     expect(world.terraform.calls).toEqual([]);
-    nothingChanged(world);
+    await nothingChanged(world);
   });
 
   test("a backend.tfplan swapped after it was read back is never applied", async () => {
@@ -577,7 +583,7 @@ describe("applying a saved bootstrap plan (plan-apply §Apply)", () => {
       kind: "damaged_plan",
       planId: PLAN_ID,
     });
-    nothingChanged(world);
+    await nothingChanged(world);
   });
 
   test("a read-back that differs from B's record is damaged", async () => {
@@ -593,7 +599,7 @@ describe("applying a saved bootstrap plan (plan-apply §Apply)", () => {
       planId: PLAN_ID,
     });
     expect(world.approver.shown).toEqual([]);
-    nothingChanged(world);
+    await nothingChanged(world);
   });
 
   test.each<[string, unknown, UnexpectedPlan[]]>([
@@ -627,7 +633,7 @@ describe("applying a saved bootstrap plan (plan-apply §Apply)", () => {
       unexpected,
     });
     expect(world.approver.shown).toEqual([]);
-    nothingChanged(world);
+    await nothingChanged(world);
   });
 
   test("an approval that does not approve applies nothing", async () => {
@@ -635,7 +641,7 @@ describe("applying a saved bootstrap plan (plan-apply §Apply)", () => {
     expect(await applySavedBootstrap(world.deps, world.savedRequest())).toEqual({
       kind: "declined",
     });
-    nothingChanged(world);
+    await nothingChanged(world);
   });
 
   test("an account check for another account is refused before reaching AWS", async () => {
@@ -650,7 +656,58 @@ describe("applying a saved bootstrap plan (plan-apply §Apply)", () => {
     });
     expect(world.store.calls).toEqual([]);
     expect(world.terraform.calls).toEqual([]);
-    nothingChanged(world);
+    await nothingChanged(world);
+  });
+
+  test("B is spent before its Terraform apply starts: it cannot be loaded while it runs", async () => {
+    const world = await savedWorld();
+    const { applyPlan } = world.terraform.provisioner;
+    let started = () => {};
+    const applying = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    let finish = () => {};
+    world.deps.provisioner = {
+      ...world.terraform.provisioner,
+      applyPlan: async (planned) => {
+        started();
+        await new Promise<void>((resolve) => {
+          finish = resolve;
+        });
+        await applyPlan(planned);
+      },
+    };
+    const request = world.savedRequest();
+    const result = applySavedBootstrap(world.deps, request);
+    await applying;
+    // A second interrupt now exits at once, skipping any cleanup: B is already spent.
+    expect(await world.planStore.load(FACTORY_ID, PLAN_ID)).toEqual({ kind: "missing" });
+    // Its backend.tfplan stays, the file approved, for the Terraform apply reading it.
+    expect(await world.planStore.digest(world.saved)).toBe(request.digest);
+    expect(world.events).toEqual([`spend ${PLAN_ID}`]);
+    finish();
+    expect((await result).kind).toBe("acquired");
+    expect(world.planStore.directories.size).toBe(0);
+  });
+
+  test("B spent by another apply after the last check is not found, and never applied", async () => {
+    const world = await savedWorld();
+    const digest = world.planStore.digest.bind(world.planStore);
+    let checks = 0;
+    world.planStore.digest = async (plan) => {
+      const now = await digest(plan);
+      checks += 1;
+      if (checks === 2) await world.planStore.spend(FACTORY_ID, PLAN_ID);
+      return now;
+    };
+    expect(await applySavedBootstrap(world.deps, world.savedRequest())).toEqual({
+      kind: "no_plan",
+      planId: PLAN_ID,
+    });
+    expect(world.terraform.calls.some(({ call }) => call === "applyPlan")).toBe(false);
+    expect(world.events).toEqual([`spend ${PLAN_ID}`, `spend ${PLAN_ID}`]);
+    expect(world.store.locks.size).toBe(0);
+    expect(world.store.operationWrites).toEqual([]);
   });
 
   test("a failed Terraform apply spends B, takes no lock and fails", async () => {
@@ -664,7 +721,7 @@ describe("applying a saved bootstrap plan (plan-apply §Apply)", () => {
     await expect(applySavedBootstrap(world.deps, world.savedRequest())).rejects.toThrow(
       "exited with status 1",
     );
-    expect(world.events).toEqual([`remove ${PLAN_ID}`]);
+    expect(world.events).toEqual([`spend ${PLAN_ID}`, `remove ${PLAN_ID}`]);
     expect(world.store.locks.size).toBe(0);
     expect(world.store.operationWrites).toEqual([]);
   });
@@ -682,7 +739,7 @@ describe("applying a saved bootstrap plan (plan-apply §Apply)", () => {
     expect(await applySavedBootstrap(world.deps, world.savedRequest())).toEqual({
       kind: "interrupted",
     });
-    expect(world.events).toEqual(["applyPlan", `remove ${PLAN_ID}`]);
+    expect(world.events).toEqual([`spend ${PLAN_ID}`, "applyPlan", `remove ${PLAN_ID}`]);
     expect(world.store.locks.size).toBe(0);
     expect(world.store.buckets.has(BUCKET)).toBe(true);
   });
@@ -699,7 +756,7 @@ describe("applying a saved bootstrap plan (plan-apply §Apply)", () => {
     expect(await applySavedBootstrap(world.deps, world.savedRequest())).toEqual({
       kind: "interrupted",
     });
-    expect(world.events).toEqual([`remove ${PLAN_ID}`]);
+    expect(world.events).toEqual([`spend ${PLAN_ID}`, `remove ${PLAN_ID}`]);
     expect(world.store.locks.size).toBe(0);
   });
 
@@ -714,7 +771,7 @@ describe("applying a saved bootstrap plan (plan-apply §Apply)", () => {
     expect(await applySavedBootstrap(world.deps, world.savedRequest())).toEqual({
       kind: "interrupted",
     });
-    nothingChanged(world);
+    await nothingChanged(world);
   });
 
   test("a lock another operation took meanwhile is reported, with the bucket created", async () => {

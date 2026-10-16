@@ -657,7 +657,7 @@ A plan with changes is saved in the operator's local plan store,
 | `backend.tfplan` | Backend bootstrap's plan, as a saved bootstrap plan or on a first apply. |
 | `factory.tfplan.sha256` | A saved factory plan's `factory.tfplan` SHA-256 when it was saved. |
 | `backend.tfplan.sha256` | A saved bootstrap plan's `backend.tfplan` SHA-256 when it was saved. |
-| `plan.json` | The plan's record, written last: its presence saves the plan. |
+| `plan.json` | The plan's record, written last: its presence saves the plan, and removing it spends a saved bootstrap plan. |
 
 The plan ID is eight random lowercase letters or digits. Only a well-formed
 plan ID names a plan directory, so `--plan-id` can never name another path.
@@ -813,13 +813,17 @@ restyling, not the intended contract: #12 moves the check before anything is
 applied, or reports what was.
 
 Plans are short-lived. Each `plan` and `apply` first prunes the factory's plans
-that expired over a day ago, and plan directories never saved that were made
-over a day ago (`PLAN_KEPT_MS`; an interrupted command leaves one). Until then
+that expired over a day ago, and plan directories without a record that have
+not changed for over a day (`PLAN_KEPT_MS`): never saved, as an interrupted
+command leaves one, or spent, as an apply killed outright leaves one. Until then
 an expired plan is refused as expired, a plan in use as it expires is never
 removed under its apply, and an apply waiting at its approval question keeps
 its plan. A saved factory plan is removed once apply held the lock for it,
 whatever came of it: it is spent. A saved bootstrap plan is spent earlier,
-once its Terraform apply starts, before any lock exists
+right before its Terraform apply starts, before any lock exists: its
+`plan.json` is removed and the removal flushed to disk, so it can never be
+loaded again, while `backend.tfplan` stays for Terraform until the apply
+settles and the directory is removed
 ([Applying a saved bootstrap plan](#applying-a-saved-bootstrap-plan)).
 
 ## Apply
@@ -936,8 +940,15 @@ completeness), `applySavedBootstrap` (`src/application/bootstrap-backend.ts`):
 5. checks again, immediately before the apply, that the bucket is still
    missing and `backend.tfplan` still the file read back; either refuses as in
    2 or 3;
-6. applies exactly that file (`terraform apply PLANFILE`), never a new plan.
-   B is spent once its apply starts: it is removed, whatever comes of it;
+6. spends B, then applies exactly that file (`terraform apply PLANFILE`),
+   never a new plan. Spending removes B's `plan.json` and flushes the removal
+   to disk before Terraform starts, so whatever comes of the apply, even a
+   second interrupt that exits at once or a kill, B is never found again;
+   `backend.tfplan` stays, the file checked in 5, for Terraform to read, and
+   B's directory is removed once the apply settles (or pruned, after a kill).
+   Only one apply spends B: another that spent it first leaves this one
+   refused as no saved plan B, with nothing applied. Any refusal or interrupt
+   before this step keeps B;
 7. takes the factory-wide lock in the new bucket. A held lock is refused,
    showing its holder, as any apply is ([provisioning §Lock](provisioning.md#lock)),
    with the bucket already created;
@@ -1646,10 +1657,10 @@ unchanged by where the plan was made.
 | Application | `src/application/upgrade.ts` | `upgradeFactory`: the refusals, then apply's operation with the pin move shown in the review and written under the lock once approved. |
 | Application | `src/application/set-secret.ts` | The CLI/pin match guard on `secret set`. |
 | Domain | `src/domain/rollout.ts` | A worker's outcome (`stoppedOutcome` too), the rollout rule, and the first boot wait's rules: its deadline, poll and report intervals, which tailnet states are still joining, a bootstrap refusal to wait for, and the timed-out failure. Pure. |
-| Application | `src/application/plan-store.ts` | The `PlanStore` port, which binds a record to the Terraform plan file its kind names, with `digest` for the check under the lock, and `planStoreDirectory`. |
+| Application | `src/application/plan-store.ts` | The `PlanStore` port, which binds a record to the Terraform plan file its kind names, with `digest` for the check under the lock, `spend` (its record durably removed, its Terraform plan kept), and `planStoreDirectory`. |
 | Application | `src/application/factory-lock.ts` | `Interrupted` and `settleFactoryLock`: an interrupted operation keeps its lock. |
 | Application | `src/application/lock-store.ts` | `writeOperation` and `stateRevision` on the state bucket port. |
-| Infrastructure | `src/infrastructure/plan-store.ts` | `filesystemPlanStore`: private plan directories, the bound plan file's digest (`factory.tfplan` or `backend.tfplan`), pruning either kind. |
+| Infrastructure | `src/infrastructure/plan-store.ts` | `filesystemPlanStore`: private plan directories, the bound plan file's digest (`factory.tfplan` or `backend.tfplan`), spending a plan (unlinking `plan.json`, then fsyncing its directory), pruning either kind and spent leftovers. |
 | Infrastructure | `src/infrastructure/aws-s3-lock-store.ts` | PutObject of operation records; HeadObject of the state object. |
 | CLI adapter | `src/cli/presentation/plan.ts` | Every plan review and refusal in blocks: `planSection` (the target rows and an upgrade's pin move, the infrastructure tally and changes with Terraform's symbols, then each stage's row with each worker's change), `bootstrapSection`, `reviewBlocks`, `savedPlanReport` and `savedBootstrapPlanReport` (`plan`'s saved plan and Next block), `planRefusalReport` (each `PlanRefusal`), `d11Report`, `staleReport`, `unknownPlanReport` and `damagedPlanReport`, with `describeStaleReason` and `describeUnexpectedPlan`, and the unready bucket's AWS CLI commands; `describeRemovalPlan`, still unstyled. |
 | CLI adapter | `src/cli/presentation/command-line.ts` | `fffactoryCommand`: a command a Next block names, with the `--instance` and `--profile` given, quoted for a POSIX shell (`shellWord`). |
@@ -1727,8 +1738,11 @@ its record is written keeping the lock and the record, an unwritable record
 reported, and a lock held meanwhile refused; a lock taken
 after bootstrap and never after an interrupt, and `applySavedBootstrap`'s every
 refusal, the bucket rechecked and the file checked again right before the
-apply, a declined approval, another account, a failed or interrupted apply
-spending the plan (`tests/application/bootstrap-backend.test.ts`); the workers stage after the
+apply, a declined approval, another account, the plan spent before its
+Terraform apply starts and never loadable while it runs, every refusal and an
+interrupt before the apply keeping it, one another apply spent first not
+found and never applied, a failed or interrupted apply spending the plan
+(`tests/application/bootstrap-backend.test.ts`); the workers stage after the
 infrastructure under the same lock and record, without infrastructure changes
 still approved and installed with no Terraform apply, a failed install stopping
 the rollout and failing the operation and a rerun repairing it, a skip making
@@ -1763,7 +1777,9 @@ more of the record written), once the record is written, while taking the lock
 and before it), `tests/application/factory-lock.test.ts` (an interrupted
 operation keeps its lock), `tests/infrastructure/plan-store.test.ts` (including
 the plan file's digest as it is now, a bootstrap plan bound to `backend.tfplan`,
-damaged once that file changes or vanishes, and pruned once long expired),
+damaged once that file changes or vanishes, and pruned once long expired; a
+spent plan missing, its `backend.tfplan` kept unchanged, spent only once, and
+pruned once long unchanged),
 `tests/infrastructure/aws-s3-lock-store.test.ts` (records and state revisions,
 stubbed and against `tests/support/stub-s3.ts`),
 `tests/infrastructure/terminal-prompt.test.ts` (Ctrl-C cancels an echoed

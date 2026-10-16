@@ -69,6 +69,13 @@ export class MemoryPlanStore implements PlanStore {
     return this.directories.has(key) ? this.digestOf(key) : undefined;
   }
 
+  /** Removes the saved plan's record and keeps its directory, whose files stay digestible. */
+  async spend(factoryId: FactoryId, planId: string): Promise<boolean> {
+    const key = `${factoryId}/${planId}`;
+    this.calls.push(`spend ${key}`);
+    return this.saved.delete(key);
+  }
+
   async remove(factoryId: FactoryId, planId: string): Promise<void> {
     const key = `${factoryId}/${planId}`;
     this.calls.push(`remove ${key}`);

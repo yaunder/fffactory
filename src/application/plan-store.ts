@@ -50,6 +50,13 @@ export interface PlanStore {
    * undefined when absent.
    */
   digest(plan: SavedPlan): Promise<string | undefined>;
+  /**
+   * Spends saved plan `planId`: durably removes its record, so `load` finds it missing, and
+   * keeps its Terraform plan files for an apply about to read them. True only for the call
+   * that removed the record; false when it was already gone, spent or never saved. `remove`,
+   * or else `prune`, removes the rest.
+   */
+  spend(factoryId: FactoryId, planId: string): Promise<boolean>;
   /** Removes plan `planId`'s directory, saved or not. */
   remove(factoryId: FactoryId, planId: string): Promise<void>;
   /** Removes the factory's plans long expired, and those long made but never saved (`PLAN_KEPT_MS`). */

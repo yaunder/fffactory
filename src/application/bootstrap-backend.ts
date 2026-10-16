@@ -318,6 +318,8 @@ export interface SavedBootstrapRequest
 
 export type SavedBootstrapStart =
   | { readonly kind: "refused"; readonly issues: readonly Issue[] }
+  /** Another apply of it spent it after its last check: it is never applied twice. */
+  | { readonly kind: "no_plan"; readonly planId: string }
   /** It is no longer the plan to apply, the state bucket now existing among the reasons. */
   | { readonly kind: "stale"; readonly planId: string; readonly reasons: readonly StaleReason[] }
   /** Its `backend.tfplan` is not the file loaded, or makes other changes than its record. */
@@ -379,24 +381,29 @@ async function checkSavedBootstrap(
 }
 
 /**
- * Applies exactly the saved bootstrap plan's file, and spends the plan once its apply starts,
- * whatever comes of it. False when fffactory was interrupted, before the apply or during it.
+ * Applies exactly the saved bootstrap plan's file, spending the plan first: its record is
+ * durably removed before Terraform starts, so it can never be loaded again whatever comes of
+ * the apply, even if fffactory is killed outright; its file stays for Terraform, and its
+ * directory is removed once the apply settles. The outcome: applied; interrupted, before the
+ * apply (the plan kept) or during it; or spent elsewhere, by another apply that spent it first
+ * and alone applies it, so nothing is applied here and its directory is left to that apply.
  */
 async function applySpending(
   deps: SavedBootstrapDependencies,
   saved: SavedBootstrapPlan,
   file: SavedPlanRequest,
-): Promise<boolean> {
-  if (deps.interrupted()) return false;
+): Promise<"applied" | "interrupted" | "spent_elsewhere"> {
+  if (deps.interrupted()) return "interrupted";
+  if (!(await deps.planStore.spend(saved.factory_id, saved.plan_id))) return "spent_elsewhere";
   try {
     await deps.provisioner.applyPlan(file);
   } catch (error) {
-    if (deps.interrupted()) return false;
+    if (deps.interrupted()) return "interrupted";
     throw error;
   } finally {
     await deps.planStore.remove(saved.factory_id, saved.plan_id);
   }
-  return !deps.interrupted();
+  return deps.interrupted() ? "interrupted" : "applied";
 }
 
 /**
@@ -405,8 +412,10 @@ async function applySpending(
  * must be fresh and the state bucket missing, checked before its `backend.tfplan` is read back
  * and again right before it is applied; the file must be the one loaded, checked before the
  * read-back and immediately before the apply, and its changes must be its record's and only
- * create. Otherwise nothing is applied. Once its Terraform apply starts, the plan is spent:
- * removed, whatever comes of it. A failed apply rejects, taking no lock.
+ * create. Otherwise nothing is applied, and the plan is kept. Right before its Terraform apply
+ * starts, the plan is spent: its record durably removed, whatever comes of the apply, and its
+ * directory removed once the apply settles. One another apply spent first is not found. A
+ * failed apply rejects, taking no lock.
  */
 export async function applySavedBootstrap(
   deps: SavedBootstrapDependencies,
@@ -421,7 +430,9 @@ export async function applySavedBootstrap(
   const file = backendPlanFile(bucket, request.terraformDirectory, request.files.backend);
   const refusal = await checkSavedBootstrap(deps, request, bucket, file);
   if (refusal !== undefined) return refusal;
-  if (!(await applySpending(deps, request.saved, file))) return { kind: "interrupted" };
+  const applied = await applySpending(deps, request.saved, file);
+  if (applied === "spent_elsewhere") return { kind: "no_plan", planId: request.saved.plan_id };
+  if (applied === "interrupted") return { kind: "interrupted" };
   const acquisition = await acquireFactoryLock(deps.lockStore, {
     bucket,
     operation: request.operation,

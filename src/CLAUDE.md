@@ -44,9 +44,10 @@ Dependencies point inward: `domain <- application <- infrastructure, cli`, and
   bootstrap plan is bound to the state bucket's absence in place of a state revision, and to
   `backend.tfplan`: `applySavedBootstrap` plans nothing, rechecks the bucket missing and the
   file's SHA-256 right before applying exactly that file, reads it back as its record's
-  create-only changes, spends the plan once its apply starts, takes the lock right after the
-  bucket exists, and apply records `plan_id` with the `backend` stage alone and stops: the
-  factory is planned next, never in the same apply. `planFactory` saves that bootstrap plan
+  create-only changes, spends the plan right before its apply starts (`PlanStore.spend`: its
+  record durably removed, never loadable again, its file kept for Terraform), takes the lock
+  right after the bucket exists, and apply records `plan_id` with the `backend` stage alone and
+  stops: the factory is planned next, never in the same apply. `planFactory` saves that bootstrap plan
   while the bucket is missing, and a factory plan once it exists; a plan refused or failing
   saves nothing and leaves no plan directory. The workers
   stage (`application/apply-workers.ts`) is the second step under the same lock and record, and
