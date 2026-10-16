@@ -20,11 +20,13 @@ import {
 } from "../domain/readiness";
 import type { ProcessOutcome } from "../infrastructure/local-tool-probe";
 import { tokenOr, type WorkerSystem } from "./inspect";
+import { AS_FACTORY } from "./runtime-account";
+import { workerPlugins } from "./plugins";
 
 /** What verification needs of the worker. */
 export interface VerifySystem extends WorkerSystem {
   readonly now: () => Date;
-  /** This executable's release, whose steps hold the pins and the plugin verifier. */
+  /** This executable's release, whose steps hold the pins and plugin manifest. */
   readonly release: Release;
 }
 
@@ -34,27 +36,10 @@ export interface HostVerifier {
 
 /** Each command's deadline; every verifier runs at once. */
 export const CHECK_TIMEOUT_MS = 30_000;
-/** The plugins step's own verifier reads every plugin checkout, so it gets longer. */
+/** The native plugin verifier reads every plugin checkout, so it gets longer. */
 export const PLUGINS_TIMEOUT_MS = 2 * 60_000;
 
-const FACTORY_HOME = `/home/${RUNTIME_ACCOUNT}`;
-
-/**
- * How a command runs as the runtime account: `runuser`, then `env -i` so it gets exactly the
- * environment its agents get (its own tools first) and nothing of root's.
- */
-export const AS_FACTORY = [
-  "/usr/sbin/runuser",
-  "-u",
-  RUNTIME_ACCOUNT,
-  "--",
-  "/usr/bin/env",
-  "-i",
-  `HOME=${FACTORY_HOME}`,
-  `PATH=${FACTORY_HOME}/.local/bin:/usr/local/bin:/usr/bin:/bin`,
-  "LANG=C.UTF-8",
-  "DISABLE_UPDATES=1",
-] as const;
+export { AS_FACTORY } from "./runtime-account";
 
 /** The tools the packages step installs, each with the command that shows it runs. */
 export const TOOLCHAIN: readonly (readonly [string, readonly string[]])[] = [
@@ -163,19 +148,7 @@ function verifiers(system: VerifySystem) {
   }
 
   async function plugins(): Promise<SoftwareCheck> {
-    const outcome = await system.run(
-      ["/bin/bash", join(steps, "plugins.sh"), "verify"],
-      PLUGINS_TIMEOUT_MS,
-      {
-        env: {
-          PATH: "/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
-          HOME: "/root",
-          LANG: "C.UTF-8",
-          FFFACTORY_STEPS: steps,
-        },
-      },
-    );
-    return succeeded(outcome)
+    return (await workerPlugins(system, steps, "verify", PLUGINS_TIMEOUT_MS))
       ? passed("plugins", "The agent plugins match their pins")
       : failed("plugins", "The agent plugins do not match their pins");
   }

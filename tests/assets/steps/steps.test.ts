@@ -6,6 +6,7 @@
 import { describe, expect, test } from "bun:test";
 import { readdir, readFile, stat } from "node:fs/promises";
 import { join } from "node:path";
+import { pluginPins } from "../../../src/host/plugin-manifest";
 import { INSTALL_STEPS } from "../../../src/domain/installation";
 
 const ROOT = join(import.meta.dir, "../../..");
@@ -52,9 +53,11 @@ const WORKER_PATH = [
 ];
 
 describe("the install steps", () => {
-  test("are one script per install step, in the release's steps directory, plus the validator", () => {
+  test("are one script per shell install step, in the release's steps directory", () => {
     expect(SCRIPTS).toEqual(
-      [...INSTALL_STEPS.map(({ name }) => `${name}.sh`), "validate-plugins.sh"].sort(),
+      INSTALL_STEPS.filter(({ name }) => name !== "plugins")
+        .map(({ name }) => `${name}.sh`)
+        .sort(),
     );
   });
 
@@ -168,11 +171,9 @@ describe("no SSM in the worker path", () => {
 });
 
 describe("the pins and the plugin manifest", () => {
-  test("the manifest passes the plugins step's own validator", () => {
-    const validated = Bun.spawnSync(
-      ["bash", join(STEPS, "validate-plugins.sh"), join(STEPS, "plugins.json")],
-      { stderr: "pipe" },
-    );
-    expect(validated.exitCode).toBe(0);
+  test("the manifest passes the plugins step's own validator", async () => {
+    expect(
+      pluginPins(JSON.parse(await readFile(join(STEPS, "plugins.json"), "utf8"))),
+    ).toHaveLength(1);
   });
 });

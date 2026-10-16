@@ -26,7 +26,7 @@ import { readVerification, type Verification, verificationFields } from "./readi
 const MINUTE_MS = 60_000;
 
 /**
- * The wrapped setup steps, `steps/<name>.sh` in the release, run in this order in one
+ * The install steps (shell assets, then native TypeScript plugins), run in this order in one
  * process. Each is idempotent, so a rerun repairs what a failed one left.
  */
 export const INSTALL_STEPS = [
@@ -39,7 +39,7 @@ export const INSTALL_STEPS = [
   /** Codex and Claude Code at their pinned versions. */
   { name: "harness", timeoutMs: 20 * MINUTE_MS },
   /** The pinned agent plugins. */
-  { name: "plugins", timeoutMs: 15 * MINUTE_MS },
+  { name: "plugins", timeoutMs: 15 * MINUTE_MS, implementation: "plugins" },
 ] as const;
 export type StepName = (typeof INSTALL_STEPS)[number]["name"];
 

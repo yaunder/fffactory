@@ -15,5 +15,8 @@ temporary directories by `worker-scenarios.ts`, never the real `/`.
   lays out in a temporary worker root, with a remote outside it; its runner checks each command
   drops to `factory`, then runs the rest as the test's user. `protocol-contract.test.ts` builds
   `fixtures/work-unresolved.json` from the same real Git.
+- `plugins.test.ts` exercises native plugin installation and verification with local
+  metadata and a scripted process runner, including unversioned marketplace entries,
+  exact commit/version/content checks, drift repair and undeclared plugin removal.
 - `verify.test.ts` answers every command with a scripted runner; `inspect.test.ts` covers the
   unprivileged read-only inspection.

@@ -5,13 +5,13 @@
       "plugins": [
         {
           "id": "fff@ffflow",
-          "version": "0.4.2",
+          "version": "0.4.3",
           "marketplace": "ffflow",
           "path": "plugin",
           "source": {
             "type": "github",
-            "repository": "bryonjacob/ffflow",
-            "revision": "9e231e2a610bdef2ae30ebca9c3814cc59121e26"
+            "repository": "zerotechdebt/ffflow",
+            "revision": "527c1a8ea204a9745b16713218fe9557943b8a10"
           }
         }
       ]
