@@ -41,8 +41,9 @@ export const PLAN_TTL_MS = 60 * 60 * 1000;
 /**
  * How long the local plan store keeps a plan directory: an expired plan until this long
  * after it expires, so applying it is refused as expired rather than unknown and a plan in
- * use as it expires is never removed under it; a directory never saved until this long after
- * it was made, so an apply waiting at its approval question keeps its plan.
+ * use as it expires is never removed under it; a directory without a record, never saved or
+ * spent, until this long after it last changed, so an apply waiting at its approval question
+ * keeps its plan and a spent plan's Terraform apply keeps its file.
  */
 export const PLAN_KEPT_MS = 24 * 60 * 60 * 1000;
 

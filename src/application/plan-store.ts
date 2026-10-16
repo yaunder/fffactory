@@ -30,7 +30,8 @@ export type StoredPlan =
  * its Terraform plan files and, once saved, its record; a saved plan is bound to the one
  * Terraform plan file its kind names, as that file was when saved: a factory plan to
  * `factory`, a bootstrap plan to `backend` (`PlanFiles`). Plans are short-lived: `prune`
- * removes expired ones of either kind and any never saved.
+ * removes expired ones of either kind and any directory without a record, never saved or
+ * spent, long unchanged.
  */
 export interface PlanStore {
   /** Creates plan `planId`'s empty private directory; rejects when it exists. */
@@ -59,7 +60,10 @@ export interface PlanStore {
   spend(factoryId: FactoryId, planId: string): Promise<boolean>;
   /** Removes plan `planId`'s directory, saved or not. */
   remove(factoryId: FactoryId, planId: string): Promise<void>;
-  /** Removes the factory's plans long expired, and those long made but never saved (`PLAN_KEPT_MS`). */
+  /**
+   * Removes the factory's plans long expired, and directories without a record (never saved,
+   * or spent) long unchanged (`PLAN_KEPT_MS`).
+   */
   prune(factoryId: FactoryId, now: Date): Promise<void>;
 }
 
