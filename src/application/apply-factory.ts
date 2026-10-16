@@ -171,17 +171,24 @@ export type FactoryApply =
    * locked or applied.
    */
   | { readonly kind: "no_state_bucket" }
-  /** fffactory was interrupted before the lock was taken: it takes none. */
-  | { readonly kind: "interrupted"; readonly locked: false }
+  /**
+   * fffactory was interrupted before the lock was taken: it takes none. `bootstrapPlan` is the
+   * saved bootstrap plan being applied, if one was: it may be spent, so the factory is planned
+   * again rather than applied.
+   */
+  | { readonly kind: "interrupted"; readonly locked: false; readonly bootstrapPlan?: string }
   /**
    * fffactory was interrupted holding the lock: the lock and the operation record stay as
    * they were. `record` is where the record is, once a write of it finished; `installing` the
    * worker whose `host apply` was running, which may still be installing; `waiting` the new
-   * worker whose first boot apply was waiting for, on which no install step ran.
+   * worker whose first boot apply was waiting for, on which no install step ran;
+   * `bootstrapPlan` the saved bootstrap plan applied, if one was: the bucket exists, and the
+   * factory is planned next.
    */
   | {
       readonly kind: "interrupted";
       readonly locked: true;
+      readonly bootstrapPlan?: string;
       readonly record: OperationLocation | undefined;
       readonly installing?: WorkerIdentity | undefined;
       readonly waiting?: WorkerIdentity;
@@ -292,7 +299,8 @@ async function recordBootstrap(
   );
   const operation = { bucket: lock.bucket.bucket, key: operationKey(record) };
   try {
-    if (deps.interrupted()) return { kind: "interrupted", locked: true, record: undefined };
+    if (deps.interrupted())
+      return { kind: "interrupted", locked: true, record: undefined, bootstrapPlan: planId };
     const recordFailure = await deps.lockStore
       .writeOperation(lock.bucket, record)
       .then(() => undefined, reasonOf);
@@ -301,6 +309,7 @@ async function recordBootstrap(
         kind: "interrupted",
         locked: true,
         record: recordFailure === undefined ? operation : undefined,
+        bootstrapPlan: planId,
       };
     return { kind: "bootstrapped", planId, operation, recordFailure };
   } finally {
@@ -332,7 +341,7 @@ async function applyBootstrapPlan(
     case "declined":
       return { kind: "declined", stage: "backend" };
     case "interrupted":
-      return { kind: "interrupted", locked: false };
+      return { kind: "interrupted", locked: false, bootstrapPlan: found.plan.plan_id };
     default:
       return start;
   }

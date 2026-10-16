@@ -1084,18 +1084,41 @@ describe("fffactory apply (plan-apply §Apply)", () => {
       expect(world.lockStore.locks.size).toBe(0);
     });
 
-    test("an interrupt before the lock says the factory is not locked", async () => {
+    test("an interrupt before the lock says the factory is not locked, and names plan next", async () => {
       const world = cli({ bucket: false });
       await saveBootstrapPlan(world);
       world.terraform.world.beforeChange = () => {
         world.signal.interrupted = true;
       };
-      expect(await run(["apply", "--plan-id", PLAN_ID], world.context)).toBe(1);
+      const args = ["apply", "--plan-id", PLAN_ID, "--profile", "factory"];
+      expect(await run(args, world.context)).toBe(1);
+      // Without a terminal `fffactory apply` is refused, and B may be spent: plan again.
       expect(world.err).toEqual([
-        "Interrupted before the factory was locked: it is not locked. Rerun `fffactory apply`: " +
-          "it plans again from what exists now.",
+        `Interrupted before the factory was locked: it is not locked. Saved plan ${PLAN_ID} ` +
+          "may be spent and the state bucket created, so plan again from what exists now:",
+        "  fffactory plan --profile factory",
       ]);
       expect(world.lockStore.locks.size).toBe(0);
+    });
+
+    test("an interrupt as it takes the lock keeps it, and names plan after the break", async () => {
+      const world = cli({ bucket: false });
+      await saveBootstrapPlan(world);
+      const { lockStore, signal } = world;
+      const create = lockStore.create.bind(lockStore);
+      lockStore.create = async (bucket, record) => {
+        signal.interrupted = true;
+        return create(bucket, record);
+      };
+      expect(await run(["apply", "--plan-id", PLAN_ID], world.context)).toBe(1);
+      expect(world.err).toEqual([
+        "Interrupted: the factory stays locked by this apply, which may have no operation " +
+          "record. Once fffactory has exited, break the lock with `fffactory lock break`, then " +
+          "plan the factory next:",
+        "  fffactory plan",
+      ]);
+      expect(lockStore.buckets.has(BUCKET)).toBe(true);
+      expect(lockStore.locks.size).toBe(1);
     });
   });
 

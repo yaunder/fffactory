@@ -58,11 +58,13 @@ const USAGE = [
   "Interrupting apply (Ctrl-C) stops Terraform gracefully and leaves the factory",
   "locked, with a record of the interrupted operation in the state bucket. Once",
   "fffactory has exited, break the lock with `fffactory lock break`; rerunning",
-  "apply plans again from what exists and converges.",
+  "apply plans again from what exists and converges. An interrupted saved bootstrap",
+  "plan may be spent: run `fffactory plan` instead.",
   "",
-  "Exits 0 once every worker is installed and verified or stopped, 2 when a worker",
-  "was skipped, and 1 when anything failed or was refused, including a new worker",
-  "whose first boot did not finish in time.",
+  "Exits 0 once every worker is installed and verified or stopped, or once a saved",
+  "bootstrap plan has created the bucket, 2 when a worker was skipped, and 1 when",
+  "anything failed or was refused, including a new worker whose first boot did not",
+  "finish in time.",
   "",
   "Refused, naming what is missing, when this fffactory is not the release",
   "factory.json pins, when factory.json no longer declares a provisioned host key",
@@ -123,12 +125,48 @@ const breakThenRerun = ({ rerun }: Reporting) =>
   "Once fffactory has exited, break the lock with `fffactory lock break`, then rerun " +
   `\`fffactory ${rerun}\`.`;
 
+/**
+ * What an interrupted saved bootstrap plan's apply left, to standard error. Not a rerun of
+ * apply, which the plan, possibly spent, cannot repeat and which needs a terminal: plan again,
+ * repeating the `--instance` and `--profile` given.
+ */
+function reportBootstrapInterrupted(
+  result: Extract<FactoryApply, { readonly kind: "interrupted" }>,
+  planId: string,
+  context: CliContext,
+  reporting: Reporting,
+): void {
+  const plan = `  ${commandLine(["fffactory", "plan"], reporting.flags ?? {})}`;
+  if (!result.locked) {
+    context.err(
+      `Interrupted before the factory was locked: it is not locked. Saved plan ${planId} may ` +
+        "be spent and the state bucket created, so plan again from what exists now:",
+    );
+    context.err(plan);
+    return;
+  }
+  const left =
+    result.record === undefined
+      ? `the factory stays locked by this ${reporting.action}, which may have no operation record`
+      : "the factory stays locked, with a record of this operation";
+  context.err(
+    `Interrupted: ${left}. Once fffactory has exited, break the lock with ` +
+      "`fffactory lock break`, then plan the factory next:",
+  );
+  context.err(plan);
+  if (result.record !== undefined) printRecord(result.record, context);
+}
+
 /** What an interrupt left: no lock, the lock alone, or the lock and a record of the apply. */
 function reportInterrupted(
   result: Extract<FactoryApply, { readonly kind: "interrupted" }>,
   context: CliContext,
   reporting: Reporting,
 ): void {
+  if (result.bootstrapPlan !== undefined) {
+    reportBootstrapInterrupted(result, result.bootstrapPlan, context, reporting);
+    return;
+  }
   if (!result.locked) {
     context.err(
       `Interrupted before the factory was locked: it is not locked. Rerun \`fffactory ${reporting.rerun}\`: ` +

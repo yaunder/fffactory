@@ -754,9 +754,19 @@ A Terraform apply that fails is reported as backend bootstrap's failure is,
 taken. A rerun of `fffactory plan` finds the bucket missing, and a new plan is
 needed, or created but unready, and shows how to complete it. An interrupt
 before the lock is taken, including one that stops the Terraform apply, takes
-none and says so (`Interrupted before the factory was locked: ...`); one once
-it is taken leaves it, as any interrupted apply does
-([Interruption](#interruption)).
+none and says so; one once it is taken leaves it, as any interrupted apply does
+([Interruption](#interruption)). Either names `fffactory plan` next, never a
+rerun of `fffactory apply`, which needs a terminal, while B may be spent:
+
+```text
+Interrupted before the factory was locked: it is not locked. Saved plan B may be spent and the state bucket created, so plan again from what exists now:
+  fffactory plan
+```
+
+With the lock held, the message ends ``break the lock with `fffactory lock
+break`, then plan the factory next:`` and the same `fffactory plan` line. That
+line repeats the `--instance` and `--profile` given, as the line after a
+created bucket does.
 
 Bootstrap stays the one step before the lock, which lives in the bucket
 ([provisioning §Backend bootstrap](provisioning.md#backend-bootstrap)). The
@@ -924,6 +934,9 @@ signal's number:
 | No lock: interrupted before it was taken | ``Interrupted before the factory was locked: it is not locked. Rerun `fffactory apply`: it plans again from what exists now.`` |
 | The lock, and no record written yet | ``Interrupted: the factory stays locked by this apply, which may have no operation record. Once fffactory has exited, break the lock with `fffactory lock break`, then rerun `fffactory apply`.`` |
 | The lock and its record | ``Interrupted: the factory stays locked, with a record of this operation. Once fffactory has exited, ...``, then `Operation record: s3://BUCKET/KEY` on standard output. |
+
+A saved bootstrap plan's apply names `fffactory plan` in place of each rerun of
+`fffactory apply` ([above](#applying-a-saved-bootstrap-plan)).
 
 An interrupt during the workers stage first names the worker it concerned:
 ``Interrupted while installing on KEY (HOSTNAME): host apply may still be

@@ -1310,6 +1310,7 @@ describe("applying a saved bootstrap plan (plan-apply §Apply)", () => {
     expect(await applyFactory(world.deps, withBootstrapPlan())).toEqual({
       kind: "interrupted",
       locked: false,
+      bootstrapPlan: PLAN_ID,
     });
     expect(world.lockStore.locks.size).toBe(0);
     expect(world.lockStore.operationWrites).toEqual([]);
@@ -1327,6 +1328,7 @@ describe("applying a saved bootstrap plan (plan-apply §Apply)", () => {
       kind: "interrupted",
       locked: true,
       record: undefined,
+      bootstrapPlan: PLAN_ID,
     });
     expect(world.lockStore.locks.size).toBe(1);
     expect(world.lockStore.operationWrites).toEqual([]);
