@@ -117,6 +117,12 @@ as the managed Terraform's cache hit and interrupts a spawned `apply`, and
 `cli/plan-apply.test.ts` runs the real provisioner over it in process to check where a failed
 command's diagnostics go. `stopRunningTools`
 refuses every later command in its process, so it is tested only in a child process,
-`support/stop-tools-main.ts`. `descriptorLines` is tested over a real pipe in
+`support/stop-tools-main.ts`. `descriptorOutput` is tested over a real pipe in
 `support/descriptor-lines-main.ts`, read by a deliberately slow reader (`sleep` before `wc`)
-so the pipe fills: a delay in the reader, not a wait for the process.
+so the pipe fills: a delay in the reader, not a wait for the process. The undrained-pipe
+regression (`cli/descriptor-interrupted.test.ts`) keeps both pipes open without reading,
+waits for a real EAGAIN marker, then verifies first-signal stopping and bounded exit,
+including during normal output flushing and a prompt waiting to show its review, and
+second-signal killing. The merged-pipe prompt case verifies its question, echo and
+newline follow the full review. `infrastructure/terminal-prompt.test.ts` verifies a
+cancelled review flush never enters raw mode or reads an answer.

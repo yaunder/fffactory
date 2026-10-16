@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import {
   type DescriptorIo,
-  descriptorLines,
+  descriptorOutput,
   systemDescriptorIo,
 } from "../../src/cli/descriptor-lines";
 
@@ -24,7 +24,7 @@ function scriptedDescriptor(steps: readonly (number | string)[]) {
       written.push(...bytes.subarray(offset, offset + count));
       return count;
     },
-    wait() {
+    async wait() {
       waits++;
     },
   };
@@ -36,10 +36,10 @@ function scriptedDescriptor(steps: readonly (number | string)[]) {
   };
 }
 
-describe("descriptorLines (cli-output §Plain output)", () => {
+describe("descriptorOutput (cli-output §Plain output)", () => {
   test("writes each line and its newline to its descriptor, as given", () => {
     const descriptor = scriptedDescriptor([]);
-    const line = descriptorLines(2, descriptor.io);
+    const line = descriptorOutput(descriptor.io).lines(2);
     line("\x1b[1mRefusing\x1b[22m to plan: %s");
     line("");
     expect(descriptor.text()).toBe("\x1b[1mRefusing\x1b[22m to plan: %s\n\n");
@@ -48,20 +48,24 @@ describe("descriptorLines (cli-output §Plain output)", () => {
 
   test("finishes a line a write took only part of, even inside a character", () => {
     const descriptor = scriptedDescriptor([3, 1, 2]);
-    descriptorLines(1, descriptor.io)("✔ ready ✖");
+    descriptorOutput(descriptor.io).lines(1)("✔ ready ✖");
     expect(descriptor.text()).toBe("✔ ready ✖\n");
   });
 
-  test("waits while the descriptor is full (EAGAIN) and retries an interrupted write", () => {
+  test("waits while the descriptor is full (EAGAIN) and retries an interrupted write", async () => {
     const descriptor = scriptedDescriptor([4, "EAGAIN", "EAGAIN", "EINTR", 2]);
-    descriptorLines(1, descriptor.io)("Applying workers");
+    const output = descriptorOutput(descriptor.io);
+    output.lines(1)("Applying workers");
+    await output.flush();
     expect(descriptor.text()).toBe("Applying workers\n");
-    expect(descriptor.waits()).toBe(2);
+    expect(descriptor.waits()).toBe(3);
   });
 
-  test("waits after a write that took nothing, rather than retrying at once", () => {
+  test("waits after a write that took nothing, rather than retrying at once", async () => {
     const descriptor = scriptedDescriptor([0, 0, 5]);
-    descriptorLines(1, descriptor.io)("ready");
+    const output = descriptorOutput(descriptor.io);
+    output.lines(1)("ready");
+    await output.flush();
     expect(descriptor.text()).toBe("ready\n");
     expect(descriptor.waits()).toBe(2);
   });
@@ -69,7 +73,7 @@ describe("descriptorLines (cli-output §Plain output)", () => {
   test("stops writing a stream whose reader is gone, without throwing", () => {
     for (const code of ["EPIPE", "EBADF"]) {
       const descriptor = scriptedDescriptor([2, code]);
-      const line = descriptorLines(1, descriptor.io);
+      const line = descriptorOutput(descriptor.io).lines(1);
       line("first");
       line("second");
       expect(descriptor.text()).toBe("fi");
@@ -78,7 +82,41 @@ describe("descriptorLines (cli-output §Plain output)", () => {
   });
 });
 
-describe("descriptorLines over a real pipe", () => {
+describe("descriptorOutput cancellation", () => {
+  test("releases pending flushes and drops queued and future lines", async () => {
+    const descriptor = scriptedDescriptor(["EAGAIN"]);
+    let resume!: () => void;
+    const output = descriptorOutput({
+      ...descriptor.io,
+      wait: () =>
+        new Promise<void>((resolve) => {
+          resume = resolve;
+        }),
+    });
+    output.lines(1)("blocked");
+    output.lines(2)("queued");
+    const first = output.flush();
+    const second = output.flush();
+    output.cancel();
+    await Promise.all([first, second]);
+    output.lines(1)("later");
+    resume();
+    await output.flush();
+    expect(descriptor.calls).toHaveLength(1);
+    expect(descriptor.text()).toBe("");
+  });
+
+  test("a broken stdout does not discard stderr queued behind it", async () => {
+    const descriptor = scriptedDescriptor(["EAGAIN", "EPIPE"]);
+    const output = descriptorOutput(descriptor.io);
+    output.lines(1)("broken");
+    output.lines(2)("diagnostic");
+    await output.flush();
+    expect(descriptor.text()).toBe("diagnostic\n");
+  });
+});
+
+describe("descriptorOutput over a real pipe", () => {
   const SCRIPT = resolve(import.meta.dir, "../support/descriptor-lines-main.ts");
   let scratch: string;
   beforeAll(async () => {
@@ -102,7 +140,7 @@ describe("descriptorLines over a real pipe", () => {
 
   test("loses nothing written before process.exit into a slow, non-blocking pipe", () => {
     // The script touches process.stdout and process.stderr as main.ts does, which makes
-    // both pipes non-blocking, then writes far more than a pipe holds and exits at once.
+    // both pipes non-blocking, then writes far more than a pipe holds and flushes at exit.
     const counted = shell("large 700000 300000", `2>'${scratch}/err' | (sleep 0.3; wc -c)`);
     expect(Number(counted.trim())).toBe(700001);
     const errors = Bun.spawnSync(["wc", "-c", join(scratch, "err")]).stdout.toString();
@@ -113,7 +151,7 @@ describe("descriptorLines over a real pipe", () => {
     const file = join(scratch, "lines");
     const fd = openSync(file, "w");
     try {
-      const line = descriptorLines(fd);
+      const line = descriptorOutput().lines(fd);
       line("✔ ready");
       line("");
     } finally {
@@ -121,13 +159,19 @@ describe("descriptorLines over a real pipe", () => {
     }
     expect(await readFile(file, "utf8")).toBe("✔ ready\n\n");
     const before = performance.now();
-    systemDescriptorIo.wait();
+    await systemDescriptorIo.wait();
     expect(performance.now() - before).toBeGreaterThanOrEqual(0.5);
   });
 
+  test("a prompt and its echo follow the entire review before its result", () => {
+    const merged = shell("prompt 700000", "2>&1 | (sleep 0.1; cat)");
+    expect(merged.indexOf("PROMPT ")).toBe(700001);
+    expect(merged.slice(700001)).toBe("PROMPT yes\nANSWER yes\n");
+  });
+
   test("keeps the order of lines written to both streams on one pipe", () => {
-    const merged = shell("alternate 200", "2>&1 | cat");
-    const expected = Array.from({ length: 200 }, (_, n) => `${n % 2 ? "err" : "out"} ${n}\n`);
+    const merged = shell("alternate 20000", "2>&1 | (sleep 0.1; cat)");
+    const expected = Array.from({ length: 20000 }, (_, n) => `${n % 2 ? "err" : "out"} ${n}\n`);
     expect(merged).toBe(expected.join(""));
   });
 });

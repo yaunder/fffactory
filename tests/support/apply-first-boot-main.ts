@@ -28,6 +28,8 @@ const interrupts = interruptible({
   on: (signal, handler) => process.on(signal, handler),
   off: (signal, handler) => process.off(signal, handler),
   exit: (code) => process.exit(code),
+  flushOutput: async () => {},
+  cancelOutput: () => {},
   signalNumber: (signal) => constants.signals[signal],
   stopRunningTools,
   killRunningTools,

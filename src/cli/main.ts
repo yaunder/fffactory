@@ -37,7 +37,7 @@ import { managedTerraform } from "../infrastructure/terraform/installer";
 import { terraformProvisioner } from "../infrastructure/terraform/provisioner";
 import { terraformRunner } from "../infrastructure/terraform/runner";
 import { RELEASE_COMPATIBILITY } from "../domain/release-compatibility";
-import { descriptorLines } from "./descriptor-lines";
+import { descriptorOutput } from "./descriptor-lines";
 import { interruptible, RETURN_GRACE_MS } from "./interrupts";
 import { streamStyles } from "./presentation/color";
 import { writer } from "./presentation/style";
@@ -45,14 +45,17 @@ import { RELEASE } from "./release";
 import { run, waitsOnInterrupt } from "./run";
 
 /** Standard output's and standard error's lines, written raw: never through `console`. */
-const stdoutLines = descriptorLines(1);
-const stderrLines = descriptorLines(2);
+const output = descriptorOutput();
+const stdoutLines = output.lines(1);
+const stderrLines = output.lines(2);
 
 /** Signal handling (`cli/interrupts.ts`) over this process. */
 const interrupts = interruptible({
   on: (signal, handler) => process.on(signal, handler),
   off: (signal, handler) => process.off(signal, handler),
   exit: (code) => process.exit(code),
+  flushOutput: output.flush,
+  cancelOutput: output.cancel,
   signalNumber: (signal) => constants.signals[signal],
   stopRunningTools,
   killRunningTools,
@@ -100,7 +103,13 @@ await interrupts.run(
       vpcQuota: awsVpcQuotaProbe(),
       lockStore: s3LockStore(),
       secrets: secretsManagerStore(),
-      prompt: terminalPrompt(process.stdin, process.stderr),
+      prompt: terminalPrompt(process.stdin, {
+        write: (text) => output.write(2, text),
+        flush: async () => {
+          await output.flush();
+          return !interrupts.interrupted();
+        },
+      }),
       provisioner: terraformProvisioner({
         cacheDirectory,
         terraform,

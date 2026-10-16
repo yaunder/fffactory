@@ -37,10 +37,22 @@ backticks around inline code, which color drops, so an agent reads it as
 Markdown. Color is added on top and is never the only signal: every status has
 its glyph in both modes.
 
-Both streams' lines are written raw to their file descriptors, synchronously, in
-the order written and with nothing lost at exit, never through the runtime's
-console, whose own coloring would wrap them. Tested in `tests/cli/main.test.ts` and
-`tests/cli/descriptor-lines.test.ts`.
+Both streams' lines are written raw to their file descriptors through one ordered
+queue, never through the runtime's console, whose own coloring would wrap them.
+When a pipe fills, retries yield so signals and timers can run. Normal exit flushes
+the queue with signal handlers still installed, preserving all output and its order,
+even when both streams share a pipe. For commands that wait on interruption, reporting
+and its output flush share the existing return grace; a second signal exits immediately.
+Pending output is discarded at an interrupted exit, so an open pipe that never drains cannot
+prevent tools from stopping or keep the CLI alive. Tested in `tests/cli/main.test.ts`,
+`tests/cli/descriptor-lines.test.ts` and `tests/cli/descriptor-interrupted.test.ts`.
+
+Prompt questions, typed echoes and newlines use the same ordered queue as report
+lines. Before asking or reading an answer, the prompt flushes the complete preceding
+review while input remains out of raw mode, so an undrained pipe remains interruptible.
+If interrupted during that wait, the prompt accepts no answer and does not enter raw
+mode. Tested by the real merged-pipe prompt in `tests/cli/descriptor-lines.test.ts`,
+the undrained-pipe interruption cases and `tests/infrastructure/terminal-prompt.test.ts`.
 
 ## Style roles
 
@@ -236,5 +248,5 @@ apply only to human lines laid out by `src/cli/presentation/`.
 | CLI adapter | `src/cli/presentation/apply.ts` | A report on [two streams](#two-streams): apply's Result and Next block as lines, each for its stream (`StreamLine`), written by the command in order. |
 | CLI adapter | `src/cli/presentation/command-line.ts` | `fffactoryCommand`: an `fffactory` command a Next block names, repeating the `--instance` and `--profile` the running command was given, each word quoted for a POSIX shell (`shellWord`) where needed. |
 | CLI adapter | `src/cli/context.ts` | `CliContext.out` and `err`, each a `Writer` carrying its stream's style. |
-| CLI adapter | `src/cli/descriptor-lines.ts` | `descriptorLines`, a stream's raw line writer over its file descriptor ([Plain output](#plain-output)). |
+| CLI adapter | `src/cli/descriptor-lines.ts` | `descriptorOutput`, both streams' raw line writers and shared queue ([Plain output](#plain-output)). |
 | CLI adapter | `src/cli/main.ts` | The one place reading each stream's `isTTY` and the environment to pick the styles. |
