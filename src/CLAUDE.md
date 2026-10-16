@@ -34,7 +34,9 @@ Dependencies point inward: `domain <- application <- infrastructure, cli`, and
   file's SHA-256 right before applying exactly that file, reads it back as its record's
   create-only changes, spends the plan once its apply starts, takes the lock right after the
   bucket exists, and apply records `plan_id` with the `backend` stage alone and stops: the
-  factory is planned next, never in the same apply. The workers
+  factory is planned next, never in the same apply. `planFactory` saves that bootstrap plan
+  while the bucket is missing, and a factory plan once it exists; a plan refused or failing
+  saves nothing and leaves no plan directory. The workers
   stage (`application/apply-workers.ts`) is the second step under the same lock and record, and
   its changes, each declared worker's install, are in the one plan approved. The repositories
   stage (`application/apply-repositories.ts`) follows it under that lock and record, and its

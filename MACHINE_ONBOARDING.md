@@ -65,7 +65,7 @@ chain. Every such command first refuses unless the caller is in factory.json's
 | [4. Check the workstation](#4-check-the-workstation) | Agent | `fffactory doctor` | Every check is ready but the instance check. |
 | [5. Prepare the tailnet](#5-prepare-the-tailnet) | Human (tailnet admin) | Tailscale admin console | Tag, grant, SSH rule and auth key exist, and the admin client if you create it. |
 | [6. Store the secrets](#6-store-the-secrets) | Human | `fffactory secret set` | `validate` reports `Complete` and `doctor` exits 0. |
-| [7. Bootstrap and provision](#7-bootstrap-and-provision) | Human (approves at a terminal) | `fffactory plan`, `fffactory apply` | apply exits 0; the worker is installed, enrollment pending. |
+| [7. Bootstrap and provision](#7-bootstrap-and-provision) | Human (approves at a terminal), or agent after plan approval | `fffactory plan`, `fffactory apply` (or `apply --plan-id ID`, twice) | apply exits 0; the worker is installed, enrollment pending. |
 | [8. Enroll the worker's accounts](#8-enroll-the-workers-accounts) | Human | `tailscale ssh factory@HOSTNAME`, then each login | Each login's status command succeeds. |
 | [9. Verify enrollment](#9-verify-enrollment) | Agent, after plan approval | `fffactory plan`, `fffactory apply --plan-id ID`, `fffactory status` | status exits 0: `Ready on release R`. |
 | [10. Enroll Paseo clients](#10-enroll-paseo-clients) | Human | Paseo Desktop or iOS | The client connects to `HOSTNAME.TAILNET:6767`. |
@@ -334,7 +334,8 @@ fffactory has no way yet to restart Paseo onto a rotated password.
 
 ## 7. Bootstrap and provision
 
-**Actor:** human: the first apply asks for two approvals at a terminal.
+**Actor:** human: the first apply asks for two approvals at a terminal. Or an
+agent, once the operator has approved each of two saved plans (below).
 **Specs:** [plan and apply](docs/specs/plan-apply.md),
 [provisioning §First apply](docs/specs/provisioning.md#first-apply).
 
@@ -344,8 +345,9 @@ fffactory apply --profile NAME
 ```
 
 Before the first apply the state bucket does not exist, so `plan` shows only
-backend bootstrap's plan, ending `The factory itself is planned once the state
-bucket exists: …`, and saves nothing. `apply` then:
+backend bootstrap's plan, saves it as a bootstrap plan with its `fffactory apply
+--plan-id ID` command, and ends `The factory itself is planned once the state
+bucket exists: …`. At a terminal, `apply` ignores that saved plan and:
 
 1. shows the bootstrap plan and asks `Apply this plan? Only "yes" applies it: `.
    Approving creates the state bucket;
@@ -363,6 +365,23 @@ bucket exists: …`, and saves nothing. `apply` then:
    Paseo and reconciles dispatch;
 6. prints each stage's outcome, the end-to-end verification and `Operation
    record: s3://…`, and releases the lock.
+
+**Without a terminal**, the same two approvals are two saved plans, each
+applied exactly by naming its ID
+([plan and apply §Applying a saved bootstrap plan](docs/specs/plan-apply.md#applying-a-saved-bootstrap-plan)):
+
+```bash
+fffactory plan --profile NAME                  # saves bootstrap plan B
+fffactory apply --plan-id B --profile NAME     # creates the state bucket, then stops
+fffactory plan --profile NAME                  # the bucket exists: saves factory plan F
+fffactory apply --plan-id F --profile NAME     # steps 3 to 6 above
+```
+
+The operator reviews each plan before an agent applies it. `apply --plan-id B`
+creates only the bucket, records `plan_id: B` and prints `Created the state
+bucket. Plan the factory next: fffactory plan …`; it never plans the factory.
+Each plan is refused as stale once factory.json, the release, the account or
+(for B) the bucket's absence changed: plan again and review the new plan.
 
 **Done when** apply exits 0 and its `Workers:` section shows `installed  KEY
 (HOSTNAME): release R installed and verified; enrollment pending: GitHub,

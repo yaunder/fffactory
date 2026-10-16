@@ -73,9 +73,27 @@ consistency instead. The plan `apply` makes for itself, under the factory lock,
 keeps Terraform's state lock as well.
 
 1. When the state bucket does not exist, the plan is
-   [backend bootstrap's](provisioning.md#backend-bootstrap), shown as bootstrap
-   shows it, followed by `The factory itself is planned once the state bucket
-   exists: ...`. No plan is saved; exit 0.
+   [backend bootstrap's](provisioning.md#backend-bootstrap): planned as
+   bootstrap plans it, create-only, into a new plan directory's
+   `backend.tfplan`, and saved as a [bootstrap plan](#saved-plans). It is
+   shown as bootstrap shows it, then:
+
+   ```text
+   Saved as plan b7q2m9xk, until 2026-09-30T13:00:00.000Z. To apply exactly it:
+     fffactory apply --plan-id b7q2m9xk
+   The factory itself is planned once the state bucket exists: rerun `fffactory plan` after applying it.
+   ```
+
+   Exit 0. The apply command repeats `--instance` and `--profile` as a
+   factory plan's does (5). `fffactory apply --plan-id B` then creates the
+   bucket without a terminal and stops
+   ([Applying a saved bootstrap plan](#applying-a-saved-bootstrap-plan)); the
+   next `fffactory plan` finds the bucket and plans the factory. A bootstrap
+   plan Terraform shows doing more than create, or nothing, or that cannot be
+   read, is refused as Terraform's plan fffactory cannot apply; it saves
+   nothing, and its plan directory is removed. `fffactory apply` at a terminal
+   still bootstraps interactively, after its own approval
+   ([Apply](#apply) 1).
 2. A bucket bootstrap did not finish is refused as bootstrap refuses it.
 3. While the factory is locked, planning is refused with the holder
    ([provisioning §Lock](provisioning.md#lock)): a plan made during another
@@ -524,11 +542,10 @@ bucket exists. A bootstrap record carrying any of them, or with no changes, or
 with a change that does anything but create, is unreadable, and so is a factory
 record without `state_revision` or `dispatch`.
 
-`apply --plan-id` applies a bootstrap plan exactly
+`fffactory plan` saves a bootstrap plan while the state bucket is missing
+([Plan](#plan) 1), and a factory plan once it exists. `apply --plan-id`
+applies a bootstrap plan exactly
 ([Applying a saved bootstrap plan](#applying-a-saved-bootstrap-plan)).
-`fffactory plan` does not save one yet: it still shows a missing bucket's
-bootstrap plan without saving it
-([#61](https://github.com/yaunder/factory/issues/61)).
 
 ### Freshness
 
@@ -674,10 +691,19 @@ hour ([provisioning §Operations](provisioning.md#operations)).
 
 `fffactory apply --plan-id B`, where B is a saved
 [bootstrap plan](#saved-plans), is the unattended way to create the state
-bucket: it needs no terminal, and naming B approves exactly B. After the checks
-every apply runs ([above](#before-anything-reaches-aws): the account check
-first, then the assets, the CLI/pin match guard and completeness),
-`applySavedBootstrap` (`src/application/bootstrap-backend.ts`):
+bucket: it needs no terminal, and naming B approves exactly B. A fresh factory
+is created with two exact plans, each approved by naming its ID:
+
+```text
+fffactory plan                 # no bucket: saves bootstrap plan B, prints `fffactory apply --plan-id B`
+fffactory apply --plan-id B    # applies exactly B, locks, records B, releases, stops
+fffactory plan                 # bucket exists: saves factory plan F
+fffactory apply --plan-id F    # applies exactly F
+```
+
+After the checks every apply runs ([above](#before-anything-reaches-aws): the
+account check first, then the assets, the CLI/pin match guard and
+completeness), `applySavedBootstrap` (`src/application/bootstrap-backend.ts`):
 
 1. checks B's local [freshness](#freshness): factory.json's path and text, the
    release and its assets, the account, and its expiry. A stale plan is
@@ -1101,7 +1127,7 @@ refused (D11).
 | Domain | `src/domain/operation.ts` | The operation record, its key, stage transitions (upgrade's `pin` stage too), workers, repositories and control-plane outcomes. Pure. |
 | Domain | `src/domain/repository-placement.ts` | The per-worker repository manifest, fixed worker protocol commands, and completed-result parser. Pure. |
 | Domain | `src/domain/stable-host-keys.ts` | `recordedHostKeys`, reading the factory root's `host_keys` output. |
-| Application | `src/application/plan-factory.ts` | `checkPlannable`, `planInfrastructure`, `planFactory`, `declaredMachines` (the one inventory read: the stopped workers and the resize guard). |
+| Application | `src/application/plan-factory.ts` | `checkPlannable`, `planInfrastructure`, `planFactory` (a missing bucket's bootstrap plan saved too), `declaredMachines` (the one inventory read: the stopped workers and the resize guard). |
 | Application | `src/application/apply-factory.ts` | `applyFactory`: saved-plan freshness, the lock, infrastructure, workers, repository and control-plane stages, operation records, interruption; a saved bootstrap plan routed to `applySavedBootstrap`, then its record. |
 | Application | `src/application/bootstrap-backend.ts` | `applySavedBootstrap`: a saved bootstrap plan's bucket and file checks, its read-back, its exact apply, then the lock. |
 | Application | `src/application/plan-control-plane.ts` | Derives Paseo changes and saved live observations from worker inspections. |
@@ -1139,7 +1165,9 @@ bootstrap plan's record),
 `tests/application/plan-factory.test.ts` (a first plan, the state revision
 bound before planning, no infrastructure changes still saved with the workers,
 the pin guard, incomplete factory.json, another account, a missing bucket's
-bootstrap plan, an unready bucket, a held lock, host key removal refused before
+bootstrap plan saved into its own `backend.tfplan` and bound to the current
+circumstances with no lock taken, one that does more than create or whose
+Terraform plan fails saving nothing and leaving no plan directory, an unready bucket, a held lock, host key removal refused before
 Terraform plans, a host replacement refused and never saved, unreadable outputs
 and plans, a failing Terraform plan, no Terraform state lock, pruning, a
 stopped worker's install skipped and saved and never inspected, a stopped or
@@ -1214,7 +1242,14 @@ bootstrap plan applied with no terminal, its lines, the next step with the
 instance and profile quoted, exit 0 and its record's `plan_id`, then refused as
 missing; one refused after factory.json changed or once the bucket exists, and
 for another account before anything is planned or applied, with nothing
-changed; its failed Terraform apply and an interrupt before the lock; a stopped worker
+changed; its failed Terraform apply and an interrupt before the lock; `plan`
+with no bucket printing the bootstrap plan, its exact `apply --plan-id` command
+with the instance and profile and the line to plan again, exit 0, and saving
+nothing when refused; the unattended first apply over fakes with no terminal,
+`plan` saving B, `apply --plan-id B` creating the bucket, `plan` saving F and
+`apply --plan-id F` applying the factory, each command's account check first and
+the two records naming B (`backend` alone) then F, and B applied after
+factory.json changed refused with nothing changed; a stopped worker
 shown skipped in the plan, listed `stopped` by apply with exit 0, its resize
 refused, and with the inventory unreadable skipped with exit 2 as before and a
 resize refused; one apply creating, waiting for and installing a worker; the

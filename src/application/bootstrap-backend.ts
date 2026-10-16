@@ -132,17 +132,17 @@ export interface BootstrapPlanRequest {
 export type BootstrapPlanning =
   /** The plan would do something other than create, or could not be read. */
   | { readonly kind: "unexpected_plan"; readonly unexpected: readonly string[] }
-  /** The plan, saved at `saved.planFile`, and the lines an operator approves it from. */
+  /**
+   * The plan, saved at `saved.planFile`, the lines an operator approves it from, and what it
+   * changes, each only a create.
+   */
   | {
       readonly kind: "planned";
       readonly plan: readonly string[];
+      readonly changes: readonly ResourceChange[];
       readonly saved: SavedPlanRequest;
     };
 
-/**
- * Plans creating the state bucket with the backend root module, and reads the saved plan
- * back: it may only create. Applies nothing.
- */
 /** Backend bootstrap's saved Terraform plan file `planFile`, for the backend root. */
 function backendPlanFile(
   bucket: StateBucket,
@@ -199,6 +199,10 @@ async function readBackBootstrapPlan(
   return { kind: "read", changes: changes.filter(changesSomething), plan };
 }
 
+/**
+ * Plans creating the state bucket with the backend root module, and reads the saved plan
+ * back: it may only create. Applies nothing.
+ */
 export async function planBackendBootstrap(
   provisioner: Provisioner,
   request: BootstrapPlanRequest,
@@ -207,7 +211,7 @@ export async function planBackendBootstrap(
   await provisioner.plan({ ...saved, variables: { ...request.variables } });
   const read = await readBackBootstrapPlan(provisioner, saved, request);
   if (read.kind !== "read") return read;
-  return { kind: "planned", plan: read.plan, saved };
+  return { kind: "planned", plan: read.plan, changes: read.changes, saved };
 }
 
 /**

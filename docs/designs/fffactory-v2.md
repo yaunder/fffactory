@@ -364,7 +364,11 @@ maintenance actions receive an additional explicit approval.
 
 The first apply is the exception: it first presents and applies a small backend
 bootstrap plan, acquires the newly created factory-wide lock, then creates the
-complete factory plan and requests the normal approval.
+complete factory plan and requests the normal approval. Unattended, the same
+two approvals are two saved plans: while the state bucket is missing, `plan`
+saves the bootstrap plan, `apply --plan-id` applies exactly it, records it and
+stops, and the next `plan` saves the factory plan
+([plan and apply §Applying a saved bootstrap plan](../specs/plan-apply.md#applying-a-saved-bootstrap-plan)).
 
 The full stage order is:
 
@@ -654,7 +658,7 @@ release verification, SSH execution, state transitions, and safety policy.
 | Condition | Behavior |
 | --- | --- |
 | Wrong AWS account | Refuse before planning or mutation |
-| Missing backend | First apply presents a separate bootstrap approval |
+| Missing backend | `plan` saves a bootstrap plan that `apply --plan-id` applies exactly, then stops; or the first apply at a terminal presents a separate bootstrap approval |
 | Concurrent apply | Factory-wide remote lock refuses the second operation |
 | Worker offline | Mark partial, continue with other eligible workers |
 | Worker blocked by active agents | Pause automatic dispatch when maintenance is needed, leave release unchanged, continue elsewhere |

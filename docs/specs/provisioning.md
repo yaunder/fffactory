@@ -594,8 +594,9 @@ takes naming the plan's ID as its approval, applies exactly its
 `backend.tfplan` after the checks above, takes the lock, and the apply records
 the bootstrap and stops
 ([plan and apply §Applying a saved bootstrap plan](plan-apply.md#applying-a-saved-bootstrap-plan)).
-`fffactory plan` shows a missing bucket's bootstrap plan with
-`planBackendBootstrap`, applying nothing.
+`fffactory plan` plans a missing bucket's bootstrap with
+`planBackendBootstrap`, applying nothing, and saves it as that bootstrap plan
+([plan and apply §Plan](plan-apply.md#plan)).
 
 ## Lock
 
