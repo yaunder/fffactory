@@ -78,8 +78,10 @@ Dependencies point inward: `domain <- application <- infrastructure, cli`, and
 - Secret material is a `SecretMaterial` from a hidden prompt, standard input or
   `SecretStore.read`, never a command argument; only a `SecretStore` adapter calls `reveal`,
   `tailscaleApiAdmin`, for the admin client's token requests (one renewal per call
-  refused with HTTP 401), and the worker's `credentials` step (`host/credentials.ts`), onto a
-  delivering command's standard input (`docs/specs/credential-delivery.md`). factory.json keeps only
+  refused with HTTP 401), the worker's `credentials` step (`host/credentials.ts`), onto a
+  delivering command's standard input (`docs/specs/credential-delivery.md`), and the worker's
+  control-plane install (`host/control-plane.ts`), only into the Paseo password's bcrypt hash
+  (`docs/specs/control-plane.md` §The daemon password). factory.json keeps only
   the ARN (`docs/specs/secrets.md`). Arguments of `secret` are never echoed.
   `tailscale.admin_client_secret`, the operator's admin-tier Tailscale OAuth client, never
   reaches a worker: neither the host projection nor the Terraform inputs carry it, so the

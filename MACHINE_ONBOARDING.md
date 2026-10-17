@@ -328,9 +328,10 @@ exits 0.
 **Otherwise:** a refusal names its cause and stores nothing (exit 1).
 Rerunning `secret set` stores a new value under the same secret, which workers
 that boot later read for the Tailscale key. Do not rotate a running worker's
-Paseo password: its daemon keeps the password it started with until Paseo
-restarts, while fffactory's own Paseo calls read the new value at once, and
-fffactory has no way yet to restart Paseo onto a rotated password.
+Paseo password: its daemon keeps the hash of the password it was installed
+with, while fffactory's own Paseo calls read the new value at once, and
+fffactory has no way yet to install a rotated password's hash and restart Paseo
+onto it.
 
 ### Deliver API credentials (optional)
 

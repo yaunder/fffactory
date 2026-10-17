@@ -61,6 +61,10 @@ terraform-check:
 bootstrap-test *cases:
     ./scripts/bootstrap-test.sh {{cases}}
 
+# Check that the pinned Paseo accepts only the password hash fffactory writes and that no agent sees PASEO_PASSWORD (Linux with user namespaces; downloads Paseo)
+paseo-check:
+    ./tests/paseo/hash-only-daemon.sh
+
 # Run all quality checks (format, lint, typecheck, coverage - fastest first)
 check-all: format-check lint-check typecheck coverage repository-skills
     @echo "All checks passed"

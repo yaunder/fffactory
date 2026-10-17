@@ -5,7 +5,8 @@ set -Eeuo pipefail
 readonly factory_user=factory
 readonly factory_home=/home/factory
 readonly paseo_home=${factory_home}/.paseo
-readonly script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+readonly script_dir
 readonly service_path=/etc/systemd/system/paseo.service
 readonly secret_reference=${factory_home}/.config/fffactory/paseo-password-secret-arn
 readonly factory_path=${factory_home}/.local/bin:/usr/local/bin:/usr/bin:/bin
@@ -28,10 +29,16 @@ source "${script_dir}/versions.env"
 : "${PASEO_VERSION:?PASEO_VERSION is required}"
 : "${PASEO_INTEGRITY:?PASEO_INTEGRITY is required}"
 
+# Standard input: the Paseo password's secret reference, then the bcrypt hash fffactory made of
+# the password it read by that reference; both lines empty for a host that declares none.
 IFS= read -r paseo_secret_arn || true
+IFS= read -r paseo_password_hash || true
 if [[ -n ${paseo_secret_arn} ]]; then
   [[ ${paseo_secret_arn} =~ ^arn:aws[a-z-]*:secretsmanager:[a-z0-9-]+:[0-9]{12}:secret:[A-Za-z0-9/_+=.@-]+$ ]] ||
     fail 'the Paseo password secret reference is invalid'
+  [[ -n ${paseo_password_hash} ]] || fail 'the Paseo password hash is missing'
+else
+  [[ -z ${paseo_password_hash} ]] || fail 'a Paseo password hash came without its secret reference'
 fi
 
 install -d -o "${factory_user}" -g "${factory_user}" -m 0700 "${paseo_home}"
@@ -64,10 +71,15 @@ tailscale_dns="$(tailscale status --json 2>/dev/null | jq -r '.Self.DNSName // e
 [[ -n ${tailscale_dns} ]] || fail 'the worker has no MagicDNS name'
 short_hostname="$(hostname --short)"
 [[ -n ${short_hostname} ]] || fail 'the worker has no hostname'
-factory_command FACTORY_PASEO_CONFIG="${paseo_home}/config.json" \
+# The hash reaches paseo-config.sh in its environment, read from standard input by factory's own
+# shell: as an argument, runuser's command line would show it to every account on the worker.
+# paseo-config.sh checks its form.
+# shellcheck disable=SC2016 # expanded by that shell
+printf '%s\n' "${paseo_password_hash}" | factory_command FACTORY_PASEO_CONFIG="${paseo_home}/config.json" \
   FACTORY_PASEO_LISTEN="${tailscale_ipv4}:6767" \
   FACTORY_PASEO_HOSTNAMES="${short_hostname} ${tailscale_dns}" \
-  "${script_dir}/paseo-config.sh" || fail 'the Paseo config merge failed'
+  /bin/bash -c 'IFS= read -r FACTORY_PASEO_PASSWORD_HASH || true; export FACTORY_PASEO_PASSWORD_HASH; exec "$1"' \
+  paseo-config "${script_dir}/paseo-config.sh" || fail 'the Paseo config merge failed'
 
 install -o root -g root -m 0644 "${script_dir}/paseo.service" "${service_path}"
 systemctl daemon-reload

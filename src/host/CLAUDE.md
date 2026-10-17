@@ -31,8 +31,13 @@ over SSH as `fffactory-admin` (`docs/specs/host-protocol.md`). Rules:
   `runuser` and `env -i`; neither the operator nor `factory` receives broader sudo.
 - `host control-plane` runs only through the activator's fixed `activity`, `install`,
   `reload` and `restart` actions and shares that lock. Activity and reload drop to
-  `factory`; install reads the host projection from standard input and invokes only the
-  active release's setup program; restart is the fixed Paseo systemd action.
+  `factory`; install reads the host projection from standard input, reads the Paseo password
+  by its reference as root and hashes it (bcryptjs at Paseo's cost), and invokes only the
+  active release's setup program, the reference and the hash on its standard input; the
+  password reaches only the hash function. Restart is the fixed Paseo systemd action.
+- `secret-value.ts` reads a delivered secret by its ARN with `/usr/bin/aws` as root, for the
+  `credentials` step and the control-plane install: a `SecretMaterial`, or why not in
+  fffactory's words (the AWS error's name at most).
 - `host dispatch` runs only through the activator's fixed `adoption`, `reconcile` and
   `inspect` actions and shares that lock. It installs only the active release's assets,
   persists canonical desired and observed state, and drops to `factory` for FFFlow,

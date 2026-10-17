@@ -43,6 +43,15 @@ worker only through that new release: its version and asset digest plan
 projection, plans `listen-address`. All three are maintenance, so the
 [pre-activation deferral](#pre-activation-deferral) applies unchanged.
 
+`password` stands for the daemon's password hash, which the install writes from
+the host's Paseo password ([§The daemon password](#the-daemon-password)). A
+release that changes how the daemon authenticates, as the hash-only daemon of
+[#71](https://github.com/yaunder/fffactory/issues/71) did, reaches an existing
+worker the same way: its new release plans `paseo-package`,
+`service-definition`, `listen-address` and `password`, and the restart that
+follows the install starts the daemon on the hash, deferred while agents may be
+active.
+
 The observation and changes are part of saved `plan.json`. Apply re-inspects
 existing workers under the factory lock before worker activation; a changed
 observation makes the approved plan stale. A secret field in the projection is
@@ -101,9 +110,12 @@ versioned JSON activity or action document.
 
 - `activity` and `reload` drop to `factory` with `runuser` and a clean
   environment, then invoke the active release's `paseo-auth.sh`.
-- `install` reads the validated host projection from standard input and sends
-  only its optional secret ARN plus a newline to the active release's
-  `setup-host.sh`. No configuration value is an SSH command token.
+- `install` reads the validated host projection from standard input. When it
+  carries `paseo_password_secret`, install reads the password by that ARN and
+  hashes it ([§The daemon password](#the-daemon-password)); it then sends the
+  active release's `setup-host.sh` two lines on standard input, the ARN and the
+  hash, each empty for a host that declares no password. No configuration value
+  is an SSH command token.
 - `restart` is the fixed `systemctl restart paseo.service` action.
 
 The infrastructure adapter uses only these fixed activator calls. The health
@@ -115,10 +127,11 @@ probe is a fixed curl to the resolved worker's Tailscale address.
 It installs the pinned and integrity-checked `@getpaseo/cli` as `factory`,
 merges the factory-owned daemon settings into
 `/home/factory/.paseo/config.json`, installs the service from the same release,
-points it at that active release's auth wrapper, stores only the optional secret
-ARN in a factory-owned mode 0600 file, reloads systemd and enables the unit. It
+stores only the optional secret ARN in a factory-owned mode 0600 file for the
+auth wrapper, reloads systemd and enables the unit. It
 deliberately does not start or restart Paseo; the separately classified
-lifecycle action does that.
+lifecycle action does that. Setup refuses a hash without an ARN, and an ARN
+without a hash.
 
 Paseo answers `403 Invalid Host header` to a request whose `Host` (port aside)
 is a DNS name other than `localhost` and not one of `daemon.hostnames`; an IP
@@ -131,21 +144,72 @@ sets, in `config.json`:
 - `daemon.listen` to `<Tailscale IPv4>:6767`;
 - `daemon.relay.enabled` to `false`;
 - `daemon.hostnames` to exactly `[<short hostname>, <MagicDNS name>]`, replacing
-  any existing value, a `true` (any host) included.
+  any existing value, a `true` (any host) included;
+- `daemon.auth.password` to the password hash, when setup was given one,
+  keeping the rest of `daemon.auth`. Without one, `daemon.auth.password` is
+  removed, keeping the rest of `daemon.auth`, and a config without one is left
+  as it is ([§The daemon password](#the-daemon-password)).
 
 It keeps every other setting, sets `$schema` to Paseo's config schema and
-`version` to 1, and leaves the file mode 0600. A config that is not one JSON object, or whose
-`daemon` is not an object, fails setup and is left as it was; a rerun leaves the
-merged config unchanged. A Paseo client therefore connects to a worker by its
+`version` to 1, and leaves the file `factory`'s, mode 0600. A config that is not one JSON object, or whose
+`daemon` or `daemon.auth` is not an object, fails setup and is left as it was, as
+does a hash that is not a bcrypt hash (`$2a$`, `$2b$` or `$2y$`, a two-digit
+cost, 53 characters), which is never echoed. A rerun with the same inputs
+leaves the merged config unchanged; each install hashes the password afresh, so
+its salt, and so the stored hash, changes. A Paseo client therefore connects to a worker by its
 stable MagicDNS name, `tcp://<factory ID>-<host key>.<tailnet>.ts.net:6767`, as
 well as by its Tailscale address.
 
-`paseo-auth.sh` reads that one host's reference, fetches the value directly
-from Secrets Manager, puts it only in `PASEO_PASSWORD`, and execs Paseo. The
-service uses the same wrapper, so a fresh daemon hashes that password at
-startup while authenticated CLI calls use it as their credential. The value
+### The daemon password
+
+The daemon holds only the bcrypt hash of the host's Paseo password, never the
+password: an agent, and every tool and hook it runs, inherits the daemon's whole
+environment, so a password there would reach all of them. `install` reads the
+password as root with the instance role (`/usr/bin/aws secretsmanager
+get-secret-value`, in the secret's Region, with the `credentials` step's
+deadline, `src/host/secret-value.ts`) and hashes it as Paseo's own `paseo daemon
+set-password` does: `bcryptjs`'s `hashSync` at Paseo's cost, 12. It hashes the
+value as `paseo-auth.sh` sends it, its final line endings dropped, and refuses an
+empty or blank one. The password reaches only that hash function: never an
+argument, an environment, a log or a file. A password that cannot be read or is
+empty fails `install` before setup runs, with `Paseo password: ` and the
+reason: the AWS error's name, an exit status, a deadline, an unreadable answer
+or an empty secret, never the AWS CLI's output.
+
+Setup hands the hash to `paseo-config.sh` in its environment
+(`FACTORY_PASEO_PASSWORD_HASH`), read from standard input by a shell already
+running as `factory`, so it is no command argument either; `jq` reads it from
+its environment.
+
+`paseo.service` runs `/home/factory/.local/bin/paseo daemon run --home
+/home/factory/.paseo` directly, with only `HOME`, `PASEO_HOME` and `PATH` set,
+so no daemon, agent, tool or hook process has `PASEO_PASSWORD`. Its
+`ExecStartPre` refuses to start the daemon unless `config.json` holds a
+non-empty `daemon.auth.password`: Paseo without one would accept every client
+on the tailnet. A host whose factory.json declares no Paseo password keeps the
+behavior it had before the hash-only daemon: its daemon does not start, as when
+the wrapper that started it refused to without a secret reference. Setup
+therefore stores an empty reference and removes any `daemon.auth.password` from
+`config.json`, keeping the rest of `daemon.auth`, so `ExecStartPre` refuses.
+This covers a host whose `paseo_password_secret` was removed from factory.json:
+the changed projection plans `listen-address`, the install removes the hash
+written for the old password, and the restart that follows leaves the daemon
+stopped rather than running on a password fffactory no longer references
+(which `paseo-auth.sh`, with no reference, could not send). A password stored
+by hand with `paseo daemon set-password` is removed too: without a reference
+the daemon never ran on it before either.
+
+`paseo-auth.sh` is only for fffactory's own Paseo CLI calls (activity, reload,
+the dispatch schedule and dispatch): it reads that one host's reference, fetches
+the value directly from Secrets Manager, puts it only in `PASEO_PASSWORD` of
+the Paseo CLI it execs, and the daemon checks it against the hash. The value
 never enters an argument or log. This replaces v1's generated per-host secret
-map, which v2 does not produce.
+map, which v2 does not produce. Tested in
+`tests/host/control-plane.test.ts` (the read, the hash and where the password
+never goes), `assets/steps/control-plane/tests/test_paseo_config.py` (the
+merge), `tests/assets/steps/steps.test.ts` (the unit and setup's hand-off), and
+against the pinned Paseo by `just paseo-check`
+([§The Paseo pin](#the-paseo-pin)).
 
 After install and its required reload or restart, apply probes health with a
 bounded retry; an unhealthy or unreachable daemon fails the worker's
@@ -171,12 +235,24 @@ daemon.
 fffactory relies on these Paseo contracts, held by 0.11.4
 ([#46](https://github.com/yaunder/fffactory/issues/46)):
 
-- The service runs `paseo daemon run --home /home/factory/.paseo`. With
-  `PASEO_PASSWORD` in its environment the daemon requires that password; a CLI
-  call sending a wrong one fails with `AUTH_FAILED`. 0.11.4 also writes a
+- The service runs `paseo daemon run --home /home/factory/.paseo`. With a
+  bcrypt hash in `config.json`'s `daemon.auth.password` (and no
+  `PASEO_PASSWORD` in its environment, which would take precedence) the daemon
+  requires the password it hashes: a CLI call sending a wrong one fails with
+  `AUTH_FAILED`, and one sending none, or an HTTP request without one, is
+  refused. Without a password it accepts every client. An agent's process gets
+  the daemon's whole environment, plus `PASEO_AGENT_ID` and a few others. 0.11.4 also writes a
   per-run `local-credential` file into its home, removed when it stops, which a
-  CLI on the worker uses only when `PASEO_PASSWORD` is unset. fffactory's calls
-  go through `paseo-auth.sh` and always send the password.
+  CLI on the worker uses only when `PASEO_PASSWORD` is unset and it targets the
+  daemon's own listen address. fffactory's calls
+  go through `paseo-auth.sh` and always send the password. `just paseo-check`
+  (`tests/paseo/hash-only-daemon.sh`) proves these against the pin with the
+  hash the install makes, the real merge and the unit's own commands, in a
+  loopback-only namespace: the right password connects through `paseo-auth.sh`,
+  a wrong one or none is refused, neither a daemon process nor an agent it
+  launches has `PASEO_PASSWORD`, and the unit's `ExecStartPre` refuses the
+  config merged without a hash
+  ([#71](https://github.com/yaunder/fffactory/issues/71)).
 - `GET /api/health` answers `200` without a password, and the `Host` rule
   of [§Release-owned installation](#release-owned-installation) is unchanged.
 - `paseo agent ls --json` prints a JSON array of the agents that are not
@@ -206,6 +282,7 @@ neither yet: `paseo-config.sh` merges only the settings of
 | Protocol documents | domain | `src/domain/control-plane.ts` |
 | Plan derivation | application | `src/application/plan-control-plane.ts` |
 | Deferral and reconciliation | application | `src/application/apply-control-plane.ts`, `apply-factory.ts` |
-| Worker endpoint | host | `src/host/control-plane.ts` |
+| Worker endpoint, password hash | host | `src/host/control-plane.ts`, `src/host/secret-value.ts` |
 | SSH adapter | infrastructure | `src/infrastructure/paseo-control-plane.ts` |
 | Setup, config merge, auth, unit and pin | release assets | `assets/steps/control-plane/` |
+| The pin against the hash | check | `tests/paseo/hash-only-daemon.sh` (`just paseo-check`) |

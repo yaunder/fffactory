@@ -15,6 +15,9 @@ LISTEN = "100.106.58.123:6767"
 SHORT_HOSTNAME = "fff-r29c2un6-builder-1"
 DNS_NAME = "fff-r29c2un6-builder-1.taila910dc.ts.net"
 SCHEMA = "https://paseo.sh/schemas/paseo.config.v1.json"
+# bcrypt hashes as Paseo's own set-password writes them (bcryptjs, cost 12); never a password.
+HASH = "$2b$12$h5b4I7b2Fz0bHCm7UssJA.VS1FTMOJTN61tONuTJ0oFXl0ZQkZ8dq"
+OTHER_HASH = "$2a$12$R9h/cIPz0gi.URNNX3kh2OPST9/PgBkqquzi.Ss7KIUgO2t0jWMUW"
 
 
 class PaseoConfigTest(unittest.TestCase):
@@ -95,6 +98,84 @@ class PaseoConfigTest(unittest.TestCase):
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn("no Paseo hostnames", result.stderr)
                 self.assertFalse(self.config.exists())
+
+    def test_a_password_hash_is_merged_as_the_daemon_password_keeping_other_settings(self):
+        self.config.write_text(json.dumps({
+            "providers": {"claude": {"enabled": True}},
+            "daemon": {"logLevel": "debug", "auth": {"password": OTHER_HASH, "other": 1}},
+        }))
+        self.env["FACTORY_PASEO_PASSWORD_HASH"] = HASH
+        self.assertEqual(self.merged(), {
+            "$schema": SCHEMA,
+            "version": 1,
+            "providers": {"claude": {"enabled": True}},
+            "daemon": {"logLevel": "debug", "auth": {"password": HASH, "other": 1},
+                       "listen": LISTEN, "relay": {"enabled": False},
+                       "hostnames": [SHORT_HOSTNAME, DNS_NAME]},
+        })
+        self.assertEqual(stat.S_IMODE(self.config.stat().st_mode), 0o600)
+
+    def test_a_new_config_gets_the_password_hash(self):
+        self.env["FACTORY_PASEO_PASSWORD_HASH"] = HASH
+        self.assertEqual(self.merged()["daemon"]["auth"], {"password": HASH})
+
+    def test_without_a_hash_a_stored_daemon_password_is_removed(self):
+        # A host whose reference was removed: its daemon must not start on a password fffactory
+        # no longer references, so the stored hash goes and the unit's ExecStartPre refuses.
+        self.config.write_text(json.dumps({"daemon": {"auth": {"password": OTHER_HASH}}}))
+        self.env["FACTORY_PASEO_PASSWORD_HASH"] = ""
+        self.assertEqual(self.merged()["daemon"]["auth"], {})
+
+    def test_without_a_hash_the_rest_of_the_config_and_daemon_auth_is_kept(self):
+        self.config.write_text(json.dumps({
+            "providers": {"claude": {"enabled": True}},
+            "daemon": {"logLevel": "debug", "auth": {"password": OTHER_HASH, "other": 1}},
+        }))
+        self.env["FACTORY_PASEO_PASSWORD_HASH"] = ""
+        self.assertEqual(self.merged(), {
+            "$schema": SCHEMA,
+            "version": 1,
+            "providers": {"claude": {"enabled": True}},
+            "daemon": {"logLevel": "debug", "auth": {"other": 1},
+                       "listen": LISTEN, "relay": {"enabled": False},
+                       "hostnames": [SHORT_HOSTNAME, DNS_NAME]},
+        })
+
+    def test_without_a_hash_a_config_with_no_daemon_password_is_unchanged(self):
+        for existing in ({}, {"daemon": {}}, {"daemon": {"auth": {}}},
+                         {"daemon": {"auth": {"other": 1}}}):
+            with self.subTest(existing=existing):
+                self.config.write_text(json.dumps(existing))
+                self.env["FACTORY_PASEO_PASSWORD_HASH"] = ""
+                self.assertEqual(self.merged()["daemon"].get("auth"),
+                                 existing.get("daemon", {}).get("auth"))
+
+    def test_anything_but_a_bcrypt_hash_fails_unechoed_without_writing_a_config(self):
+        for value in ("correct horse battery staple", "$2b$12$short", HASH + "x", " " + HASH,
+                      HASH + "\n" + HASH):
+            with self.subTest(value=value):
+                self.env["FACTORY_PASEO_PASSWORD_HASH"] = value
+                result = self.merge()
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("the Paseo password hash is invalid", result.stderr)
+                self.assertNotIn(value.strip(), result.stdout + result.stderr)
+                self.assertFalse(self.config.exists())
+
+    def test_the_hash_never_reaches_a_command_argument(self):
+        text = SCRIPT.read_text()
+        self.assertNotRegex(text, r"--arg[^\n]*(hash|HASH)")
+        self.assertIn("$ENV.FACTORY_PASEO_PASSWORD_HASH", text)
+
+    def test_an_auth_setting_that_is_not_an_object_fails_and_is_left_as_it_was(self):
+        text = json.dumps({"daemon": {"auth": "plain"}})
+        for password_hash in (HASH, ""):
+            with self.subTest(password_hash=password_hash):
+                self.config.write_text(text)
+                self.env["FACTORY_PASEO_PASSWORD_HASH"] = password_hash
+                result = self.merge()
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("the existing Paseo config is invalid", result.stderr)
+                self.assertEqual(self.config.read_text(), text)
 
     def test_a_missing_listen_address_fails_without_writing_a_config(self):
         self.env["FACTORY_PASEO_LISTEN"] = ""

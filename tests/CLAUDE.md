@@ -16,6 +16,8 @@ Each test maps to a section of a spec in `docs/specs/`. Areas with their own rul
   bootstrap.
 - [`bootstrap/`](bootstrap/CLAUDE.md): the worker bootstrap's shell tests, run as root in
   Amazon Linux 2023 containers by `just bootstrap-test`, never by `bun test`.
+- [`paseo/`](paseo/CLAUDE.md): the pinned Paseo daemon against the password hash fffactory
+  writes, in a loopback-only namespace, by `just paseo-check`, never by `bun test`.
 
 Tests read no AWS account or factory state and never depend on the operator's own
 `.fffactory/`. `support/aws-isolation-preload.ts`, preloaded by `bunfig.toml`, strips

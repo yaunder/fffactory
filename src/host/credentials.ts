@@ -25,15 +25,9 @@ import { SecretMaterial } from "../domain/secrets";
 import type { ProcessOutcome } from "../infrastructure/local-tool-probe";
 import type { WorkerSystem } from "./inspect";
 import { AS_FACTORY } from "./runtime-account";
+import { AWS_ENV, readSecretValue } from "./secret-value";
 
 const FACTORY_HOME = `/home/${RUNTIME_ACCOUNT}`;
-const ROOT_ENV = {
-  PATH: "/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
-  HOME: "/root",
-  LANG: "C.UTF-8",
-};
-/** The AWS CLI as root: the instance role, no pager. */
-const AWS_ENV = { ...ROOT_ENV, AWS_PAGER: "" };
 const GITHUB = ["--hostname", "github.com"] as const;
 /**
  * A GitHub login, as gh lists it: letters, digits, `-` and `_` (an Enterprise Managed User's is
@@ -41,7 +35,6 @@ const GITHUB = ["--hostname", "github.com"] as const;
  * else is never passed to `gh auth logout`.
  */
 const GITHUB_LOGIN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,99}$/;
-const AWS_ERROR = /An error occurred \(([A-Za-z][A-Za-z0-9.]{0,63})\)/;
 const ERROR_CODE = /^[A-Z0-9_]{1,32}$/;
 
 /** Why the step failed, for one account, in fffactory's own words. */
@@ -111,25 +104,8 @@ function commands(system: WorkerSystem, budgetMs: number) {
 
 type Commands = ReturnType<typeof commands>;
 
-/** Why reading a secret failed: the AWS error's name, an exit status, or its deadline. */
-function readFailure(outcome: ProcessOutcome): string {
-  switch (outcome.kind) {
-    case "exited": {
-      const name = AWS_ERROR.exec(outcome.stderr)?.[1];
-      return `reading its secret failed (${name ?? `exit status ${outcome.exitCode}`})`;
-    }
-    case "timed_out":
-      return "reading its secret timed out";
-    case "not_found":
-      return "reading its secret failed (the AWS CLI is not installed)";
-    case "not_started":
-      return `reading its secret failed (${ERROR_CODE.test(outcome.code) ? outcome.code : "unexpected error"})`;
-  }
-}
-
 /**
- * The secret `arn` names, read with the instance role in the secret's own Region (the factory
- * Region: factory.json's validation places it there). Refused unless it is a non-empty string
+ * The secret `arn` names, read with the instance role. Refused unless it is a non-empty string
  * without whitespace once trimmed: gh starts its device flow on an empty token.
  */
 async function fetchMaterial(
@@ -137,35 +113,12 @@ async function fetchMaterial(
   account: EnrollmentId,
   arn: SecretReference,
 ): Promise<SecretMaterial> {
-  const region = arn.split(":")[3] ?? "";
-  const outcome = await run.run(
-    [
-      "/usr/bin/aws",
-      "secretsmanager",
-      "get-secret-value",
-      "--region",
-      region,
-      "--secret-id",
-      arn,
-      "--query",
-      "SecretString",
-      "--output",
-      "json",
-    ],
-    CREDENTIAL_COMMAND_TIMEOUT_MS,
-    { asFactory: false },
+  const read = await readSecretValue(
+    (argv) => run.run(argv, CREDENTIAL_COMMAND_TIMEOUT_MS, { asFactory: false }),
+    arn,
   );
-  if (outcome.kind !== "exited" || outcome.exitCode !== 0)
-    throw new Refused(account, readFailure(outcome));
-  let value: unknown;
-  try {
-    value = JSON.parse(outcome.stdout);
-  } catch {
-    throw new Refused(account, "Secrets Manager's answer could not be read");
-  }
-  if (value !== null && typeof value !== "string")
-    throw new Refused(account, "Secrets Manager's answer could not be read");
-  const material = (value ?? "").trim();
+  if (!read.ok) throw new Refused(account, read.reason);
+  const material = read.value.reveal().trim();
   if (material === "") throw new Refused(account, "its secret is empty");
   if (/\s/.test(material)) throw new Refused(account, "its secret contains whitespace");
   return new SecretMaterial(material);

@@ -10,8 +10,10 @@
   executable, no marker polling or v1 inputs, jq's re-evaluation markers, and the plugin
   manifest passing the native TypeScript validator. It also scans the whole worker path, from the workers
   stage to the steps, for SSM. The Paseo programs in `control-plane/` it checks parse, are
-  executable and name no v1 paths or markers, and that `setup-host.sh` hands the worker's
-  addresses to `paseo-config.sh`, whose own Python tests sit beside it.
+  executable and name no v1 paths or markers, that `setup-host.sh` hands the worker's
+  addresses and the password hash (never as an argument) to `paseo-config.sh`, whose own
+  Python tests sit beside it, and that `paseo.service` starts the daemon directly, never with
+  `PASEO_PASSWORD`, and only with a stored password.
 - `bootstrap/` renders the worker user data with `support/templatefile.ts`, the subset of
   Terraform's `templatefile` it uses, through `support/user-data.ts`.
   `base-generation.test.ts` records the bootstrap's digest for each base generation, so a

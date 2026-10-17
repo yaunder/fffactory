@@ -16,7 +16,10 @@ export interface ControlPlane {
   health(worker: WorkerAddress): Promise<ControlPlaneHealth>;
   /** How many agents are active, so a maintenance change never interrupts one. */
   activeAgents(worker: WorkerAddress): Promise<AgentActivity>;
-  /** Installs the release-owned package, settings, auth wrapper and service without lifecycle action. */
+  /**
+   * Installs the release-owned package, settings (the password as its hash only), auth wrapper
+   * and service without lifecycle action.
+   */
   install(worker: WorkerAddress, projection: HostProjection): Promise<ControlPlaneAction>;
   /** Asks Paseo to reload its configuration, without ending active agents. */
   reload(worker: WorkerAddress): Promise<ControlPlaneAction>;
