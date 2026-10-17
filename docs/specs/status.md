@@ -144,12 +144,25 @@ only mentioned, and never keep a worker from being ready:
 ```text
   not ready  builder-1 (example-builder-1): Software ready on release 0.1.0; enrollment pending: GitHub, OpenAI Codex, Claude Code
              Machine: running (i-0000000000000000a); Tailscale: online; Release: 0.1.0
-               GitHub: Authenticate GitHub as factory on example-builder-1 (tailnet SSH policy must let you log in as `factory`): run `tailscale ssh factory@example-builder-1`, then `gh auth login --hostname github.com --git-protocol https --web`, then `gh auth status`
+               GitHub: Authenticate GitHub as factory on example-builder-1: run `tailscale ssh factory@example-builder-1`, then `gh auth login --hostname github.com --git-protocol https --web`, then `gh auth status --hostname github.com --active`
                ...
                Paseo clients: enrollment is checked from each client, not the worker
                Enrollment as `fffactory apply` last verified it, at 2026-09-30T12:09:00.000Z
              Next: Enroll each pending account on example-builder-1 as listed (tailnet SSH policy must let you log in there as `factory`), then verify the enrollment with `fffactory apply` and rerun `fffactory status`.
 ```
+
+An account factory.json delivers to the host (`deliveredAccounts`, read from
+factory.json, never the worker) names storing a valid credential instead,
+with no login ([readiness §Enrollment](readiness.md#enrollment)):
+
+```text
+               GitHub: Replace the GitHub token, which example-builder-1 did not accept: run `fffactory secret set github-token`, then `fffactory apply`
+```
+
+The worker's next action carries the tailnet-policy caveat only while an
+account is left to log in to: with only delivered accounts pending it is
+"Enroll each pending account on HOST as listed, then verify the enrollment
+with `fffactory apply` and rerun `fffactory status`."
 
 Status reads the verification the last install recorded: it runs
 unprivileged, and only root can check the runtime account's credentials. With
@@ -221,7 +234,7 @@ Ready: no workers are declared.
 
 Its JSON report has `workers: []`.
 
-### JSON, schema version 1
+### JSON, schema version 2
 
 `--json` prints one document, indented by two spaces, on standard output and
 nothing else. Its structure is published as
@@ -239,13 +252,17 @@ nothing else. Its structure is published as
   each account's `id`, `title`, `state` and structured `next_action`
   (`summary`, `login`, `commands`), null exactly when enrolled, for GitHub,
   OpenAI Codex and Claude Code (Paseo clients are not listed until Paseo runs
-  on workers).
+  on workers). `login` is null for an account factory.json delivers: its
+  `commands` run where fffactory does.
 
 `next_action` is `null` exactly when `status` is `ready`. Adding a field, a
-check or a worker state keeps `schema_version` 1; consumers ignore what they do
+check or a worker state keeps `schema_version`; consumers ignore what they do
 not know. Removing, renaming or redefining a field needs a new version. The
 worker status `stopped` is such an addition
-([#7](https://github.com/yaunder/fffactory/issues/7)). This deliberately
+([#7](https://github.com/yaunder/fffactory/issues/7)). Version 2 redefined an
+enrollment `next_action`'s `login` as nullable, for delivered accounts, and
+dropped the tailnet-policy caveat from its `summary`
+([#70](https://github.com/yaunder/fffactory/issues/70)). This deliberately
 differs from [doctor's rule](doctor.md#json-schema-version-1), under which
 changing the set of statuses needs a new version: it holds for every check and
 the report's top-level `status`, whose enum stays `ready`, `not_ready` and
@@ -282,7 +299,8 @@ checks, the report's status and a stopped worker keeping it ready),
 hostname, and a device without the factory's tag, refused with the next action
 and never connected to; the tag read from factory.json; each worker's
 configuration compared with the projection apply would send it; enrollment
-pending reported with each account's state; an offline worker and one SSH
+pending reported with each account's state, and a delivered account's steps
+from factory.json; an offline worker and one SSH
 cannot reach with an unknown release; no release; unprovisioned and stopped
 machines not connected to, a stopped one with its own verdict; an unreadable
 EC2 inventory; Tailscale logged out; another account refused before any
@@ -292,8 +310,9 @@ against `tests/support/stub-ec2-instances.ts`), `tests/cli/status.test.ts`
 (exit codes 0, 2 and 1, no lock taken, no report once interrupted, the human
 report, a factory declaring no worker exiting 0 with how to add one and an empty
 `workers` in JSON, the JSON report against the fixture and the schema, enrollment pending
-in both, and a stopped worker exiting 0 with the start command, its JSON
-verdict `stopped` under schema version 1, and beside a worker that needs
+in both, a delivered credential not accepted in both, with no login, and a stopped worker
+exiting 0 with the start command, its JSON
+verdict `stopped`, and beside a worker that needs
 attention still exiting 2), and `tests/cli/status-executable.test.ts` (the
 spawned executable with stand-in `tailscale` and `ssh` on a private PATH, STS
 and EC2 stubs: an offline worker exits 2 with an unknown release and is never
@@ -304,4 +323,5 @@ connected to; a device with the worker's name but not the factory's tag exits
 Introduced by [#100](https://github.com/yaunder/factory/issues/100); the
 configuration comparison, install record and enrollment by
 [#101](https://github.com/yaunder/factory/issues/101); the `stopped` verdict by
-[#7](https://github.com/yaunder/fffactory/issues/7).
+[#7](https://github.com/yaunder/fffactory/issues/7); delivered accounts' next actions and
+schema version 2 by [#70](https://github.com/yaunder/fffactory/issues/70).

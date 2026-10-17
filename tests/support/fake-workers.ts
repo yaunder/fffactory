@@ -16,6 +16,7 @@ import type { TailnetPeers } from "../../src/application/tailnet-peers";
 import type { CredentialSelection } from "../../src/domain/aws-account";
 import {
   controlPlaneProjection,
+  type HostCredentials,
   hostProjection,
   hostProjectionJson,
   parseHostProjection,
@@ -209,6 +210,7 @@ export function projectionSha256(
   key: string,
   release: string,
   paseoPasswordSecret?: SecretReference,
+  credentials?: HostCredentials,
 ): string {
   return sha256Text(
     hostProjectionJson(
@@ -217,6 +219,7 @@ export function projectionSha256(
         key as HostKey,
         release as Release,
         paseoPasswordSecret,
+        credentials,
       ),
     ),
   );
@@ -231,9 +234,10 @@ export function readyWorker(
   key: string,
   release: string,
   paseoPasswordSecret?: SecretReference,
+  credentials?: HostCredentials,
 ): HostInspection {
   const hostname = `${factoryId}-${key}`;
-  const sha256 = projectionSha256(factoryId, key, release, paseoPasswordSecret);
+  const sha256 = projectionSha256(factoryId, key, release, paseoPasswordSecret, credentials);
   return inspection(
     hostname,
     {

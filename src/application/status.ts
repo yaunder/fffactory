@@ -8,6 +8,7 @@ import { accountExpectation } from "../domain/aws-account";
 import { hostProjectionSha256, projectHost, type Sha256 } from "../domain/host-projection";
 import {
   assessCompleteness,
+  deliveredAccounts,
   type FactoryId,
   type FactoryInstance,
   type Host,
@@ -112,6 +113,7 @@ async function workerStatus(
       projectHost(instance, target.factoryId, target.release, host),
       sha256,
     ),
+    delivered: deliveredAccounts(instance, host.key).map(({ id }) => id),
   });
   if (inspection.kind !== "inspected" || inspection.inspection.release.state !== "active")
     return {

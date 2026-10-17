@@ -1104,6 +1104,7 @@ function dispatchInputFor(
     settings: host.dispatch,
     releaseHealthy: true,
     githubCredential: githubCredential(worker.verification),
+    githubDelivered: worker.delivered.includes("github"),
     repositorySync: repo?.kind === "synchronized" ? "ready" : "pending",
     paseoHealth: cp.paseoHealth,
   };

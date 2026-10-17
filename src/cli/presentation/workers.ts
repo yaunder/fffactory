@@ -7,8 +7,11 @@
 import type { ControlPlaneOutcome } from "../../application/apply-control-plane";
 import type { DispatchOutcome } from "../../application/apply-dispatch";
 import type { RepositoryOutcome } from "../../application/apply-repositories";
+import type { HostKey } from "../../domain/instance";
 import {
+  ENROLLMENTS,
   enrollmentReport,
+  pendingCount,
   RUNTIME_ACCOUNT,
   type WorkerEnrollment,
   workerEnrollment,
@@ -50,11 +53,14 @@ const worst = (statuses: readonly (Status | undefined)[]): Status | undefined =>
     undefined,
   );
 
-/** An installed worker's enrollment, named for the hostname the CLI resolved; none otherwise. */
+/**
+ * An installed worker's enrollment, named for the hostname the CLI resolved, with the accounts
+ * its projection delivered; none otherwise.
+ */
 export function workerEnrollmentOf(outcome: WorkerOutcome): WorkerEnrollment | undefined {
   if (outcome.kind !== "installed") return undefined;
   return workerEnrollment(
-    enrollmentReport(outcome.verification, outcome.hostname),
+    enrollmentReport(outcome.verification, outcome.hostname, outcome.delivered),
     outcome.hostname,
   );
 }
@@ -71,7 +77,8 @@ const said = (word: string, summary: string): Inline => [`${word} · `, verbatim
 function workersOutcome(outcome: WorkerOutcome, selection: Selection): Outcome {
   switch (outcome.kind) {
     case "installed": {
-      const pending = workerEnrollmentOf(outcome)?.accounts.length ?? 0;
+      const enrollment = workerEnrollmentOf(outcome);
+      const pending = enrollment === undefined ? 0 : pendingCount(enrollment);
       return pending === 0
         ? { status: "ready", value: "installed and verified · every account enrolled" }
         : {
@@ -181,6 +188,35 @@ export function workerRow(outcome: WorkerOutcome, later: LaterStages, selection:
       ? {}
       : { details: [{ kind: "rows", rows: stages, labelWidth: STAGE_WIDTH, statusColumn: true }] }),
   };
+}
+
+/** One worker's enrollment, by its key. */
+export interface KeyedEnrollment {
+  readonly key: HostKey;
+  readonly enrollment: WorkerEnrollment;
+}
+
+/**
+ * Each delivered credential some worker did not accept, once for every worker, in
+ * `ENROLLMENTS`' order: the workers, and the `fffactory secret set` that replaces it, with the
+ * instance and profile given. The credential is factory-wide, so one replacement serves them all.
+ */
+export function deliveredSteps(
+  enrollments: readonly KeyedEnrollment[],
+  selection: Selection,
+): NextPart[] {
+  return ENROLLMENTS.flatMap(({ id, credential, secret }) => {
+    const keys = enrollments
+      .filter(({ enrollment }) => enrollment.delivered.some((entry) => entry.id === id))
+      .map(({ key }) => key);
+    return keys.length === 0
+      ? []
+      : [
+          step(`Replace the ${credential}, which ${keys.join(", ")} did not accept:`, [
+            fffactoryCommand(["secret", "set", secret], selection),
+          ]),
+        ];
+  });
 }
 
 /** What logging in requires, said once with the login. */

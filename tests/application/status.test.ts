@@ -247,6 +247,50 @@ describe("factory status", () => {
     expect(one?.enrollment?.map((entry) => entry.state)).toEqual(["pending", "pending", "pending"]);
   });
 
+  test("an account factory.json delivers names its credential, from factory.json alone", async () => {
+    const pending = installed("0.1.0", verification(B1, "pending"));
+    const { deps } = world({
+      script: {
+        [B1]: statusAnswers(inspection(B1, { installation: pending }, "0.1.0")),
+        [B2]: statusAnswers(inspection(B2, { installation: pending }, "0.1.0")),
+      },
+    });
+    const github =
+      "arn:aws:secretsmanager:us-east-1:123456789012:secret:example/github-token-AbCdEf";
+    const outcome = await report(
+      deps,
+      instance({
+        credentials: { github_token_secret: github },
+        hosts: [
+          EXAMPLE.hosts[0],
+          {
+            key: "builder-2",
+            instance_type: "m7i.large",
+            root_volume_gib: 100,
+            interactive_logins: ["github"],
+          },
+        ],
+      }),
+    );
+    const workers = byKey(outcome.report.workers);
+    const logins = (key: string) =>
+      workers[key]?.enrollment?.map(({ next_action }) => next_action?.login ?? null);
+    expect(logins("builder-1")).toEqual([
+      null,
+      `tailscale ssh factory@${B1}`,
+      `tailscale ssh factory@${B1}`,
+    ]);
+    expect(workers["builder-1"]?.enrollment?.[0]?.next_action?.commands).toEqual([
+      "fffactory secret set github-token",
+      "fffactory apply",
+    ]);
+    expect(logins("builder-2")).toEqual([
+      `tailscale ssh factory@${B2}`,
+      `tailscale ssh factory@${B2}`,
+      `tailscale ssh factory@${B2}`,
+    ]);
+  });
+
   test("reports unresolved and unmanaged checkouts from the worker's persisted observation", async () => {
     const { deps } = world({
       script: {

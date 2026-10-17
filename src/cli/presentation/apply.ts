@@ -11,7 +11,7 @@ import type { WorkerProgress } from "../../application/apply-workers";
 import { type DispatchGate, dispatchNextActions } from "../../domain/dispatch-readiness";
 import type { HostKey } from "../../domain/instance";
 import { changeTally, type PlanReview } from "../../domain/plan";
-import { PASEO_CLIENTS, type WorkerEnrollment } from "../../domain/readiness";
+import { PASEO_CLIENTS, pendingCount } from "../../domain/readiness";
 import { FIRST_BOOT_DEADLINE_MS, type WorkerOutcome } from "../../domain/rollout";
 import {
   type Block,
@@ -28,7 +28,13 @@ import {
 } from "./blocks";
 import { fffactoryCommand, type Selection } from "./command-line";
 import type { Style } from "./style";
-import { enrollmentSteps, workerEnrollmentOf, workerRow } from "./workers";
+import {
+  deliveredSteps,
+  enrollmentSteps,
+  type KeyedEnrollment,
+  workerEnrollmentOf,
+  workerRow,
+} from "./workers";
 
 type Applied = Extract<FactoryApply, { readonly kind: "applied" }>;
 type Failed = Extract<FactoryApply, { readonly kind: "failed" }>;
@@ -330,10 +336,15 @@ function appliedRows(result: Applied, reporting: ApplyReporting): Routed[] {
   ];
 }
 
+/** An installed worker's accounts still to enroll; none for any other. */
+function pendingOf(outcome: WorkerOutcome): number {
+  const enrollment = workerEnrollmentOf(outcome);
+  return enrollment === undefined ? 0 : pendingCount(enrollment);
+}
+
 /** How many installed workers have accounts still to enroll. */
 const enrollmentPending = (result: Applied): number =>
-  result.workers.filter((outcome) => (workerEnrollmentOf(outcome)?.accounts.length ?? 0) > 0)
-    .length;
+  result.workers.filter((outcome) => pendingOf(outcome) > 0).length;
 
 /**
  * The end-to-end verdict, as verification words it. Verification checks the software, and counts
@@ -388,9 +399,10 @@ function coveredGates(result: Applied, key: HostKey): Set<DispatchGate> {
   const covered = new Set<DispatchGate>();
   const worker = result.workers.find((outcome) => outcome.key === key);
   if (worker?.kind !== "installed") covered.add("worker_release");
+  const enrollment = worker === undefined ? undefined : workerEnrollmentOf(worker);
   if (
-    worker !== undefined &&
-    workerEnrollmentOf(worker)?.accounts.some(({ id }) => id === "github") === true
+    enrollment !== undefined &&
+    [...enrollment.accounts, ...enrollment.delivered].some(({ id }) => id === "github")
   )
     covered.add("github_credential");
   const repositories = byKey(result.repositories).get(key);
@@ -474,12 +486,43 @@ const onOut = (parts: readonly NextPart[]): RoutedPart[] =>
   parts.map((part) => ({ stream: "out", part }));
 
 /**
+ * The workers' enrollment, after the stages' next actions: each delivered credential to
+ * replace, once for every worker; then each worker's login (named unless the block's title names
+ * it) and its accounts, back to the workstation; then `fffactory apply` to verify the enrollment
+ * again and `fffactory status` to confirm (status alone reads the verification apply recorded).
+ * All on standard output. None when no worker has an account to enroll.
+ */
+function enrollmentParagraphs(
+  enrollments: readonly KeyedEnrollment[],
+  named: boolean,
+  reporting: ApplyReporting,
+): RoutedPart[][] {
+  if (enrollments.length === 0) return [];
+  const delivered = deliveredSteps(enrollments, reporting.selection);
+  const logins = enrollments.filter(({ enrollment }) => enrollment.accounts.length > 0);
+  const back = step("Return to your workstation:", ["exit"]);
+  const verify = [
+    step("Refresh enrollment verification, reviewing the new plan:", [
+      command(["apply"], reporting),
+    ]),
+    step("Then confirm:", [command(["status"], reporting)]),
+  ];
+  // Verifying follows the last return, or the credentials when no login is left to make.
+  if (logins.length === 0) return [onOut([...delivered, ...verify])];
+  return [
+    ...(delivered.length === 0 ? [] : [onOut(delivered)]),
+    ...logins.flatMap(({ key, enrollment }, index) => [
+      ...enrollmentSteps(enrollment, key, named).map(onOut),
+      onOut(index < logins.length - 1 ? [back] : [back, ...verify]),
+    ]),
+  ];
+}
+
+/**
  * What an applied run leaves for the operator, as one Next block: every stage's next actions,
- * then each worker's enrollment (the login once, its accounts numbered), back to the
- * workstation, `fffactory apply` to verify the enrollment again and `fffactory status` to
- * confirm (status alone reads the verification apply recorded). Each part goes to the stream
- * its origin always went to: a failed worker's next action to standard error, every other part
- * to standard output. Undefined when nothing is left.
+ * then the workers' enrollment (`enrollmentParagraphs`). Each part goes to the stream its origin
+ * always went to: a failed worker's next action to standard error, every other part to standard
+ * output. Undefined when nothing is left.
  */
 function appliedNext(result: Applied, reporting: ApplyReporting): RoutedNext | undefined {
   // TODO(re-evaluate when stage next actions carry their fffactory command as data): build it
@@ -492,31 +535,19 @@ function appliedNext(result: Applied, reporting: ApplyReporting): RoutedNext | u
       part: step([{ text: keys.join(", "), tone: "label" }, ": ", action]),
     }),
   );
-  const enrollments = result.workers.flatMap((outcome) => {
+  const enrollments = result.workers.flatMap((outcome): KeyedEnrollment[] => {
     const enrollment = workerEnrollmentOf(outcome);
-    return enrollment === undefined || enrollment.accounts.length === 0
+    return enrollment === undefined || pendingCount(enrollment) === 0
       ? []
       : [{ key: outcome.key, enrollment }];
   });
   const installed = result.workers.some((outcome) => outcome.kind === "installed");
   if (actions.length === 0 && enrollments.length === 0) return undefined;
-  const only = actions.length === 0 && enrollments.length === 1 ? enrollments[0] : undefined;
-  const paragraphs: RoutedPart[][] = actions.length === 0 ? [] : [actions];
-  enrollments.forEach(({ key, enrollment }, index) => {
-    paragraphs.push(...enrollmentSteps(enrollment, key, only === undefined).map(onOut));
-    const back = step("Return to your workstation:", ["exit"]);
-    if (index < enrollments.length - 1) paragraphs.push(onOut([back]));
-    else
-      paragraphs.push(
-        onOut([
-          back,
-          step("Refresh enrollment verification, reviewing the new plan:", [
-            command(["apply"], reporting),
-          ]),
-          step("Then confirm:", [command(["status"], reporting)]),
-        ]),
-      );
-  });
+  const named = !(actions.length === 0 && enrollments.length === 1);
+  const paragraphs: RoutedPart[][] = [
+    ...(actions.length === 0 ? [] : [actions]),
+    ...enrollmentParagraphs(enrollments, named, reporting),
+  ];
   if (installed) paragraphs.at(-1)?.push(...onOut([PASEO_NOTE]));
   const title = enrollmentTitle(actions.length, enrollments);
   return { ...(title === undefined ? {} : { title }), paragraphs };
@@ -525,13 +556,13 @@ function appliedNext(result: Applied, reporting: ApplyReporting): RoutedNext | u
 /** The Next block's title: what enrolling asks, when that is all it asks. */
 function enrollmentTitle(
   actions: number,
-  enrollments: readonly { readonly key: HostKey; readonly enrollment: WorkerEnrollment }[],
+  enrollments: readonly KeyedEnrollment[],
 ): string | undefined {
   if (actions > 0 || enrollments.length === 0) return undefined;
   const [first] = enrollments;
   if (enrollments.length > 1 || first === undefined)
     return `enroll accounts on ${enrollments.length} workers`;
-  const count = first.enrollment.accounts.length;
+  const count = pendingCount(first.enrollment);
   return `enroll ${count} ${count === 1 ? "account" : "accounts"} on ${first.key}`;
 }
 

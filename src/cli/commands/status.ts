@@ -19,7 +19,7 @@ import { loadInstance, printAccountRefusal } from "./selected-instance";
  * Version of the `--json` output format; `schemas/status-report.schema.json` publishes it.
  * Additions keep it; removing, renaming or redefining a field needs a new version.
  */
-export const STATUS_JSON_SCHEMA_VERSION = 1;
+export const STATUS_JSON_SCHEMA_VERSION = 2;
 
 function workerJson(worker: WorkerStatus) {
   return {

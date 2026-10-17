@@ -238,7 +238,7 @@ export function installedTools(failing: readonly string[] = []): ProcessRunner {
     "codex --version": exited(0, "codex-cli 0.156.1\n"),
     "claude --version": exited(0, "2.1.280 (Claude Code)\n"),
     "systemctl is-active tailscaled.service": exited(0, "active\n"),
-    "gh auth status --hostname github.com": exited(0, "Logged in to github.com\n"),
+    "gh auth status --hostname github.com --active": exited(0, "Logged in to github.com\n"),
     "codex login status": exited(1, "Not logged in\n"),
     "claude auth status": exited(1, "Not logged in\n"),
   };

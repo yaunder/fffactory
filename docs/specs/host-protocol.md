@@ -613,7 +613,8 @@ refuses (exit 1). They change nothing and never echo what a tool printed.
 `enrolled`, `pending` or `unknown`, for the accounts `github`, `openai` and
 `anthropic`. Summaries are fffactory's own printable one-line text. The
 document carries states only, never instructions: the CLI names each
-account's next action itself, from its `id` and the hostname the CLI resolved
+account's next action itself, from its `id`, the hostname the CLI resolved and
+the accounts the CLI's factory.json delivers to the host
 ([readiness §Enrollment](readiness.md#enrollment)), and ignores anything else
 a worker sends with an account. So a compromised worker cannot put a command
 in front of the operator.

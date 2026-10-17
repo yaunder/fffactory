@@ -77,6 +77,8 @@ export interface GatedDispatchWorker {
   readonly releaseHealthy: boolean;
   /** The GitHub credential's state from the worker's verification. */
   readonly githubCredential: EnrollmentState;
+  /** factory.json delivers the GitHub token to the worker (`deliveredAccounts`). */
+  readonly githubDelivered: boolean;
   /** The repository stage's readiness for the worker. */
   readonly repositorySync: RepositoryReadiness;
   /** Paseo's health from the control-plane stage. */
@@ -195,6 +197,7 @@ async function reconcile(
     {
       releaseHealthy: entry.releaseHealthy,
       githubCredential: entry.githubCredential,
+      githubDelivered: entry.githubDelivered,
       repositorySync: entry.repositorySync,
       ffflowAdoption: adoptionState(adoption),
       paseoHealth: entry.paseoHealth,

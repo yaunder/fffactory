@@ -14,6 +14,7 @@ import {
   type SecretReference,
   type TailscaleSecretField,
 } from "./instance";
+import { enrollmentOf } from "./readiness";
 import { FACTORY_ID_TAG, MANAGED_BY_TAG } from "./resource-naming";
 import { fieldPath, itemPath } from "./validation";
 
@@ -118,17 +119,17 @@ const FACTORY_SECRETS: Readonly<
   "github-token": {
     section: "credentials",
     field: CREDENTIAL_SECRET_FIELDS.github,
-    what: "GitHub token",
+    what: enrollmentOf("github").credential,
   },
   "anthropic-api-key": {
     section: "credentials",
     field: CREDENTIAL_SECRET_FIELDS.anthropic,
-    what: "Anthropic API key",
+    what: enrollmentOf("anthropic").credential,
   },
   "openai-api-key": {
     section: "credentials",
     field: CREDENTIAL_SECRET_FIELDS.openai,
-    what: "OpenAI API key",
+    what: enrollmentOf("openai").credential,
   },
 };
 

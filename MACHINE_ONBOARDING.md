@@ -383,7 +383,10 @@ root-owned API key helper, with no prompt
 ([credential delivery](docs/specs/credential-delivery.md)). Those accounts need
 no login in step 8. A credential that cannot be read, is empty, or that gh
 refuses fails the worker's install, naming the account: fix it with `secret set
-NAME` and apply again.
+NAME` and apply again. One delivered but not accepted by the worker's check
+leaves the account pending, and apply's and status's next action says so with
+no login: `Replace the GitHub token, which KEY did not accept`, then `fffactory
+secret set github-token` and `fffactory apply`.
 
 ## 7. Bootstrap and provision
 
@@ -443,7 +446,10 @@ bucket's absence changed: plan again and review the new plan.
 `Next: enroll 3 accounts on KEY`: the login, each account's commands, then
 `exit`, `fffactory apply` and `fffactory status`, and `Paseo clients:
 enrollment is checked from each client, not the worker`. Pending enrollment is
-expected here: fffactory never enrolls an account.
+expected here for each account left to a human login: fffactory never logs in.
+An account delivered as an API credential ([step 6](#deliver-api-credentials-optional))
+is not pending; with all three delivered the worker shows `✔ KEY   installed
+and verified · every account enrolled`, and step 8 has nothing to do.
 
 **Otherwise:**
 
@@ -473,12 +479,14 @@ expected here: fffactory never enrolls an account.
 
 Run the steps apply's Next block printed for each pending account. An account
 delivered as an API credential ([step 6](#deliver-api-credentials-optional)) was
-enrolled by apply and needs none of them. They are, as `factory` on the worker:
+enrolled by apply and needs none of them; if the worker did not accept it, the
+Next block names `fffactory secret set NAME` instead, run on your workstation.
+The logins are, as `factory` on the worker:
 
 ```bash
 tailscale ssh factory@HOSTNAME
 gh auth login --hostname github.com --git-protocol https --web
-gh auth status
+gh auth status --hostname github.com --active
 codex login --device-auth
 codex login status
 claude auth login
@@ -490,8 +498,8 @@ Log in as `factory` and nowhere else: agents run as `factory`, and
 `fffactory-admin` cannot switch to it. Credentials stay on the worker; never
 copy them into factory.json, a prompt or a repository.
 
-**Done when** `gh auth status`, `codex login status` and `claude auth status`
-each succeed.
+**Done when** `gh auth status --hostname github.com --active`, `codex login
+status` and `claude auth status` each succeed.
 
 **Otherwise:** `tailscale ssh` refused means the tailnet SSH rule does not let
 you log in as `factory`: fix [step 5](#5-prepare-the-tailnet).
@@ -526,7 +534,8 @@ ready.`
 
 **Otherwise:** status exit 2 lists each not-ready finding with its next action;
 an account still pending names its steps again (back to
-[step 8](#8-enroll-the-workers-accounts)).
+[step 8](#8-enroll-the-workers-accounts)), or, for a delivered one, `fffactory
+secret set NAME` and `fffactory apply`.
 
 ## 10. Enroll Paseo clients
 

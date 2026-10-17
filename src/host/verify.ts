@@ -17,6 +17,7 @@ import {
 import type { Release } from "../domain/instance";
 import {
   ENROLLMENTS,
+  GITHUB_STATUS,
   type EnrollmentId,
   type EnrollmentState,
   RUNTIME_ACCOUNT,
@@ -89,7 +90,7 @@ function pins(text: string): Map<string, string> {
 
 /** How each account's credential is checked, as `factory`. */
 export const CREDENTIAL_CHECKS: Readonly<Record<EnrollmentId, readonly string[]>> = {
-  github: ["gh", "auth", "status", "--hostname", "github.com"],
+  github: GITHUB_STATUS,
   openai: ["codex", "login", "status"],
   anthropic: ["claude", "auth", "status"],
 };

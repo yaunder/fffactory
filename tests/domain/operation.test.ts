@@ -105,6 +105,7 @@ describe("operation records", () => {
         kind: "installed",
         release: "0.3.0",
         verification: verification("fff-abcd1234-builder-1", "pending"),
+        delivered: [],
       },
       {
         key: "builder-2" as HostKey,

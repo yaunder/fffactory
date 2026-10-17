@@ -119,7 +119,7 @@ case "$*" in
     user="${!#}"
     grep -v "^$user " "$store" >"$store.new" || true
     mv -f "$store.new" "$store" ;;
-  "auth status --hostname github.com")
+  "auth status --hostname github.com --active")
     current="$(cat "$active" 2>/dev/null || true)"
     [[ -n $current ]] && grep -q "^$current ghp_" "$store" ;;
   *) exec /usr/local/bin/gh "$@" ;;

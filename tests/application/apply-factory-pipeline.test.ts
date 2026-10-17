@@ -160,6 +160,39 @@ describe("apply's full pipeline (dispatch §Requested versus active, §End-to-en
     });
   });
 
+  test("a delivered GitHub token not accepted blocks dispatch with storing a valid one, never a login", async () => {
+    const { controlPlane } = fakeControlPlane("healthy", { kind: "idle" });
+    const { queue, reconcile } = fakeQueue({ changed: true });
+    const github =
+      "arn:aws:secretsmanager:eu-west-2:123456789012:secret:fff-abcd1234/github-token-AbCdEf" as SecretReference;
+    const fleet = workerFleet(["builder-1"], {
+      [B1]: installableWorker(
+        appliedRecord(B1, "0.3.0", {
+          verification: verification(B1, "enrolled", {
+            enrollment: [
+              { id: "github", state: "pending" },
+              { id: "openai", state: "enrolled" },
+              { id: "anthropic", state: "enrolled" },
+            ],
+          }),
+        }),
+        { inspection: currentWorker("builder-1") },
+      ),
+    });
+    const instance = { ...requestingDispatch(), credentials: { github_token_secret: github } };
+    const { deps, request } = pipeline(instance, { controlPlane, workflowQueue: queue }, fleet);
+    const result = await applyFactory(deps, request);
+    if (result.kind !== "applied") throw new Error(`expected applied, got ${result.kind}`);
+    expect(result.workers).toMatchObject([{ kind: "installed", delivered: ["github"] }]);
+    const dispatch = result.dispatch?.[0];
+    if (dispatch?.kind !== "pending") throw new Error("expected dispatch pending");
+    expect(reconcile).toEqual([false]);
+    expect(dispatch.nextActions).toEqual([
+      `GitHub is not authenticated for the runtime account on ${B1}: Replace the GitHub token, ` +
+        `which ${B1} did not accept: run \`fffactory secret set github-token\`, then \`fffactory apply\``,
+    ]);
+  });
+
   test("a failed dispatch reconciliation fails the recorded dispatch and verification stages", async () => {
     const { controlPlane } = fakeControlPlane("healthy", { kind: "idle" });
     const { queue } = fakeQueue({ failure: "schedule apply exited 1" });

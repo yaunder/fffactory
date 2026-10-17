@@ -65,7 +65,10 @@ const HEALTHY: Record<string, ProcessOutcome> = {
   "codex --version": exited(0, "codex-cli 0.156.1\n"),
   "claude --version": exited(0, "2.1.280 (Claude Code)\n"),
   "systemctl is-active tailscaled.service": exited(0, "active\n"),
-  "gh auth status --hostname github.com": exited(0, "Logged in to github.com account octocat\n"),
+  "gh auth status --hostname github.com --active": exited(
+    0,
+    "Logged in to github.com account octocat\n",
+  ),
   "codex login status": exited(0, "Logged in using ChatGPT\n"),
   "claude auth status": exited(0, "Logged in as someone@example.com\n"),
 };
@@ -183,7 +186,7 @@ describe("host verify's enrollment (readiness §Enrollment)", () => {
       { id: "anthropic", state: "unknown" },
     ]);
     const timedOut = await verify({
-      "gh auth status --hostname github.com": { kind: "timed_out" },
+      "gh auth status --hostname github.com --active": { kind: "timed_out" },
     });
     expect(timedOut.verification.enrollment[0]?.state).toBe("unknown");
   });
@@ -208,6 +211,7 @@ describe("host verify's enrollment (readiness §Enrollment)", () => {
         "status",
         "--hostname",
         "github.com",
+        "--active",
       ],
       timeoutMs: CHECK_TIMEOUT_MS,
       env: {},
@@ -226,6 +230,7 @@ describe("host verify's enrollment (readiness §Enrollment)", () => {
       hostname: WORKER_HOSTNAME,
       release: "0.3.0",
       configurationSha256: CONFIGURATION_SHA256,
+      delivered: [],
     };
     expect(readinessVerdict(worker, expected)).toEqual({
       status: "ready",

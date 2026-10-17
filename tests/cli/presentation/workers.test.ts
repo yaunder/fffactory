@@ -12,6 +12,7 @@ import { plainStyle } from "../../../src/cli/presentation/style";
 import type { HostKey } from "../../../src/domain/instance";
 import {
   ENROLLMENTS,
+  type EnrollmentId,
   type EnrollmentState,
   type Verification,
 } from "../../../src/domain/readiness";
@@ -20,7 +21,10 @@ import { stoppedOutcome, type WorkerOutcome } from "../../../src/domain/rollout"
 const HOST = "fff-abcd1234-builder-1";
 const WORKER = { key: "builder-1" as HostKey, hostname: HOST };
 
-function installed(state: (id: string) => EnrollmentState): WorkerOutcome {
+function installed(
+  state: (id: string) => EnrollmentState,
+  delivered: readonly EnrollmentId[] = [],
+): WorkerOutcome {
   const verification: Verification = {
     protocol_version: 1,
     hostname: "attacker",
@@ -28,11 +32,12 @@ function installed(state: (id: string) => EnrollmentState): WorkerOutcome {
     checks: [],
     enrollment: ENROLLMENTS.map(({ id }) => ({ id, state: state(id) })),
   };
-  return { ...WORKER, kind: "installed", release: "0.3.0", verification };
+  return { ...WORKER, kind: "installed", release: "0.3.0", verification, delivered };
 }
 
 const ENROLLED = installed(() => "enrolled");
-const PENDING = installed((id) => (id === "openai" ? "enrolled" : "pending"));
+const pendingUnlessOpenai = (id: string) => (id === "openai" ? "enrolled" : "pending");
+const PENDING = installed(pendingUnlessOpenai);
 
 /** A worker's row, alone in its block, as plain text. */
 const lines = (row: Row) => render(plainStyle, [{ kind: "rows", rows: [row] }]);
@@ -198,7 +203,7 @@ describe("a worker's enrollment (readiness §Where it is reported)", () => {
           title: "GitHub",
           commands: [
             "gh auth login --hostname github.com --git-protocol https --web",
-            "gh auth status",
+            "gh auth status --hostname github.com --active",
           ],
         },
         {
@@ -207,9 +212,18 @@ describe("a worker's enrollment (readiness §Where it is reported)", () => {
           commands: ["claude auth login", "claude auth status"],
         },
       ],
+      delivered: [],
     });
     expect(workerEnrollmentOf(ENROLLED)?.accounts).toEqual([]);
     expect(workerEnrollmentOf({ ...WORKER, kind: "not_attempted" })).toBeUndefined();
+  });
+
+  test("a delivered account is grouped apart from the login, from the outcome's delivered set", () => {
+    const enrollment = workerEnrollmentOf(installed(pendingUnlessOpenai, ["github"]));
+    expect(enrollment?.accounts.map(({ id }) => id)).toEqual(["anthropic"]);
+    expect(enrollment?.delivered).toEqual([
+      { id: "github", title: "GitHub", credential: "GitHub token", secret: "github-token" },
+    ]);
   });
 
   test("the login once with its caveat, then each account numbered with its command lines", () => {
@@ -224,7 +238,7 @@ describe("a worker's enrollment (readiness §Where it is reported)", () => {
       "",
       "  1. GitHub",
       "     $ gh auth login --hostname github.com --git-protocol https --web",
-      "     $ gh auth status",
+      "     $ gh auth status --hostname github.com --active",
       "  2. Claude Code",
       "     $ claude auth login",
       "     $ claude auth status",

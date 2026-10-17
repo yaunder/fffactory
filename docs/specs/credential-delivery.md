@@ -158,14 +158,22 @@ onboarding, trust or approval prompt with these stores.
 
 ## Verify
 
-`host verify`'s enrollment checks are unchanged
-([readiness §Enrollment](readiness.md#enrollment)), except Anthropic's (D15):
+`host verify`'s enrollment checks are the same for a delivered account as for a
+human login ([readiness §Enrollment](readiness.md#enrollment)). GitHub's is
+`gh auth status --hostname github.com --active` (D15), which a stale stored
+account does not fail. Anthropic's also checks the key file (D15):
 `claude auth status` passes on a configured helper without running it, even
 with the key file missing. So while `/etc/claude-code/managed-settings.json`
 names fffactory's helper (`apiKeyHelper` exactly
 `cat /home/factory/.config/fffactory/anthropic-api-key`, `namesKeyHelper`),
 `anthropic` is `enrolled` only when, as `factory`, `test -r KEY -a -s KEY` also
 passes for the key file: a missing, unreadable or empty key is `pending`.
+
+A delivered account left `pending` or `unknown` names no login (D8): apply's
+and status's next action, and the dispatch GitHub gate's, is to store a valid
+credential with `fffactory secret set NAME` and run `fffactory apply`
+([Renewal](#renewal)). The CLI knows an account is delivered from its own
+factory.json, never from the worker's document.
 
 ## Renewal
 
@@ -235,7 +243,8 @@ outside the test suite. Evidence 7 is this spec's tests.
 | Domain | `src/domain/installation.ts` | The `credentials` step and its budget, the command deadlines, the key file, the helper, the managed settings' path and text, and whether settings name the helper (`namesKeyHelper`). Pure. |
 | Worker | `src/host/credentials.ts` | `workerCredentials`: reading, checking, delivering and removing, over the injected process runner and the worker's root. |
 | Worker | `src/host/apply.ts` | Runs the step with the projection's references and its log. |
-| Worker | `src/host/verify.ts` | The Anthropic key-file check, while the managed settings name the helper. |
+| Worker | `src/host/verify.ts` | GitHub's `--active` check, and the Anthropic key-file check, while the managed settings name the helper. |
+| Domain | `src/domain/readiness.ts`, `src/domain/status.ts`, `src/domain/dispatch-readiness.ts` | A delivered account's next action (`enrollmentNextAction`), from the delivered accounts the CLI passes ([readiness §Enrollment](readiness.md#enrollment)). Pure. |
 
 Tests: `tests/domain/installation.test.ts` (`namesKeyHelper`),
 `tests/host/credentials.test.ts` (each secret read by ARN in its Region as
@@ -253,8 +262,10 @@ replacing others' settings; the step's budget bounding each command; a rerun
 issuing the same commands and leaving the same files), the native credentials
 step in `tests/host/apply.test.ts` (inside the install lock, the projection's
 references, the log, a failure failing the install),
-`tests/host/verify.test.ts` (the helper configured with the key file missing or
-empty is pending; without fffactory's helper `claude auth status` decides), and
+`tests/host/verify.test.ts` (GitHub checked with `--active`; the helper
+configured with the key file missing or empty is pending; without fffactory's
+helper `claude auth status` decides), the delivered accounts' next actions in
+the tests [readiness](readiness.md#layer-mapping) lists, and
 the container cases of `tests/bootstrap/credentials.test.sh`: the real `host
 apply` through the activator with a stand-in `aws` and stand-in `gh`, `codex`
 and `claude` that keep their stores as the real tools do; each account enrolled
@@ -265,4 +276,5 @@ removal, and each failure, a stale Enterprise Managed User's account logged
 out, and an organisation's managed settings kept when Anthropic is not
 delivered. The real agents against a provider are evidence 1–2 above.
 
-Introduced by [#69](https://github.com/yaunder/fffactory/issues/69).
+Introduced by [#69](https://github.com/yaunder/fffactory/issues/69); GitHub's `--active`
+check and delivered accounts' next actions by [#70](https://github.com/yaunder/fffactory/issues/70).

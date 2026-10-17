@@ -80,6 +80,7 @@ describe("host inspect, CLI side", () => {
       hostname: WORKER_HOSTNAME,
       release: "0.3.0",
       configurationSha256: HOST_CONFIGURATION_SHA256,
+      delivered: [],
     };
     const verdicts: Record<string, unknown> = {};
     for (const { fixture: name } of SCENARIOS) {
@@ -259,13 +260,14 @@ describe("host apply and host verify, CLI side", () => {
         WORKER,
         "0.3.0",
         readActivation(exitCode, await fixture(name)),
+        [],
       );
       outcomes[name] =
         outcome.kind === "installed"
           ? {
               kind: outcome.kind,
               release: outcome.release,
-              enrollment: enrollmentReport(outcome.verification, WORKER.hostname).map(
+              enrollment: enrollmentReport(outcome.verification, WORKER.hostname, []).map(
                 ({ id, state }) => `${id}:${state}`,
               ),
             }
@@ -300,7 +302,9 @@ describe("host apply and host verify, CLI side", () => {
     if (!parsed.ok) throw new Error(`rejected: ${JSON.stringify(parsed)}`);
     expect(`${verificationJson(parsed.document)}\n`).toBe(text);
     expect(
-      enrollmentReport(parsed.document, WORKER_HOSTNAME).map(({ id, state }) => `${id}:${state}`),
+      enrollmentReport(parsed.document, WORKER_HOSTNAME, []).map(
+        ({ id, state }) => `${id}:${state}`,
+      ),
     ).toEqual(["github:enrolled", "openai:pending", "anthropic:pending"]);
   });
 });

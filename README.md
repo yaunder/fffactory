@@ -184,7 +184,7 @@ Replace `HOSTNAME` with the worker name printed by apply, such as
 ```bash
 tailscale ssh factory@HOSTNAME
 gh auth login --hostname github.com --git-protocol https --web
-gh auth status
+gh auth status --hostname github.com --active
 codex login --device-auth
 codex login status
 claude auth login

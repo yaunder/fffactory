@@ -99,6 +99,21 @@ function stage(
 const installs = (hostname: string) => installableWorker(appliedRecord(hostname));
 
 describe("the workers stage (plan-apply §The workers stage)", () => {
+  test("an installed worker carries the accounts its projection delivers", async () => {
+    const { deps, record } = stage({ script: { [B1]: installs(B1) } });
+    const github =
+      "arn:aws:secretsmanager:us-east-1:123456789012:secret:fff-abcd1234/github-token-AbCdEf" as SecretReference;
+    const projections = [
+      hostProjection(FACTORY, "builder-1" as HostKey, RELEASE, undefined, {
+        github_token_secret: github,
+      }),
+    ];
+    const result = await applyWorkers(deps, { ...request(), projections }, record);
+    expect(result.outcomes).toEqual([
+      expect.objectContaining({ kind: "installed", delivered: ["github"] }),
+    ]);
+  });
+
   test("uploads the release tarball, then activates it with its digest and the host's projection", async () => {
     const { deps, record, transport, progress } = stage({ script: { [B1]: installs(B1) } });
     const result = await applyWorkers(deps, request("builder-1"), record);
@@ -111,6 +126,7 @@ describe("the workers stage (plan-apply §The workers stage)", () => {
           kind: "installed",
           release: RELEASE,
           verification: verification(B1, "pending"),
+          delivered: [],
         },
       ],
     });

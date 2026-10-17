@@ -20,7 +20,13 @@ const VERIFIED: Verification = {
 };
 
 function installed(key: string): WorkerOutcome {
-  return { ...identity(key), kind: "installed", release: "0.3.0", verification: VERIFIED };
+  return {
+    ...identity(key),
+    kind: "installed",
+    release: "0.3.0",
+    verification: VERIFIED,
+    delivered: [],
+  };
 }
 
 function synchronized(key: string): RepositoryOutcome {

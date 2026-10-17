@@ -34,7 +34,7 @@ entry here and in `DISPATCH_GATES`.
 | Gate | Passes when | When it fails, keeps dispatch |
 | --- | --- | --- |
 | `worker_release` | The workers stage installed and verified the release. | pending until a rerun installs and verifies it; in apply a worker the workers stage did not install never reaches the gates ([Skipped workers](#skipped-workers)), so this gate guards in depth |
-| `github_credential` | The worker's verification found GitHub enrolled for `factory`. | pending, naming the exact GitHub enrollment steps ([readiness §Enrollment](readiness.md#enrollment)) |
+| `github_credential` | The worker's verification found GitHub enrolled for `factory`. | pending, naming the exact GitHub enrollment steps, or, for a GitHub token factory.json delivers to the host, storing a valid one and applying it ([readiness §Enrollment](readiness.md#enrollment)) |
 | `repository_sync` | The repository stage synchronized every placed checkout ([repositories §Repository readiness](repositories.md#repository-readiness-and-dispatch)). | pending until the reported checkouts are resolved |
 | `ffflow_adoption` | The `WorkflowQueue` reports FFFlow adoption passes for the placed repositories. | pending until the placed repositories adopt FFFlow |
 | `paseo_health` | The control-plane stage found Paseo healthy. | pending until Paseo is healthy |
@@ -210,4 +210,5 @@ configuration flag alone.
 | The dispatch program, schedule reconciler and skill | release assets | `assets/steps/dispatch/` |
 
 Introduced by [#105](https://github.com/yaunder/factory/issues/105). Skipped
-workers: [#134](https://github.com/yaunder/factory/issues/134).
+workers: [#134](https://github.com/yaunder/factory/issues/134). A delivered
+GitHub token's next action: [#70](https://github.com/yaunder/fffactory/issues/70).

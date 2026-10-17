@@ -26,6 +26,7 @@ import {
   type Release,
   type SecretReference,
 } from "./instance";
+import { ENROLLMENTS, type EnrollmentId } from "./readiness";
 import {
   type DocumentParse,
   type Fields,
@@ -85,6 +86,13 @@ export function hostProjection(
     ...(paseoPasswordSecret === undefined ? {} : { paseo_password_secret: paseoPasswordSecret }),
     ...(canonical === undefined ? {} : { credentials: canonical }),
   };
+}
+
+/** The accounts whose credential `projection` delivers, in `ENROLLMENTS`' order. */
+export function projectedAccounts(projection: HostProjection): EnrollmentId[] {
+  return ENROLLMENTS.flatMap(({ id }) =>
+    projection.credentials?.[CREDENTIAL_SECRET_FIELDS[id]] === undefined ? [] : [id],
+  );
 }
 
 /** `credentials`' references in canonical order, or undefined when there is none. */
