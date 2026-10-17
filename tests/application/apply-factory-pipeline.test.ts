@@ -12,7 +12,7 @@ import { factoryStatus } from "../../src/application/status";
 import { planFactory } from "../../src/application/plan-factory";
 import { hostProjection, hostProjectionJson } from "../../src/domain/host-projection";
 import type { HostInspection } from "../../src/domain/host-protocol";
-import type { FactoryInstance, HostKey } from "../../src/domain/instance";
+import type { FactoryInstance, HostKey, SecretReference } from "../../src/domain/instance";
 import type { PlanReview } from "../../src/domain/plan";
 import { sha256Text } from "../../src/infrastructure/release-tarball";
 import { fakeCallerIdentity } from "../support/doctor-fakes";
@@ -617,5 +617,84 @@ describe("a password-bearing host (host protocol §The host projection, #132)", 
     expect(status.report.workers).toMatchObject([
       { key: "builder-1", status: "ready", configuration: sha256Text(sent) },
     ]);
+  });
+});
+
+describe("a host delivered credential references (control plane §Planned state, D3)", () => {
+  const GITHUB_TOKEN_ARN =
+    "arn:aws:secretsmanager:eu-west-2:123456789012:secret:fff-abcd1234/github-token-AbCdEf" as SecretReference;
+  const ROTATED_ARN =
+    "arn:aws:secretsmanager:eu-west-2:123456789012:secret:fff-abcd1234/github-token-2-AbCdEf" as SecretReference;
+  /** factory.json declaring builder-1 with its Paseo password, delivered `credentials`. */
+  function delivering(credentials: FactoryInstance["credentials"]): FactoryInstance {
+    return {
+      ...declaring({ key: "builder-1", paseo_password_secret: PASEO_PASSWORD_ARN }),
+      credentials,
+    };
+  }
+
+  test("adding, changing or removing a reference plans no Paseo change, and apply delivers it", async () => {
+    const { controlPlane, installed } = fakeControlPlane("healthy", { kind: "idle" });
+    // The worker holds the projection a release from before credential references sent.
+    const fleet = enrolledFleet(currentWorker("builder-1", PASEO_PASSWORD_ARN));
+    const instance = delivering({ github_token_secret: GITHUB_TOKEN_ARN });
+    const { deps, request, world } = pipeline(instance, { controlPlane }, fleet);
+    const plan = async (planned: FactoryInstance, offset: number) => {
+      const result = await planFactory(
+        world.deps,
+        planRequest({
+          instance: planned,
+          now: new Date(NOW.getTime() + offset),
+          randomBytes: (count) => new Uint8Array(count).fill(offset / 500),
+        }),
+      );
+      if (result.kind !== "planned") throw new Error(`expected planned, got ${result.kind}`);
+      return result.saved.control_plane;
+    };
+
+    // 1. Adding a reference plans no Paseo change on the worker from before.
+    expect(await plan(instance, 500)).toMatchObject([{ key: "builder-1", changes: [] }]);
+
+    const applied = await applyFactory(deps, request);
+    if (applied.kind !== "applied") throw new Error(`expected applied, got ${applied.kind}`);
+
+    // 2. The workers stage streamed the projection with the delivered reference.
+    const sent = hostProjectionJson(
+      hostProjection(FACTORY, "builder-1" as HostKey, RELEASE, PASEO_PASSWORD_ARN, {
+        github_token_secret: GITHUB_TOKEN_ARN,
+      }),
+    );
+    expect(fleet.worker.projections).toEqual([sent]);
+    expect(installed.map(hostProjectionJson).every((text) => text === sent)).toBe(true);
+
+    // 3. Unchanged, changed or removed, the reference plans no Paseo change.
+    for (const [planned, offset] of [
+      [instance, 2000],
+      [delivering({ github_token_secret: ROTATED_ARN }), 3000],
+      [delivering({ openai_api_key_secret: ROTATED_ARN }), 4000],
+      [declaring({ key: "builder-1", paseo_password_secret: PASEO_PASSWORD_ARN }), 5000],
+    ] as const)
+      expect(await plan(planned, offset)).toMatchObject([{ key: "builder-1", changes: [] }]);
+
+    // 4. Status finds the delivered projection current, and a changed reference not yet applied.
+    const status = async (judged: FactoryInstance) => {
+      const report = await factoryStatus(
+        {
+          identity: fakeCallerIdentity().identity,
+          machines: fakeMachineInventory({ kind: "machines", machines: [machine("builder-1")] })
+            .machines,
+          peers: fleet.tailnet.tailnet,
+          transport: fleet.transport.transport,
+          sha256: sha256Text,
+        },
+        { instance: judged, credentials: request.credentials },
+      );
+      if (report.kind !== "report") throw new Error(`expected a report, got ${report.kind}`);
+      return report.report.workers[0];
+    };
+    expect(await status(instance)).toMatchObject({ status: "ready" });
+    expect(await status(delivering({ github_token_secret: ROTATED_ARN }))).toMatchObject({
+      status: "not_ready",
+    });
   });
 });

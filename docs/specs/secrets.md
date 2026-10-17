@@ -44,8 +44,11 @@ is meant for every host that does not keep a human login for its account
 (`hosts[].interactive_logins`); a factory that sets none keeps every account
 on a human's login. `secret set` stores them as it stores every other secret,
 and, like every other, does not check that a token or key works. Setting one
-again rotates it (below). Delivery to workers, and the hosts' read access to
-these secrets, are not shipped yet
+again rotates it (below). Each host's projection carries the references
+delivered to it, and every host's shared role may read all three
+([host protocol §The host projection](host-protocol.md#the-host-projection),
+[provisioning §Terraform inputs](provisioning.md#terraform-inputs)); the
+worker step that acts on them is not shipped yet
 ([#55](https://github.com/yaunder/fffactory/issues/55)).
 
 ### The Tailscale admin client

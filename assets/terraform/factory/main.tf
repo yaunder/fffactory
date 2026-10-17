@@ -16,11 +16,18 @@ module "network" {
   availability_zone  = var.availability_zone
 }
 
+# Every host shares one role: it may read the enrollment key, every host's Paseo password and
+# the factory-wide credentials; narrowing it per host is an open question (#64). The operator's
+# Tailscale admin client is never among them.
 module "host_identity" {
   source = "../modules/host-identity"
 
-  factory_id  = var.factory_id
-  secret_arns = distinct(concat([var.tailscale_auth_key_secret_arn], values(var.paseo_password_secret_arns)))
+  factory_id = var.factory_id
+  secret_arns = distinct(concat(
+    [var.tailscale_auth_key_secret_arn],
+    values(var.paseo_password_secret_arns),
+    values(var.credential_secret_arns),
+  ))
 }
 
 module "hosts" {

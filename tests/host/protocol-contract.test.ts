@@ -110,6 +110,13 @@ describe("host inspect, CLI side", () => {
         summary:
           "Software ready on release 0.3.0; enrollment pending: GitHub, OpenAI Codex, Claude Code",
       },
+      "inspect-credentials.json": {
+        release: "0.3.0",
+        configuration: "2f95fc2e8e64d5560410f2ee7035fefcdbaf1db8932f2f1f11676943fdebee24",
+        installation: "succeeded",
+        status: "not_ready",
+        summary: "Its host configuration is not the one factory.json projects for it",
+      },
       "inspect-failed-install.json": {
         release: "0.3.0",
         configuration: HOST_CONFIGURATION_SHA256,
@@ -142,6 +149,15 @@ describe("host inspect, CLI side", () => {
       expect(
         parseHostInspection(JSON.stringify({ ...document, protocol_version: version })),
       ).toEqual({ ok: false, kind: "unsupported_version", version });
+  });
+
+  test("a worker holding credential references reports its control-plane part apart (D3)", async () => {
+    const parsed = parseHostInspection(await fixture("inspect-credentials.json"));
+    expect(parsed.ok && parsed.inspection.configuration).toEqual({
+      state: "present",
+      sha256: "2f95fc2e8e64d5560410f2ee7035fefcdbaf1db8932f2f1f11676943fdebee24",
+      control_plane_sha256: HOST_CONFIGURATION_SHA256,
+    });
   });
 
   test("a worker from before installs were recorded reports none", async () => {

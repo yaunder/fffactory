@@ -377,8 +377,9 @@ whose credential is stored, list the account in that host's
 `interactive_logins`, such as `"interactive_logins": ["anthropic"]`.
 
 Delivery to workers is not shipped yet
-([#55](https://github.com/yaunder/fffactory/issues/55)): until it is, a stored
-credential reaches no worker, and every account still needs step 8's login.
+([#55](https://github.com/yaunder/fffactory/issues/55)): until it is, a worker
+receives only a stored credential's reference and does nothing with it, and
+every account still needs step 8's login.
 
 ## 7. Bootstrap and provision
 

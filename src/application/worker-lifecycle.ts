@@ -1239,7 +1239,7 @@ async function readiness(
     hostname: power.worker.hostname,
     release: power.pinned,
     configurationSha256: hostProjectionSha256(
-      projectHost(power.factoryId, power.pinned, power.host),
+      projectHost(power.request.instance, power.factoryId, power.pinned, power.host),
       deps.sha256,
     ),
   }).verdict;

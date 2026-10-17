@@ -73,7 +73,8 @@ whose EC2 inventory lists no machine until a test sets `machines.inventory` (a s
 worker, or an inventory that cannot be read) and counts its reads. Digests there are
 real: the fleet digests projections as the CLI does, and an `installableWorker` keeps the
 projection its activator was streamed (`projections`) and from then on reports that
-text's SHA-256 as its configuration, so a plan or `status` after an apply sees exactly
+text's SHA-256 as its configuration (and, as `host inspect` does for one carrying credential
+references, its control-plane part's SHA-256 apart), so a plan or `status` after an apply sees exactly
 the drift, or the clean rerun, a real worker would. `status`'s unit tests
 (`application/status.test.ts`) do not: they still digest with `FAKE_SHA256`, which gives
 every text the same constant, so they cannot see a projection that drifted. `declaring`

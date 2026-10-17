@@ -140,9 +140,12 @@ delivered account with its reference in `ENROLLMENTS`' order (`github`,
 
 All of these fields are optional. A document without them is valid, complete
 and means what it did before: every account stays on a human's login.
-Delivery itself is not shipped yet
-([#55](https://github.com/yaunder/fffactory/issues/55)): no projection, plan or
-worker acts on these fields, which are only validated.
+The host projection carries each host's delivered references
+([host protocol §The host projection](host-protocol.md#the-host-projection)),
+and the hosts' role may read every reference set
+([provisioning §Terraform inputs](provisioning.md#terraform-inputs)). Nothing
+on the worker acts on them yet
+([#55](https://github.com/yaunder/fffactory/issues/55)).
 
 Validation rejects an unknown field under `credentials`, a raw secret value in
 any of them, an `interactive_logins` entry that is not one of the three account

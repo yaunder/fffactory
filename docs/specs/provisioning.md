@@ -245,7 +245,7 @@ account, Region and tailnet (D5), so every factory keeps to its own namespace.
 | `factory/` (root) | The factory: `network`, `host-identity` and `hosts`, and the current Amazon Linux 2023 x86-64 image from the public SSM parameter `/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64`. Its state lives in the S3 backend: the bucket comes from the backend settings, the key is `factory/terraform.tfstate`, encrypted, with S3 native locking (`use_lockfile`). |
 | `backend/` (root) | The state bucket's definition, `state-bucket`, planned and applied only by [backend bootstrap](#backend-bootstrap). It has no backend of its own. |
 | `modules/network` | The factory VPC (DNS support and hostnames on), its internet gateway, one public subnet in `network.availability_zone` that assigns no public IPs by default, a route table with a default route to the gateway, and the hosts' security group: no ingress, all egress (hosts are reached over Tailscale). |
-| `modules/host-identity` | The hosts' IAM role, assumable only by EC2, its instance profile, and one inline policy allowing `secretsmanager:GetSecretValue` on exactly the workers' secret references factory.json declares (`tailscale.auth_key_secret`, `hosts[].paseo_password_secret`), never the operator's Tailscale admin client. Hosts can mutate nothing. |
+| `modules/host-identity` | The hosts' IAM role, assumable only by EC2, its instance profile, and one inline policy allowing `secretsmanager:GetSecretValue` on exactly the workers' secret references factory.json declares (`tailscale.auth_key_secret`, `hosts[].paseo_password_secret`, `credentials.*_secret`), never the operator's Tailscale admin client. One role serves every host, so each may read every host's Paseo password and every credential reference, whichever hosts keep an account on a human's login; narrowing it is an open question ([#64](https://github.com/yaunder/fffactory/issues/64)). Hosts can mutate nothing. |
 | `modules/hosts` | One EC2 instance per stable host key, none for a factory that declares no host: `hosts[].instance_type`, an encrypted gp3 root volume of `hosts[].root_volume_gib` deleted with the instance, a public IP, IMDSv2 only with a hop limit of 1 and instance tags in metadata, the security group and instance profile above. Its user data is the worker bootstrap, `bootstrap/user-data.sh.tftpl` rendered with the host's namespaced hostname, the Region, the Tailscale reference and tag, and the activator ([worker bootstrap](worker-bootstrap.md)). It changes neither `ami` nor `user_data` of a running host: a newer image or bootstrap template never replaces a host. |
 | `bootstrap/` | Not a module: the worker bootstrap's user data template and root activator, which `modules/hosts` reads ([worker bootstrap](worker-bootstrap.md)). |
 | `modules/state-bucket` | The state bucket: public access blocked, bucket-owner-enforced ownership, SSE-S3 encryption, versioning, a policy denying any request without TLS, and `prevent_destroy`. |
@@ -410,6 +410,7 @@ state. Secrets appear only as the references factory.json holds.
 | `tailscale_auth_key_secret_arn` | `tailscale.auth_key_secret` |
 | `tailscale_tag` | `tailscale.tag` |
 | `paseo_password_secret_arns` | `hosts[].paseo_password_secret`, by host key, for hosts that declare one |
+| `credential_secret_arns` | `credentials.github_token_secret`, `credentials.anthropic_api_key_secret`, `credentials.openai_api_key_secret`, by field name, for each one set; empty for none. Factory-wide: `interactive_logins` does not narrow it |
 | `hosts` | `hosts[]` by host key: `instance_type` and `root_volume_gib`; empty for a factory that declares no host |
 
 `tailscale.admin_client_secret` is projected into no variable: no worker may
@@ -428,7 +429,11 @@ needs only `factory_id`, `aws.account_id`, `aws.region` and
 ID. The root modules repeat factory.json's format rules as variable
 validations; none requires a host, so an empty factory's projection plans its
 shared infrastructure alone, and its hosts' policy allows only the Tailscale
-enrollment key. A test checks that each projection supplies exactly its root
+enrollment key and any credential references. The hosts' policy allows the
+`distinct` union of the enrollment key, `paseo_password_secret_arns`' values
+and `credential_secret_arns`' values; each ARN must be a Secrets Manager
+secret in the factory Region and account, and `credential_secret_arns`' keys
+only the three field names. A test checks that each projection supplies exactly its root
 module's variables.
 
 ### Stable host keys
@@ -905,4 +910,5 @@ and namespacing by [#96](https://github.com/yaunder/factory/issues/96); host
 user data by [#97](https://github.com/yaunder/factory/issues/97); first apply
 and the factory-wide lock by [#98](https://github.com/yaunder/factory/issues/98); the lock's
 interruption rule, operation records and the state revision by
-[#99](https://github.com/yaunder/factory/issues/99).
+[#99](https://github.com/yaunder/factory/issues/99); the hosts' read of the
+credential references by [#68](https://github.com/yaunder/fffactory/issues/68).

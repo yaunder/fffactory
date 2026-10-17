@@ -20,10 +20,18 @@ it will make. A worker with no active release, or whose active release differs
 from the requested version or asset digest, needs `paseo-package` and
 `service-definition`. A host-projection digest mismatch needs the factory-owned
 Paseo settings (`listen-address`, and `password` when factory.json declares its
-secret reference). The digest planned against is that of the projection the
-workers stage sends ([host protocol §The host projection](host-protocol.md#the-host-projection)),
-so a successful apply leaves no mismatch to plan again. An up-to-date worker is
-shown as `Paseo is unchanged`.
+secret reference). The digest planned against is that of the control-plane
+part of the projection the workers stage sends: all of it but its
+`credentials` ([host protocol §The host projection](host-protocol.md#the-host-projection)).
+It is compared with the worker's `configuration.control_plane_sha256`, or, on a
+worker that reports none (one from before credential references, or one whose
+file carries none), the whole file's `sha256`. So a successful apply leaves no
+mismatch to plan again, and adding, changing or removing a credential reference
+plans no Paseo change, on an upgraded worker or on one still on an earlier
+release. An up-to-date worker is shown as `Paseo is unchanged`. Tested in
+`tests/application/plan-control-plane.test.ts` and, across a real apply, the
+credential case of `tests/application/apply-factory-pipeline.test.ts`
+([#68](https://github.com/yaunder/fffactory/issues/68)).
 
 `listen-address` stands for every factory-owned daemon setting the release
 merges into `config.json` ([§Release-owned installation](#release-owned-installation)):

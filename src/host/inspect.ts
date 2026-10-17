@@ -17,10 +17,15 @@ import {
   WORKER_PATHS,
   WORKER_SERVICES,
 } from "../domain/host-protocol";
+import {
+  controlPlaneProjection,
+  hostProjectionJson,
+  parseHostProjection,
+} from "../domain/host-projection";
 import { type Installation, installationOf, parseHostApply } from "../domain/installation";
 import { MATERIALIZED_MARKER } from "../domain/release-assets";
 import { bunProcessRunner, type ProcessRunner } from "../infrastructure/local-tool-probe";
-import { sha256Hex } from "../infrastructure/release-tarball";
+import { sha256Hex, sha256Text } from "../infrastructure/release-tarball";
 
 /** What inspection reads the worker through; tests replace each part. */
 export interface WorkerSystem {
@@ -102,7 +107,13 @@ async function activeRelease(root: string): Promise<ReleaseState> {
 async function configuration(root: string): Promise<ConfigurationState> {
   try {
     const bytes = await readFile(join(root, WORKER_PATHS.configuration));
-    return { state: "present", sha256: sha256Hex(bytes) };
+    const sha256 = sha256Hex(bytes);
+    const projection = parseHostProjection(new TextDecoder().decode(bytes));
+    // Only the file's credential references are not the control plane's (D3).
+    if (!projection.ok || projection.document.credentials === undefined)
+      return { state: "present", sha256 };
+    const part = hostProjectionJson(controlPlaneProjection(projection.document));
+    return { state: "present", sha256, control_plane_sha256: sha256Text(part) };
   } catch (error) {
     return errorCode(error) === "ENOENT" ? { state: "none" } : { state: "unreadable" };
   }

@@ -16,7 +16,8 @@
 - `terraform-check.ts` also compares each planned host's `user_data` with the rendering the
   bootstrap tests use (`tests/support/user-data.ts`), and plans the factory root without
   hosts, an empty factory: no instance, the shared infrastructure kept, the hosts' policy
-  allowing only the Tailscale enrollment key.
+  allowing only the Tailscale enrollment key; and with every credential reference set, the
+  hosts' policy allowing exactly the enrollment key, the Paseo password and those references.
 - `terraform-check.ts` last checks `worker terminate`'s scoped removal rule against real
   Terraform removal plans (`terraform-removal-check.ts`): states for several hosts and for
   one, synthesized offline by `terraform-state-fixture.ts` (each `-refresh=false` plan's

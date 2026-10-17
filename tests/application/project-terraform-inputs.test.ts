@@ -35,6 +35,7 @@ describe("factory.json projected into the factory root module's variables", () =
         paseo_password_secret_arns: {
           "builder-1": example.hosts[0]?.paseo_password_secret as string,
         },
+        credential_secret_arns: {},
         hosts: { "builder-1": { instance_type: "m7i.xlarge", root_volume_gib: 200 } },
       },
     });
@@ -56,6 +57,34 @@ describe("factory.json projected into the factory root module's variables", () =
       [],
     );
     expect(projection).toEqual(projectFactoryVariables(instance(), []));
+    expect(JSON.stringify(projection)).not.toContain("ts-admin");
+  });
+
+  test("every credential reference reaches the hosts' role, whatever a host keeps on login (D2)", () => {
+    const arn = (name: string) =>
+      `arn:aws:secretsmanager:us-east-1:123456789012:secret:example/${name}-AbCdEf`;
+    const admin = arn("ts-admin");
+    const projection = projectFactoryVariables(
+      instance({
+        ...example,
+        tailscale: { ...example.tailscale, admin_client_secret: admin },
+        credentials: {
+          openai_api_key_secret: arn("openai-api-key"),
+          github_token_secret: arn("github-token"),
+          anthropic_api_key_secret: arn("anthropic-api-key"),
+        },
+        hosts: example.hosts.map((host) => ({
+          ...host,
+          interactive_logins: ["github", "openai", "anthropic"],
+        })),
+      }),
+      [],
+    );
+    expect(projection.ok && projection.variables.credential_secret_arns).toEqual({
+      github_token_secret: arn("github-token"),
+      anthropic_api_key_secret: arn("anthropic-api-key"),
+      openai_api_key_secret: arn("openai-api-key"),
+    });
     expect(JSON.stringify(projection)).not.toContain("ts-admin");
   });
 
@@ -96,6 +125,7 @@ describe("factory.json projected into the factory root module's variables", () =
       variables: expect.objectContaining({
         tailscale_auth_key_secret_arn: TAILSCALE,
         paseo_password_secret_arns: {},
+        credential_secret_arns: {},
         hosts: {},
       }),
     });

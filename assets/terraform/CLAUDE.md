@@ -35,7 +35,7 @@ Shipped in the release bundle and run only by the managed Terraform through the
 - Host instances are keyed by stable host key and ignore `ami` and `user_data` changes.
 - `hosts` may be empty: a factory whose last host `fffactory worker terminate` removed keeps
   its network, state and host identity, whose policy then allows only the Tailscale enrollment
-  key. No validation may require a host; `guardrails.test.ts` checks it and
+  key and the factory-wide credential references (`credential_secret_arns`). No validation may require a host; `guardrails.test.ts` checks it and
   `just terraform-check` plans the empty factory.
 - `bootstrap/` is not a module: the worker bootstrap user data template and root activator
   that `modules/hosts` reads. Its own CLAUDE.md has the rules.

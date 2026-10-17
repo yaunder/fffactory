@@ -363,7 +363,7 @@ async function planAndSaveFactory(
     deps,
     target,
     tag,
-    request.instance.hosts ?? [],
+    request.instance,
     request.assetsSha256,
     new Set(
       createdWorkers(infrastructure.changes, declaredWorkers(request.instance, target.factoryId)),

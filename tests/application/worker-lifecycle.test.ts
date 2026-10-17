@@ -2427,6 +2427,31 @@ describe("fffactory worker terminate (worker-lifecycle §Terminate (remove))", (
     expect(w.store.files[PATH]).toBe(serializeInstance(withoutHost(instance, KEY as HostKey)));
   });
 
+  test("factory-wide credential references stay readable: removing a host never changes them (D2)", async () => {
+    const github = paseoPassword("github-token");
+    const openai = paseoPassword("openai-api-key");
+    const credentials = { github_token_secret: github, openai_api_key_secret: openai };
+    for (const [instance, before, after] of [
+      [
+        { ...withPasswords(PASEO_1, PASEO_2), credentials },
+        [AUTH, PASEO_1, PASEO_2, github, openai],
+        [AUTH, PASEO_2, github, openai],
+      ],
+      [{ ...withAdmin(), credentials }, [AUTH, github, openai], [AUTH, github, openai]],
+    ] as const) {
+      const text = serializeInstance(instance);
+      const w = world({ worker: CLEAN, configuration: text, secretArns: before });
+      const result = await terminateWorker(w.deps, removing(w, { instance }));
+      expect(result).toMatchObject({ kind: "done", removed: true, instanceId: ID });
+      const [, plan] = w.terraform.calls;
+      expect(plan?.call === "plan" && plan.request.variables.credential_secret_arns).toEqual(
+        credentials,
+      );
+      expect(w.terraform.world.secretArns).toEqual(after);
+      expect(w.store.files[PATH]).toBe(serializeInstance(withoutHost(instance, KEY as HostKey)));
+    }
+  });
+
   test("a policy update dropping another ARN than the removed host's password is refused, applying nothing", async () => {
     // factory.json now names a new password for builder-1, not yet applied: the state's policy
     // still allows the old one, which the removal plan would drop instead.

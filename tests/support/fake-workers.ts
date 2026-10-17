@@ -14,7 +14,12 @@ import type { ObservedMachineState } from "../../src/domain/worker-lifecycle";
 import type { TailnetAdmin, TailnetDeviceList } from "../../src/application/tailnet-admin";
 import type { TailnetPeers } from "../../src/application/tailnet-peers";
 import type { CredentialSelection } from "../../src/domain/aws-account";
-import { hostProjection, hostProjectionJson } from "../../src/domain/host-projection";
+import {
+  controlPlaneProjection,
+  hostProjection,
+  hostProjectionJson,
+  parseHostProjection,
+} from "../../src/domain/host-projection";
 import {
   HOST_PROTOCOL_VERSION,
   type HostInspection,
@@ -375,15 +380,26 @@ const NOT_REQUESTED: DispatchInspection = {
 
 /**
  * `document` as the worker reports it once it keeps `projection`: its configuration, and its
- * install record's, are that text's real SHA-256, as `host apply` records them.
+ * install record's, are that text's real SHA-256, as `host apply` records them, and a
+ * projection carrying credential references has its control-plane part digested apart, as
+ * `host inspect` does.
  */
 function holding(document: HostInspection, projection: string | undefined): HostInspection {
   if (projection === undefined) return document;
   const sha256 = sha256Text(projection);
+  const parsed = parseHostProjection(projection);
+  const part =
+    parsed.ok && parsed.document.credentials !== undefined
+      ? {
+          control_plane_sha256: sha256Text(
+            hostProjectionJson(controlPlaneProjection(parsed.document)),
+          ),
+        }
+      : {};
   const { installation } = document;
   return {
     ...document,
-    configuration: { state: "present", sha256 },
+    configuration: { state: "present", sha256, ...part },
     installation:
       "configuration_sha256" in installation
         ? { ...installation, configuration_sha256: sha256 }

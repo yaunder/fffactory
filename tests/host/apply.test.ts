@@ -10,7 +10,7 @@ import { join } from "node:path";
 import { WORKER_PATHS } from "../../src/domain/host-protocol";
 import { hostProjection, hostProjectionJson } from "../../src/domain/host-projection";
 import { type HostApplyRecord, INSTALL_STEPS, parseHostApply } from "../../src/domain/installation";
-import type { FactoryId, HostKey, Release } from "../../src/domain/instance";
+import type { FactoryId, HostKey, Release, SecretReference } from "../../src/domain/instance";
 import { ENROLLMENTS, type Verification } from "../../src/domain/readiness";
 import {
   type ApplySystem,
@@ -159,6 +159,25 @@ describe("host apply, installing (host protocol §apply)", () => {
     expect(await readFile(at(WORKER_PATHS.configuration), "utf8")).toBe(PROJECTION);
     expect((await stat(at(WORKER_PATHS.configuration))).mode & 0o777).toBe(0o644);
     expect((await stat(at(WORKER_PATHS.lastApply))).mode & 0o777).toBe(0o644);
+  });
+
+  test("keeps a projection carrying credential references exactly as given (D3)", async () => {
+    await worker();
+    const delivered = hostProjectionJson(
+      hostProjection("fff-aaaa1111" as FactoryId, "builder-1" as HostKey, RELEASE, undefined, {
+        github_token_secret:
+          "arn:aws:secretsmanager:eu-west-2:123456789012:secret:fff-aaaa1111/github-token-AbCdEf" as SecretReference,
+      }),
+    );
+    const result = await workerApplier(
+      applySystem({ readInput: async () => delivered }),
+      fakeVerifier().verifier,
+    ).apply();
+    expect(result).toMatchObject({
+      state: "succeeded",
+      configuration_sha256: sha256Text(delivered),
+    });
+    expect(await readFile(at(WORKER_PATHS.configuration), "utf8")).toBe(delivered);
   });
 
   test("keeps each step's output in its log, never in the document", async () => {

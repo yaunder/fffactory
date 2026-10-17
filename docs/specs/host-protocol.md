@@ -206,7 +206,7 @@ indented by two spaces, on standard output. Without `--json` it refuses (exit
 | --- | --- | --- |
 | `/opt/fffactory/current` | `host apply` | A symbolic link `releases/<version>`. Absent: no release. |
 | `/opt/fffactory/releases/<version>/.fffactory-assets.json` | the activator ([worker bootstrap §Activator](worker-bootstrap.md#activator)) | The marker `{"release", "sha256"}`; it must record `<version>` and a SHA-256. |
-| `/var/lib/fffactory/host.json` | `host apply` | The host's configuration; its SHA-256 is reported. |
+| `/var/lib/fffactory/host.json` | `host apply` | The host's configuration; its SHA-256 is reported, and, when it is a host projection carrying `credentials`, that of its control-plane part apart ([§The host projection](#the-host-projection)). |
 | `/var/lib/fffactory/last-apply.json` | `host apply` | The last install's record ([apply](#apply)), summarized as `installation`. |
 | `/var/lib/fffactory/bootstrap-complete` | bootstrap | Present: bootstrap finished. |
 | `/etc/os-release` | the base image | `ID` and `VERSION_ID`, quoted or not. |
@@ -248,7 +248,7 @@ name (`uname -m`). A value that is not a short token of letters, digits, `.`,
 | Field | Values |
 | --- | --- |
 | `release` | `{"state": "none"}`: no `current` link, the explicit empty state. `{"state": "active", "version", "sha256"}`: the link names a release whose marker records it. `{"state": "broken"}`: anything else (not a link, another target, a missing or mismatched marker). |
-| `configuration` | `{"state": "none"}`: no file. `{"state": "present", "sha256"}`. `{"state": "unreadable"}`: it exists but cannot be read. |
+| `configuration` | `{"state": "none"}`: no file. `{"state": "present", "sha256"}`, and `control_plane_sha256` after it when the file is a host projection carrying `credentials`: the SHA-256 of its control-plane part, the projection without them. Absent, the whole file is that part, as on a worker from before credential references. `{"state": "unreadable"}`: it exists but cannot be read. |
 | `installation` | `{"state": "none"}`: no record. `{"state": "unreadable"}`: a record that cannot be read as one. Otherwise the record's `state` (`running`, `succeeded` or `failed`), `release`, `configuration_sha256`, `failed_step` (the first failed step's name, or null), `started_at`, `finished_at`, `verification` (the verify document, or null) and `failure` (the record's, below; absent reads as null). A worker that reports no `installation` field, from before #101, reads as `none`. |
 | `services[].state` | What `systemctl is-active` prints: `active`, `reloading`, `refreshing`, `inactive`, `failed`, `activating`, `deactivating`, `maintenance`; else `unknown`, as when it cannot run. |
 | `evidence.os` | `null` when os-release is unreadable or lacks either value. |
@@ -305,19 +305,32 @@ on standard input and kept as `/var/lib/fffactory/host.json`:
   "host_key": "builder-1",
   "hostname": "fff-aaaa1111-builder-1",
   "release": "0.3.0",
-  "paseo_password_secret": "arn:aws:secretsmanager:eu-west-2:123456789012:secret:fff-aaaa1111/paseo-password-builder-1-AbCdEf"
+  "paseo_password_secret": "arn:aws:secretsmanager:eu-west-2:123456789012:secret:fff-aaaa1111/paseo-password-builder-1-AbCdEf",
+  "credentials": {
+    "github_token_secret": "arn:aws:secretsmanager:eu-west-2:123456789012:secret:fff-aaaa1111/github-token-AbCdEf",
+    "anthropic_api_key_secret": "arn:aws:secretsmanager:eu-west-2:123456789012:secret:fff-aaaa1111/anthropic-api-key-AbCdEf",
+    "openai_api_key_secret": "arn:aws:secretsmanager:eu-west-2:123456789012:secret:fff-aaaa1111/openai-api-key-AbCdEf"
+  }
 }
 ```
 
 `paseo_password_secret` is present exactly when the host declares
 `hosts[].paseo_password_secret`: a validated Secrets Manager ARN, the
 reference the [control plane](control-plane.md) installs Paseo's password
-from, never the password it names. The projection holds no secret material,
-and never appears in an argument, a plan or a log. `release` is the release
-factory.json pins, which the CLI/pin match guard makes the running one's.
-No factory-wide reference is projected: the worker reads its Tailscale key
-only at first boot, through Terraform, and the operator's Tailscale admin
-client, `tailscale.admin_client_secret`, never reaches a worker
+from, never the password it names. `credentials` holds the references of the
+API credentials delivered to the host
+([instance configuration §API credentials](instance-configuration.md#api-credentials),
+`deliveredAccounts`): each `credentials.*_secret` factory.json sets whose
+account the host does not list in `interactive_logins`, under the same field
+name, in this order. It is absent when none is delivered, never empty. Nothing
+on the worker acts on them yet
+([#55](https://github.com/yaunder/fffactory/issues/55)). The projection holds
+no secret material, and never appears in an argument, a plan or a log.
+`release` is the release factory.json pins, which the CLI/pin match guard makes
+the running one's. No other factory-wide reference is projected: the worker
+reads its Tailscale key only at first boot, through Terraform, and the
+operator's Tailscale admin client, `tailscale.admin_client_secret`, never
+reaches a worker
 ([secrets §The Tailscale admin client](secrets.md#the-tailscale-admin-client)).
 Repositories and dispatch travel in their own documents
 ([repositories](repositories.md), [dispatch](dispatch.md)).
@@ -326,8 +339,17 @@ Its text is canonical: keys in this order, two-space indented, one final
 newline. `host apply` refuses any other text, so the file it keeps has exactly
 the SHA-256 the CLI computes for it.
 
+Its *control-plane part* (`controlPlaneProjection`) is the projection without
+`credentials`: what a projection was before credential references, and all
+the control plane installs from. The control-plane plan digests only that part
+([control plane §Planned state](control-plane.md#planned-state)), and `host
+inspect` reports its digest apart from the file's, so adding, changing or
+removing a credential reference plans no Paseo change. `status` still compares
+the whole file's digest: a changed reference is a configuration apply has not
+delivered yet.
+
 There is one projection per host, built from factory.json's host as it
-stands: the workers stage sends the ones `projectHosts` builds from the
+stands, and its delivered references from the instance's `credentials`: the workers stage sends the ones `projectHosts` builds from the
 instance itself, the control-plane stage installs Paseo from it, and plan and
 `status` compare its digest with the one `host inspect` reports
 ([status §Readiness](status.md#readiness),
@@ -896,4 +918,6 @@ Introduced by [#100](https://github.com/yaunder/factory/issues/100); `apply`,
 [#101](https://github.com/yaunder/factory/issues/101); `work inspect` by
 [#9](https://github.com/yaunder/fffactory/issues/9); the Codex 0.163.0 and
 Claude Code 2.1.302 pins and Codex's requirements by
-[#65](https://github.com/yaunder/fffactory/issues/65).
+[#65](https://github.com/yaunder/fffactory/issues/65); the projection's
+credential references and the control-plane part's digest by
+[#68](https://github.com/yaunder/fffactory/issues/68).
