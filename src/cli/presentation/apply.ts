@@ -33,6 +33,7 @@ import { enrollmentSteps, workerEnrollmentOf, workerRow } from "./workers";
 type Applied = Extract<FactoryApply, { readonly kind: "applied" }>;
 type Failed = Extract<FactoryApply, { readonly kind: "failed" }>;
 type Interrupted = Extract<FactoryApply, { readonly kind: "interrupted" }>;
+type Bootstrapped = Extract<FactoryApply, { readonly kind: "bootstrapped" }>;
 /** The runs that applied nothing and took no lock, refused as a plan's refusals are. */
 type RefusedRun = Extract<
   FactoryApply,
@@ -570,6 +571,37 @@ export function appliedLines(
   );
 }
 
+// A saved bootstrap plan, applied
+
+/**
+ * A saved bootstrap plan's Result: the state bucket it created and the operation record, on
+ * standard output, any record that could not be finished on standard error; then planning the
+ * factory, which this apply never does (D2), as its one Next block.
+ */
+export function bootstrappedLines(
+  result: Bootstrapped,
+  reporting: ApplyReporting,
+  styles: Styles,
+): StreamLine[] {
+  const rows: Routed[] = [
+    { stream: "out", row: { label: "State bucket", value: "created" } },
+    { stream: "out", row: recordRow(result.operation) },
+  ];
+  return routedLines(
+    styles,
+    [
+      {
+        kind: "section",
+        title: RESULT,
+        items: [...rowItems(rows), ...recordFailure(result.recordFailure)],
+      },
+    ],
+    onStream("out", {
+      paragraphs: [[step("Plan the factory next:", [command(["plan"], reporting)])]],
+    }),
+  );
+}
+
 // A failure
 
 /** What each step's failure may have left, and whether a rerun converges it. */
@@ -689,51 +721,62 @@ function interruptedWorker(result: Interrupted): string[] {
 }
 
 /**
+ * How to go on after an interrupt: rerun the command, or, when a saved bootstrap plan was being
+ * applied, plan the factory instead. That plan may be spent, and apply without one needs a
+ * terminal, so it is never rerun.
+ */
+function goOn(result: Interrupted, reporting: ApplyReporting) {
+  if (result.bootstrapPlan === undefined) {
+    const rerun = command([reporting.rerun], reporting);
+    return {
+      unlocked: step("Rerun: it plans again from what exists now:", [rerun]),
+      locked: step("Then rerun:", [rerun]),
+    };
+  }
+  const plan = command(["plan"], reporting);
+  return {
+    unlocked: step("Plan again from what exists now:", [plan]),
+    locked: step("Then plan the factory next:", [plan]),
+  };
+}
+
+/** The verdict's details: the saved bootstrap plan that may be spent, or the worker concerned. */
+function interruptedDetails(result: Interrupted): Block[] {
+  const lines =
+    result.bootstrapPlan === undefined
+      ? interruptedWorker(result)
+      : result.locked
+        ? []
+        : [`Saved plan ${result.bootstrapPlan} may be spent and the state bucket created.`];
+  return lines.length === 0 ? [] : [{ kind: "text", lines }];
+}
+
+/**
  * What an interrupt left, on standard error but for the record's location: no lock, the lock
- * alone, or the lock and a record of the operation, then how to recover.
+ * alone, or the lock and a record of the operation, then how to recover: rerun, or plan the
+ * factory after a saved bootstrap plan.
  */
 export function interruptedLines(
   result: Interrupted,
   reporting: ApplyReporting,
   styles: Styles,
 ): StreamLine[] {
-  const rerun = command([reporting.rerun], reporting);
-  if (!result.locked)
-    return routedLines(
-      styles,
-      [
-        {
-          kind: "section",
-          title: RESULT,
-          items: [
-            {
-              stream: "err",
-              block: {
-                kind: "verdict",
-                status: "attention",
-                text: "Interrupted before the factory was locked: it is not locked",
-              },
-            },
-          ],
-        },
-        ...notices([pinNotice(reporting)]),
-      ],
-      onStream("err", {
-        paragraphs: [[step("Rerun: it plans again from what exists now:", [rerun])]],
-      }),
-    );
-  const workers = interruptedWorker(result);
+  const next = goOn(result, reporting);
+  const details = interruptedDetails(result);
   const verdict: Block = {
     kind: "verdict",
     status: "attention",
-    text:
-      result.record === undefined
+    text: !result.locked
+      ? "Interrupted before the factory was locked: it is not locked"
+      : result.record === undefined
         ? `Interrupted: the factory stays locked by this ${reporting.action}, which may have no operation record`
         : "Interrupted: the factory stays locked, with a record of this operation",
-    ...(workers.length === 0 ? {} : { details: [{ kind: "text", lines: workers }] }),
+    ...(details.length === 0 ? {} : { details }),
   };
   const record: Routed[] =
-    result.record === undefined ? [] : [{ stream: "out", row: recordRow(result.record) }];
+    !result.locked || result.record === undefined
+      ? []
+      : [{ stream: "out", row: recordRow(result.record) }];
   return routedLines(
     styles,
     [
@@ -746,12 +789,14 @@ export function interruptedLines(
     ],
     onStream("err", {
       paragraphs: [
-        [
-          step("Once fffactory has exited, break the lock:", [
-            command(["lock", "break"], reporting),
-          ]),
-          step("Then rerun:", [rerun]),
-        ],
+        result.locked
+          ? [
+              step("Once fffactory has exited, break the lock:", [
+                command(["lock", "break"], reporting),
+              ]),
+              next.locked,
+            ]
+          : [next.unlocked],
       ],
     }),
   );

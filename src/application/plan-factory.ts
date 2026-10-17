@@ -4,7 +4,9 @@
  * control-plane stages. Every plan, even one of a factory that declares no worker and has
  * nothing to change, is saved under a short-lived plan ID, bound to factory.json's
  * exact text, the release and its assets, the AWS account and the revision of the factory's
- * Terraform state, so `fffactory apply --plan-id` can apply exactly it. Planning changes
+ * Terraform state, so `fffactory apply --plan-id` can apply exactly it. Before the state
+ * bucket exists, the plan is backend bootstrap's, saved as a bootstrap plan bound to the
+ * same circumstances but the bucket's absence in place of the state revision. Planning changes
  * nothing: it takes no lock, inspects existing workers read-only for their Paseo state, and
  * refuses while another operation holds it. The EC2 inventory says which workers are stopped:
  * the plan skips them, and refuses to change the instance type of one stopped or stopping,
@@ -32,6 +34,7 @@ import {
   hostKeyRemovalRefusal,
   hostMachineRefusal,
   newPlanId,
+  newSavedBootstrapPlan,
   newSavedPlan,
   type PlanCircumstances,
   type PlannedWorker,
@@ -42,14 +45,15 @@ import {
   resizeRefusal,
   type ResourceChange,
   resourceChanges,
-  type SavedPlan,
+  type SavedBootstrapPlan,
+  type SavedFactoryPlan,
   type UnexpectedPlan,
 } from "../domain/plan";
 import { checkStableHostKeys, recordedHostKeys } from "../domain/stable-host-keys";
 import { planBackendBootstrap, stateBucketState } from "./bootstrap-backend";
 import { stateBucketOf } from "./factory-lock";
 import type { LockStore, StateBucket } from "./lock-store";
-import type { PlanStore } from "./plan-store";
+import type { PlanFiles, PlanStore } from "./plan-store";
 import { projectBackendVariables, projectFactoryVariables } from "./project-terraform-inputs";
 import type { Provisioner, ProvisioningTarget } from "./provisioner";
 import type { AllowedAccount } from "./require-expected-account";
@@ -108,15 +112,19 @@ export type PlanRefusal =
 export type FactoryPlanning =
   | PlanRefusal
   /**
-   * The state bucket does not exist yet: `review` is backend bootstrap's plan. The factory is
-   * planned by `fffactory apply` once the bucket exists, under the lock.
+   * The state bucket does not exist yet: `review` is backend bootstrap's plan, saved as the
+   * bootstrap plan `saved`. The factory is planned once the bucket exists.
    */
-  | { readonly kind: "bootstrap_first"; readonly review: BootstrapPlanReview }
+  | {
+      readonly kind: "bootstrap_planned";
+      readonly review: BootstrapPlanReview;
+      readonly saved: SavedBootstrapPlan;
+    }
   /** `review` is what an operator reviews, saved as `saved`. */
   | {
       readonly kind: "planned";
       readonly review: FactoryPlanReview;
-      readonly saved: SavedPlan;
+      readonly saved: SavedFactoryPlan;
     };
 
 const OTHER_ACCOUNT: Issue = {
@@ -293,11 +301,21 @@ export function circumstances(
   };
 }
 
-async function planBootstrap(
-  provisioner: Provisioner,
+/** A new plan's ID and the files of its plan directory, which a saved plan keeps. */
+interface PlanDirectory {
+  readonly planId: string;
+  readonly files: PlanFiles;
+}
+
+/**
+ * Backend bootstrap's plan, into the plan directory's `backend.tfplan`, saved there as a
+ * bootstrap plan.
+ */
+async function planAndSaveBootstrap(
+  { provisioner, planStore }: Pick<FactoryPlanDependencies, "provisioner" | "planStore">,
   request: FactoryPlanRequest,
-  bucket: StateBucket,
-  planFile: string,
+  { bucket, target }: { readonly bucket: StateBucket; readonly target: PlanTarget },
+  { planId, files }: PlanDirectory,
 ): Promise<FactoryPlanning> {
   const projection = projectBackendVariables(request.instance);
   if (!projection.ok) return { kind: "refused", issues: projection.issues };
@@ -305,15 +323,85 @@ async function planBootstrap(
     ...request,
     bucket,
     variables: projection.variables,
-    planFile,
+    planFile: files.backend,
   });
   if (planning.kind !== "planned") return planning;
-  return { kind: "bootstrap_first", review: planning.review };
+  const saved = newSavedBootstrapPlan({
+    ...circumstances(request, target),
+    planId,
+    changes: planning.changes,
+  });
+  await planStore.save(saved);
+  return { kind: "bootstrap_planned", review: planning.review, saved };
+}
+
+/**
+ * The factory's plan, its infrastructure into the plan directory's `factory.tfplan`, saved
+ * there as a factory plan. A held lock refuses it.
+ */
+async function planAndSaveFactory(
+  deps: FactoryPlanDependencies,
+  request: FactoryPlanRequest,
+  { bucket, target }: { readonly bucket: StateBucket; readonly target: PlanTarget },
+  { planId, files }: PlanDirectory,
+): Promise<FactoryPlanning> {
+  const held = await deps.lockStore.read(bucket);
+  if (held !== undefined) return { kind: "locked", held };
+  const machines = await declaredMachines(deps.machines, request, target);
+  const stopped = machines.stopped ?? [];
+  const infrastructure = await planInfrastructure(deps, {
+    ...request,
+    bucket,
+    planFile: files.factory,
+    underFactoryLock: false,
+    resizeGuard: machines.resizeGuard,
+  });
+  if (infrastructure.kind !== "planned") return infrastructure;
+  const tag = request.instance.tailscale?.tag;
+  if (tag === undefined) throw new Error("complete factory.json has no tailscale.tag");
+  const controlPlane = await planControlPlane(
+    deps,
+    target,
+    tag,
+    request.instance.hosts ?? [],
+    request.assetsSha256,
+    new Set(
+      createdWorkers(infrastructure.changes, declaredWorkers(request.instance, target.factoryId)),
+    ),
+    new Set(stopped.map(({ key }) => key)),
+  );
+  const dispatch = plannedDispatch(request.instance, target.factoryId);
+  const stoppedKeys = stopped.map(({ key }) => key);
+  const review = factoryPlanReview({
+    target,
+    changes: infrastructure.changes,
+    instance: request.instance,
+    controlPlane,
+    dispatch,
+    stopped: stoppedKeys,
+  });
+  const saved = newSavedPlan({
+    ...circumstances(request, target),
+    planId,
+    stateRevision: infrastructure.stateRevision,
+    changes: infrastructure.changes,
+    controlPlane,
+    dispatch,
+    stopped: stoppedKeys,
+  });
+  await deps.planStore.save(saved);
+  return { kind: "planned", review, saved };
+}
+
+/** Whether planning saved its plan, which keeps its plan directory. */
+function savedAPlan(planning: FactoryPlanning | undefined): boolean {
+  return planning?.kind === "planned" || planning?.kind === "bootstrap_planned";
 }
 
 /**
  * Plans the factory, after the account check allowed the caller. Changes nothing: a missing
- * state bucket is shown as backend bootstrap's plan, and a held lock refuses planning.
+ * state bucket is planned and saved as backend bootstrap's plan, and a held lock refuses
+ * planning. A plan refused, or that fails, saves nothing and leaves no plan directory.
  */
 export async function planFactory(
   deps: FactoryPlanDependencies,
@@ -321,64 +409,20 @@ export async function planFactory(
 ): Promise<FactoryPlanning> {
   const plannable = checkPlannable(request);
   if (!plannable.ok) return plannable.refusal;
-  const { bucket, target } = plannable;
+  const { bucket } = plannable;
   await deps.planStore.prune(bucket.factoryId, request.now);
   const state = await stateBucketState(deps.lockStore, bucket);
   if (state.kind === "unready") return state;
   const planId = newPlanId(request.randomBytes);
-  const files = await deps.planStore.create(bucket.factoryId, planId);
-  let saved: SavedPlan | undefined;
+  const directory = { planId, files: await deps.planStore.create(bucket.factoryId, planId) };
+  let planning: FactoryPlanning | undefined;
   try {
-    if (state.kind === "missing")
-      return await planBootstrap(deps.provisioner, request, bucket, files.backend);
-    const held = await deps.lockStore.read(bucket);
-    if (held !== undefined) return { kind: "locked", held };
-    const machines = await declaredMachines(deps.machines, request, target);
-    const stopped = machines.stopped ?? [];
-    const infrastructure = await planInfrastructure(deps, {
-      ...request,
-      bucket,
-      planFile: files.factory,
-      underFactoryLock: false,
-      resizeGuard: machines.resizeGuard,
-    });
-    if (infrastructure.kind !== "planned") return infrastructure;
-    const tag = request.instance.tailscale?.tag;
-    if (tag === undefined) throw new Error("complete factory.json has no tailscale.tag");
-    const controlPlane = await planControlPlane(
-      deps,
-      target,
-      tag,
-      request.instance.hosts ?? [],
-      request.assetsSha256,
-      new Set(
-        createdWorkers(infrastructure.changes, declaredWorkers(request.instance, target.factoryId)),
-      ),
-      new Set(stopped.map(({ key }) => key)),
-    );
-    const dispatch = plannedDispatch(request.instance, target.factoryId);
-    const stoppedKeys = stopped.map(({ key }) => key);
-    const review = factoryPlanReview({
-      target,
-      changes: infrastructure.changes,
-      instance: request.instance,
-      controlPlane,
-      dispatch,
-      stopped: stoppedKeys,
-    });
-    const record = newSavedPlan({
-      ...circumstances(request, target),
-      planId,
-      stateRevision: infrastructure.stateRevision,
-      changes: infrastructure.changes,
-      controlPlane,
-      dispatch,
-      stopped: stoppedKeys,
-    });
-    await deps.planStore.save(record);
-    saved = record;
-    return { kind: "planned", review, saved };
+    planning =
+      state.kind === "missing"
+        ? await planAndSaveBootstrap(deps, request, plannable, directory)
+        : await planAndSaveFactory(deps, request, plannable, directory);
+    return planning;
   } finally {
-    if (saved === undefined) await deps.planStore.remove(bucket.factoryId, planId);
+    if (!savedAPlan(planning)) await deps.planStore.remove(bucket.factoryId, planId);
   }
 }

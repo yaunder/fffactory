@@ -563,7 +563,8 @@ account than `aws.account_id`. Then:
 7. the factory-wide lock is acquired in the bucket (next section) for the
    operation, and held by it from then on. The operation then builds the
    complete factory plan and asks for the normal approval
-   ([plan and apply §Apply](plan-apply.md#apply)).
+   ([plan and apply §Apply](plan-apply.md#apply)); a saved bootstrap plan's
+   apply records the bootstrap and stops instead (below).
 
 An existing, ready bucket skips steps 3 to 6, so bootstrap is safe to repeat:
 every later operation goes from the bucket and readiness checks straight to
@@ -572,7 +573,9 @@ backend block, and an operation's local state is removed with it): the
 bucket is created once and, with `prevent_destroy`, never destroyed by
 fffactory.
 
-Bootstrap necessarily runs before the lock exists. Two first applies racing
+Bootstrap necessarily runs before the lock exists: the lock lives in the
+bucket, so nothing can be locked until the bucket is created. The lock is taken
+right after it is. Two first applies racing
 past the bucket check both plan and apply the bucket. Outside us-east-1, S3
 refuses the second `CreateBucket` (`BucketAlreadyOwnedByYou`), so its apply
 fails in Terraform; in us-east-1, `CreateBucket` on a bucket the account
@@ -584,12 +587,26 @@ a rerun finds the bucket ready and goes on to the lock. S3's versioning can
 take a while to come into effect after it is enabled; the lock refuses to be
 taken until it has (next section).
 
+A saved bootstrap plan narrows that window. Its apply checks that the bucket
+is missing before it reads the plan file back, and again right before it
+applies it: a bucket another apply created by then makes the plan stale, and
+nothing is applied. Only an apply that passes its last check while another's
+`CreateBucket` is in flight still races as above, and one of them takes the
+lock. Its plan, made while the bucket was missing, is never applied once the
+bucket exists, ready or not: a new plan is made from what exists.
+
 `fffactory apply` calls `beginFactoryOperation`, and implements `Approval` by
 showing each plan and asking at the terminal
-([plan and apply §Apply](plan-apply.md#apply)). Applying a saved plan passes
+([plan and apply §Apply](plan-apply.md#apply)). Applying a saved factory plan passes
 `mayBootstrap: false`: a missing bucket is then only reported, never created.
-`fffactory plan` shows a missing bucket's bootstrap plan with
-`planBackendBootstrap`, applying nothing.
+A saved bootstrap plan is the exception: `applySavedBootstrap` plans nothing,
+takes naming the plan's ID as its approval, applies exactly its
+`backend.tfplan` after the checks above, takes the lock, and the apply records
+the bootstrap and stops
+([plan and apply §Applying a saved bootstrap plan](plan-apply.md#applying-a-saved-bootstrap-plan)).
+`fffactory plan` plans a missing bucket's bootstrap with
+`planBackendBootstrap`, applying nothing, and saves it as that bootstrap plan
+([plan and apply §Plan](plan-apply.md#plan)).
 
 ## Lock
 
@@ -787,8 +804,8 @@ N s`, never an AWS or SDK message.
 | Domain | `src/domain/backend-bootstrap.ts` | The create-only rule (`bootstrapPlanVerdict`, each offending change as a `ResourceChange`) and `BootstrapContext`; the state bucket's readiness rule, its TLS-only policy and its check, and `UnreadyBucket` (where the bucket is, what S3 reports and each setting it lacks). Pure; no text layout. |
 | Domain | `src/domain/factory-lock.ts` | The lock record, its key and break-log key, parsing, staleness (`isStale`, `lockAge`, `formatDuration`), and the break confirmation rule (`confirmsBreak`). Pure; no text layout. |
 | CLI adapter | `src/cli/presentation/lock.ts` | The holder lines (`describeHeldLock`) and the lock refusal: `lockRefusalReport` in blocks for plan, apply and upgrade, and the unstyled `lockRefusal` the worker commands still print. |
-| Application | `src/application/bootstrap-backend.ts` | `bootstrapBackend` and `beginFactoryOperation`: the bootstrap plan approved as a `PlanReview`, an unready bucket returned as its `UnreadyBucket`. |
-| CLI adapter | `src/cli/presentation/plan.ts` | The bootstrap plan as shown (`bootstrapSection`), and the unready bucket's refusal (`planRefusalReport`): what it lacks, the AWS CLI commands that complete it, and the warning that `put-bucket-policy` replaces the whole policy. |
+| Application | `src/application/bootstrap-backend.ts` | `bootstrapBackend` and `beginFactoryOperation`: the bootstrap plan approved as a `PlanReview`, an unready bucket returned as its `UnreadyBucket`; and `applySavedBootstrap`, a saved bootstrap plan's exact apply, its review shown as the same `PlanReview`. |
+| CLI adapter | `src/cli/presentation/plan.ts` | The bootstrap plan as shown (`bootstrapSection`), and as `plan` saves it (`savedBootstrapPlanReport`), and the unready bucket's refusal (`planRefusalReport`): what it lacks, the AWS CLI commands that complete it, and the warning that `put-bucket-policy` replaces the whole policy. |
 | Application | `src/application/factory-lock.ts` | `stateBucketOf`, `lockHolder`, `acquireFactoryLock`, `releaseFactoryLock`, `settleFactoryLock`, `withFactoryLock`, `breakFactoryLock`. |
 | Application | `src/application/lock-store.ts`, `src/application/approval.ts`, `src/application/operator-prompt.ts` | The `LockStore`, `Approval` and `OperatorPrompt` ports. |
 | Infrastructure | `src/infrastructure/aws-s3-lock-store.ts` | `s3LockStore`: HeadBucket, the bucket's versioning, public access block, encryption and policy, conditional PutObject, GetObject and DeleteObject by version, PutObject of [operation records](plan-apply.md#operation-records) and HeadObject of the Terraform state, always with `ExpectedBucketOwner`. |

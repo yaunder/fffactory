@@ -17,6 +17,7 @@ import {
   applyingLabelWidth,
   applyingRow,
   applyingSection,
+  bootstrappedLines,
   failedLines,
   infrastructureApplyingRow,
   interruptedLines,
@@ -1193,6 +1194,108 @@ describe("an interrupt (plan-apply §Interruption)", () => {
       "  Then rerun:",
       "    $ fffactory upgrade --profile factory",
     ]);
+  });
+});
+
+describe("a saved bootstrap plan (plan-apply §Applying a saved bootstrap plan)", () => {
+  const operation = {
+    bucket: BUCKET,
+    key: "fff-abcd1234-operations/2026-09-30T12:00:00.000Z-aaaaaaaa.json",
+  };
+  const bootstrapped = (recordFailure?: string): FactoryApply => ({
+    kind: "bootstrapped",
+    planId: "b00tstr4",
+    operation,
+    recordFailure,
+  });
+  const lines = (result: FactoryApply, reporting = APPLY, styles = PLAIN) => {
+    if (result.kind !== "bootstrapped") throw new Error(result.kind);
+    return streams(bootstrappedLines(result, reporting, styles));
+  };
+
+  test("the bucket created and its record, then planning the factory next, on standard output", () => {
+    const { out, err } = lines(bootstrapped());
+    expect(err).toEqual([]);
+    expect(out).toEqual([
+      "",
+      RESULT,
+      "  State bucket       created",
+      `  Operation record   ${RECORD}`,
+      "",
+      NEXT,
+      "  Plan the factory next:",
+      "    $ fffactory plan",
+    ]);
+  });
+
+  test("the next step repeats the instance and profile given", () => {
+    expect(lines(bootstrapped(), SELECTED).out.at(-1)).toBe(`    $ fffactory plan ${FLAGS}`);
+  });
+
+  test("a record that could not be finished: on standard error, the bucket still created", () => {
+    const { all, err } = lines(bootstrapped("S3 PutObject on the state bucket failed: SlowDown"));
+    expect(err).toEqual([
+      "",
+      "  ✖ The operation record could not be finished: S3 PutObject on the state bucket failed: SlowDown",
+    ]);
+    expect(all.slice(0, 6)).toEqual([
+      "",
+      RESULT,
+      "  State bucket       created",
+      `  Operation record   ${RECORD}`,
+      "",
+      "  ✖ The operation record could not be finished: S3 PutObject on the state bucket failed: SlowDown",
+    ]);
+    expect(all.at(-1)).toBe("    $ fffactory plan");
+  });
+
+  test("its human output is colored only on a stream that is", () => {
+    const { out } = lines(bootstrapped(), APPLY, { out: ansiStyle, err: plainStyle });
+    expect(out).toContain(`    ${ansiStyle.command("fffactory plan")}`);
+    expect(out.map((line) => stripVTControlCharacters(line))).toEqual(lines(bootstrapped()).out);
+  });
+
+  test("interrupted before the lock: B may be spent, so the factory is planned again", () => {
+    const { out, all } = streams(
+      interruptedLines(
+        { kind: "interrupted", locked: false, bootstrapPlan: "b00tstr4" },
+        SELECTED,
+        PLAIN,
+      ),
+    );
+    expect(out).toEqual([]);
+    expect(all).toEqual([
+      "",
+      RESULT,
+      "  ! Interrupted before the factory was locked: it is not locked",
+      "    Saved plan b00tstr4 may be spent and the state bucket created.",
+      "",
+      NEXT,
+      "  Plan again from what exists now:",
+      `    $ fffactory plan ${FLAGS}`,
+    ]);
+  });
+
+  test("interrupted holding the lock: break it, then plan the factory, never rerun apply", () => {
+    const { out, err } = streams(
+      interruptedLines(
+        { kind: "interrupted", locked: true, record: operation, bootstrapPlan: "b00tstr4" },
+        APPLY,
+        PLAIN,
+      ),
+    );
+    expect(err).toEqual([
+      "",
+      RESULT,
+      "  ! Interrupted: the factory stays locked, with a record of this operation",
+      "",
+      NEXT,
+      "  Once fffactory has exited, break the lock:",
+      "    $ fffactory lock break",
+      "  Then plan the factory next:",
+      "    $ fffactory plan",
+    ]);
+    expect(out).toEqual(["", `  Operation record   ${RECORD}`]);
   });
 });
 

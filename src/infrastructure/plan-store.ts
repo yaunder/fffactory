@@ -3,14 +3,30 @@
  * (directories 0700, records 0600), one directory per plan:
  *
  *   factory.tfplan         the factory root's Terraform plan, written by Terraform
- *   backend.tfplan         backend bootstrap's plan, on a first apply
- *   factory.tfplan.sha256  the factory plan's SHA-256 when the plan was saved
- *   plan.json              the saved plan's record, written last: its presence saves the plan
+ *   backend.tfplan         backend bootstrap's plan, as a saved bootstrap plan or on a first apply
+ *   factory.tfplan.sha256  a saved factory plan's factory.tfplan SHA-256 when it was saved
+ *   backend.tfplan.sha256  a saved bootstrap plan's backend.tfplan SHA-256 when it was saved
+ *   plan.json              the saved plan's record, written last: its presence saves the plan,
+ *                          and its removal spends it, the Terraform plan kept for the apply
  *
- * A plan is short-lived: plans long expired, and plans never saved that are long made (an
- * interrupted `plan` or `apply` leaves one), are pruned (`PLAN_KEPT_MS`).
+ * A record binds the one Terraform plan file its kind names: a factory plan `factory.tfplan`,
+ * a bootstrap plan (`"kind": "bootstrap"`) `backend.tfplan`.
+ *
+ * A plan is short-lived: plans long expired, and directories without a record (never saved,
+ * as an interrupted `plan` or `apply` leaves one, or spent, as an apply killed outright does)
+ * long unchanged, are pruned (`PLAN_KEPT_MS`).
  */
-import { lstat, mkdir, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import {
+  lstat,
+  mkdir,
+  open,
+  readdir,
+  readFile,
+  rename,
+  rm,
+  unlink,
+  writeFile,
+} from "node:fs/promises";
 import { join } from "node:path";
 import type { PlanFiles, PlanStore, StoredPlan } from "../application/plan-store";
 import type { FactoryId } from "../domain/instance";
@@ -27,7 +43,7 @@ import { sha256Hex } from "./release-tarball";
 const RECORD = "plan.json";
 const FACTORY_PLAN = "factory.tfplan";
 const BACKEND_PLAN = "backend.tfplan";
-const DIGEST = "factory.tfplan.sha256";
+const DIGEST_SUFFIX = ".sha256";
 const ABSENT = new Set(["ENOENT", "ENOTDIR"]);
 
 function isAbsent(error: unknown): boolean {
@@ -60,6 +76,21 @@ async function writeAtomically(path: string, text: string): Promise<void> {
   await rename(staged, path);
 }
 
+/** Flushes a directory's entries to disk, so a removal in it survives a crash. */
+async function syncDirectory(path: string): Promise<void> {
+  const handle = await open(path, "r");
+  try {
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+}
+
+/** The Terraform plan file a saved plan of this kind binds. */
+function boundFile(plan: SavedPlan): string {
+  return plan.kind === "bootstrap" ? BACKEND_PLAN : FACTORY_PLAN;
+}
+
 /** PlanStore over the local filesystem, rooted at `directory` (`<cache>/plans`). */
 export function filesystemPlanStore(directory: string): PlanStore {
   function planDirectory(factoryId: FactoryId, planId: string): string {
@@ -76,8 +107,9 @@ export function filesystemPlanStore(directory: string): PlanStore {
   }
 
   /**
-   * Whether a plan's directory should go: long expired, or never saved (or unreadable) and
-   * long made (`PLAN_KEPT_MS`). One another command removed meanwhile is already gone.
+   * Whether a plan's directory should go: long expired, or without a readable record (never
+   * saved, spent, or unreadable) and long unchanged (`PLAN_KEPT_MS`). One another command
+   * removed meanwhile is already gone.
    */
   async function prunable(factoryId: FactoryId, planId: string, now: Date): Promise<boolean> {
     const path = join(directory, factoryId, planId);
@@ -100,10 +132,11 @@ export function filesystemPlanStore(directory: string): PlanStore {
 
     async save(plan: SavedPlan) {
       const path = planDirectory(plan.factory_id, plan.plan_id);
-      const digest = await digestOf(join(path, FACTORY_PLAN));
+      const bound = boundFile(plan);
+      const digest = await digestOf(join(path, bound));
       if (digest === undefined)
         throw new Error(`Plan ${plan.plan_id} has no Terraform plan to save`);
-      await writeAtomically(join(path, DIGEST), `${digest}\n`);
+      await writeAtomically(join(path, `${bound}${DIGEST_SUFFIX}`), `${digest}\n`);
       await writeAtomically(join(path, RECORD), serializeSavedPlan(plan));
     },
 
@@ -112,15 +145,28 @@ export function filesystemPlanStore(directory: string): PlanStore {
       const text = await textOf(join(path, RECORD));
       if (text === undefined) return { kind: "missing" };
       const plan = parseSavedPlan(text, factoryId, planId);
-      const recorded = (await textOf(join(path, DIGEST)))?.trim();
-      const digest = await digestOf(join(path, FACTORY_PLAN));
-      if (plan === undefined || digest === undefined || digest !== recorded)
-        return { kind: "damaged" };
+      if (plan === undefined) return { kind: "damaged" };
+      const bound = boundFile(plan);
+      const recorded = (await textOf(join(path, `${bound}${DIGEST_SUFFIX}`)))?.trim();
+      const digest = await digestOf(join(path, bound));
+      if (digest === undefined || digest !== recorded) return { kind: "damaged" };
       return { kind: "found", plan, files: filesOf(path), digest };
     },
 
-    async digest(factoryId, planId) {
-      return digestOf(join(planDirectory(factoryId, planId), FACTORY_PLAN));
+    async digest(plan) {
+      return digestOf(join(planDirectory(plan.factory_id, plan.plan_id), boundFile(plan)));
+    },
+
+    async spend(factoryId, planId) {
+      const path = planDirectory(factoryId, planId);
+      try {
+        await unlink(join(path, RECORD));
+      } catch (error) {
+        if (isAbsent(error)) return false;
+        throw error;
+      }
+      await syncDirectory(path);
+      return true;
     },
 
     async remove(factoryId, planId) {

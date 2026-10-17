@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { FactoryId, HostKey, Release } from "../../src/domain/instance";
 import {
+  bootstrapStaleness,
   changeKind,
   changeTally,
   createdWorkers,
@@ -10,7 +11,9 @@ import {
   hostMachineRefusal,
   isPlanId,
   newPlanId,
+  newSavedBootstrapPlan,
   newSavedPlan,
+  PLAN_SCHEMA_VERSION,
   PLAN_TTL_MS,
   type PlanCircumstances,
   type PlannedWorker,
@@ -22,6 +25,9 @@ import {
   resizedStoppedWorkers,
   resizeRefusal,
   resourceChanges,
+  sameChanges,
+  type SavedBootstrapPlan,
+  type SavedFactoryPlan,
   type SavedPlan,
   serializeSavedPlan,
   type StaleReason,
@@ -424,7 +430,7 @@ describe("an instance type change on a stopped worker (plan-apply §Stopped work
   });
 });
 
-const SAVED: SavedPlan = newSavedPlan({
+const SAVED: SavedFactoryPlan = newSavedPlan({
   planId: "k3x9q2ab",
   factoryId: "fff-abcd1234" as FactoryId,
   instancePath: "/work/.fffactory/factory.json",
@@ -556,7 +562,7 @@ describe("saved plans", () => {
       requested: false,
       schedule: null,
     };
-    const plan: SavedPlan = { ...SAVED, dispatch: [requested, disabled] };
+    const plan: SavedFactoryPlan = { ...SAVED, dispatch: [requested, disabled] };
     expect(parseSavedPlan(serializeSavedPlan(plan), plan.factory_id, plan.plan_id)).toEqual(plan);
 
     const brokenItems: unknown[] = [
@@ -639,5 +645,160 @@ describe("saved plans", () => {
     expect(stoppedStaleness(SAVED, undefined)).toEqual([{ kind: "inventory_unreadable", key: b1 }]);
     const none = { ...SAVED, stopped_workers: [] };
     expect(stoppedStaleness(none, undefined)).toEqual([]);
+  });
+});
+
+const BUCKET = "module.state_bucket.aws_s3_bucket.state";
+const VERSIONING = "module.state_bucket.aws_s3_bucket_versioning.state";
+
+const BOOTSTRAP: SavedBootstrapPlan = newSavedBootstrapPlan({
+  planId: "b00tstr4",
+  factoryId: "fff-abcd1234" as FactoryId,
+  instancePath: "/work/.fffactory/factory.json",
+  configurationSha256: "a".repeat(64),
+  release: "0.3.0" as Release,
+  assetsSha256: "b".repeat(64),
+  accountId: "123456789012",
+  now: NOW,
+  changes: [change(BUCKET, ["create"], "aws_s3_bucket"), change(VERSIONING, ["create"])],
+});
+
+describe("comparing a plan's changes with its record (plan-apply §Freshness)", () => {
+  const bucket = { address: "a.bucket", type: "aws_s3_bucket", actions: ["create"] };
+  const versioning = { address: "a.versioning", actions: ["create"] };
+
+  test("the same addresses and actions, in order, are the same changes", () => {
+    expect(sameChanges([bucket, versioning], [{ ...bucket, type: undefined }, versioning])).toBe(
+      true,
+    );
+    expect(sameChanges([], [])).toBe(true);
+  });
+
+  test("another action, another resource, another order or one more is not", () => {
+    expect(sameChanges([bucket], [{ ...bucket, actions: ["delete", "create"] }])).toBe(false);
+    expect(sameChanges([bucket], [versioning])).toBe(false);
+    expect(sameChanges([bucket, versioning], [versioning, bucket])).toBe(false);
+    expect(sameChanges([bucket], [bucket, versioning])).toBe(false);
+  });
+});
+
+describe("saved bootstrap plans (plan-apply §Saved plans)", () => {
+  test("record the kind and what they are bound to, and no factory state", () => {
+    expect(BOOTSTRAP).toEqual({
+      schema_version: 1,
+      kind: "bootstrap",
+      plan_id: "b00tstr4",
+      factory_id: "fff-abcd1234" as FactoryId,
+      instance_path: "/work/.fffactory/factory.json",
+      configuration_sha256: "a".repeat(64),
+      release: "0.3.0" as Release,
+      assets_sha256: "b".repeat(64),
+      account_id: "123456789012",
+      created_at: "2026-09-30T12:00:00.000Z",
+      expires_at: new Date(NOW.getTime() + PLAN_TTL_MS).toISOString(),
+      changes: [
+        { address: BUCKET, type: "aws_s3_bucket", actions: ["create"] },
+        { address: VERSIONING, actions: ["create"] },
+      ],
+    });
+    expect(PLAN_SCHEMA_VERSION).toBe(1);
+  });
+
+  test("only ever create", () => {
+    for (const changes of [
+      [],
+      [change(BUCKET, ["update"])],
+      [change(BUCKET, ["delete", "create"])],
+    ])
+      expect(() => newSavedBootstrapPlan({ ...CURRENT, planId: "b00tstr4", changes })).toThrow();
+  });
+
+  test("round-trip through their text, beside factory records without a kind", () => {
+    const text = serializeSavedPlan(BOOTSTRAP);
+    expect(text).toContain('"kind": "bootstrap"');
+    const read: SavedPlan | undefined = parseSavedPlan(text, BOOTSTRAP.factory_id, "b00tstr4");
+    expect(read).toEqual(BOOTSTRAP);
+    expect(read?.kind).toBe("bootstrap");
+    expect(serializeSavedPlan(SAVED)).not.toContain('"kind"');
+    const factory = parseSavedPlan(serializeSavedPlan(SAVED), SAVED.factory_id, SAVED.plan_id);
+    expect(factory).toEqual(SAVED);
+    expect(factory?.kind).toBeUndefined();
+  });
+
+  test("a bootstrap record with a factory plan's fields, or anything not create, is unreadable", () => {
+    const record = JSON.parse(serializeSavedPlan(BOOTSTRAP)) as Record<string, unknown>;
+    const broken: Record<string, unknown>[] = [
+      { ...record, state_revision: null },
+      { ...record, state_revision: "state-v1" },
+      { ...record, control_plane: [] },
+      { ...record, dispatch: [] },
+      { ...record, stopped_workers: [] },
+      { ...record, kind: "backend" },
+      { ...record, kind: null },
+      { ...record, changes: [] },
+      { ...record, changes: [{ address: BUCKET, actions: ["update"] }] },
+      { ...record, changes: [{ address: BUCKET, actions: ["create", "delete"] }] },
+      { ...record, changes: [{ address: BUCKET, actions: ["create"] }, { address: BUCKET }] },
+      { ...record, release: "nope" },
+      { ...record, account_id: 1 },
+      { ...record, created_at: "yesterday" },
+      { ...record, expires_at: undefined },
+      { ...record, schema_version: 2 },
+    ];
+    for (const document of broken)
+      expect(
+        parseSavedPlan(JSON.stringify(document), BOOTSTRAP.factory_id, "b00tstr4"),
+      ).toBeUndefined();
+    const text = serializeSavedPlan(BOOTSTRAP);
+    expect(parseSavedPlan(text, "fff-other000" as FactoryId, "b00tstr4")).toBeUndefined();
+    expect(parseSavedPlan(text, BOOTSTRAP.factory_id, "zzzzzzzz")).toBeUndefined();
+  });
+
+  test("a factory record that names another kind, or lacks its factory fields, is unreadable", () => {
+    const record = JSON.parse(serializeSavedPlan(SAVED)) as Record<string, unknown>;
+    const { dispatch: _dispatch, ...noDispatch } = record;
+    const { state_revision: _revision, ...noRevision } = record;
+    for (const document of [{ ...record, kind: "factory" }, noDispatch, noRevision])
+      expect(
+        parseSavedPlan(JSON.stringify(document), SAVED.factory_id, SAVED.plan_id),
+      ).toBeUndefined();
+  });
+
+  test("a bootstrap plan applied in the circumstances it was planned in, no bucket yet, is fresh", () => {
+    expect(bootstrapStaleness(BOOTSTRAP, CURRENT, false)).toEqual([]);
+    expect(
+      bootstrapStaleness(BOOTSTRAP, { ...CURRENT, now: new Date(BOOTSTRAP.expires_at) }, false),
+    ).toEqual([]);
+  });
+
+  test("every factory-plan reason but the state revision makes it stale, and so does the bucket", () => {
+    expect(
+      bootstrapStaleness(
+        BOOTSTRAP,
+        {
+          ...CURRENT,
+          instancePath: "/elsewhere/factory.json",
+          configurationSha256: "c".repeat(64),
+          release: "0.3.1" as Release,
+          assetsSha256: "d".repeat(64),
+          accountId: "210987654321",
+          now: new Date(Date.parse(BOOTSTRAP.expires_at) + 1),
+        },
+        true,
+      ),
+    ).toEqual([
+      { kind: "expired", expiresAt: BOOTSTRAP.expires_at },
+      { kind: "other_instance", instancePath: "/work/.fffactory/factory.json" },
+      { kind: "configuration_changed" },
+      { kind: "other_release", release: "0.3.0" as Release },
+      { kind: "other_account", accountId: "123456789012" },
+      { kind: "state_bucket_created" },
+    ]);
+    expect(
+      bootstrapStaleness(BOOTSTRAP, { ...CURRENT, assetsSha256: "d".repeat(64) }, false),
+    ).toEqual([{ kind: "other_assets" }]);
+    expect(bootstrapStaleness(BOOTSTRAP, CURRENT, true)).toEqual([
+      { kind: "state_bucket_created" },
+    ]);
   });
 });

@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { applyFactory, type FactoryApplyRequest } from "../../src/application/apply-factory";
 import type { Approval } from "../../src/application/approval";
+import { planBackendBootstrap } from "../../src/application/bootstrap-backend";
 import { breakFactoryLock } from "../../src/application/factory-lock";
 import { planFactory } from "../../src/application/plan-factory";
 import { newLockRecord } from "../../src/domain/factory-lock";
@@ -10,13 +11,17 @@ import { type OperationRecord, operationKey } from "../../src/domain/operation";
 import {
   changeTally,
   type FactoryPlanReview,
+  newSavedBootstrapPlan,
   PLAN_KEPT_MS,
   PLAN_TTL_MS,
   type PlanReview,
   type SavedPlan,
+  type StaleReason,
 } from "../../src/domain/plan";
 import { FIRST_BOOT_POLL_MS } from "../../src/domain/rollout";
 import {
+  ACCOUNT,
+  ASSETS_SHA256,
   BUCKET,
   declaring,
   FACTORY,
@@ -24,11 +29,13 @@ import {
   NOW,
   fleetView,
   planRequest,
+  RELEASE,
   TERRAFORM,
   workerFleet,
 } from "../support/factory-world";
 import { appliedRecord, installableWorker, machine } from "../support/fake-workers";
 import { hostAddress, NETWORK, STATE_BUCKET_ADDRESS } from "../support/fake-provisioner";
+import { READY_BUCKET } from "../support/memory-lock-store";
 
 /** Approval that records every plan review it is shown and answers from `answers` in turn. */
 function approval(...answers: boolean[]) {
@@ -1092,6 +1099,364 @@ describe("applying a saved plan (plan-apply §Saved plans)", () => {
       reasons: [{ kind: "state_bucket_missing" }],
     });
     expect(terraform.calls).toEqual([]);
+  });
+});
+
+describe("applying a saved bootstrap plan (plan-apply §Apply)", () => {
+  const PLAN_ID = "b00tstr4";
+
+  /**
+   * A factory without its state bucket and a saved bootstrap plan B, its `backend.tfplan`
+   * planned in the world, as `fffactory plan` saves one.
+   */
+  async function bootstrapPlanned() {
+    const world = applying({ bucket: false });
+    const files = await world.planStore.create(FACTORY, PLAN_ID);
+    const planning = await planBackendBootstrap(world.terraform.provisioner, {
+      instancePath: "/work/.fffactory/factory.json",
+      instance: declaring("builder-1"),
+      bucket: {
+        factoryId: FACTORY,
+        bucket: BUCKET,
+        accountId: ACCOUNT.verdict.caller.account,
+        region: "eu-west-2",
+        credentials: { source: "--profile", profile: "factory" },
+      },
+      variables: {
+        factory_id: FACTORY,
+        account_id: ACCOUNT.verdict.caller.account,
+        region: "eu-west-2",
+        state_bucket_suffix: "state",
+      },
+      release: RELEASE,
+      terraformDirectory: TERRAFORM,
+      planFile: files.backend,
+    });
+    if (planning.kind !== "planned") throw new Error("not planned");
+    const saved = newSavedBootstrapPlan({
+      planId: PLAN_ID,
+      factoryId: FACTORY,
+      instancePath: "/work/.fffactory/factory.json",
+      configurationSha256: "a".repeat(64),
+      release: RELEASE,
+      assetsSha256: ASSETS_SHA256,
+      accountId: ACCOUNT.verdict.caller.account,
+      now: NOW,
+      changes: [{ address: STATE_BUCKET_ADDRESS, actions: ["create"] }],
+    });
+    await world.planStore.save(saved);
+    world.terraform.calls.length = 0;
+    world.planStore.calls.length = 0;
+    return { ...world, saved };
+  }
+
+  const withBootstrapPlan = (overrides: Partial<FactoryApplyRequest> = {}) =>
+    applyRequest({
+      planId: PLAN_ID,
+      clock: () => new Date(NOW.getTime() + 60_000),
+      ...overrides,
+    });
+
+  /** Nothing was applied, locked or recorded, and B is kept. */
+  function nothingChanged(world: Awaited<ReturnType<typeof bootstrapPlanned>>) {
+    expect(world.terraform.calls.some(({ call }) => call === "applyPlan")).toBe(false);
+    expect(world.lockStore.buckets.has(BUCKET)).toBe(false);
+    expect(world.lockStore.calls.some((call) => call.startsWith("create"))).toBe(false);
+    expect(world.lockStore.operationWrites).toEqual([]);
+    expect(world.planStore.saved.has(`${FACTORY}/${PLAN_ID}`)).toBe(true);
+  }
+
+  test("creates the bucket from exactly B's file, then locks, records B, releases and stops", async () => {
+    const world = await bootstrapPlanned();
+    const { deps, lockStore, terraform, approver, planStore } = world;
+    const order: string[] = [];
+    const { applyPlan } = terraform.provisioner;
+    deps.provisioner = {
+      ...terraform.provisioner,
+      applyPlan: async (planned) => {
+        order.push(`applyPlan ${planned.configuration.root}`);
+        await applyPlan(planned);
+      },
+    };
+    const create = lockStore.create.bind(lockStore);
+    lockStore.create = async (bucket, record) => {
+      order.push("lock");
+      return create(bucket, record);
+    };
+    const writeOperation = lockStore.writeOperation.bind(lockStore);
+    lockStore.writeOperation = async (bucket, record) => {
+      order.push(`record ${record.status}`);
+      return writeOperation(bucket, record);
+    };
+    const remove = lockStore.remove.bind(lockStore);
+    lockStore.remove = async (bucket, version) => {
+      order.push("release");
+      return remove(bucket, version);
+    };
+
+    const result = await applyFactory(deps, withBootstrapPlan());
+
+    expect(result).toEqual({
+      kind: "bootstrapped",
+      planId: PLAN_ID,
+      operation: { bucket: BUCKET, key: expect.stringMatching(/^fff-abcd1234-operations\//) },
+      recordFailure: undefined,
+    });
+    expect(order).toEqual(["applyPlan backend", "lock", "record succeeded", "release"]);
+    // Exactly B's file is read back and applied: nothing is planned, and never the factory.
+    const planFile = (request: object) => ("planFile" in request ? request.planFile : "none");
+    expect(terraform.calls.map(({ call, request }) => `${call} ${planFile(request)}`)).toEqual([
+      `showPlan /plans/${FACTORY}/${PLAN_ID}/backend.tfplan`,
+      `applyPlan /plans/${FACTORY}/${PLAN_ID}/backend.tfplan`,
+    ]);
+    expect(approver.shown).toHaveLength(1);
+    expect(approver.shown[0]).toMatchObject({
+      kind: "backend_bootstrap",
+      creates: [STATE_BUCKET_ADDRESS],
+    });
+    expect(lockStore.buckets.has(BUCKET)).toBe(true);
+    expect(lockStore.locks.size).toBe(0);
+    expect(lockStore.operationWrites).toHaveLength(1);
+    expect(lockStore.operationWrites[0]).toMatchObject({
+      plan_id: PLAN_ID,
+      operation: "apply",
+      status: "succeeded",
+      stages: [{ name: "backend", status: "applied" }],
+      failure: null,
+    });
+    expect(planStore.saved.size).toBe(0);
+    expect(planStore.directories.size).toBe(0);
+  });
+
+  test("B is spent once applied: a rerun names it missing", async () => {
+    const { deps } = await bootstrapPlanned();
+    expect(await applyFactory(deps, withBootstrapPlan())).toMatchObject({ kind: "bootstrapped" });
+    expect(await applyFactory(deps, withBootstrapPlan())).toEqual({
+      kind: "no_plan",
+      planId: PLAN_ID,
+    });
+  });
+
+  test("factory.json changed after B is refused as stale before anything reaches AWS", async () => {
+    const world = await bootstrapPlanned();
+    const result = await applyFactory(
+      world.deps,
+      withBootstrapPlan({ configurationSha256: "c".repeat(64) }),
+    );
+    expect(result).toEqual({
+      kind: "stale",
+      planId: PLAN_ID,
+      reasons: [{ kind: "configuration_changed" }],
+    });
+    expect(world.terraform.calls).toEqual([]);
+    expect(world.lockStore.calls).toEqual([]);
+    expect(world.approver.shown).toEqual([]);
+    nothingChanged(world);
+  });
+
+  test.each<[string, Partial<FactoryApplyRequest>, StaleReason]>([
+    [
+      "another release",
+      { release: "0.3.1" as Release },
+      { kind: "other_release", release: "0.3.0" as Release },
+    ],
+    ["other assets", { assetsSha256: "d".repeat(64) }, { kind: "other_assets" }],
+    [
+      "another factory.json",
+      { instancePath: "/elsewhere/factory.json" },
+      { kind: "other_instance", instancePath: "/work/.fffactory/factory.json" },
+    ],
+    [
+      "its expiry",
+      { clock: () => new Date(NOW.getTime() + PLAN_TTL_MS + 1) },
+      { kind: "expired", expiresAt: new Date(NOW.getTime() + PLAN_TTL_MS).toISOString() },
+    ],
+  ])("B stale by %s is refused with nothing changed", async (_, overrides, reason) => {
+    const world = await bootstrapPlanned();
+    const instance =
+      "release" in overrides ? { ...declaring("builder-1"), release: "0.3.1" } : undefined;
+    const result = await applyFactory(
+      world.deps,
+      withBootstrapPlan({ ...overrides, ...(instance === undefined ? {} : { instance }) }),
+    );
+    expect(result).toEqual({ kind: "stale", planId: PLAN_ID, reasons: [reason] });
+    expect(world.terraform.calls).toEqual([]);
+    nothingChanged(world);
+  });
+
+  test.each([
+    ["ready", undefined],
+    ["unready", { versioning: undefined }],
+  ])("a state bucket that exists now, %s, makes B stale", async (_, lacking) => {
+    const world = await bootstrapPlanned();
+    world.lockStore.buckets.add(BUCKET);
+    if (lacking !== undefined)
+      world.lockStore.readiness.set(BUCKET, { ...READY_BUCKET, ...lacking });
+    expect(await applyFactory(world.deps, withBootstrapPlan())).toEqual({
+      kind: "stale",
+      planId: PLAN_ID,
+      reasons: [{ kind: "state_bucket_created" }],
+    });
+    expect(world.terraform.calls).toEqual([]);
+    expect(world.lockStore.calls.some((call) => call.startsWith("create"))).toBe(false);
+    expect(world.lockStore.operationWrites).toEqual([]);
+    expect(world.planStore.saved.has(`${FACTORY}/${PLAN_ID}`)).toBe(true);
+  });
+
+  test("a tampered backend.tfplan is refused as damaged with nothing changed", async () => {
+    const world = await bootstrapPlanned();
+    world.planStore.damage(FACTORY, PLAN_ID);
+    expect(await applyFactory(world.deps, withBootstrapPlan())).toEqual({
+      kind: "damaged_plan",
+      planId: PLAN_ID,
+    });
+    expect(world.terraform.calls).toEqual([]);
+    nothingChanged(world);
+  });
+
+  test("a read-back that differs from B's record is damaged; nothing is applied", async () => {
+    const world = await bootstrapPlanned();
+    world.planStore.saved.set(`${FACTORY}/${PLAN_ID}`, {
+      ...world.saved,
+      changes: [
+        { address: STATE_BUCKET_ADDRESS, actions: ["create"] },
+        { address: "module.state_bucket.aws_s3_bucket_versioning.state", actions: ["create"] },
+      ],
+    });
+    expect(await applyFactory(world.deps, withBootstrapPlan())).toEqual({
+      kind: "damaged_plan",
+      planId: PLAN_ID,
+    });
+    expect(world.terraform.calls.map(({ call }) => call)).toEqual(["showPlan"]);
+    nothingChanged(world);
+  });
+
+  test("a read-back that does more than create is an unexpected plan; nothing is applied", async () => {
+    const world = await bootstrapPlanned();
+    world.terraform.world.shown = {
+      resource_changes: [
+        { address: STATE_BUCKET_ADDRESS, change: { actions: ["delete", "create"] } },
+      ],
+    };
+    expect(await applyFactory(world.deps, withBootstrapPlan())).toEqual({
+      kind: "unexpected_plan",
+      unexpected: [
+        {
+          kind: "not_create",
+          change: { address: STATE_BUCKET_ADDRESS, actions: ["delete", "create"] },
+        },
+      ],
+    });
+    expect(world.approver.shown).toEqual([]);
+    nothingChanged(world);
+  });
+
+  test("a failed Terraform apply spends B, takes no lock and writes no record", async () => {
+    const world = await bootstrapPlanned();
+    world.terraform.world.failNext = "applyPlan";
+    await expect(applyFactory(world.deps, withBootstrapPlan())).rejects.toThrow(
+      "`terraform apply` exited with status 1",
+    );
+    expect(world.lockStore.locks.size).toBe(0);
+    expect(world.lockStore.operationWrites).toEqual([]);
+    expect(world.planStore.saved.size).toBe(0);
+  });
+
+  test("an interrupt before the lock takes none", async () => {
+    const world = await bootstrapPlanned();
+    const { applyPlan } = world.terraform.provisioner;
+    world.deps.provisioner = {
+      ...world.terraform.provisioner,
+      applyPlan: async (planned) => {
+        await applyPlan(planned);
+        world.signal.interrupted = true;
+      },
+    };
+    expect(await applyFactory(world.deps, withBootstrapPlan())).toEqual({
+      kind: "interrupted",
+      locked: false,
+      bootstrapPlan: PLAN_ID,
+    });
+    expect(world.lockStore.locks.size).toBe(0);
+    expect(world.lockStore.operationWrites).toEqual([]);
+    expect(world.lockStore.buckets.has(BUCKET)).toBe(true);
+  });
+
+  test("an interrupt once the lock is taken keeps it, and writes no record", async () => {
+    const world = await bootstrapPlanned();
+    const create = world.lockStore.create.bind(world.lockStore);
+    world.lockStore.create = async (bucket, record) => {
+      world.signal.interrupted = true;
+      return create(bucket, record);
+    };
+    expect(await applyFactory(world.deps, withBootstrapPlan())).toEqual({
+      kind: "interrupted",
+      locked: true,
+      record: undefined,
+      bootstrapPlan: PLAN_ID,
+    });
+    expect(world.lockStore.locks.size).toBe(1);
+    expect(world.lockStore.operationWrites).toEqual([]);
+  });
+
+  test("an interrupt once the record is written keeps the lock and the record", async () => {
+    const world = await bootstrapPlanned();
+    const write = world.lockStore.writeOperation.bind(world.lockStore);
+    world.lockStore.writeOperation = async (bucket, record) => {
+      await write(bucket, record);
+      world.signal.interrupted = true;
+    };
+    expect(await applyFactory(world.deps, withBootstrapPlan())).toEqual({
+      kind: "interrupted",
+      locked: true,
+      record: { bucket: BUCKET, key: expect.stringMatching(/^fff-abcd1234-operations\//) },
+      bootstrapPlan: PLAN_ID,
+    });
+    expect(world.lockStore.locks.size).toBe(1);
+    expect(world.lockStore.calls.some((call) => call.startsWith("remove"))).toBe(false);
+    expect(world.lockStore.operationWrites).toHaveLength(1);
+    expect(world.lockStore.operationWrites[0]).toMatchObject({
+      plan_id: PLAN_ID,
+      stages: [{ name: "backend", status: "applied" }],
+    });
+  });
+
+  test("a record that cannot be written is reported, and the lock still released", async () => {
+    const world = await bootstrapPlanned();
+    world.lockStore.writeOperation = async () => {
+      throw new Error("S3 PutObject failed: InternalError");
+    };
+    expect(await applyFactory(world.deps, withBootstrapPlan())).toMatchObject({
+      kind: "bootstrapped",
+      recordFailure: "S3 PutObject failed: InternalError",
+    });
+    expect(world.lockStore.locks.size).toBe(0);
+  });
+
+  test("a lock held by the time the bucket exists is reported as today", async () => {
+    const world = await bootstrapPlanned();
+    const { applyPlan } = world.terraform.provisioner;
+    let held: ReturnType<typeof world.lockStore.hold> | undefined;
+    world.deps.provisioner = {
+      ...world.terraform.provisioner,
+      applyPlan: async (planned) => {
+        await applyPlan(planned);
+        held = world.lockStore.hold(
+          BUCKET,
+          newLockRecord({
+            factoryId: FACTORY,
+            operation: "apply",
+            holder: { principal: "arn:aws:iam::123456789012:user/other", host: "desk" },
+            now: NOW,
+            release: RELEASE,
+            randomBytes: (n) => new Uint8Array(n).fill(1),
+          }),
+        );
+      },
+    };
+    expect(await applyFactory(world.deps, withBootstrapPlan())).toEqual({ kind: "locked", held });
+    expect(world.lockStore.buckets.has(BUCKET)).toBe(true);
+    expect(world.lockStore.operationWrites).toEqual([]);
   });
 });
 

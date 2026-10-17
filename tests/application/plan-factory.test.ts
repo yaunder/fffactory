@@ -208,22 +208,90 @@ describe("fffactory plan (plan-apply §Plan)", () => {
     expect(lockStore.calls).toEqual([]);
   });
 
-  test("without a state bucket, the plan is backend bootstrap's, and nothing is saved", async () => {
+  test("without a state bucket, backend bootstrap's plan is saved as a bootstrap plan", async () => {
     const { deps, terraform, planStore, lockStore } = factory({ bucket: false });
     const result = await planFactory(deps, planRequest());
     expect(result).toEqual({
-      kind: "bootstrap_first",
+      kind: "bootstrap_planned",
       review: {
         kind: "backend_bootstrap",
         target: { ...TARGET, bucket: BUCKET },
         creates: [STATE_BUCKET_ADDRESS],
       },
+      saved: {
+        schema_version: 1,
+        kind: "bootstrap",
+        plan_id: "aaaaaaaa",
+        factory_id: FACTORY,
+        instance_path: "/work/.fffactory/factory.json",
+        configuration_sha256: "a".repeat(64),
+        release: "0.3.0" as Release,
+        assets_sha256: "b".repeat(64),
+        account_id: "123456789012",
+        created_at: NOW.toISOString(),
+        expires_at: new Date(NOW.getTime() + PLAN_TTL_MS).toISOString(),
+        changes: [{ address: STATE_BUCKET_ADDRESS, type: "aws_s3_bucket", actions: ["create"] }],
+      },
     });
-    expect(terraform.calls.map(({ call, request }) => [call, request.configuration.root])).toEqual([
-      ["plan", "backend"],
-      ["showPlan", "backend"],
+    // backend.tfplan is planned into the saved plan's own directory, and read back from it.
+    expect(
+      terraform.calls.map(({ call, request }) => [
+        call,
+        request.configuration.root,
+        "planFile" in request ? request.planFile : undefined,
+      ]),
+    ).toEqual([
+      ["plan", "backend", "/plans/fff-abcd1234/aaaaaaaa/backend.tfplan"],
+      ["showPlan", "backend", "/plans/fff-abcd1234/aaaaaaaa/backend.tfplan"],
     ]);
+    expect(planStore.saved.get("fff-abcd1234/aaaaaaaa")).toEqual(
+      result.kind === "bootstrap_planned" ? result.saved : undefined,
+    );
+    expect(planStore.calls).toEqual([
+      "prune fff-abcd1234",
+      "create fff-abcd1234/aaaaaaaa",
+      "save fff-abcd1234/aaaaaaaa",
+    ]);
+    // Planning changes nothing and takes no lock: the bucket is only looked for.
+    expect(lockStore.calls).toEqual([`bucketExists ${BUCKET}`]);
     expect(lockStore.buckets.size).toBe(0);
+  });
+
+  test("a bootstrap plan that does more than create is refused and saves nothing", async () => {
+    const { deps, terraform, planStore } = factory({ bucket: false });
+    terraform.world.shown = {
+      resource_changes: [
+        {
+          address: STATE_BUCKET_ADDRESS,
+          type: "aws_s3_bucket",
+          change: { actions: ["delete", "create"] },
+        },
+      ],
+    };
+    expect(await planFactory(deps, planRequest())).toEqual({
+      kind: "unexpected_plan",
+      unexpected: [
+        {
+          kind: "not_create",
+          change: {
+            address: STATE_BUCKET_ADDRESS,
+            type: "aws_s3_bucket",
+            actions: ["delete", "create"],
+          },
+        },
+      ],
+    });
+    expect(planStore.saved.size).toBe(0);
+    expect(planStore.directories.size).toBe(0);
+    expect(planStore.calls.at(-1)).toBe("remove fff-abcd1234/aaaaaaaa");
+  });
+
+  test("a failing bootstrap plan leaves no plan behind", async () => {
+    const { deps, terraform, planStore } = factory({ bucket: false });
+    terraform.world.failNext = "plan";
+    await expect(planFactory(deps, planRequest())).rejects.toThrow(
+      "`terraform plan` exited with status 1",
+    );
     expect(planStore.directories.size).toBe(0);
   });
 
@@ -332,7 +400,8 @@ describe("fffactory plan (plan-apply §Plan)", () => {
       dispatch: [BUILDER_1, BUILDER_2],
       stopped: ["builder-2"],
     });
-    expect(planStore.saved.get("fff-abcd1234/aaaaaaaa")?.stopped_workers).toEqual([
+    const record = planStore.saved.get("fff-abcd1234/aaaaaaaa");
+    expect(record?.kind === undefined ? record?.stopped_workers : "a bootstrap plan").toEqual([
       "builder-2" as HostKey,
     ]);
     expect(fleet.machines.reads).toBe(1);

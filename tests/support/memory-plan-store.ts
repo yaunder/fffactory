@@ -5,7 +5,8 @@ import { isPrunable, type SavedPlan } from "../../src/domain/plan";
 /**
  * In-memory PlanStore, keyed by `<factory ID>/<plan ID>`: plan directories created, the saved
  * plans in them, and any `damage`d (their Terraform plan changed after saving). A plan's
- * Terraform plan file digest is `digest-<key>-<swaps>`, changed by `swap`. Records every
+ * Terraform plan file digest, of whichever file its kind binds, is `digest-<key>-<swaps>`,
+ * changed by `swap`. Records every
  * call. Plan files are paths under `/plans` that nothing writes.
  */
 export class MemoryPlanStore implements PlanStore {
@@ -62,10 +63,17 @@ export class MemoryPlanStore implements PlanStore {
     return { kind: "found", plan, files: this.files(key), digest: this.digestOf(key) };
   }
 
-  async digest(factoryId: FactoryId, planId: string): Promise<string | undefined> {
-    const key = `${factoryId}/${planId}`;
+  async digest(plan: SavedPlan): Promise<string | undefined> {
+    const key = `${plan.factory_id}/${plan.plan_id}`;
     this.calls.push(`digest ${key}`);
     return this.directories.has(key) ? this.digestOf(key) : undefined;
+  }
+
+  /** Removes the saved plan's record and keeps its directory, whose files stay digestible. */
+  async spend(factoryId: FactoryId, planId: string): Promise<boolean> {
+    const key = `${factoryId}/${planId}`;
+    this.calls.push(`spend ${key}`);
+    return this.saved.delete(key);
   }
 
   async remove(factoryId: FactoryId, planId: string): Promise<void> {

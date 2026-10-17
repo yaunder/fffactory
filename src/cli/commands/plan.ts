@@ -2,7 +2,7 @@ import { parseArgs } from "node:util";
 import { planFactory } from "../../application/plan-factory";
 import type { CliContext, Command } from "../context";
 import { sha256Text } from "../../infrastructure/release-tarball";
-import { bootstrapFirstReport, savedPlanReport } from "../presentation/plan";
+import { savedBootstrapPlanReport, savedPlanReport } from "../presentation/plan";
 import { planningBasis, printPlanRefusal, printReport } from "./planning";
 
 const USAGE = [
@@ -18,8 +18,11 @@ const USAGE = [
   "state has changed.",
   "",
   "Before the first apply the state bucket does not exist yet, and the plan is",
-  "backend bootstrap's: `fffactory apply` creates the bucket first, then plans the",
-  "factory.",
+  "backend bootstrap's, saved like any plan, so `apply --plan-id` can create the",
+  "bucket without a terminal. It is refused once the bucket exists. Rerun `fffactory",
+  "plan` after applying it: the factory is planned once the bucket exists. At a",
+  "terminal, `fffactory apply` still creates the bucket after its own approval, then",
+  "plans the factory.",
   "",
   "Refused, naming what is missing, when this fffactory is not the release",
   "factory.json pins, when factory.json no longer declares a provisioned host key",
@@ -55,8 +58,8 @@ async function plan(args: readonly string[], context: CliContext): Promise<numbe
     { ...basis, now: context.now(), randomBytes: context.randomBytes },
   );
   switch (result.kind) {
-    case "bootstrap_first":
-      printReport(context.out, bootstrapFirstReport(result.review, values));
+    case "bootstrap_planned":
+      printReport(context.out, savedBootstrapPlanReport(result.review, result.saved, values));
       return 0;
     case "planned":
       printReport(context.out, savedPlanReport(result.review, result.saved, values));

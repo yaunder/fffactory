@@ -15,6 +15,7 @@ import {
   applyingLabelWidth,
   applyingRow,
   applyingSection,
+  bootstrappedLines,
   failedLines,
   infrastructureApplyingRow,
   interruptedLines,
@@ -49,6 +50,11 @@ const USAGE = [
   "approves, and refuses it once factory.json, the fffactory release, the AWS",
   "account or the factory's Terraform state has changed, or after an hour.",
   "",
+  "A saved bootstrap plan, made while the state bucket does not exist, is applied",
+  "the same way with --plan-id ID, without a terminal: it creates the bucket",
+  "exactly as planned, and is refused once the bucket exists. Apply then records it",
+  "and stops; plan the factory next with `fffactory plan`.",
+  "",
   "The first apply creates the state bucket first, after its own approval.",
   "Terraform's output is not shown while it runs, which can take several minutes.",
   "Then each worker, one at a time, is found in your tailnet, receives this",
@@ -66,11 +72,13 @@ const USAGE = [
   "Interrupting apply (Ctrl-C) stops Terraform gracefully and leaves the factory",
   "locked, with a record of the interrupted operation in the state bucket. Once",
   "fffactory has exited, break the lock with `fffactory lock break`; rerunning",
-  "apply plans again from what exists and converges.",
+  "apply plans again from what exists and converges. An interrupted saved bootstrap",
+  "plan may be spent: run `fffactory plan` instead.",
   "",
-  "Exits 0 once every worker is installed and verified or stopped, 2 when a worker",
-  "was skipped, and 1 when anything failed or was refused, including a new worker",
-  "whose first boot did not finish in time.",
+  "Exits 0 once every worker is installed and verified or stopped, or once a saved",
+  "bootstrap plan has created the bucket, 2 when a worker was skipped, and 1 when",
+  "anything failed or was refused, including a new worker whose first boot did not",
+  "finish in time.",
   "",
   "Refused, naming what is missing, when this fffactory is not the release",
   "factory.json pins, when factory.json no longer declares a provisioned host key",
@@ -274,6 +282,9 @@ export function reportApply(
       write(appliedLines(result, reporting, styles), context);
       return code;
     }
+    case "bootstrapped":
+      write(bootstrappedLines(result, reporting, styles), context);
+      return 0;
     case "failed":
       write(failedLines(result, reporting, styles), context);
       return 1;

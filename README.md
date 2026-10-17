@@ -166,7 +166,10 @@ fffactory apply
 ```
 
 Review the plans at the terminal. On the first apply, you approve creation of
-the state bucket, then approve the factory plan. The CLI provisions AWS
+the state bucket, then approve the factory plan. Without a terminal, apply the
+saved plans by ID instead: `plan` saves the bucket's bootstrap plan B, `apply
+--plan-id B` creates only the bucket, then `plan` saves factory plan F for
+`apply --plan-id F`. The CLI provisions AWS
 resources, waits for the worker to join Tailscale, and installs its release.
 First boot can take up to 15 minutes.
 
@@ -299,8 +302,9 @@ is skipped, see [Mark an epic ready](MACHINE_ONBOARDING.md#12-mark-an-epic-ready
 
 Operate with the release factory.json pins; change that pin only through
 `fffactory upgrade`. A saved plan can also be applied with `--plan-id ID`
-after reviewing and approving that exact plan. Changed configuration, state
-or release invalidates it: plan again. See [plan and apply](docs/specs/plan-apply.md).
+after reviewing and approving that exact plan, including the first apply's
+bootstrap plan, so a fresh factory needs no terminal. Changed configuration,
+state, release or AWS account invalidates it: plan again. See [plan and apply](docs/specs/plan-apply.md).
 
 - [Machine onboarding](MACHINE_ONBOARDING.md) — full setup, expected results,
   recovery and upgrades.

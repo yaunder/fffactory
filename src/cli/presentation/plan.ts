@@ -348,17 +348,31 @@ export function savedPlanReport(
   };
 }
 
-/** `fffactory plan` before the state bucket exists: bootstrap's plan, then how to go on. */
-export function bootstrapFirstReport(review: BootstrapPlanReview, selection: Selection): Report {
+/**
+ * `fffactory plan` before the state bucket exists: bootstrap's plan, saved as a bootstrap plan,
+ * then how to apply exactly it and plan the factory once the bucket exists.
+ */
+export function savedBootstrapPlanReport(
+  review: BootstrapPlanReview,
+  saved: Pick<SavedPlan, "plan_id" | "expires_at">,
+  selection: Selection,
+): Report {
   return {
     blocks: [
       bootstrapSection(review.target, review.creates),
-      { kind: "text", lines: ["The factory itself is planned once the state bucket exists."] },
+      {
+        kind: "text",
+        lines: [
+          `Saved as plan ${saved.plan_id}, until ${saved.expires_at}.`,
+          "The factory itself is planned once the state bucket exists.",
+        ],
+      },
     ],
     next: nextSteps(
-      step("Approve this bootstrap, then the factory's own plan, at a terminal:", [
-        fffactoryCommand(["apply"], selection),
+      step("Apply exactly this plan:", [
+        fffactoryCommand(["apply", "--plan-id", saved.plan_id], selection),
       ]),
+      step("Then plan the factory:", [fffactoryCommand(["plan"], selection)]),
     ),
   };
 }
@@ -494,6 +508,8 @@ export function describeStaleReason(reason: StaleReason): string {
       return "the factory's Terraform state changed after it was planned";
     case "state_bucket_missing":
       return "the state bucket no longer exists";
+    case "state_bucket_created":
+      return "the state bucket was created after it was planned";
     case "inventory_unreadable":
       return `the EC2 inventory could not be read to check that worker ${reason.key} is still stopped`;
     case "worker_started":

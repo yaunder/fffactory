@@ -8,13 +8,14 @@ import { planStoreDirectory } from "../../src/application/plan-store";
 import { ansiStyle, type Style } from "../../src/cli/presentation/style";
 import { run } from "../../src/cli/run";
 import { newLockRecord } from "../../src/domain/factory-lock";
+import type { RandomBytes } from "../../src/domain/initialization";
 import type { Release } from "../../src/domain/instance";
 import { SUPPORTED_TERRAFORM } from "../../src/domain/managed-terraform";
 import { filesystemPlanStore } from "../../src/infrastructure/plan-store";
 import { sha256Hex } from "../../src/infrastructure/release-tarball";
 import { terraformProvisioner } from "../../src/infrastructure/terraform/provisioner";
 import { terraformRunner } from "../../src/infrastructure/terraform/runner";
-import { harness, TEST_NOW } from "../support/cli-harness";
+import { harness, TEST_NOW, zeroBytes } from "../support/cli-harness";
 import {
   FAKE_ASSETS_SHA256,
   FAKE_CALLER,
@@ -33,7 +34,13 @@ import {
   WORKER_TAG,
   workerFleet,
 } from "../support/factory-world";
-import { fakeFactoryWorld, hostAddress, NETWORK } from "../support/fake-provisioner";
+import {
+  fakeFactoryWorld,
+  hostAddress,
+  NETWORK,
+  STATE_BUCKET_ADDRESS,
+} from "../support/fake-provisioner";
+import { newSavedBootstrapPlan } from "../../src/domain/plan";
 import { fakePrompt } from "../support/fake-secrets";
 import { type Behavior, fakeTerraform } from "../support/fake-terraform";
 import { MemoryInstanceStore } from "../support/memory-instance-store";
@@ -95,6 +102,15 @@ const SAVED = [
   NEXT,
   "  Apply exactly this plan:",
   "    $ fffactory apply --plan-id aaaaaaaa",
+];
+/** Backend bootstrap's plan section, after the blank line that separates it. */
+const BOOTSTRAP_PLAN = [
+  "",
+  rule("Plan: backend bootstrap"),
+  ...PLAN.slice(2),
+  `  State bucket     ${BUCKET}, which does not exist yet`,
+  "  Infrastructure   1 to add, 0 to change, 0 to destroy",
+  `    + ${STATE_BUCKET_ADDRESS}`,
 ];
 /** The Applying section, once Terraform applies the plan's infrastructure changes. */
 const TERRAFORM = [
@@ -179,6 +195,7 @@ function cli(
     fleet?: ReturnType<typeof workerFleet>;
     controlPlane?: ControlPlane;
     workflowQueue?: WorkflowQueue;
+    randomBytes?: RandomBytes;
     styles?: { out?: Style; err?: Style };
   } = {},
 ) {
@@ -197,6 +214,7 @@ function cli(
   const identity = options.identity ?? fakeCallerIdentity();
   const fleet = options.fleet ?? workerFleet();
   const signal = { interrupted: false };
+  const { randomBytes = zeroBytes } = options;
   const context = harness(
     store,
     {},
@@ -214,6 +232,7 @@ function cli(
       sleep: fleet.deps.sleep,
       ...(options.controlPlane === undefined ? {} : { controlPlane: options.controlPlane }),
       ...(options.workflowQueue === undefined ? {} : { workflowQueue: options.workflowQueue }),
+      randomBytes,
       styles: options.styles,
     },
   );
@@ -342,25 +361,61 @@ describe("fffactory plan (plan-apply §Plan)", () => {
     expect(planStore.saved.size).toBe(1);
   });
 
-  test("before the first apply, shows backend bootstrap's plan", async () => {
-    const { context, out, lockStore } = cli({ bucket: false });
+  test("before the first apply, saves backend bootstrap's plan to apply by its ID", async () => {
+    const { context, out, err, lockStore, planStore, prompt } = cli({ bucket: false });
     expect(await run(["plan"], context)).toBe(0);
+    expect(err).toEqual([]);
     expect(out).toEqual([
       ...header("plan"),
+      ...BOOTSTRAP_PLAN,
       "",
-      rule("Plan: backend bootstrap"),
-      ...PLAN.slice(2),
-      `  State bucket     ${BUCKET}, which does not exist yet`,
-      "  Infrastructure   1 to add, 0 to change, 0 to destroy",
-      "    + module.state_bucket.aws_s3_bucket.state",
-      "",
+      "Saved as plan aaaaaaaa, until 2026-09-30T13:00:00.000Z.",
       "The factory itself is planned once the state bucket exists.",
       "",
       NEXT,
-      "  Approve this bootstrap, then the factory's own plan, at a terminal:",
-      "    $ fffactory apply",
+      "  Apply exactly this plan:",
+      "    $ fffactory apply --plan-id aaaaaaaa",
+      "  Then plan the factory:",
+      "    $ fffactory plan",
     ]);
+    expect(planStore.saved.get(`${FACTORY}/aaaaaaaa`)).toMatchObject({
+      kind: "bootstrap",
+      instance_path: PATH,
+      account_id: "123456789012",
+    });
+    expect(prompt.asked).toEqual([]);
     expect(lockStore.buckets.size).toBe(0);
+    expect(lockStore.locks.size).toBe(0);
+  });
+
+  test("the bootstrap plan's apply command repeats the instance and profile", async () => {
+    const { context, out, store } = cli({ bucket: false });
+    store.files["/elsewhere/my factory.json"] = store.files[PATH] as string;
+    const args = ["plan", "--instance", "/elsewhere/my factory.json", "--profile", "factory"];
+    expect(await run(args, context)).toBe(0);
+    expect(out.slice(-4)).toEqual([
+      "  Apply exactly this plan:",
+      "    $ fffactory apply --plan-id aaaaaaaa --instance '/elsewhere/my factory.json' --profile factory",
+      "  Then plan the factory:",
+      "    $ fffactory plan --instance '/elsewhere/my factory.json' --profile factory",
+    ]);
+  });
+
+  test("a bootstrap plan Terraform shows doing more than create is refused and saves nothing", async () => {
+    const { context, err, terraform, planStore } = cli({ bucket: false });
+    terraform.world.shown = {
+      resource_changes: [
+        {
+          address: STATE_BUCKET_ADDRESS,
+          type: "aws_s3_bucket",
+          change: { actions: ["update"] },
+        },
+      ],
+    };
+    expect(await run(["plan"], context)).toBe(1);
+    expect(err.join("\n")).toContain(`${STATE_BUCKET_ADDRESS} (update)`);
+    expect(planStore.saved.size).toBe(0);
+    expect(planStore.directories.size).toBe(0);
   });
 
   test("refuses another account before anything else reaches AWS", async () => {
@@ -1141,6 +1196,357 @@ describe("fffactory apply (plan-apply §Apply)", () => {
     expect(out[3]).toBe(rule("Plan: backend bootstrap"));
     expect(out).toContainEqual(rule("Plan"));
     expect(lockStore.buckets.has(BUCKET)).toBe(true);
+    // Its record, written once the lock is taken, leads with the bootstrap it did first.
+    const [record] = [...lockStore.operations.values()];
+    expect(lockStore.operations.size).toBe(1);
+    expect(record?.plan_id).toBeNull();
+    expect(record?.stages.slice(0, 2)).toEqual([
+      { name: "backend", status: "applied" },
+      { name: "infrastructure", status: "applied" },
+    ]);
+    expect(record?.status).toBe("succeeded");
+  });
+
+  describe("a saved bootstrap plan (plan-apply §Apply)", () => {
+    const PLAN_ID = "b00tstr4";
+    /** What a saved bootstrap plan shows as it is applied: its review, approved by its ID. */
+    const BOOTSTRAP = [
+      ...BOOTSTRAP_PLAN,
+      "",
+      `Applying saved plan ${PLAN_ID}, approved by naming its ID.`,
+      ...TERRAFORM,
+    ];
+
+    /**
+     * Saves bootstrap plan B for the factory as it is now, its `backend.tfplan` planned in the
+     * world, as `fffactory plan` would before the first apply.
+     */
+    async function saveBootstrapPlan(world: ReturnType<typeof cli>): Promise<void> {
+      const files = await world.planStore.create(FACTORY, PLAN_ID);
+      await world.terraform.provisioner.plan({
+        configuration: { directory: `${ASSETS}/terraform`, root: "backend" },
+        credentials: { source: "chain" },
+        region: "eu-west-2",
+        backend: {},
+        planFile: files.backend,
+        variables: {},
+      });
+      await world.planStore.save(
+        newSavedBootstrapPlan({
+          planId: PLAN_ID,
+          factoryId: FACTORY,
+          instancePath: PATH,
+          configurationSha256: sha256Hex(new TextEncoder().encode(world.store.files[PATH])),
+          release: "0.3.0" as Release,
+          assetsSha256: FAKE_ASSETS_SHA256,
+          accountId: "123456789012",
+          now: TEST_NOW,
+          changes: [{ address: STATE_BUCKET_ADDRESS, actions: ["create"] }],
+        }),
+      );
+      world.terraform.calls.length = 0;
+    }
+
+    test("with no terminal, creates the bucket from exactly B, records B, and names the next step", async () => {
+      const world = cli({ bucket: false });
+      await saveBootstrapPlan(world);
+      const { context, out, err, prompt, lockStore, terraform, planStore } = world;
+      expect(await run(["apply", "--plan-id", PLAN_ID], context)).toBe(0);
+      expect(err).toEqual([]);
+      expect(out).toEqual([
+        ...header("apply"),
+        ...BOOTSTRAP,
+        "",
+        RESULT,
+        "  State bucket       created",
+        expect.stringMatching(
+          /^ {2}Operation record {3}s3:\/\/fff-abcd1234-state\/fff-abcd1234-operations\/.+\.json$/,
+        ),
+        "",
+        NEXT,
+        "  Plan the factory next:",
+        "    $ fffactory plan",
+      ]);
+      expect(prompt.asked).toEqual([]);
+      expect(
+        terraform.calls.map(({ call, request }) => `${call} ${request.configuration.root}`),
+      ).toEqual(["showPlan backend", "applyPlan backend"]);
+      expect(lockStore.buckets.has(BUCKET)).toBe(true);
+      expect(lockStore.locks.size).toBe(0);
+      const records = [...lockStore.operations.values()];
+      expect(records).toHaveLength(1);
+      expect(records[0]).toMatchObject({
+        plan_id: PLAN_ID,
+        status: "succeeded",
+        stages: [{ name: "backend", status: "applied" }],
+      });
+      expect(planStore.saved.size).toBe(0);
+      // B is spent: a rerun names it missing.
+      out.length = 0;
+      expect(await run(["apply", "--plan-id", PLAN_ID], context)).toBe(1);
+      expect(err[1]).toStartWith(`✖ There is no saved plan ${PLAN_ID} for this factory here`);
+    });
+
+    test("the next step repeats the instance and profile, quoted as plan quotes them", async () => {
+      const world = cli({ bucket: false });
+      const elsewhere = "/elsewhere/my factory.json";
+      world.store.files[elsewhere] = world.store.files[PATH] as string;
+      const files = await world.planStore.create(FACTORY, PLAN_ID);
+      await world.terraform.provisioner.plan({
+        configuration: { directory: `${ASSETS}/terraform`, root: "backend" },
+        credentials: { source: "--profile", profile: "factory" },
+        region: "eu-west-2",
+        backend: {},
+        planFile: files.backend,
+        variables: {},
+      });
+      await world.planStore.save(
+        newSavedBootstrapPlan({
+          planId: PLAN_ID,
+          factoryId: FACTORY,
+          instancePath: elsewhere,
+          configurationSha256: sha256Hex(new TextEncoder().encode(world.store.files[PATH])),
+          release: "0.3.0" as Release,
+          assetsSha256: FAKE_ASSETS_SHA256,
+          accountId: "123456789012",
+          now: TEST_NOW,
+          changes: [{ address: STATE_BUCKET_ADDRESS, actions: ["create"] }],
+        }),
+      );
+      const args = ["apply", "--plan-id", PLAN_ID, "--instance", elsewhere, "--profile", "factory"];
+      expect(await run(args, world.context)).toBe(0);
+      expect(world.out.slice(-2)).toEqual([
+        "  Plan the factory next:",
+        "    $ fffactory plan --instance '/elsewhere/my factory.json' --profile factory",
+      ]);
+    });
+
+    test("factory.json edited after B is refused as stale, with nothing changed", async () => {
+      const world = cli({ bucket: false });
+      await saveBootstrapPlan(world);
+      const { context, err, store, terraform, lockStore, planStore } = world;
+      store.files[PATH] = text(["builder-1", "builder-2"]);
+      expect(await run(["apply", "--plan-id", PLAN_ID], context)).toBe(1);
+      expect(err).toEqual([
+        "",
+        `✖ Refusing to apply plan ${PLAN_ID}: it is no longer the plan to apply:`,
+        "  factory.json changed after it was planned",
+        "",
+        "Nothing was applied.",
+        "",
+        NEXT,
+        "  Review a new plan:",
+        "    $ fffactory plan",
+      ]);
+      expect(terraform.calls).toEqual([]);
+      expect(lockStore.buckets.size).toBe(0);
+      expect(lockStore.calls.some((call) => call.startsWith("create"))).toBe(false);
+      expect(lockStore.operations.size).toBe(0);
+      expect(planStore.saved.has(`${FACTORY}/${PLAN_ID}`)).toBe(true);
+    });
+
+    test("a state bucket created after B makes it stale", async () => {
+      const world = cli({ bucket: false });
+      await saveBootstrapPlan(world);
+      world.lockStore.buckets.add(BUCKET);
+      expect(await run(["apply", "--plan-id", PLAN_ID], world.context)).toBe(1);
+      expect(world.err).toContain("  the state bucket was created after it was planned");
+      expect(world.terraform.calls).toEqual([]);
+      expect(world.lockStore.operations.size).toBe(0);
+    });
+
+    test("another account is refused before anything is planned or applied", async () => {
+      const other = fakeCallerIdentity({
+        kind: "caller",
+        caller: { ...FAKE_CALLER, account: "210987654321" },
+      });
+      const world = cli({ bucket: false, identity: other });
+      await saveBootstrapPlan(world);
+      world.planStore.calls.length = 0;
+      expect(await run(["apply", "--plan-id", PLAN_ID], world.context)).toBe(1);
+      expect(world.err[0]).toStartWith("Refusing to apply: ");
+      expect(world.terraform.calls).toEqual([]);
+      expect(world.lockStore.calls).toEqual([]);
+      expect(world.planStore.calls).toEqual([]);
+      expect(world.assets.materialized).toEqual([]);
+      expect(world.lockStore.buckets.size).toBe(0);
+    });
+
+    test("a failed Terraform apply is reported as a bootstrap failure, with no record", async () => {
+      const world = cli({ bucket: false });
+      await saveBootstrapPlan(world);
+      world.terraform.world.failNext = "applyPlan";
+      expect(await run(["apply", "--plan-id", PLAN_ID], world.context)).toBe(1);
+      expect(world.err).toEqual(["fffactory: `terraform apply` exited with status 1"]);
+      expect(world.lockStore.operations.size).toBe(0);
+      expect(world.lockStore.locks.size).toBe(0);
+    });
+
+    test("an interrupt before the lock says the factory is not locked, and names plan next", async () => {
+      const world = cli({ bucket: false });
+      await saveBootstrapPlan(world);
+      world.terraform.world.beforeChange = () => {
+        world.signal.interrupted = true;
+      };
+      const args = ["apply", "--plan-id", PLAN_ID, "--profile", "factory"];
+      expect(await run(args, world.context)).toBe(1);
+      // Without a terminal `fffactory apply` is refused, and B may be spent: plan again.
+      expect(world.err).toEqual([
+        "",
+        RESULT,
+        "  ! Interrupted before the factory was locked: it is not locked",
+        `    Saved plan ${PLAN_ID} may be spent and the state bucket created.`,
+        "",
+        NEXT,
+        "  Plan again from what exists now:",
+        "    $ fffactory plan --profile factory",
+      ]);
+      expect(world.lockStore.locks.size).toBe(0);
+    });
+
+    test("an interrupt as it takes the lock keeps it, and names plan after the break", async () => {
+      const world = cli({ bucket: false });
+      await saveBootstrapPlan(world);
+      const { lockStore, signal } = world;
+      const create = lockStore.create.bind(lockStore);
+      lockStore.create = async (bucket, record) => {
+        signal.interrupted = true;
+        return create(bucket, record);
+      };
+      expect(await run(["apply", "--plan-id", PLAN_ID], world.context)).toBe(1);
+      expect(world.err).toEqual([
+        "",
+        RESULT,
+        "  ! Interrupted: the factory stays locked by this apply, which may have no operation record",
+        "",
+        NEXT,
+        "  Once fffactory has exited, break the lock:",
+        "    $ fffactory lock break",
+        "  Then plan the factory next:",
+        "    $ fffactory plan",
+      ]);
+      expect(lockStore.buckets.has(BUCKET)).toBe(true);
+      expect(lockStore.locks.size).toBe(1);
+    });
+
+    test("an interrupt once B's record is written keeps the lock, and prints the record", async () => {
+      const world = cli({ bucket: false });
+      await saveBootstrapPlan(world);
+      const { lockStore, signal } = world;
+      const write = lockStore.writeOperation.bind(lockStore);
+      lockStore.writeOperation = async (bucket, record) => {
+        await write(bucket, record);
+        signal.interrupted = true;
+      };
+      const args = ["apply", "--plan-id", PLAN_ID, "--profile", "factory"];
+      expect(await run(args, world.context)).toBe(1);
+      expect(world.err).toEqual([
+        "",
+        RESULT,
+        "  ! Interrupted: the factory stays locked, with a record of this operation",
+        "",
+        NEXT,
+        "  Once fffactory has exited, break the lock:",
+        "    $ fffactory lock break --profile factory",
+        "  Then plan the factory next:",
+        "    $ fffactory plan --profile factory",
+      ]);
+      expect(world.out.at(-1)).toMatch(
+        /^ {2}Operation record {3}s3:\/\/fff-abcd1234-state\/fff-abcd1234-operations\/.+\.json$/,
+      );
+      expect(lockStore.locks.size).toBe(1);
+      expect(lockStore.operations.size).toBe(1);
+    });
+  });
+
+  describe("a fresh factory with no terminal (epic #54)", () => {
+    /** Different bytes on every draw, so each plan, lock and record gets its own ID. */
+    function countingBytes(): RandomBytes {
+      let draws = 0;
+      return (count) => new Uint8Array(count).fill(draws++ % 36);
+    }
+
+    /** The plan ID the last `fffactory plan` printed the apply command for. */
+    function printedPlanId(out: readonly string[]): string {
+      const command = out.find((line) => line.startsWith("    $ fffactory apply --plan-id "));
+      const planId = command?.split(" ")[8];
+      if (planId === undefined) throw new Error(`no apply command in ${out.join("\n")}`);
+      return planId;
+    }
+
+    test("plan, apply B, plan, apply F: bootstrap then the factory, each record naming its plan", async () => {
+      const world = cli({ bucket: false, randomBytes: countingBytes() });
+      const { context, out, err, prompt, lockStore, identity, terraform } = world;
+
+      expect(await run(["plan"], context)).toBe(0);
+      const bootstrapPlan = printedPlanId(out);
+      expect(out).toContain("The factory itself is planned once the state bucket exists.");
+      expect(out.at(-1)).toBe("    $ fffactory plan");
+      expect(lockStore.buckets.size).toBe(0);
+
+      out.length = 0;
+      expect(await run(["apply", "--plan-id", bootstrapPlan], context)).toBe(0);
+      expect(out).toContain("  State bucket       created");
+      expect(out.slice(-2)).toEqual(["  Plan the factory next:", "    $ fffactory plan"]);
+      expect(lockStore.buckets.has(BUCKET)).toBe(true);
+      expect(terraform.calls.map(({ call }) => call)).not.toContain("output");
+
+      out.length = 0;
+      expect(await run(["plan"], context)).toBe(0);
+      const factoryPlan = printedPlanId(out);
+      expect(factoryPlan).not.toBe(bootstrapPlan);
+      expect(out).toContain(rule("Plan"));
+
+      out.length = 0;
+      expect(await run(["apply", "--plan-id", factoryPlan], context)).toBe(0);
+      expect(out).toContain(APPLIED);
+
+      expect(err).toEqual([]);
+      expect(prompt.asked).toEqual([]);
+      // The account check ran first in each of the four commands.
+      expect(identity.requests).toHaveLength(4);
+      expect(lockStore.locks.size).toBe(0);
+      const records = [...lockStore.operations.values()];
+      expect(records.map(({ plan_id, status }) => [plan_id, status])).toEqual([
+        [bootstrapPlan, "succeeded"],
+        [factoryPlan, "succeeded"],
+      ]);
+      expect(records[0]?.stages).toEqual([{ name: "backend", status: "applied" }]);
+      expect(records[1]?.stages[0]).toEqual({ name: "infrastructure", status: "applied" });
+      expect(records[1]?.stages.map(({ name }) => name)).not.toContain("backend");
+    });
+
+    test("a bootstrap plan applied after factory.json changes is refused, with nothing changed", async () => {
+      const { context, out, err, store, lockStore, terraform, planStore } = cli({ bucket: false });
+      expect(await run(["plan"], context)).toBe(0);
+      const bootstrapPlan = printedPlanId(out);
+      store.files[PATH] = text(["builder-1", "builder-2"]);
+      terraform.calls.length = 0;
+      expect(await run(["apply", "--plan-id", bootstrapPlan], context)).toBe(1);
+      expect(err).toEqual([
+        "",
+        `✖ Refusing to apply plan ${bootstrapPlan}: it is no longer the plan to apply:`,
+        "  factory.json changed after it was planned",
+        "",
+        "Nothing was applied.",
+        "",
+        NEXT,
+        "  Review a new plan:",
+        "    $ fffactory plan",
+      ]);
+      expect(terraform.calls).toEqual([]);
+      expect(lockStore.buckets.size).toBe(0);
+      expect(lockStore.operations.size).toBe(0);
+      expect(planStore.saved.has(`${FACTORY}/${bootstrapPlan}`)).toBe(true);
+    });
+  });
+
+  test("an apply that found the state bucket records no backend stage", async () => {
+    const { context, lockStore } = cli({ interactive: true, answers: ["yes"] });
+    expect(await run(["apply"], context)).toBe(0);
+    const [record] = [...lockStore.operations.values()];
+    expect(record?.stages[0]).toEqual({ name: "infrastructure", status: "applied" });
+    expect(record?.stages.map(({ name }) => name)).not.toContain("backend");
   });
 
   test("an interrupted apply keeps the lock and says how to recover", async () => {

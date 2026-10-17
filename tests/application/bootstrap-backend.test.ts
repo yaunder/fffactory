@@ -1,17 +1,27 @@
 import { describe, expect, test } from "bun:test";
 import type { Approval } from "../../src/application/approval";
 import {
+  applySavedBootstrap,
   type BackendBootstrapRequest,
   beginFactoryOperation,
   bootstrapBackend,
+  type SavedBootstrapRequest,
 } from "../../src/application/bootstrap-backend";
 import type { AllowedAccount } from "../../src/application/require-expected-account";
 import { newLockRecord } from "../../src/domain/factory-lock";
 import type { FactoryId, FactoryInstance, Release } from "../../src/domain/instance";
-import type { PlanReview, UnexpectedPlan } from "../../src/domain/plan";
+import {
+  newSavedBootstrapPlan,
+  PLAN_TTL_MS,
+  type PlanCircumstances,
+  type PlanReview,
+  type StaleReason,
+  type UnexpectedPlan,
+} from "../../src/domain/plan";
 import { FAKE_CALLER } from "../support/doctor-fakes";
 import { fakeProvisioner } from "../support/fake-provisioner";
 import { MemoryLockStore, READY_BUCKET } from "../support/memory-lock-store";
+import { MemoryPlanStore } from "../support/memory-plan-store";
 
 const BUCKET = "fff-abcd1234-state";
 const INSTANCE: FactoryInstance = {
@@ -330,5 +340,465 @@ describe("beginning a factory operation (first apply)", () => {
     const result = await beginFactoryOperation(deps, { ...request(), ...begin, randomBytes });
     expect(result).toEqual({ kind: "declined" });
     expect(store.locks.size).toBe(0);
+  });
+});
+
+describe("applying a saved bootstrap plan (plan-apply §Apply)", () => {
+  const NOW = new Date("2026-09-30T10:00:00.000Z");
+  const FACTORY_ID = "fff-abcd1234" as FactoryId;
+  const PLAN_ID = "b00tstr4";
+  const CONFIGURATION = "c".repeat(64);
+  const ASSETS = "d".repeat(64);
+  const CURRENT = {
+    factoryId: FACTORY_ID,
+    instancePath: "/work/.fffactory/factory.json",
+    configurationSha256: CONFIGURATION,
+    release: "0.3.0" as Release,
+    assetsSha256: ASSETS,
+    accountId: "123456789012",
+    now: new Date(NOW.getTime() + 60_000),
+  };
+  const BACKEND_TARGET = {
+    configuration: { directory: "/cache/releases/0.3.0/terraform", root: "backend" },
+    credentials: { source: "--profile" as const, profile: "factory" },
+    region: "eu-west-2",
+    backend: {},
+    planFile: `/plans/${FACTORY_ID}/${PLAN_ID}/backend.tfplan`,
+  };
+
+  /**
+   * A factory with no state bucket and a saved bootstrap plan B for it, as `fffactory plan`
+   * saves one. `events` orders what changes anything: B's spending, the Terraform apply, B's
+   * removal and the lock's creation.
+   */
+  async function savedWorld(options: { shown?: unknown; approve?: boolean } = {}) {
+    const events: string[] = [];
+    const store = new MemoryLockStore();
+    const terraform = fakeProvisioner({
+      shown: options.shown ?? CREATES,
+      onApply: () => {
+        events.push("applyPlan");
+        store.buckets.add(BUCKET);
+      },
+    });
+    const planStore = new MemoryPlanStore();
+    const files = await planStore.create(FACTORY_ID, PLAN_ID);
+    const saved = newSavedBootstrapPlan({
+      ...CURRENT,
+      planId: PLAN_ID,
+      now: NOW,
+      changes: [
+        { address: "module.state_bucket.aws_s3_bucket.state", actions: ["create"] },
+        { address: "module.state_bucket.aws_s3_bucket_versioning.state", actions: ["create"] },
+      ],
+    });
+    await planStore.save(saved);
+    const loaded = await planStore.load(FACTORY_ID, PLAN_ID);
+    if (loaded.kind !== "found") throw new Error("not saved");
+    const create = store.create.bind(store);
+    store.create = async (bucket, record) => {
+      events.push("lock");
+      return create(bucket, record);
+    };
+    const spend = planStore.spend.bind(planStore);
+    planStore.spend = async (factoryId, planId) => {
+      events.push(`spend ${planId}`);
+      return spend(factoryId, planId);
+    };
+    const remove = planStore.remove.bind(planStore);
+    planStore.remove = async (factoryId, planId) => {
+      events.push(`remove ${planId}`);
+      return remove(factoryId, planId);
+    };
+    const approver = approval(options.approve ?? true);
+    const signal = { interrupted: false };
+    const deps = {
+      lockStore: store,
+      provisioner: terraform.provisioner,
+      approval: approver.port,
+      planStore,
+      interrupted: () => signal.interrupted,
+    };
+    const savedRequest = (
+      overrides: Partial<SavedBootstrapRequest> = {},
+    ): SavedBootstrapRequest => {
+      const { planFile: _, ...base } = request();
+      return {
+        ...base,
+        saved,
+        files,
+        digest: loaded.digest,
+        current: CURRENT,
+        operation: "apply",
+        host: "laptop",
+        clock: () => NOW,
+        randomBytes: (count) => new Uint8Array(count),
+        ...overrides,
+      };
+    };
+    return { events, store, terraform, planStore, approver, signal, deps, saved, savedRequest };
+  }
+
+  /** Nothing was applied, locked or recorded, and B is kept: it was never spent. */
+  async function nothingChanged(world: Awaited<ReturnType<typeof savedWorld>>) {
+    expect(world.terraform.calls.some(({ call }) => call === "applyPlan")).toBe(false);
+    expect(world.store.calls.some((call) => call.startsWith("create"))).toBe(false);
+    expect(world.store.operationWrites).toEqual([]);
+    expect(world.events).toEqual([]);
+    expect(await world.planStore.load(FACTORY_ID, PLAN_ID)).toMatchObject({ kind: "found" });
+  }
+
+  test("applies exactly B's file, approved by its ID, spending B first, then takes the lock", async () => {
+    const world = await savedWorld();
+    const result = await applySavedBootstrap(world.deps, world.savedRequest());
+    if (result.kind !== "acquired") throw new Error(`not acquired: ${result.kind}`);
+    expect(result.lock.record.holder).toEqual({ principal: FAKE_CALLER.arn, host: "laptop" });
+    expect(world.store.locks.get(BUCKET)?.version).toBe(result.lock.version);
+    // Exactly the saved file is read back and applied; nothing is planned.
+    expect(world.terraform.calls).toEqual([
+      { call: "showPlan", request: BACKEND_TARGET },
+      { call: "applyPlan", request: BACKEND_TARGET },
+    ]);
+    expect(world.events).toEqual([`spend ${PLAN_ID}`, "applyPlan", `remove ${PLAN_ID}`, "lock"]);
+    expect(world.approver.shown).toEqual([
+      {
+        kind: "backend_bootstrap",
+        target: {
+          instancePath: "/work/.fffactory/factory.json",
+          name: "Test factory",
+          factoryId: "fff-abcd1234" as FactoryId,
+          accountId: "123456789012",
+          region: "eu-west-2",
+          release: "0.3.0" as Release,
+          bucket: BUCKET,
+        },
+        creates: [
+          "module.state_bucket.aws_s3_bucket.state",
+          "module.state_bucket.aws_s3_bucket_versioning.state",
+        ],
+      },
+    ]);
+    // The bucket is checked missing before the read-back, and again right before the apply.
+    expect(world.store.calls.filter((call) => call.startsWith("bucketExists"))).toHaveLength(2);
+    expect(world.store.buckets.has(BUCKET)).toBe(true);
+    expect(world.planStore.saved.size).toBe(0);
+  });
+
+  test.each<[string, Partial<PlanCircumstances>, StaleReason]>([
+    [
+      "factory.json changed",
+      { configurationSha256: "e".repeat(64) },
+      { kind: "configuration_changed" },
+    ],
+    [
+      "another factory.json",
+      { instancePath: "/elsewhere/factory.json" },
+      { kind: "other_instance", instancePath: "/work/.fffactory/factory.json" },
+    ],
+    [
+      "another release",
+      { release: "0.3.1" as Release },
+      { kind: "other_release", release: "0.3.0" as Release },
+    ],
+    ["other assets", { assetsSha256: "f".repeat(64) }, { kind: "other_assets" }],
+    [
+      "another account",
+      { accountId: "210987654321" },
+      { kind: "other_account", accountId: "123456789012" },
+    ],
+    [
+      "its expiry",
+      { now: new Date(NOW.getTime() + PLAN_TTL_MS + 1) },
+      { kind: "expired", expiresAt: new Date(NOW.getTime() + PLAN_TTL_MS).toISOString() },
+    ],
+  ])("a plan stale by %s is refused with nothing changed", async (_, changed, reason) => {
+    const world = await savedWorld();
+    const result = await applySavedBootstrap(
+      world.deps,
+      world.savedRequest({ current: { ...CURRENT, ...changed } }),
+    );
+    expect(result).toEqual({ kind: "stale", planId: PLAN_ID, reasons: [reason] });
+    expect(world.terraform.calls).toEqual([]);
+    await nothingChanged(world);
+  });
+
+  test.each([
+    ["ready", READY_BUCKET],
+    ["unready", { ...READY_BUCKET, versioning: undefined }],
+  ])("a state bucket that exists now, %s, makes B stale", async (_, readiness) => {
+    const world = await savedWorld();
+    world.store.buckets.add(BUCKET);
+    world.store.readiness.set(BUCKET, readiness);
+    expect(await applySavedBootstrap(world.deps, world.savedRequest())).toEqual({
+      kind: "stale",
+      planId: PLAN_ID,
+      reasons: [{ kind: "state_bucket_created" }],
+    });
+    expect(world.terraform.calls).toEqual([]);
+    await nothingChanged(world);
+  });
+
+  test("a bucket created after the read-back is caught right before the apply", async () => {
+    const world = await savedWorld();
+    const { showPlan } = world.terraform.provisioner;
+    world.deps.provisioner = {
+      ...world.terraform.provisioner,
+      showPlan: async (planned) => {
+        const shown = await showPlan(planned);
+        world.store.buckets.add(BUCKET);
+        return shown;
+      },
+    };
+    expect(await applySavedBootstrap(world.deps, world.savedRequest())).toEqual({
+      kind: "stale",
+      planId: PLAN_ID,
+      reasons: [{ kind: "state_bucket_created" }],
+    });
+    await nothingChanged(world);
+  });
+
+  test("a backend.tfplan swapped after B was loaded is damaged, and never read back", async () => {
+    const world = await savedWorld();
+    world.planStore.swap(FACTORY_ID, PLAN_ID);
+    expect(await applySavedBootstrap(world.deps, world.savedRequest())).toEqual({
+      kind: "damaged_plan",
+      planId: PLAN_ID,
+    });
+    expect(world.terraform.calls).toEqual([]);
+    await nothingChanged(world);
+  });
+
+  test("a backend.tfplan swapped after it was read back is never applied", async () => {
+    const world = await savedWorld();
+    const { showPlan } = world.terraform.provisioner;
+    world.deps.provisioner = {
+      ...world.terraform.provisioner,
+      showPlan: async (planned) => {
+        const shown = await showPlan(planned);
+        world.planStore.swap(FACTORY_ID, PLAN_ID);
+        return shown;
+      },
+    };
+    expect(await applySavedBootstrap(world.deps, world.savedRequest())).toEqual({
+      kind: "damaged_plan",
+      planId: PLAN_ID,
+    });
+    await nothingChanged(world);
+  });
+
+  test("a read-back that differs from B's record is damaged", async () => {
+    const world = await savedWorld({
+      shown: {
+        resource_changes: [
+          { address: "module.state_bucket.aws_s3_bucket.state", change: { actions: ["create"] } },
+        ],
+      },
+    });
+    expect(await applySavedBootstrap(world.deps, world.savedRequest())).toEqual({
+      kind: "damaged_plan",
+      planId: PLAN_ID,
+    });
+    expect(world.approver.shown).toEqual([]);
+    await nothingChanged(world);
+  });
+
+  test.each<[string, unknown, UnexpectedPlan[]]>([
+    [
+      "does more than create",
+      {
+        resource_changes: [
+          { address: "module.state_bucket.aws_s3_bucket.state", change: { actions: ["create"] } },
+          {
+            address: "module.state_bucket.aws_s3_bucket_versioning.state",
+            change: { actions: ["delete", "create"] },
+          },
+        ],
+      },
+      [
+        {
+          kind: "not_create",
+          change: {
+            address: "module.state_bucket.aws_s3_bucket_versioning.state",
+            actions: ["delete", "create"],
+          },
+        },
+      ],
+    ],
+    ["cannot be read", { resource_changes: "nope" }, [{ kind: "unreadable_plan" }]],
+    ["creates nothing", { resource_changes: [] }, [{ kind: "creates_nothing" }]],
+  ])("a read-back that %s is an unexpected plan", async (_, shown, unexpected) => {
+    const world = await savedWorld({ shown });
+    expect(await applySavedBootstrap(world.deps, world.savedRequest())).toEqual({
+      kind: "unexpected_plan",
+      unexpected,
+    });
+    expect(world.approver.shown).toEqual([]);
+    await nothingChanged(world);
+  });
+
+  test("an approval that does not approve applies nothing", async () => {
+    const world = await savedWorld({ approve: false });
+    expect(await applySavedBootstrap(world.deps, world.savedRequest())).toEqual({
+      kind: "declined",
+    });
+    await nothingChanged(world);
+  });
+
+  test("an account check for another account is refused before reaching AWS", async () => {
+    const world = await savedWorld();
+    const other: AllowedAccount = {
+      allowed: true,
+      verdict: { kind: "match", caller: { ...FAKE_CALLER, account: "210987654321" } },
+    };
+    expect(await applySavedBootstrap(world.deps, world.savedRequest({ account: other }))).toEqual({
+      kind: "refused",
+      issues: [{ path: "aws.account_id", message: "is not the account the account check allowed" }],
+    });
+    expect(world.store.calls).toEqual([]);
+    expect(world.terraform.calls).toEqual([]);
+    await nothingChanged(world);
+  });
+
+  test("B is spent before its Terraform apply starts: it cannot be loaded while it runs", async () => {
+    const world = await savedWorld();
+    const { applyPlan } = world.terraform.provisioner;
+    let started = () => {};
+    const applying = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    let finish = () => {};
+    world.deps.provisioner = {
+      ...world.terraform.provisioner,
+      applyPlan: async (planned) => {
+        started();
+        await new Promise<void>((resolve) => {
+          finish = resolve;
+        });
+        await applyPlan(planned);
+      },
+    };
+    const request = world.savedRequest();
+    const result = applySavedBootstrap(world.deps, request);
+    await applying;
+    // A second interrupt now exits at once, skipping any cleanup: B is already spent.
+    expect(await world.planStore.load(FACTORY_ID, PLAN_ID)).toEqual({ kind: "missing" });
+    // Its backend.tfplan stays, the file approved, for the Terraform apply reading it.
+    expect(await world.planStore.digest(world.saved)).toBe(request.digest);
+    expect(world.events).toEqual([`spend ${PLAN_ID}`]);
+    finish();
+    expect((await result).kind).toBe("acquired");
+    expect(world.planStore.directories.size).toBe(0);
+  });
+
+  test("B spent by another apply after the last check is not found, and never applied", async () => {
+    const world = await savedWorld();
+    const digest = world.planStore.digest.bind(world.planStore);
+    let checks = 0;
+    world.planStore.digest = async (plan) => {
+      const now = await digest(plan);
+      checks += 1;
+      if (checks === 2) await world.planStore.spend(FACTORY_ID, PLAN_ID);
+      return now;
+    };
+    expect(await applySavedBootstrap(world.deps, world.savedRequest())).toEqual({
+      kind: "no_plan",
+      planId: PLAN_ID,
+    });
+    expect(world.terraform.calls.some(({ call }) => call === "applyPlan")).toBe(false);
+    expect(world.events).toEqual([`spend ${PLAN_ID}`, `spend ${PLAN_ID}`]);
+    expect(world.store.locks.size).toBe(0);
+    expect(world.store.operationWrites).toEqual([]);
+  });
+
+  test("a failed Terraform apply spends B, takes no lock and fails", async () => {
+    const world = await savedWorld();
+    world.deps.provisioner = {
+      ...world.terraform.provisioner,
+      applyPlan: async () => {
+        throw new Error("`terraform apply` exited with status 1");
+      },
+    };
+    await expect(applySavedBootstrap(world.deps, world.savedRequest())).rejects.toThrow(
+      "exited with status 1",
+    );
+    expect(world.events).toEqual([`spend ${PLAN_ID}`, `remove ${PLAN_ID}`]);
+    expect(world.store.locks.size).toBe(0);
+    expect(world.store.operationWrites).toEqual([]);
+  });
+
+  test("an interrupt during the apply takes no lock, and B is spent", async () => {
+    const world = await savedWorld();
+    const { applyPlan } = world.terraform.provisioner;
+    world.deps.provisioner = {
+      ...world.terraform.provisioner,
+      applyPlan: async (planned) => {
+        await applyPlan(planned);
+        world.signal.interrupted = true;
+      },
+    };
+    expect(await applySavedBootstrap(world.deps, world.savedRequest())).toEqual({
+      kind: "interrupted",
+    });
+    expect(world.events).toEqual([`spend ${PLAN_ID}`, "applyPlan", `remove ${PLAN_ID}`]);
+    expect(world.store.locks.size).toBe(0);
+    expect(world.store.buckets.has(BUCKET)).toBe(true);
+  });
+
+  test("an interrupt that stops Terraform takes no lock, and says so rather than failing", async () => {
+    const world = await savedWorld();
+    world.deps.provisioner = {
+      ...world.terraform.provisioner,
+      applyPlan: async () => {
+        world.signal.interrupted = true;
+        throw new Error("`terraform apply` exited with status 1");
+      },
+    };
+    expect(await applySavedBootstrap(world.deps, world.savedRequest())).toEqual({
+      kind: "interrupted",
+    });
+    expect(world.events).toEqual([`spend ${PLAN_ID}`, `remove ${PLAN_ID}`]);
+    expect(world.store.locks.size).toBe(0);
+  });
+
+  test("an interrupt before the apply applies nothing and keeps B", async () => {
+    const world = await savedWorld();
+    world.deps.approval = {
+      approve: async () => {
+        world.signal.interrupted = true;
+        return true;
+      },
+    };
+    expect(await applySavedBootstrap(world.deps, world.savedRequest())).toEqual({
+      kind: "interrupted",
+    });
+    await nothingChanged(world);
+  });
+
+  test("a lock another operation took meanwhile is reported, with the bucket created", async () => {
+    const world = await savedWorld();
+    const other = { principal: "arn:aws:sts::123456789012:assumed-role/Admin/other", host: "desk" };
+    let held: ReturnType<typeof world.store.hold> | undefined;
+    const { applyPlan } = world.terraform.provisioner;
+    world.deps.provisioner = {
+      ...world.terraform.provisioner,
+      applyPlan: async (planned) => {
+        await applyPlan(planned);
+        held = world.store.hold(
+          BUCKET,
+          newLockRecord({
+            factoryId: FACTORY_ID,
+            operation: "apply",
+            holder: other,
+            now: NOW,
+            release: "0.3.0" as Release,
+            randomBytes: (count) => new Uint8Array(count).fill(1),
+          }),
+        );
+      },
+    };
+    const result = await applySavedBootstrap(world.deps, world.savedRequest());
+    expect(result).toEqual({ kind: "locked", held });
+    expect(world.store.buckets.has(BUCKET)).toBe(true);
+    expect(world.planStore.saved.size).toBe(0);
   });
 });

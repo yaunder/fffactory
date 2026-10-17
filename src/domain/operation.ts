@@ -13,6 +13,13 @@ import type { DispatchGate } from "./dispatch-readiness";
 
 export const OPERATION_SCHEMA_VERSION = 1;
 
+/**
+ * The state bucket's creation, which an apply that found no bucket did before it could take
+ * the lock. The record only exists once the bucket and the lock do, so this stage is only
+ * ever `applied`, and leads the stages of exactly the applies that created the bucket.
+ */
+export const BACKEND_STAGE = "backend";
+
 /** Apply's first stage: planning and applying the factory's Terraform. */
 export const INFRASTRUCTURE_STAGE = "infrastructure";
 
@@ -194,28 +201,41 @@ export function operationKey(record: OperationRecord): string {
   return `${namespaced(record.factory_id, "operations")}/${record.started_at}-${record.operation_id}.json`;
 }
 
+/** How an operation's record starts, beyond its lock and plan ID. */
+export interface OperationStart {
+  /** Stages it starts with `pending`, before the infrastructure stage, such as upgrade's pin. */
+  readonly pending?: readonly string[];
+  /** Whether it created the state bucket first: its record leads with the backend stage. */
+  readonly bootstrapped?: boolean;
+}
+
 /**
  * The record of an operation that has just taken `lock`: running the infrastructure stage's
- * plan, after any `pending` stages it starts with, such as upgrade's pin.
+ * plan, after the applied backend stage when it bootstrapped, and any `pending` stages.
  */
 export function startOperation(
   lock: LockRecord,
   planId: string | undefined,
-  pending: readonly string[] = [],
+  { pending = [], bootstrapped = false }: OperationStart = {},
 ): OperationRecord {
   return openOperation(lock, planId, [
+    ...(bootstrapped ? [{ name: BACKEND_STAGE, status: "applied" as const }] : []),
     ...pending.map((name) => ({ name, status: "pending" as const })),
     { name: INFRASTRUCTURE_STAGE, status: "planning" },
   ]);
 }
 
-/** The record of an operation that has just taken `lock` and runs one stage, `name`. */
+/**
+ * The record of an operation that has just taken `lock` and runs one stage, `name`, applying
+ * saved plan `planId` when it has one.
+ */
 export function startStageOperation(
   lock: LockRecord,
   name: string,
   status: StageStatus,
+  planId?: string,
 ): OperationRecord {
-  return openOperation(lock, undefined, [{ name, status }]);
+  return openOperation(lock, planId, [{ name, status }]);
 }
 
 function openOperation(

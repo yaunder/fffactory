@@ -3,7 +3,6 @@ import { stripVTControlCharacters } from "node:util";
 import type { PlanRefusal } from "../../../src/application/plan-factory";
 import { type Block, type Report, render } from "../../../src/cli/presentation/blocks";
 import {
-  bootstrapFirstReport,
   d11Report,
   damagedPlanReport,
   describeRemovalPlan,
@@ -12,6 +11,7 @@ import {
   planRefusalReport,
   planSection,
   reviewBlocks,
+  savedBootstrapPlanReport,
   savedPlanReport,
   staleReport,
   unknownPlanReport,
@@ -409,13 +409,14 @@ describe("what `fffactory plan` prints after the plan (plan-apply §Plan, §Save
     );
   });
 
-  test("before the first apply, backend bootstrap's plan, then how the factory is planned", () => {
-    const report = bootstrapFirstReport(
+  test("before the bucket exists, bootstrap's plan saved, then applying it and planning the factory", () => {
+    const report = savedBootstrapPlanReport(
       {
         kind: "backend_bootstrap",
         target: { ...TARGET, bucket: "fff-abcd1234-state" },
         creates: ["module.state_bucket.aws_s3_bucket.state"],
       },
+      { plan_id: "b00tstr4", expires_at: "2026-09-30T13:00:00.000Z" },
       { profile: "factory" },
     );
     expect(shown(report)).toEqual([
@@ -426,11 +427,14 @@ describe("what `fffactory plan` prints after the plan (plan-apply §Plan, §Save
       "  Infrastructure   1 to add, 0 to change, 0 to destroy",
       "    + module.state_bucket.aws_s3_bucket.state",
       "",
+      "Saved as plan b00tstr4, until 2026-09-30T13:00:00.000Z.",
       "The factory itself is planned once the state bucket exists.",
       "",
       NEXT,
-      "  Approve this bootstrap, then the factory's own plan, at a terminal:",
-      "    $ fffactory apply --profile factory",
+      "  Apply exactly this plan:",
+      "    $ fffactory apply --plan-id b00tstr4 --profile factory",
+      "  Then plan the factory:",
+      "    $ fffactory plan --profile factory",
     ]);
   });
 });
@@ -818,6 +822,7 @@ describe("a saved plan's refusal (plan-apply §Freshness)", () => {
     ],
     [{ kind: "state_changed" }, "the factory's Terraform state changed after it was planned"],
     [{ kind: "state_bucket_missing" }, "the state bucket no longer exists"],
+    [{ kind: "state_bucket_created" }, "the state bucket was created after it was planned"],
     [
       { kind: "inventory_unreadable", key },
       "the EC2 inventory could not be read to check that worker builder-1 is still stopped",
@@ -859,6 +864,19 @@ describe("a saved plan's refusal (plan-apply §Freshness)", () => {
       "  the factory's Terraform state changed after it was planned",
     ]);
     expect(lines.at(-1)).toBe("    $ fffactory plan --profile factory");
+  });
+
+  test("a stale bootstrap plan is refused like any other, with the bucket's reason", () => {
+    expect(shown(staleReport("b00tstr4", [{ kind: "state_bucket_created" }], {}))).toEqual([
+      "✖ Refusing to apply plan b00tstr4: it is no longer the plan to apply:",
+      "  the state bucket was created after it was planned",
+      "",
+      "Nothing was applied.",
+      "",
+      NEXT,
+      "  Review a new plan:",
+      "    $ fffactory plan",
+    ]);
   });
 
   test("a worker's Paseo state that changed refuses the plan", () => {

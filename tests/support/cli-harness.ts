@@ -69,6 +69,7 @@ export function harness(
       | "worker"
       | "interrupted"
       | "now"
+      | "randomBytes"
       | "sleep"
       | "compatibility"
     >

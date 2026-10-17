@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { newLockRecord } from "../../src/domain/factory-lock";
 import type { FactoryId, HostKey, Release } from "../../src/domain/instance";
 import {
+  BACKEND_STAGE,
   finishOperation,
   INFRASTRUCTURE_STAGE,
   operationKey,
@@ -60,6 +61,27 @@ describe("operation records", () => {
       failure: null,
     });
     expect(startOperation(LOCK, "k3x9q2ab").plan_id).toBe("k3x9q2ab");
+  });
+
+  test("of an apply that created the state bucket lead with the backend stage, applied", () => {
+    const bootstrapped = startOperation(LOCK, undefined, { bootstrapped: true });
+    expect(BACKEND_STAGE).toBe("backend");
+    expect(bootstrapped).toEqual({
+      ...startOperation(LOCK, undefined),
+      stages: [
+        { name: BACKEND_STAGE, status: "applied" },
+        { name: INFRASTRUCTURE_STAGE, status: "planning" },
+      ],
+    });
+    expect(startOperation(LOCK, undefined, { bootstrapped: false }).stages).toEqual([
+      { name: INFRASTRUCTURE_STAGE, status: "planning" },
+    ]);
+    // The backend stage keeps its status as the operation moves on or ends.
+    const applying = withStage(bootstrapped, INFRASTRUCTURE_STAGE, "applying", LATER);
+    expect(finishOperation(applying, "failed", END).stages).toEqual([
+      { name: BACKEND_STAGE, status: "applied" },
+      { name: INFRASTRUCTURE_STAGE, status: "applying" },
+    ]);
   });
 
   test("record each stage's progress, replacing the stage's status and adding a new stage", () => {
@@ -229,7 +251,7 @@ describe("operation records", () => {
   });
 
   test("finish with a stage still pending ended as the operation did, when it did not succeed", () => {
-    const upgrading = startOperation(LOCK, undefined, [PIN_STAGE]);
+    const upgrading = startOperation(LOCK, undefined, { pending: [PIN_STAGE] });
     for (const outcome of ["declined", "refused", "failed"] as const)
       expect(finishOperation(upgrading, outcome, END).stages).toEqual([
         { name: PIN_STAGE, status: outcome },
@@ -241,6 +263,22 @@ describe("operation records", () => {
       name: PIN_STAGE,
       status: "written",
     });
+  });
+
+  test("of a saved bootstrap plan's apply hold the applied backend stage alone, and its plan ID", () => {
+    const record = finishOperation(
+      startStageOperation(LOCK, BACKEND_STAGE, "applied", "b00tstr4"),
+      "succeeded",
+      END,
+    );
+    expect(record).toMatchObject({
+      plan_id: "b00tstr4",
+      status: "succeeded",
+      stages: [{ name: BACKEND_STAGE, status: "applied" }],
+      finished_at: END.toISOString(),
+      failure: null,
+    });
+    expect(startStageOperation(LOCK, "stop", "locating").plan_id).toBeNull();
   });
 
   test("are written as indented JSON", () => {
