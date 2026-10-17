@@ -146,6 +146,50 @@ control-plane operation stage is recorded as `reconciling`, then `reconciled`,
 `deferred` or `failed`, with one safe outcome per worker. It runs independently
 of dispatch scheduling.
 
+## The Paseo pin
+
+`assets/steps/control-plane/versions.env` pins `@getpaseo/cli` 0.11.4 with its
+npm registry integrity value. Setup downloads the package with `npm pack` as
+`factory`, refuses one whose integrity differs from the pin, installs it into
+`factory`'s npm prefix, and fails unless `paseo --version` then prints exactly
+the pinned version; a worker already reporting the pin is left alone. An
+existing worker reaches a new pin only through a release that carries it,
+applied by `fffactory upgrade` or `apply`: the release plans `paseo-package` and
+`service-definition`, both maintenance, so the
+[pre-activation deferral](#pre-activation-deferral) holds the rollout while
+agents may be active, and the restart that follows installation starts the new
+daemon.
+
+fffactory relies on these Paseo contracts, held by 0.11.4
+([#46](https://github.com/yaunder/fffactory/issues/46)):
+
+- The service runs `paseo daemon run --home /home/factory/.paseo`. With
+  `PASEO_PASSWORD` in its environment the daemon requires that password; a CLI
+  call sending a wrong one fails with `AUTH_FAILED`. 0.11.4 also writes a
+  per-run `local-credential` file into its home, removed when it stops, which a
+  CLI on the worker uses only when `PASEO_PASSWORD` is unset. fffactory's calls
+  go through `paseo-auth.sh` and always send the password.
+- `GET /api/health` answers `200` without a password, and the `Host` rule
+  of [§Release-owned installation](#release-owned-installation) is unchanged.
+- `paseo agent ls --json` prints a JSON array of the agents that are not
+  archived and sit in a workspace that is not archived, whatever their status.
+  Activity counts any entry as an active agent, so a worker is idle only when
+  the array is empty.
+- `paseo daemon reload` reloads the configuration without restarting.
+- 0.11.4 has no migration of Paseo's persisted state from 0.9.1: a 0.9.1 home's
+  `config.json` and schedules load unchanged. It needs the same Node.js 22
+  runtime.
+
+The daemon still downloads its local speech models at start: a background
+download of the speech-to-text and text-to-speech models into
+`~/.paseo/models/local-speech`, about 765 MB, that workers never use. Paseo
+supports turning it off: with `features.dictation.enabled` and
+`features.voiceMode.enabled` both `false` in `config.json` (or
+`PASEO_DICTATION_ENABLED` and `PASEO_VOICE_MODE_ENABLED` false in the daemon's
+environment) it requests no model and starts no download. The release sets
+neither yet: `paseo-config.sh` merges only the settings of
+[§Release-owned installation](#release-owned-installation).
+
 ## Layer mapping
 
 | Concern | Layer | Where |
