@@ -12,8 +12,10 @@ secret on the worker and writes it into the tool's own credential store, so
 the verifier, the dispatch gate, the Paseo daemon and the agents it launches
 all see the same login a human would have made. Decisions D1–D19 of
 [#55](https://github.com/yaunder/fffactory/issues/55); the recipes were
-characterized against the pinned gh 2.102.0, Codex 0.163.0, Claude Code
-2.1.302 and Paseo 0.11.4.
+characterized against gh 2.102.0 (not pinned: `packages.sh` installs whatever
+cli.github.com serves, and the recipe relies on its `auth status --json hosts`
+and `--active`) and the pinned Codex 0.163.0, Claude Code 2.1.302 and Paseo
+0.11.4.
 
 Logging in by hand keeps working. An account is delivered to a host when
 factory.json references its credential and the host does not list it in

@@ -143,9 +143,9 @@ and means what it did before: every account stays on a human's login.
 The host projection carries each host's delivered references
 ([host protocol §The host projection](host-protocol.md#the-host-projection)),
 and the hosts' role may read every reference set
-([provisioning §Terraform inputs](provisioning.md#terraform-inputs)). Nothing
-on the worker acts on them yet
-([#55](https://github.com/yaunder/fffactory/issues/55)).
+([provisioning §Terraform inputs](provisioning.md#terraform-inputs)). Each
+host's `credentials` install step delivers them
+([credential delivery](credential-delivery.md)).
 
 Validation rejects an unknown field under `credentials`, a raw secret value in
 any of them, an `interactive_logins` entry that is not one of the three account
