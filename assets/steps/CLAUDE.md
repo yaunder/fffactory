@@ -22,6 +22,8 @@ changed for another reason.
 - A step that still needs `jq` carries a `TODO(re-evaluate when …)` naming when to drop it.
 - `versions.env` and `plugins.json` are the only pins of the agent CLIs and Claude Code
   plugins: v1's originals in `agent-harness/` were deleted in #102.
+- `harness.sh` also writes Codex's root-owned `/etc/codex/requirements.toml` on every worker
+  (host-protocol.md §Agent pins); `tests/bootstrap/harness.test.sh` runs the real step.
 - `repositories/` holds the repository-sync program the repository stage runs over SSH, not an
   install step; its own CLAUDE.md has the rules.
 - `control-plane/` holds the Paseo control-plane step (install, verify, the config merge, the

@@ -428,8 +428,39 @@ reports it and the next apply repairs it. Nothing on this path uses SSM.
 | `packages` | Amazon Linux packages (Git, Git LFS, GCC, Make, jq, Node 22 and npm, Python 3.11, ...), Node 22 as the default, the GitHub CLI, and a checksum-verified ripgrep. |
 | `user` | The runtime account's `/workspace` directories, private `.codex` and `.claude`, login profile, npm prefix, and the system's Git defaults. |
 | `systemd` | `tailscaled.service` enabled and active. |
-| `harness` | Codex and Claude Code for `factory` at the versions and npm integrity values `versions.env` pins. |
+| `harness` | Codex's system requirements, then Codex and Claude Code for `factory` at the versions and npm integrity values `versions.env` pins ([Agent pins](#agent-pins)). |
 | `plugins` | The Claude Code plugins `plugins.json` pins, from marketplace checkouts at their pinned revisions; undeclared ones removed. |
+
+### Agent pins
+
+`steps/versions.env` pins Codex 0.163.0 and Claude Code 2.1.302, each with its
+npm registry integrity value. The `harness` step downloads each package with
+`npm pack` as `factory`, refuses one whose integrity differs from its pin, and
+installs both into `factory`'s npm prefix; agents already reporting their pins
+are left alone. Readiness's `agents` check compares the same pins
+([readiness](readiness.md)).
+
+Before installing, on every worker and whether or not any credential is
+delivered, the step writes `/etc/codex/requirements.toml`, root:root 0644 in a
+root:root 0755 `/etc/codex`, with exactly:
+
+```toml
+cli_auth_credentials_store = "file"
+check_for_update_on_startup = false
+[features]
+daemon_auto_start = false
+```
+
+Codex enforces its requirements file on every process, `codex app-server`
+(Paseo's launch path) included: neither `factory`'s `~/.codex/config.toml` nor
+`-c` overrides it, and `factory` cannot write it. Codex 0.163.0 turns
+`daemon_auto_start` on by default: a persistent server that keeps stale keys
+across sessions and carries an auto-updater that could move it off the pin.
+The file turns that off, stops the update check, and keeps credentials in the
+file store, since a headless worker has no keyring. The step writes it whole
+beside the target and renames it over whatever was there, resetting the
+directory's owner and mode, so a rerun leaves the same bytes. It holds no
+trust entries and no credential.
 
 ### Plugin installation
 
@@ -846,7 +877,11 @@ transport), `tests/domain/work-inspection.test.ts`,
 `tests/bootstrap/activator.test.sh`,
 `tests/assets/steps/steps.test.ts` (one script per shell step, parsing with
 `bash -n`, no marker polling, jq's re-evaluation markers, the plugin manifest
-valid, no SSM anywhere on the worker path), the container cases of
+valid, no SSM anywhere on the worker path), `tests/bootstrap/harness.test.sh`
+(the real `harness` step on Amazon Linux 2023 with agents already at their
+pins: Codex's requirements, their owner, mode and exact bytes, a rerun leaving
+them byte-identical, a factory-writable directory and file replaced, and the
+file written even when the install then fails), the container cases of
 `tests/bootstrap/host-apply.test.sh`, which run the real linux-x64 worker
 executable's `host apply` under the real activator on Amazon Linux 2023 over
 stand-in steps (`scripts/bootstrap-test.sh`), including `fffactory-admin`
@@ -859,4 +894,6 @@ or reaches a worker or tailnet.
 Introduced by [#100](https://github.com/yaunder/factory/issues/100); `apply`,
 `verify` and the host projection by
 [#101](https://github.com/yaunder/factory/issues/101); `work inspect` by
-[#9](https://github.com/yaunder/fffactory/issues/9).
+[#9](https://github.com/yaunder/fffactory/issues/9); the Codex 0.163.0 and
+Claude Code 2.1.302 pins and Codex's requirements by
+[#65](https://github.com/yaunder/fffactory/issues/65).
