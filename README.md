@@ -316,6 +316,8 @@ state, release or AWS account invalidates it: plan again. See [plan and apply](d
   including multiple workers and guided replacement.
 - [Portable execution and supervision](docs/designs/portable-execution.md) —
   a discussion draft for future execution backends.
+- [Open questions](docs/open-questions.md) — known gaps left open on purpose,
+  each with its trigger to revisit.
 
 v1 is frozen and its tooling has been removed. These instructions cover v2
 only; [decision 0002](docs/decisions/0002-fffactory-v2.md) records the transition.
