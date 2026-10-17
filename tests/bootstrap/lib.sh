@@ -47,6 +47,11 @@ digest_of() {
   printf '%s\n' "${line%% *}"
 }
 
+# digest_text TEXT: the SHA-256 of TEXT, without a final newline.
+digest_text() {
+  printf '%s' "$1" | sha256sum | cut -d' ' -f1
+}
+
 # pack DIR OUT: a release-shaped bundle of DIR, as the fffactory packer makes one: gzipped
 # ustar, regular files only, sorted, owner 0.
 pack() {

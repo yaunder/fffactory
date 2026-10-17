@@ -26,8 +26,9 @@ import { readVerification, type Verification, verificationFields } from "./readi
 const MINUTE_MS = 60_000;
 
 /**
- * The install steps (shell assets, then native TypeScript plugins), run in this order in one
- * process. Each is idempotent, so a rerun repairs what a failed one left.
+ * The install steps (shell assets, then the native TypeScript plugins and credentials steps),
+ * run in this order in one process. Each is idempotent, so a rerun repairs what a failed one
+ * left.
  */
 export const INSTALL_STEPS = [
   /** Amazon Linux packages, the GitHub CLI and ripgrep. */
@@ -40,8 +41,54 @@ export const INSTALL_STEPS = [
   { name: "harness", timeoutMs: 20 * MINUTE_MS },
   /** The pinned agent plugins. */
   { name: "plugins", timeoutMs: 15 * MINUTE_MS, implementation: "plugins" },
+  /** The API credentials delivered to the host, in each tool's own store. */
+  { name: "credentials", timeoutMs: 10 * MINUTE_MS, implementation: "credentials" },
 ] as const;
 export type StepName = (typeof INSTALL_STEPS)[number]["name"];
+
+/**
+ * The deadline of each login that takes delivered material (`gh auth login`, `codex login`);
+ * every other command of the credentials step has `CREDENTIAL_COMMAND_TIMEOUT_MS`
+ * (`docs/specs/credential-delivery.md`).
+ */
+export const CREDENTIAL_LOGIN_TIMEOUT_MS = 60_000;
+export const CREDENTIAL_COMMAND_TIMEOUT_MS = 30_000;
+
+/** The delivered Anthropic API key: `factory`'s own 0600 file, which the helper reads. */
+export const ANTHROPIC_KEY_FILE = "/home/factory/.config/fffactory/anthropic-api-key";
+
+/** fffactory's Claude Code API key helper: the command Claude Code runs, as `factory`, for the key. */
+export const ANTHROPIC_KEY_HELPER = `cat ${ANTHROPIC_KEY_FILE}`;
+
+/**
+ * Claude Code's root-owned managed settings, which name fffactory's helper while Anthropic is
+ * delivered, replacing whatever was there, and are removed when it is not only while they still
+ * name that helper (`namesKeyHelper`).
+ */
+export const CLAUDE_MANAGED_SETTINGS = "/etc/claude-code/managed-settings.json";
+
+/** The managed settings' text while Anthropic is delivered. */
+export const CLAUDE_MANAGED_SETTINGS_JSON = `${JSON.stringify({ apiKeyHelper: ANTHROPIC_KEY_HELPER }, null, 2)}\n`;
+
+/**
+ * Whether managed settings' `text` names fffactory's key helper (`apiKeyHelper` exactly
+ * `ANTHROPIC_KEY_HELPER`): only such a file is fffactory's. Text that is not a JSON object
+ * names none.
+ */
+export function namesKeyHelper(text: string): boolean {
+  let settings: unknown;
+  try {
+    settings = JSON.parse(text);
+  } catch {
+    return false;
+  }
+  return (
+    typeof settings === "object" &&
+    settings !== null &&
+    !Array.isArray(settings) &&
+    (settings as { apiKeyHelper?: unknown }).apiKeyHelper === ANTHROPIC_KEY_HELPER
+  );
+}
 
 /**
  * The verifiers' whole budget, after the steps: `host apply` fails an install whose

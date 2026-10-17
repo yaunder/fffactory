@@ -28,8 +28,8 @@ Each factory's secrets are its own (D5): their names begin with the factory
 ID, and each secret fffactory creates is tagged
 `fffactory:factory-id = <factory ID>` and `fffactory:managed-by = fffactory`.
 The hosts' IAM policy allows `secretsmanager:GetSecretValue` on exactly the
-workers' references factory.json declares, `tailscale.auth_key_secret` and
-`hosts[].paseo_password_secret`
+workers' references factory.json declares, `tailscale.auth_key_secret`,
+`hosts[].paseo_password_secret` and the `credentials.*_secret` it sets
 ([provisioning §Modules](provisioning.md#modules)); the worker bootstrap reads
 the Tailscale key by its ARN ([worker bootstrap](worker-bootstrap.md)).
 
@@ -47,9 +47,11 @@ and, like every other, does not check that a token or key works. Setting one
 again rotates it (below). Each host's projection carries the references
 delivered to it, and every host's shared role may read all three
 ([host protocol §The host projection](host-protocol.md#the-host-projection),
-[provisioning §Terraform inputs](provisioning.md#terraform-inputs)); the
-worker step that acts on them is not shipped yet
-([#55](https://github.com/yaunder/fffactory/issues/55)).
+[provisioning §Terraform inputs](provisioning.md#terraform-inputs)). On every
+`host apply`, each host's `credentials` install step reads the ones delivered
+to it with the instance role and writes each into its tool's own store; renew
+one with `secret set NAME`, then `fffactory apply`
+([credential delivery](credential-delivery.md)).
 
 ### The Tailscale admin client
 

@@ -376,10 +376,14 @@ login on every worker. To keep one worker on a human's login for an account
 whose credential is stored, list the account in that host's
 `interactive_logins`, such as `"interactive_logins": ["anthropic"]`.
 
-Delivery to workers is not shipped yet
-([#55](https://github.com/yaunder/fffactory/issues/55)): until it is, a worker
-receives only a stored credential's reference and does nothing with it, and
-every account still needs step 8's login.
+Every `fffactory apply` delivers each stored credential to the workers that do
+not keep its account on a human's login: the worker reads it with its own role
+and logs `gh` and Codex in as `factory`, and gives Claude Code a key file and a
+root-owned API key helper, with no prompt
+([credential delivery](docs/specs/credential-delivery.md)). Those accounts need
+no login in step 8. A credential that cannot be read, is empty, or that gh
+refuses fails the worker's install, naming the account: fix it with `secret set
+NAME` and apply again.
 
 ## 7. Bootstrap and provision
 
@@ -467,8 +471,9 @@ expected here: fffactory never enrolls an account.
 **Actor:** human: each login opens a browser or device-code flow. **Spec:**
 [readiness §Enrollment](docs/specs/readiness.md#enrollment).
 
-Run the steps apply's Next block printed for each pending account. They are, as
-`factory` on the worker:
+Run the steps apply's Next block printed for each pending account. An account
+delivered as an API credential ([step 6](#deliver-api-credentials-optional)) was
+enrolled by apply and needs none of them. They are, as `factory` on the worker:
 
 ```bash
 tailscale ssh factory@HOSTNAME
@@ -667,6 +672,31 @@ agents may be active`, stays on its complete current release, and apply exits
 2. Close the active agents on HOSTNAME, then rerun `fffactory apply`. Live
 changes such as the dispatch schedule or repositories never restart Paseo
 ([control plane §Pre-activation deferral](docs/specs/control-plane.md#pre-activation-deferral)).
+
+### Renew or remove an API credential
+
+To rotate a delivered GitHub token or API key, store the new value, then apply:
+
+```bash
+fffactory secret set github-token --profile NAME   # or anthropic-api-key, openai-api-key
+fffactory plan --profile NAME
+fffactory apply --plan-id ID --profile NAME
+```
+
+No Paseo restart is needed. GitHub uses the new token at once; Codex and Claude
+Code agents started after the apply use the new key, and running Claude Code
+agents pick it up on a 401 or within 5 minutes. Keep the old value valid until
+the agents running at the apply have finished, then revoke it
+([credential delivery §Renewal](docs/specs/credential-delivery.md#renewal)).
+
+To stop delivering one, remove its `credentials.*_secret` from factory.json (or,
+for one worker, list the account in that host's `interactive_logins`) and
+apply. Claude Code's key file, and its managed settings while they name
+fffactory's key helper, are removed, so the worker returns to a human's Claude
+Code login; managed settings of anyone else's are kept. The gh and Codex logins stay until you log out
+on the worker as `factory` (`gh auth logout --hostname github.com`, `codex
+logout`) and log in by hand as in [step 8](#8-enroll-the-workers-accounts)
+([credential delivery §Removal](docs/specs/credential-delivery.md#removal)).
 
 ### Upgrade the factory
 

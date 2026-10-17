@@ -18,5 +18,8 @@ temporary directories by `worker-scenarios.ts`, never the real `/`.
 - `plugins.test.ts` exercises native plugin installation and verification with local
   metadata and a scripted process runner, including unversioned marketplace entries,
   exact commit/version/content checks, drift repair and undeclared plugin removal.
+- `credentials.test.ts` runs the `credentials` step over a scripted runner, Secrets Manager
+  answered by ARN: it asserts each command, deadline and standard input, and searches every
+  argument, environment value and log line for the material it used.
 - `verify.test.ts` answers every command with a scripted runner; `inspect.test.ts` covers the
   unprivileged read-only inspection.

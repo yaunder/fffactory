@@ -55,7 +55,7 @@ const WORKER_PATH = [
 describe("the install steps", () => {
   test("are one script per shell install step, in the release's steps directory", () => {
     expect(SCRIPTS).toEqual(
-      INSTALL_STEPS.filter(({ name }) => name !== "plugins")
+      INSTALL_STEPS.filter((step) => !("implementation" in step))
         .map(({ name }) => `${name}.sh`)
         .sort(),
     );

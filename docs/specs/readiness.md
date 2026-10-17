@@ -51,7 +51,16 @@ and found no credential, `unknown` when it could not run (the tool is missing,
 | --- | --- | --- | --- |
 | `github` | GitHub | `gh auth status --hostname github.com` | Authenticate GitHub as factory on HOST: `tailscale ssh factory@HOST`, then `gh auth login --hostname github.com --git-protocol https --web`, then `gh auth status` |
 | `openai` | OpenAI Codex | `codex login status` | Log in to OpenAI Codex as factory on HOST: `tailscale ssh factory@HOST`, then `codex login --device-auth`, then `codex login status` |
-| `anthropic` | Claude Code | `claude auth status` | Log in to Claude Code as factory on HOST: `tailscale ssh factory@HOST`, then `claude auth login`, then `claude auth status` |
+| `anthropic` | Claude Code | `claude auth status`, and, while Claude Code's managed settings name fffactory's API key helper, `test -r KEY -a -s KEY` for its key file | Log in to Claude Code as factory on HOST: `tailscale ssh factory@HOST`, then `claude auth login`, then `claude auth status` |
+
+An account can also be enrolled by delivering its API credential, which the
+`credentials` install step writes into the tool's own store on every apply
+([credential delivery](credential-delivery.md)); the checks above are the same
+either way. `claude auth status` passes on a configured helper without running
+it, even with its key missing, so while `/etc/claude-code/managed-settings.json`
+names fffactory's helper (`cat /home/factory/.config/fffactory/anthropic-api-key`),
+`anthropic` is `enrolled` only when `factory` can also read a non-empty key file
+there, and `pending` otherwise; a helper check that cannot run is `unknown`.
 
 Each summary ends "(tailnet SSH policy must let you log in as `factory`)". A
 next action is structured (`enrollmentNextAction`): a `summary`, the `login`
@@ -156,9 +165,13 @@ never read, additions ignored), `tests/cli/presentation/workers.test.ts` and
 `tests/cli/presentation/apply.test.ts` (apply's enrollment steps from a
 `WorkerEnrollment`, the login and its requirement once per worker, then the
 return, apply and status), `tests/host/verify.test.ts` (including a worker
-the real verifier finds healthy and fully enrolled judged ready by status), `tests/domain/status.test.ts` and
+the real verifier finds healthy and fully enrolled judged ready by status, and
+fffactory's Claude Code helper with its key file missing or empty pending), `tests/domain/status.test.ts` and
 `tests/cli/status.test.ts` (enrollment pending with exact steps, in text and
 JSON), and the container cases of `tests/bootstrap/host-apply.test.sh`
-(pending, then enrolled once the stand-in `gh` is).
+(pending, then enrolled once the stand-in `gh` is) and of
+`tests/bootstrap/credentials.test.sh` (every account enrolled by delivery, and
+Anthropic pending once its key file is emptied).
 
-Introduced by [#101](https://github.com/yaunder/factory/issues/101).
+Introduced by [#101](https://github.com/yaunder/factory/issues/101); the Anthropic key-file
+check by [#69](https://github.com/yaunder/fffactory/issues/69).

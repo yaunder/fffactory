@@ -291,7 +291,7 @@ sudo -n /usr/local/libexec/fffactory-activate /home/fffactory-admin/fffactory-re
    ([worker bootstrap §Activator](worker-bootstrap.md#activator)). The host
    projection is streamed on standard input, which the activator passes to
    `host apply`. The CLI waits for every step's timeout plus verification and
-   five minutes (`ACTIVATION_TIMEOUT_MS`, 72 minutes).
+   five minutes (`ACTIVATION_TIMEOUT_MS`, 82 minutes).
 
 ### The host projection
 
@@ -322,9 +322,9 @@ API credentials delivered to the host
 ([instance configuration §API credentials](instance-configuration.md#api-credentials),
 `deliveredAccounts`): each `credentials.*_secret` factory.json sets whose
 account the host does not list in `interactive_logins`, under the same field
-name, in this order. It is absent when none is delivered, never empty. Nothing
-on the worker acts on them yet
-([#55](https://github.com/yaunder/fffactory/issues/55)). The projection holds
+name, in this order. It is absent when none is delivered, never empty. The
+`credentials` install step reads them on the worker and delivers each to its
+tool ([credential delivery](credential-delivery.md)). The projection holds
 no secret material, and never appears in an argument, a plan or a log.
 `release` is the release factory.json pins, which the CLI/pin match guard makes
 the running one's. No other factory-wide reference is projected: the worker
@@ -399,7 +399,7 @@ No arguments: the activator passes none. In order, it:
    renamed over `/opt/fffactory/current`, so the link is never absent or half
    made. From here the requested release is active, healthy or not.
 5. **Runs the install steps** in order, in this one process: `packages`,
-   `user`, `systemd`, `harness`, `plugins` (`INSTALL_STEPS`,
+   `user`, `systemd`, `harness`, `plugins`, `credentials` (`INSTALL_STEPS`,
    `domain/installation.ts`). The first four run `/bin/bash <release>/steps/<name>.sh` as
    root with their own timeouts and only `PATH`, `HOME=/root`, `LANG` and its
    inputs in the environment: `FFFACTORY_RELEASE`, `FFFACTORY_STEPS` (the
@@ -414,8 +414,11 @@ No arguments: the activator passes none. In order, it:
    rewritten after each step. It **stops at the first step that fails** (a
    non-zero exit, its timeout, or bash missing or not starting); the later
    steps stay `not_run`. Nothing waits for or polls a marker file: the process
-   orders the steps. The final `plugins` step runs in TypeScript inside the same
-   install lock and record, with its own command budget and log as described below.
+   orders the steps. The `plugins` and `credentials` steps run in TypeScript
+   inside the same install lock and record, each with its own command budget and
+   log: `plugins` as described below, `credentials` as
+   [credential delivery](credential-delivery.md) describes, given the
+   projection's `credentials` references.
 6. **Verifies**, once every step succeeded: the verifiers of `host verify`, in
    process ([verify](#verify)), within `VERIFY_TIMEOUT_MS` (5 minutes);
    verification that takes longer fails the install.
@@ -452,6 +455,7 @@ reports it and the next apply repairs it. Nothing on this path uses SSM.
 | `systemd` | `tailscaled.service` enabled and active. |
 | `harness` | Codex's system requirements, then Codex and Claude Code for `factory` at the versions and npm integrity values `versions.env` pins ([Agent pins](#agent-pins)). |
 | `plugins` | The Claude Code plugins `plugins.json` pins, from marketplace checkouts at their pinned revisions; undeclared ones removed. |
+| `credentials` | The API credentials delivered to the host, read from Secrets Manager with the instance role and written to each tool's own store, the material only on standard input; Claude Code's key file, and its managed settings while they name fffactory's API key helper, removed when Anthropic is not delivered ([credential delivery](credential-delivery.md)). |
 
 ### Agent pins
 
@@ -539,7 +543,8 @@ Tests: `tests/host/plugins.test.ts`, the native step cases in
     { "name": "user", "status": "succeeded", "reason": null },
     { "name": "systemd", "status": "succeeded", "reason": null },
     { "name": "harness", "status": "failed", "reason": "exited with status 1" },
-    { "name": "plugins", "status": "not_run", "reason": null }
+    { "name": "plugins", "status": "not_run", "reason": null },
+    { "name": "credentials", "status": "not_run", "reason": null }
   ],
   "verification": null,
   "failure": null
@@ -837,6 +842,7 @@ yet refuses too: the CLI cannot tell it from one the worker missed.
 | Worker | `src/host/inspect.ts` | `workerInspector` over a `WorkerSystem` (root, process runner, hostname, machine, free space); `localWorkerSystem`. |
 | Worker | `src/host/apply.ts` | `workerApplier` over an `ApplySystem` (a `WorkerSystem` with the clock, privilege, standard input, release and install lock): the steps, their logs and the record. |
 | Worker | `src/host/install-lock.ts` | `flockExclusive`: the install lock over `flock(2)`, through libc. |
+| Worker | `src/host/credentials.ts` | `workerCredentials`: the `credentials` install step ([credential delivery](credential-delivery.md)). |
 | Worker | `src/host/verify.ts` | `workerVerifier`: the verifiers and enrollment checks. |
 | Worker | `src/host/dispatch.ts` | Dispatch adoption, installation, reconciliation and checked observation, with privilege drop. |
 | Worker | `src/host/work.ts` | `workerWork`: the work inspection, over the worker's working trees, as `factory`, read-only. |
@@ -869,7 +875,10 @@ timeout, every refusal changing nothing, and reading standard input to its
 limit. `tests/host/install-lock.test.ts` (one holder at a time, across
 processes, never inherited). `tests/host/verify.test.ts` (each check passing and failing,
 each enrollment state, factory's commands through `runuser` and `env -i`, no
-tool output in the document). `tests/domain/host-projection.test.ts`,
+tool output in the document, the Anthropic key-file check).
+`tests/host/credentials.test.ts`, the native credentials step in
+`tests/host/apply.test.ts` and `tests/bootstrap/credentials.test.sh` (the
+`credentials` step, [credential delivery](credential-delivery.md)). `tests/domain/host-projection.test.ts`,
 `tests/domain/installation.test.ts`, `tests/domain/readiness.test.ts`,
 `tests/domain/rollout.test.ts` (every outcome; an answer for another worker or
 release; a busy worker skipped; a new worker's first boot), `tests/domain/host-protocol.test.ts` (every
@@ -920,4 +929,5 @@ Introduced by [#100](https://github.com/yaunder/factory/issues/100); `apply`,
 Claude Code 2.1.302 pins and Codex's requirements by
 [#65](https://github.com/yaunder/fffactory/issues/65); the projection's
 credential references and the control-plane part's digest by
-[#68](https://github.com/yaunder/fffactory/issues/68).
+[#68](https://github.com/yaunder/fffactory/issues/68); the `credentials` step by
+[#69](https://github.com/yaunder/fffactory/issues/69).

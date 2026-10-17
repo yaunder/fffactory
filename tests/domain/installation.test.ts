@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import {
   ACTIVATION_TIMEOUT_MS,
+  ANTHROPIC_KEY_HELPER,
+  CLAUDE_MANAGED_SETTINGS_JSON,
   failedStep,
   type HostApplyRecord,
   hostApplyJson,
@@ -8,6 +10,7 @@ import {
   installationFields,
   installationOf,
   installState,
+  namesKeyHelper,
   parseHostApply,
   pendingSteps,
   REFUSALS,
@@ -52,8 +55,15 @@ function record(overrides: Partial<HostApplyRecord> = {}): HostApplyRecord {
 }
 
 describe("the install steps (host protocol §apply)", () => {
-  test("run packages, user, systemd, harness, then plugins", () => {
-    expect(succeeded()).toEqual(["packages", "user", "systemd", "harness", "plugins"]);
+  test("run packages, user, systemd, harness, plugins, then credentials", () => {
+    expect(succeeded()).toEqual([
+      "packages",
+      "user",
+      "systemd",
+      "harness",
+      "plugins",
+      "credentials",
+    ]);
     expect(pendingSteps().every((step) => step.status === "not_run")).toBe(true);
   });
 
@@ -251,5 +261,24 @@ describe("reading the activator's answer", () => {
       kind: "no_result",
       reason: "host apply answered in host protocol version 2; this fffactory speaks version 1",
     });
+  });
+});
+
+describe("Claude Code's managed settings (credential delivery §Removal)", () => {
+  test("name fffactory's helper only when apiKeyHelper is exactly it", () => {
+    expect(namesKeyHelper(CLAUDE_MANAGED_SETTINGS_JSON)).toBe(true);
+    expect(namesKeyHelper(JSON.stringify({ apiKeyHelper: ANTHROPIC_KEY_HELPER, model: "x" }))).toBe(
+      true,
+    );
+    for (const text of [
+      JSON.stringify({ apiKeyHelper: "/usr/local/bin/org-key" }),
+      JSON.stringify({ apiKeyHelper: ` ${ANTHROPIC_KEY_HELPER}` }),
+      JSON.stringify({ permissions: { deny: ["WebFetch"] } }),
+      JSON.stringify([ANTHROPIC_KEY_HELPER]),
+      "null",
+      "",
+      "not json",
+    ])
+      expect(namesKeyHelper(text)).toBe(false);
   });
 });
