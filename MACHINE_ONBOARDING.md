@@ -332,6 +332,54 @@ Paseo password: its daemon keeps the password it started with until Paseo
 restarts, while fffactory's own Paseo calls read the new value at once, and
 fffactory has no way yet to restart Paseo onto a rotated password.
 
+### Deliver API credentials (optional)
+
+**Actor:** human: the values are typed at hidden prompts. **Specs:**
+[secrets §The API credentials](docs/specs/secrets.md#the-api-credentials),
+[instance configuration §API credentials](docs/specs/instance-configuration.md#api-credentials).
+
+A worker's three accounts can be supplied as API credentials instead of a
+human's login in [step 8](#8-enroll-the-workers-accounts). Each is optional and
+factory-wide:
+
+| Account | `NAME` | What to create |
+| --- | --- | --- |
+| `github` | `github-token` | A GitHub token for `gh` and git (below). |
+| `anthropic` | `anthropic-api-key` | An Anthropic API key, for Claude Code. |
+| `openai` | `openai-api-key` | An OpenAI API key, for Codex. |
+
+```bash
+fffactory secret set github-token --profile NAME
+fffactory secret set anthropic-api-key --profile NAME
+fffactory secret set openai-api-key --profile NAME
+fffactory validate
+```
+
+Each is stored as `FACTORY_ID/NAME` and referenced from
+`credentials.github_token_secret`, `credentials.anthropic_api_key_secret` or
+`credentials.openai_api_key_secret`. fffactory does not check that a token or
+key works.
+
+For the GitHub token, create either:
+
+- a fine-grained personal access token owned by the organization, with
+  repository permissions Metadata read, Contents read and write (and Workflows
+  read and write to push workflow files), and Issues and Pull requests read and
+  write. The organization must allow fine-grained tokens. They expire: plan
+  their rotation; or
+- a classic personal access token with the `repo` and `read:org` scopes (and
+  `workflow` to push workflow files).
+
+Logging in by hand keeps working, for example to use a coding agent's
+subscription plan. An account with no credential stored stays on a human's
+login on every worker. To keep one worker on a human's login for an account
+whose credential is stored, list the account in that host's
+`interactive_logins`, such as `"interactive_logins": ["anthropic"]`.
+
+Delivery to workers is not shipped yet
+([#55](https://github.com/yaunder/fffactory/issues/55)): until it is, a stored
+credential reaches no worker, and every account still needs step 8's login.
+
 ## 7. Bootstrap and provision
 
 **Actor:** human: the first apply asks for two approvals at a terminal. Or an

@@ -137,6 +137,55 @@ describe("fffactory secret set", () => {
     expect(store.writes).toEqual([]);
   });
 
+  test.each([
+    ["github-token", "github_token_secret", "GitHub token"],
+    ["anthropic-api-key", "anthropic_api_key_secret", "Anthropic API key"],
+    ["openai-api-key", "openai_api_key_secret", "OpenAI API key"],
+  ])("stores the API credential %s and writes only its ARN", async (name, field, what) => {
+    const prompt = fakePrompt({ interactive: true, answers: [VALUE, VALUE] });
+    const { context, out, err, store, secrets, everything } = setup({ prompt });
+    const arn = `arn:aws:secretsmanager:eu-west-2:123456789012:secret:fff-abcd1234/${name}-AbCdEf`;
+    expect(await run(["secret", "set", name], context)).toBe(0);
+    expect(err).toEqual([]);
+    expect(prompt.hidden).toEqual([`${what} of factory fff-abcd1234 (input is hidden): `]);
+    expect(out.slice(1)).toEqual([
+      `Stored the ${what} of factory fff-abcd1234 in Secrets Manager as fff-abcd1234/${name} (a new secret).`,
+      `credentials.${field} now refers to it: ${arn}`,
+    ]);
+    expect(JSON.parse(store.files[PATH] ?? "").credentials).toEqual({ [field]: arn });
+    out.length = 0;
+    expect(await run(["secret", "set", name], context)).toBe(0);
+    expect(out.slice(1)).toEqual([
+      `Stored the ${what} of factory fff-abcd1234 in Secrets Manager as fff-abcd1234/${name} (a new value).`,
+      `credentials.${field} already referred to it: ${arn}`,
+    ]);
+    expect(secrets.writes.map(({ value }) => value)).toEqual([VALUE, VALUE]);
+    expect(everything()).not.toContain(VALUE);
+  });
+
+  test.each(["github-token", "anthropic-api-key", "openai-api-key"])(
+    "refuses --host for the API credential %s",
+    async (name) => {
+      const { context, err, secrets, store } = setup();
+      expect(await run(["secret", "set", name, "--host", "builder-1"], context)).toBe(1);
+      expect(err).toEqual([
+        `fffactory secret set: ${name} belongs to the whole factory and takes no --host`,
+      ]);
+      expect(secrets.writes).toEqual([]);
+      expect(store.writes).toEqual([]);
+    },
+  );
+
+  test("refuses an unknown name, never echoed, listing the six it takes", async () => {
+    const { context, err, everything } = setup();
+    expect(await run(["secret", "set", VALUE], context)).toBe(1);
+    expect(err).toEqual([
+      "fffactory secret set: unknown secret name; expected tailscale-auth-key, " +
+        "tailscale-admin-client, paseo-password, github-token, anthropic-api-key or openai-api-key",
+    ]);
+    expect(everything()).not.toContain(VALUE);
+  });
+
   test("stores a host's Paseo password", async () => {
     const { context, out } = setup();
     expect(await run(["secret", "set", "paseo-password", "--host", "builder-1"], context)).toBe(0);
@@ -145,6 +194,12 @@ describe("fffactory secret set", () => {
 
   test.each([
     ["the value as an extra argument", ["secret", "set", "tailscale-auth-key", VALUE]],
+    ...["github-token", "anthropic-api-key", "openai-api-key"].map(
+      (name) => [`the value after ${name}`, ["secret", "set", name, VALUE]] as const,
+    ),
+    ...["github-token", "anthropic-api-key", "openai-api-key"].map(
+      (name) => [`the value as ${name}'s host`, ["secret", "set", name, "--host", VALUE]] as const,
+    ),
     ["the value in place of the name", ["secret", "set", VALUE]],
     ["the value as an unknown option", ["secret", "set", "tailscale-auth-key", `--${VALUE}`]],
     ["the value as an option's value", ["secret", "set", `--key=${VALUE}`]],
@@ -259,6 +314,14 @@ describe("fffactory secret set", () => {
     );
     expect(help.out).toContain("  tailscale-admin-client");
     expect(help.out.join("\n")).toContain("(tailscale.admin_client_secret)");
+    for (const [name, field] of [
+      ["github-token", "credentials.github_token_secret"],
+      ["anthropic-api-key", "credentials.anthropic_api_key_secret"],
+      ["openai-api-key", "credentials.openai_api_key_secret"],
+    ]) {
+      expect(help.out).toContain(`  ${name}`);
+      expect(help.out.join("\n")).toContain(`(${field})`);
+    }
   });
 });
 
@@ -280,42 +343,51 @@ describe("fffactory secret set, spawned with the real SDK against local stubs", 
     await rm(scratch, { recursive: true, force: true });
   });
 
-  test("the secret reaches Secrets Manager and never stdout, stderr, argv or factory.json", async () => {
-    sts = stubSts({
-      kind: "caller",
-      account: "123456789012",
-      arn: "arn:aws:sts::123456789012:assumed-role/FactoryAdmin/operator",
-    });
-    secretsManager = stubSecretsManager();
-    const instance = join(scratch, "factory.json");
-    await writeFile(instance, `${JSON.stringify(DOCUMENT, null, 2)}\n`);
-    const credentials = join(scratch, "credentials");
-    await writeFile(
-      credentials,
-      `[default]\naws_access_key_id = ${EXAMPLE_CREDENTIALS.accessKeyId}\n` +
-        `aws_secret_access_key = ${EXAMPLE_CREDENTIALS.secretAccessKey}\n`,
-    );
-    const args = ["secret", "set", "tailscale-auth-key", "--instance", instance];
-    const result = await spawnCli(args, {
-      cwd: scratch,
-      env: {
-        PATH: process.env.PATH ?? "",
-        HOME: scratch,
-        ...isolatedAwsEnvironment(scratch),
-        AWS_SHARED_CREDENTIALS_FILE: credentials,
-        AWS_ENDPOINT_URL_STS: sts.endpoint,
-        AWS_ENDPOINT_URL_SECRETS_MANAGER: secretsManager.endpoint,
-      },
-      stdin: `${VALUE}\n`,
-    });
-    expect(result.stderr).toBe("");
-    expect(result.code).toBe(0);
-    expect(result.stdout).toContain(`tailscale.auth_key_secret now refers to it: ${ARN}`);
-    expect(secretsManager.secrets.get("fff-abcd1234/tailscale-auth-key")).toEqual([VALUE]);
-    const written = await readFile(instance, "utf8");
-    expect(JSON.parse(written).tailscale.auth_key_secret).toBe(ARN);
-    for (const output of [result.stdout, result.stderr, written, args.join(" ")])
-      expect(output).not.toContain(VALUE);
-    expect(sts.requests).toHaveLength(1);
-  });
+  test.each([
+    ["tailscale-auth-key", "tailscale", "auth_key_secret"],
+    ["github-token", "credentials", "github_token_secret"],
+    ["anthropic-api-key", "credentials", "anthropic_api_key_secret"],
+    ["openai-api-key", "credentials", "openai_api_key_secret"],
+  ])(
+    "%s reaches Secrets Manager and never stdout, stderr, argv or factory.json",
+    async (name, section, field) => {
+      sts = stubSts({
+        kind: "caller",
+        account: "123456789012",
+        arn: "arn:aws:sts::123456789012:assumed-role/FactoryAdmin/operator",
+      });
+      secretsManager = stubSecretsManager();
+      const instance = join(scratch, `${name}.json`);
+      await writeFile(instance, `${JSON.stringify(DOCUMENT, null, 2)}\n`);
+      const credentials = join(scratch, "credentials");
+      await writeFile(
+        credentials,
+        `[default]\naws_access_key_id = ${EXAMPLE_CREDENTIALS.accessKeyId}\n` +
+          `aws_secret_access_key = ${EXAMPLE_CREDENTIALS.secretAccessKey}\n`,
+      );
+      const args = ["secret", "set", name, "--instance", instance];
+      const result = await spawnCli(args, {
+        cwd: scratch,
+        env: {
+          PATH: process.env.PATH ?? "",
+          HOME: scratch,
+          ...isolatedAwsEnvironment(scratch),
+          AWS_SHARED_CREDENTIALS_FILE: credentials,
+          AWS_ENDPOINT_URL_STS: sts.endpoint,
+          AWS_ENDPOINT_URL_SECRETS_MANAGER: secretsManager.endpoint,
+        },
+        stdin: `${VALUE}\n`,
+      });
+      const arn = `arn:aws:secretsmanager:eu-west-2:123456789012:secret:fff-abcd1234/${name}-AbCdEf`;
+      expect(result.stderr).toBe("");
+      expect(result.code).toBe(0);
+      expect(result.stdout).toContain(`${section}.${field} now refers to it: ${arn}`);
+      expect(secretsManager.secrets.get(`fff-abcd1234/${name}`)).toEqual([VALUE]);
+      const written = await readFile(instance, "utf8");
+      expect(JSON.parse(written)[section][field]).toBe(arn);
+      for (const output of [result.stdout, result.stderr, written, args.join(" ")])
+        expect(output).not.toContain(VALUE);
+      expect(sts.requests).toHaveLength(1);
+    },
+  );
 });

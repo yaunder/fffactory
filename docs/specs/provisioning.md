@@ -275,7 +275,7 @@ resource's own name (`src/domain/resource-naming.ts`):
 | Host root volume | `Name` tag `<id>-<host key>-root` |
 | State bucket | `state_backend.bucket`, which must start with `<id>-` ([instance configuration](instance-configuration.md#state-bucket)) |
 | Factory-wide lock, its break log | Objects `<id>-lock.json` and `<id>-lock-log/…` in the state bucket ([Lock](#lock)) |
-| Secrets `fffactory secret set` creates | `<id>/tailscale-auth-key`, `<id>/tailscale-admin-client`, `<id>/<host key>/paseo-password`: Secrets Manager names are paths, as in `examples/factory.json` ([secrets](secrets.md)) |
+| Secrets `fffactory secret set` creates | `<id>/tailscale-auth-key`, `<id>/tailscale-admin-client`, `<id>/<host key>/paseo-password`, `<id>/github-token`, `<id>/anthropic-api-key`, `<id>/openai-api-key`: Secrets Manager names are paths, as in `examples/factory.json` ([secrets](secrets.md)) |
 
 The AWS provider's default tags put `fffactory:factory-id = <id>` and
 `fffactory:managed-by = fffactory` on every taggable resource; a host's

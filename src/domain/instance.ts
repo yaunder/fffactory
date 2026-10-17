@@ -136,6 +136,8 @@ export const CREDENTIAL_SECRET_FIELDS = {
   anthropic: "anthropic_api_key_secret",
   openai: "openai_api_key_secret",
 } as const satisfies Record<EnrollmentId, keyof NonNullable<FactoryInstance["credentials"]>>;
+export type CredentialSecretField =
+  (typeof CREDENTIAL_SECRET_FIELDS)[keyof typeof CREDENTIAL_SECRET_FIELDS];
 
 const ACCOUNT_IDS: readonly string[] = ENROLLMENTS.map(({ id }) => id);
 const isAccountId = (value: string) => ACCOUNT_IDS.includes(value);
