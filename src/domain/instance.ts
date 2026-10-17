@@ -14,6 +14,7 @@ import {
   ROOT,
   text,
 } from "./validation";
+import { ENROLLMENTS, type EnrollmentId } from "./readiness";
 import { carriesFactoryId } from "./resource-naming";
 
 export type { Issue } from "./validation";
@@ -80,6 +81,8 @@ export interface Host {
   readonly paseo_password_secret?: SecretReference;
   readonly repositories?: readonly string[];
   readonly dispatch?: DispatchSettings;
+  /** Accounts kept on a human's login on this host: their references are not delivered to it. */
+  readonly interactive_logins?: readonly EnrollmentId[];
 }
 
 export interface Repository {
@@ -110,6 +113,12 @@ export interface FactoryInstance {
     /** The operator-only OAuth client (`devices:core`) that deletes devices; never a worker's. */
     readonly admin_client_secret?: SecretReference;
   };
+  /** Factory-wide API credentials, delivered to every host that does not keep a human login. */
+  readonly credentials?: {
+    readonly github_token_secret?: SecretReference;
+    readonly anthropic_api_key_secret?: SecretReference;
+    readonly openai_api_key_secret?: SecretReference;
+  };
   readonly repositories?: readonly Repository[];
   readonly hosts?: readonly Host[];
 }
@@ -120,6 +129,16 @@ export const TAILSCALE_SECRET_FIELDS = [
   "admin_client_secret",
 ] as const satisfies readonly (keyof NonNullable<FactoryInstance["tailscale"]>)[];
 export type TailscaleSecretField = (typeof TAILSCALE_SECRET_FIELDS)[number];
+
+/** Each account's credential reference field under factory.json's `credentials`. */
+export const CREDENTIAL_SECRET_FIELDS = {
+  github: "github_token_secret",
+  anthropic: "anthropic_api_key_secret",
+  openai: "openai_api_key_secret",
+} as const satisfies Record<EnrollmentId, keyof NonNullable<FactoryInstance["credentials"]>>;
+
+const ACCOUNT_IDS: readonly string[] = ENROLLMENTS.map(({ id }) => id);
+const isAccountId = (value: string) => ACCOUNT_IDS.includes(value);
 
 const OCTET = String.raw`(25[0-5]|2[0-4]\d|1\d\d|0?\d?\d)`;
 /** Same rule as the schema's CIDR pattern: octets 0-255, prefix 0-32 without a leading zero. */
@@ -145,6 +164,7 @@ const hostRule = object(
     root_volume_gib: integer(8, 16384),
     paseo_password_secret: secretReference,
     repositories: arrayOf(repositoryKey),
+    interactive_logins: arrayOf(text(isAccountId, `must be one of ${ACCOUNT_IDS.join(", ")}`)),
     dispatch: object({
       enabled: boolean,
       cron: nonEmptyText,
@@ -205,6 +225,11 @@ const documentRule = object(
       auth_key_secret: secretReference,
       admin_client_secret: secretReference,
     }),
+    credentials: object(
+      Object.fromEntries(
+        Object.values(CREDENTIAL_SECRET_FIELDS).map((field) => [field, secretReference]),
+      ),
+    ),
     repositories: arrayOf(repositoryRule),
     hosts: arrayOf(hostRule),
   },
@@ -257,10 +282,27 @@ function checkPlacement(host: KeyedEntry, declared: Set<string>, issues: Issue[]
   });
 }
 
+/** A host lists each account it keeps on interactive login at most once. */
+function checkInteractiveLogins(host: Record<string, unknown>, hostPath: string, issues: Issue[]) {
+  const logins = host.interactive_logins;
+  if (!Array.isArray(logins)) return;
+  const listPath = fieldPath(hostPath, "interactive_logins");
+  const accounts = logins.flatMap((account, index) =>
+    typeof account === "string" && isAccountId(account)
+      ? [{ key: account, path: itemPath(listPath, index) }]
+      : [],
+  );
+  duplicateKeys(accounts, (account) => `duplicates account "${account}"`, issues);
+}
+
 function checkHosts(document: Record<string, unknown>, declared: Set<string>, issues: Issue[]) {
   const hosts = wellFormedEntries(document.hosts, "hosts", "key", isHostKey);
   duplicateKeys(hosts, (key) => `duplicates host key "${key}"`, issues);
   for (const host of hosts) checkPlacement(host, declared, issues);
+  if (Array.isArray(document.hosts))
+    document.hosts.forEach((host, index) => {
+      if (isRecord(host)) checkInteractiveLogins(host, itemPath("hosts", index), issues);
+    });
 }
 
 /** The state bucket's name carries the factory ID, as every factory resource name does. */
@@ -285,10 +327,16 @@ function nested(document: Record<string, unknown>, parent: string, field: string
 
 /** Every secret field that holds a well-formed ARN, by field path. */
 function secretFields(document: Record<string, unknown>): { path: string; arn: string }[] {
-  const fields = TAILSCALE_SECRET_FIELDS.map((field) => ({
-    path: fieldPath("tailscale", field),
-    arn: nested(document, "tailscale", field),
-  }));
+  const fields = [
+    ...TAILSCALE_SECRET_FIELDS.map((field) => ({
+      path: fieldPath("tailscale", field),
+      arn: nested(document, "tailscale", field),
+    })),
+    ...Object.values(CREDENTIAL_SECRET_FIELDS).map((field) => ({
+      path: fieldPath("credentials", field),
+      arn: nested(document, "credentials", field),
+    })),
+  ];
   if (Array.isArray(document.hosts))
     document.hosts.forEach((host, index) => {
       if (!isRecord(host)) return;
@@ -316,6 +364,29 @@ function checkSecretPlacement(document: Record<string, unknown>, issues: Issue[]
     if (typeof account === "string" && ACCOUNT_ID.test(account) && arnAccount !== account)
       issues.push({ path, message: "must be a secret in the factory account, aws.account_id" });
   }
+}
+
+/** An account whose credential factory.json's reference delivers to one host. */
+export interface DeliveredAccount {
+  readonly id: EnrollmentId;
+  readonly secret: SecretReference;
+}
+
+/**
+ * The accounts delivered to host `hostKey`, in `ENROLLMENTS`' order: each one `credentials`
+ * references and the host does not keep on interactive login. A host factory.json does not
+ * declare is delivered nothing.
+ */
+export function deliveredAccounts(
+  instance: FactoryInstance,
+  hostKey: HostKey,
+): readonly DeliveredAccount[] {
+  const host = instance.hosts?.find((candidate) => candidate.key === hostKey);
+  if (host === undefined) return [];
+  return ENROLLMENTS.flatMap(({ id }) => {
+    const secret = instance.credentials?.[CREDENTIAL_SECRET_FIELDS[id]];
+    return secret === undefined || host.interactive_logins?.includes(id) ? [] : [{ id, secret }];
+  });
 }
 
 /** factory.json's text: two-space indented JSON and a final newline. */

@@ -58,11 +58,13 @@ Schema is [`schemas/factory.schema.json`](../../schemas/factory.schema.json), an
 | `tailscale.tag` | Tailscale tag, such as `tag:software-factory`. |
 | `tailscale.auth_key_secret` | Secret reference to the factory's Tailscale enrollment key. |
 | `tailscale.admin_client_secret` | Secret reference to the client secret of the operator's Tailscale OAuth client with the `devices:core` scope, the factory's admin client ([secrets](secrets.md#the-tailscale-admin-client)). Workers never receive it. |
+| `credentials.github_token_secret`, `credentials.anthropic_api_key_secret`, `credentials.openai_api_key_secret` | Optional secret references to the factory's GitHub token, Anthropic API key and OpenAI API key, for the `github`, `anthropic` and `openai` accounts. See [API credentials](#api-credentials). |
 | `repositories[]` | Repository inventory. Each entry requires `key`, `remote` (`https://github.com/OWNER/NAME`), `path` (relative checkout path; no empty, `.` or `..` segments) and `branch`. |
 | `hosts[]` | Stable hosts, possibly none. Each entry requires `key`. |
 | `hosts[].instance_type`, `hosts[].root_volume_gib` | Machine declaration: EC2 instance type; root volume of 8-16384 GiB. |
 | `hosts[].paseo_password_secret` | Secret reference to the host's Paseo password. |
 | `hosts[].repositories[]` | Repository placement: keys of declared repositories. |
+| `hosts[].interactive_logins[]` | Accounts kept on a human's login on this host, each at most once: `github`, `openai`, `anthropic`. See [API credentials](#api-credentials). |
 | `hosts[].dispatch` | Desired dispatch settings: `enabled` (boolean), `cron`, `timezone`, `provider`, `model`, `mode` (non-blank strings), and `cwd` (absolute path). When enabled, every schedule field is required; no runtime default is applied. |
 
 ### Factory ID
@@ -97,7 +99,9 @@ formed; the JSON Schema cannot express it.
 ### Secret references
 
 A secret field (`tailscale.auth_key_secret`, `tailscale.admin_client_secret`,
-`hosts[].paseo_password_secret`) holds only a Secrets Manager secret ARN,
+`credentials.github_token_secret`, `credentials.anthropic_api_key_secret`,
+`credentials.openai_api_key_secret`, `hosts[].paseo_password_secret`) holds
+only a Secrets Manager secret ARN,
 `arn:aws:secretsmanager:REGION:ACCOUNT:secret:NAME`. Any other string, such as
 a pasted key or password, is rejected as a raw secret value. `fffactory secret
 set` stores a secret in Secrets Manager and sets its field to the ARN
@@ -110,6 +114,40 @@ worker. The admin client, which only the operator reads, follows the same rule,
 so every secret is the factory's own. Validation requires each secret ARN's
 Region to be `aws.region` and its account `aws.account_id`, each check once
 that field is set and well formed; the JSON Schema cannot express it.
+
+### API credentials
+
+A worker's three accounts, the readiness enrollments `github`, `openai` and
+`anthropic` ([readiness](readiness.md)), are satisfied either by a human's
+login on the worker or by an API credential the factory delivers. The
+`credentials` object holds the factory-wide references, one per account:
+
+| Account | Reference |
+| --- | --- |
+| `github` | `credentials.github_token_secret` |
+| `openai` | `credentials.openai_api_key_secret` |
+| `anthropic` | `credentials.anthropic_api_key_secret` |
+
+A host's `interactive_logins` lists the accounts it keeps on a human's login.
+
+An account is *delivered* to a host when its reference is set and the host does
+not list it in `interactive_logins`. Listing an account without a reference
+changes nothing: it is on a human's login either way. A host factory.json does
+not declare is delivered nothing. `deliveredAccounts` in
+`src/domain/instance.ts` is the one statement of this rule, and gives each
+delivered account with its reference in `ENROLLMENTS`' order (`github`,
+`openai`, `anthropic`).
+
+All of these fields are optional. A document without them is valid, complete
+and means what it did before: every account stays on a human's login.
+Delivery itself is not shipped yet
+([#55](https://github.com/yaunder/fffactory/issues/55)): no projection, plan or
+worker acts on these fields, which are only validated.
+
+Validation rejects an unknown field under `credentials`, a raw secret value in
+any of them, an `interactive_logins` entry that is not one of the three account
+IDs, and an account listed twice on one host. Messages name the field, never
+the value; a duplicate names the account, which has passed its format check.
 
 ## Validation
 
@@ -125,7 +163,8 @@ Validation reports every issue, each with a field path such as `factory_id`,
 - a state bucket whose name does not start with the factory ID and a hyphen;
 - a secret reference in another Region than `aws.region` or another account
   than `aws.account_id`;
-- placement of a repository that is not declared in `repositories`.
+- placement of a repository that is not declared in `repositories`;
+- an `interactive_logins` entry that is not an account ID, or that repeats one.
 
 Messages never echo field values, except keys that already passed their format
 check, so a secret pasted into any field cannot leak through validation
@@ -147,7 +186,8 @@ infrastructure alone
 ([plan-apply §An empty factory](plan-apply.md#an-empty-factory)). An absent
 `hosts` is still reported missing, so a new document is not taken for a factory
 deliberately without workers. Repositories, dispatch settings, Paseo password
-references and `tailscale.admin_client_secret` are optional for completeness.
+references, `tailscale.admin_client_secret`, `credentials` and
+`interactive_logins` are optional for completeness.
 
 ## `fffactory validate`
 
@@ -245,7 +285,7 @@ pass the same selection and the factory Region.
 
 | Layer | Module | Responsibility |
 | --- | --- | --- |
-| Domain | `src/domain/instance.ts`, `src/domain/validation.ts`, `src/domain/initialization.ts` | `FactoryInstance`, `FactoryId`, `HostKey`, `Release`, secret references, validation rules, completeness report, factory ID generation from injected random bytes, and the gap-filling merge. Pure. |
+| Domain | `src/domain/instance.ts`, `src/domain/validation.ts`, `src/domain/initialization.ts` | `FactoryInstance`, `FactoryId`, `HostKey`, `Release`, secret references, validation rules, the delivered-account rule (`deliveredAccounts`), completeness report, factory ID generation from injected random bytes, and the gap-filling merge. Pure. |
 | Application | `src/application/resolve-instance.ts`, `src/application/validate-instance.ts`, `src/application/init-instance.ts`, `src/application/instance-store.ts` | Discovery precedence, reading and validating a document, initialization, the `InstanceStore` port. `describeSource`, each discovery source's words, is published wording: doctor's JSON `summary` embeds it, so it stays here. |
 | CLI adapter | `src/cli/presentation/instance-source.ts` | `instanceLine`, the `Instance: PATH (SOURCE)` line commands print, and `instanceHeader`, the restyled commands' header (`fffactory COMMAND · release R`, then `Instance  PATH (SOURCE)`, a path under home shown from `~`; [plan and apply §Before anything reaches AWS](plan-apply.md#before-anything-reaches-aws)), both in `describeSource`'s words. |
 | Infrastructure | `src/infrastructure/filesystem-instance-store.ts` | Filesystem `InstanceStore`, including the atomic write. |
@@ -276,4 +316,6 @@ in [provisioning §Resources and namespacing](provisioning.md#resources-and-name
 Introduced by [#89](https://github.com/yaunder/factory/issues/89);
 initialization by [#90](https://github.com/yaunder/factory/issues/90);
 credentials by [#92](https://github.com/yaunder/factory/issues/92); the state
-bucket rule by [#96](https://github.com/yaunder/factory/issues/96).
+bucket rule by [#96](https://github.com/yaunder/factory/issues/96); API
+credential references and interactive logins by
+[#66](https://github.com/yaunder/fffactory/issues/66).
