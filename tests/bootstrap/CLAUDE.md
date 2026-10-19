@@ -15,7 +15,13 @@ Shell tests of what runs as root on a new worker (`docs/specs/worker-bootstrap.m
 - `user-data.test.sh` runs the user data with stand-in `dnf`, `tailscale`, `aws`, `systemctl`,
   `hostnamectl` and `sleep` on `PATH`; `activator.test.sh` tests the root activator;
   `host-apply.test.sh` runs the real compiled worker executable's `host apply` over the
-  stand-in shell install steps in `stand-in-steps/`. The native plugin step uses an
-  empty plugin manifest and Claude list responses so it never contacts a marketplace.
+  stand-in shell install steps in `stand-in-steps/`, whose native plugin step uses an empty
+  plugin manifest and Claude list responses so it never contacts a marketplace;
+  `harness.test.sh` runs the real `harness` step from the packed release, with stand-in agents
+  already at its pins so it installs nothing; `credentials.test.sh` runs `host apply` like
+  `host-apply.test.sh`, with `credentials-host.json`, a stand-in `/usr/bin/aws` answering random
+  material from `/tmp/secrets`, and stand-in `gh`, `codex` and `claude` first on `factory`'s
+  `PATH` keeping their stores as the real tools do. Real agents need the network: they are the
+  external evidence in `docs/specs/credential-delivery.md`.
 - Only AL2023's own tools are real; never reach the network. Everything here is shellchecked
   in CI (`.github/workflows/cli.yml`).

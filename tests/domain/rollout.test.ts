@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
+  type ActivationAnswer,
   type HostApplyRecord,
   INSTALL_STEPS,
   pendingSteps,
@@ -16,6 +17,7 @@ import {
   rolloutResult,
   skipped,
   stoppedOutcome,
+  type WorkerIdentity,
   type WorkerOutcome,
 } from "../../src/domain/rollout";
 import { locateWorker } from "../../src/domain/status";
@@ -45,19 +47,32 @@ function record(overrides: Partial<HostApplyRecord> = {}): HostApplyRecord {
   };
 }
 
+/** The outcome for a worker delivered no credential. */
+const outcomeOf = (...args: [WorkerIdentity, string, ActivationAnswer]) =>
+  activationOutcome(...args, []);
+
 describe("an install attempt's outcome (plan-apply §The workers stage)", () => {
   test("a verified install is installed, whatever its enrollment", () => {
-    expect(activationOutcome(WORKER, RELEASE, { kind: "result", result: record() })).toEqual({
+    expect(activationOutcome(WORKER, RELEASE, { kind: "result", result: record() }, [])).toEqual({
       ...WORKER,
       kind: "installed",
       release: "0.3.0",
       verification: verification(HOST, "pending"),
+      delivered: [],
+    });
+  });
+
+  test("an installed worker keeps the accounts its projection delivered, not the worker's word", () => {
+    const answer = { kind: "result", result: record() } as const;
+    expect(activationOutcome(WORKER, RELEASE, answer, ["github", "openai"])).toMatchObject({
+      kind: "installed",
+      delivered: ["github", "openai"],
     });
   });
 
   test("a failed step leaves the release active but unhealthy, naming its log", () => {
     const steps = withStep(pendingSteps(), "packages", "failed", "exited with status 1");
-    const outcome = activationOutcome(WORKER, RELEASE, {
+    const outcome = outcomeOf(WORKER, RELEASE, {
       kind: "result",
       result: record({ state: "failed", steps, verification: null }),
     });
@@ -79,7 +94,7 @@ describe("an install attempt's outcome (plan-apply §The workers stage)", () => 
         { id: "toolchain", status: "passed", summary: "fine" },
       ],
     });
-    const outcome = activationOutcome(WORKER, RELEASE, {
+    const outcome = outcomeOf(WORKER, RELEASE, {
       kind: "result",
       result: record({ state: "failed", verification: unhealthy }),
     });
@@ -91,7 +106,7 @@ describe("an install attempt's outcome (plan-apply §The workers stage)", () => 
 
   test("an unfinished bootstrap is a skip; any other refusal a failure", () => {
     const refusal = (reason: "bootstrap_incomplete" | "other_host", message: string) =>
-      activationOutcome(WORKER, RELEASE, {
+      outcomeOf(WORKER, RELEASE, {
         kind: "result",
         result: { protocol_version: 1, hostname: HOST, state: "refused", reason, message },
       });
@@ -111,7 +126,7 @@ describe("an install attempt's outcome (plan-apply §The workers stage)", () => 
 
   test("no document, a record still running or success without verification are failures", () => {
     expect(
-      activationOutcome(WORKER, RELEASE, {
+      outcomeOf(WORKER, RELEASE, {
         kind: "no_result",
         reason: "another activation is running",
       }),
@@ -120,10 +135,10 @@ describe("an install attempt's outcome (plan-apply §The workers stage)", () => 
       summary: "Installing failed: another activation is running",
     });
     expect(
-      activationOutcome(WORKER, RELEASE, { kind: "result", result: record({ state: "running" }) }),
+      outcomeOf(WORKER, RELEASE, { kind: "result", result: record({ state: "running" }) }),
     ).toMatchObject({ kind: "failed", summary: "host apply ended before its install finished" });
     expect(
-      activationOutcome(WORKER, RELEASE, {
+      outcomeOf(WORKER, RELEASE, {
         kind: "result",
         result: record({ verification: null }),
       }),
@@ -131,7 +146,7 @@ describe("an install attempt's outcome (plan-apply §The workers stage)", () => 
   });
 
   test("an answer for another worker or release is a failure, trusting nothing else in it", () => {
-    const other = activationOutcome(WORKER, RELEASE, {
+    const other = outcomeOf(WORKER, RELEASE, {
       kind: "result",
       result: record({ hostname: "fff-aaaa1111-builder-2" }),
     });
@@ -141,7 +156,7 @@ describe("an install attempt's outcome (plan-apply §The workers stage)", () => 
       summary: `host apply answered as fff-aaaa1111-builder-2, not ${HOST}; nothing it reported is trusted`,
       nextAction: `Check at https://login.tailscale.com/admin/machines that the device ${HOST} is this factory's worker${THEN}`,
     });
-    const refused = activationOutcome(WORKER, RELEASE, {
+    const refused = outcomeOf(WORKER, RELEASE, {
       kind: "result",
       result: {
         protocol_version: 1,
@@ -154,13 +169,13 @@ describe("an install attempt's outcome (plan-apply §The workers stage)", () => 
     expect(refused.kind).toBe("failed");
     // Hostnames compare without case.
     expect(
-      activationOutcome(WORKER, RELEASE, {
+      outcomeOf(WORKER, RELEASE, {
         kind: "result",
         result: record({ hostname: HOST.toUpperCase() }),
       }).kind,
     ).toBe("installed");
     expect(
-      activationOutcome(WORKER, RELEASE, { kind: "result", result: record({ release: "0.2.0" }) }),
+      outcomeOf(WORKER, RELEASE, { kind: "result", result: record({ release: "0.2.0" }) }),
     ).toEqual({
       ...WORKER,
       kind: "failed",
@@ -170,7 +185,7 @@ describe("an install attempt's outcome (plan-apply §The workers stage)", () => 
   });
 
   test("an install still running on the worker is a skip: wait for it, then rerun", () => {
-    const busy = activationOutcome(WORKER, RELEASE, {
+    const busy = outcomeOf(WORKER, RELEASE, {
       kind: "result",
       result: {
         protocol_version: 1,
@@ -189,7 +204,7 @@ describe("an install attempt's outcome (plan-apply §The workers stage)", () => 
   });
 
   test("a failure outside the steps is named, the release possibly active but unhealthy", () => {
-    const outcome = activationOutcome(WORKER, RELEASE, {
+    const outcome = outcomeOf(WORKER, RELEASE, {
       kind: "result",
       result: record({
         state: "failed",
@@ -214,7 +229,7 @@ describe("an install attempt's outcome (plan-apply §The workers stage)", () => 
 });
 
 describe("the rollout's result", () => {
-  const installed = activationOutcome(WORKER, RELEASE, { kind: "result", result: record() });
+  const installed = outcomeOf(WORKER, RELEASE, { kind: "result", result: record() });
   const offline = skipped(WORKER, { summary: "Offline", nextAction: "x" });
   const broken: WorkerOutcome = { ...offline, kind: "failed" };
   const untouched: WorkerOutcome = { ...WORKER, kind: "not_attempted" };
@@ -300,7 +315,7 @@ describe("a worker's first boot (plan-apply §Waiting for a new worker)", () => 
 
   test("no install step ran on it, so the rollout goes on to the next worker", () => {
     expect(rolloutContinues(firstBootTimedOut(WORKER, "Offline in the tailnet"))).toBe(true);
-    const broken = activationOutcome(WORKER, RELEASE, { kind: "no_result", reason: "x" });
+    const broken = outcomeOf(WORKER, RELEASE, { kind: "no_result", reason: "x" });
     expect(rolloutContinues(broken)).toBe(false);
   });
 });

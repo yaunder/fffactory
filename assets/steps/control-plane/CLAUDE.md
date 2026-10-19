@@ -13,11 +13,23 @@ Spec: [docs/specs/control-plane.md](../../../docs/specs/control-plane.md).
   it never starts or restarts the daemon. `paseo.service`
   is the daemon's systemd unit; `versions.env` pins the Paseo package and its
   registry integrity value.
-- `paseo-config.sh` merges the listen address, the disabled relay and
-  `daemon.hostnames` into `config.json`, keeping every other setting. Setup runs
+- `paseo-config.sh` merges the listen address, the disabled relay,
+  `daemon.hostnames` and, when given one, the password's bcrypt hash
+  (`daemon.auth.password`) into `config.json`, keeping every other setting. Given none,
+  it removes `daemon.auth.password`, so the unit's `ExecStartPre` keeps a host without a
+  reference (one removed included) from starting the daemon. Setup runs
   it as `factory`; its inputs are `FACTORY_PASEO_*` variables, so it runs on a
   laptop. It needs no root and no worker: keep anything that does in setup.
-- `paseo-auth.sh` authenticates factory-owned Paseo CLI calls, supplying the
+- The password reaches setup only as its hash, made by the worker executable
+  (`src/host/control-plane.ts`) and read from standard input after the secret
+  reference. The hash goes to `paseo-config.sh` in its environment and to `jq` through `$ENV`,
+  never as an argument (runuser's command line is world-readable), and is never echoed.
+- `paseo.service` runs `paseo daemon run` directly, never through `paseo-auth.sh`: the daemon
+  holds only the hash, so no agent, tool or hook inherits `PASEO_PASSWORD`. Its `ExecStartPre`
+  refuses to start without a stored password. `tests/paseo/hash-only-daemon.sh`
+  (`just paseo-check`) runs its commands against the pinned Paseo; rerun it when the unit,
+  the merge or the pin changes.
+- `paseo-auth.sh` authenticates factory-owned Paseo CLI calls only, supplying the
   password from Secrets Manager through `PASEO_PASSWORD` without it entering a
   command token, log or argument. The adapter runs it as the `factory` account.
 - Inputs come from this active release and the validated host projection. Never
@@ -31,6 +43,7 @@ Spec: [docs/specs/control-plane.md](../../../docs/specs/control-plane.md).
   Run them from here with `python3 tests/<test>.py`, and keep them green; each
   resolves its script one directory up. `setup-host.sh` itself needs root and
   Amazon Linux 2023, so nothing runs it: `tests/assets/steps/steps.test.ts`
-  checks statically that it hands its addresses to `paseo-config.sh`.
+  checks statically that it hands its addresses and the hash to `paseo-config.sh`, and the
+  unit's commands.
 - A step is ported to TypeScript only when it is changed for another reason (D3).
   Until then, change a program and its test together.

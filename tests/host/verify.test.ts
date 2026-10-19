@@ -8,6 +8,11 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { WORKER_PATHS } from "../../src/domain/host-protocol";
+import {
+  ANTHROPIC_KEY_FILE,
+  CLAUDE_MANAGED_SETTINGS,
+  CLAUDE_MANAGED_SETTINGS_JSON,
+} from "../../src/domain/installation";
 import type { Release } from "../../src/domain/instance";
 import { verificationJson } from "../../src/domain/readiness";
 import { readinessVerdict } from "../../src/domain/status";
@@ -60,7 +65,10 @@ const HEALTHY: Record<string, ProcessOutcome> = {
   "codex --version": exited(0, "codex-cli 0.156.1\n"),
   "claude --version": exited(0, "2.1.280 (Claude Code)\n"),
   "systemctl is-active tailscaled.service": exited(0, "active\n"),
-  "gh auth status --hostname github.com": exited(0, "Logged in to github.com account octocat\n"),
+  "gh auth status --hostname github.com --active": exited(
+    0,
+    "Logged in to github.com account octocat\n",
+  ),
   "codex login status": exited(0, "Logged in using ChatGPT\n"),
   "claude auth status": exited(0, "Logged in as someone@example.com\n"),
 };
@@ -178,7 +186,7 @@ describe("host verify's enrollment (readiness §Enrollment)", () => {
       { id: "anthropic", state: "unknown" },
     ]);
     const timedOut = await verify({
-      "gh auth status --hostname github.com": { kind: "timed_out" },
+      "gh auth status --hostname github.com --active": { kind: "timed_out" },
     });
     expect(timedOut.verification.enrollment[0]?.state).toBe("unknown");
   });
@@ -203,6 +211,7 @@ describe("host verify's enrollment (readiness §Enrollment)", () => {
         "status",
         "--hostname",
         "github.com",
+        "--active",
       ],
       timeoutMs: CHECK_TIMEOUT_MS,
       env: {},
@@ -221,6 +230,7 @@ describe("host verify's enrollment (readiness §Enrollment)", () => {
       hostname: WORKER_HOSTNAME,
       release: "0.3.0",
       configurationSha256: CONFIGURATION_SHA256,
+      delivered: [],
     };
     expect(readinessVerdict(worker, expected)).toEqual({
       status: "ready",
@@ -235,5 +245,59 @@ describe("host verify's enrollment (readiness §Enrollment)", () => {
     const text = verificationJson(verification);
     for (const printed of ["octocat", "someone@example.com", "ChatGPT", "v22.12.0"])
       expect(text).not.toContain(printed);
+  });
+
+  describe("Anthropic delivered through fffactory's key helper (credential delivery §Verify)", () => {
+    const KEY_CHECK = "test -r anthropic-api-key -a -s anthropic-api-key";
+
+    async function helperConfigured(text = CLAUDE_MANAGED_SETTINGS_JSON) {
+      await mkdir(join(root, "/etc/claude-code"), { recursive: true });
+      await writeFile(join(root, CLAUDE_MANAGED_SETTINGS), text);
+    }
+
+    test("is enrolled only while factory can read a non-empty key file", async () => {
+      await helperConfigured();
+      const { verification, calls } = await verify();
+      expect(verification.enrollment[2]).toEqual({ id: "anthropic", state: "enrolled" });
+      const check = calls.find(({ argv }) => argv.includes("-s"));
+      expect(check?.argv).toEqual([
+        ...AS_FACTORY,
+        "/usr/bin/test",
+        "-r",
+        join(root, ANTHROPIC_KEY_FILE),
+        "-a",
+        "-s",
+        join(root, ANTHROPIC_KEY_FILE),
+      ]);
+      expect(check?.timeoutMs).toBe(CHECK_TIMEOUT_MS);
+    });
+
+    test("a key file missing or empty is pending, though claude auth status passes", async () => {
+      await helperConfigured();
+      const { verification } = await verify({ [KEY_CHECK]: exited(1) });
+      expect(verification.enrollment[2]).toEqual({ id: "anthropic", state: "pending" });
+    });
+
+    test("a key check that cannot run is unknown", async () => {
+      await helperConfigured();
+      const { verification } = await verify({ [KEY_CHECK]: { kind: "timed_out" } });
+      expect(verification.enrollment[2]).toEqual({ id: "anthropic", state: "unknown" });
+    });
+
+    test("without fffactory's helper, claude auth status alone decides", async () => {
+      for (const settings of [undefined, '{"apiKeyHelper": "cat /elsewhere"}', "not json"]) {
+        await rm(join(root, "/etc/claude-code"), { recursive: true, force: true });
+        if (settings !== undefined) await helperConfigured(settings);
+        const { verification, calls } = await verify({ [KEY_CHECK]: exited(1) });
+        expect(verification.enrollment[2]).toEqual({ id: "anthropic", state: "enrolled" });
+        expect(calls.some(({ argv }) => argv.includes("-s"))).toBe(false);
+      }
+    });
+
+    test("claude auth status failing is pending whatever the key file holds", async () => {
+      await helperConfigured();
+      const { verification } = await verify({ "claude auth status": exited(1) });
+      expect(verification.enrollment[2]).toEqual({ id: "anthropic", state: "pending" });
+    });
   });
 });

@@ -108,6 +108,35 @@ variable "paseo_password_secret_arns" {
   }
 }
 
+variable "credential_secret_arns" {
+  description = "factory.json's credentials.*_secret, by field name: the factory-wide API credentials every host may read. Empty when none is configured."
+  type        = map(string)
+
+  validation {
+    condition = alltrue([
+      for field in keys(var.credential_secret_arns) :
+      contains(["github_token_secret", "anthropic_api_key_secret", "openai_api_key_secret"], field)
+    ])
+    error_message = "credential_secret_arns keys must be github_token_secret, anthropic_api_key_secret or openai_api_key_secret."
+  }
+
+  validation {
+    condition = alltrue([
+      for arn in values(var.credential_secret_arns) :
+      can(regex("^arn:aws[a-z-]*:secretsmanager:[a-z0-9-]+:[0-9]{12}:secret:[A-Za-z0-9/_+=.@-]+$", arn))
+    ])
+    error_message = "credential_secret_arns values must be Secrets Manager secret ARNs."
+  }
+
+  validation {
+    condition = alltrue([
+      for arn in values(var.credential_secret_arns) :
+      can(regex("^arn:[a-z-]+:secretsmanager:${var.region}:${var.account_id}:secret:", arn))
+    ])
+    error_message = "credential_secret_arns values must be secrets in the factory Region and account."
+  }
+}
+
 variable "hosts" {
   description = "Stable hosts from factory.json, keyed by host key. Empty for a factory with no worker: its shared infrastructure stays."
   type = map(object({

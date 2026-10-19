@@ -92,12 +92,18 @@ export function secretsPolicy(arns: readonly string[]): string {
 
 /**
  * The secrets the factory root lets hosts read, as `assets/terraform/factory/main.tf` builds
- * them: the Tailscale auth key, then every host's Paseo password, distinct.
+ * them: the Tailscale auth key, then every host's Paseo password, then the factory-wide
+ * credentials, distinct.
  */
 function secretArnsOf(variables: Readonly<Record<string, unknown>>): string[] {
   const passwords = (variables.paseo_password_secret_arns ?? {}) as Record<string, string>;
+  const credentials = (variables.credential_secret_arns ?? {}) as Record<string, string>;
   return [
-    ...new Set([String(variables.tailscale_auth_key_secret_arn), ...Object.values(passwords)]),
+    ...new Set([
+      String(variables.tailscale_auth_key_secret_arn),
+      ...Object.values(passwords),
+      ...Object.values(credentials),
+    ]),
   ];
 }
 

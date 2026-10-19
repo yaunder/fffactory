@@ -20,15 +20,38 @@ fffactory secret set NAME [--host KEY] [--instance PATH] [--profile NAME]
 | `tailscale-auth-key` | `tailscale.auth_key_secret` | `<factory ID>/tailscale-auth-key` | `Tailscale auth key of factory <factory ID>` |
 | `tailscale-admin-client` | `tailscale.admin_client_secret` | `<factory ID>/tailscale-admin-client` | `Tailscale admin client of factory <factory ID>` |
 | `paseo-password`, with `--host KEY` | `hosts[i].paseo_password_secret` of host `KEY` | `<factory ID>/<host key>/paseo-password` | `Paseo password of host <host key> of factory <factory ID>` |
+| `github-token` | `credentials.github_token_secret` | `<factory ID>/github-token` | `GitHub token of factory <factory ID>` |
+| `anthropic-api-key` | `credentials.anthropic_api_key_secret` | `<factory ID>/anthropic-api-key` | `Anthropic API key of factory <factory ID>` |
+| `openai-api-key` | `credentials.openai_api_key_secret` | `<factory ID>/openai-api-key` | `OpenAI API key of factory <factory ID>` |
 
 Each factory's secrets are its own (D5): their names begin with the factory
 ID, and each secret fffactory creates is tagged
 `fffactory:factory-id = <factory ID>` and `fffactory:managed-by = fffactory`.
 The hosts' IAM policy allows `secretsmanager:GetSecretValue` on exactly the
-workers' references factory.json declares, `tailscale.auth_key_secret` and
-`hosts[].paseo_password_secret`
+workers' references factory.json declares, `tailscale.auth_key_secret`,
+`hosts[].paseo_password_secret` and the `credentials.*_secret` it sets
 ([provisioning §Modules](provisioning.md#modules)); the worker bootstrap reads
 the Tailscale key by its ARN ([worker bootstrap](worker-bootstrap.md)).
+
+### The API credentials
+
+`github-token`, `anthropic-api-key` and `openai-api-key` are the factory-wide
+API credentials of a worker's three accounts, `github`, `anthropic` and
+`openai` ([instance configuration §API
+credentials](instance-configuration.md#api-credentials)): a GitHub token for
+`gh` and git, and API keys for Claude Code and Codex. Each is optional, and
+is meant for every host that does not keep a human login for its account
+(`hosts[].interactive_logins`); a factory that sets none keeps every account
+on a human's login. `secret set` stores them as it stores every other secret,
+and, like every other, does not check that a token or key works. Setting one
+again rotates it (below). Each host's projection carries the references
+delivered to it, and every host's shared role may read all three
+([host protocol §The host projection](host-protocol.md#the-host-projection),
+[provisioning §Terraform inputs](provisioning.md#terraform-inputs)). On every
+`host apply`, each host's `credentials` install step reads the ones delivered
+to it with the instance role and writes each into its tool's own store; renew
+one with `secret set NAME`, then `fffactory apply`
+([credential delivery](credential-delivery.md)).
 
 ### The Tailscale admin client
 
@@ -57,12 +80,12 @@ Refusals, each exiting 1 with `fffactory secret set: MESSAGE` and before any
 AWS call:
 
 - an unknown name: `unknown secret name; expected tailscale-auth-key,
-  tailscale-admin-client or paseo-password`;
+  tailscale-admin-client, paseo-password, github-token, anthropic-api-key or
+  openai-api-key`;
 - no `factory_id`: `factory.json needs factory_id before a secret can be
   named`;
-- `--host` with a factory-wide name, `tailscale-auth-key` or
-  `tailscale-admin-client`: `NAME belongs to the whole factory and takes no
-  --host`;
+- `--host` with a factory-wide name, any but `paseo-password`: `NAME belongs
+  to the whole factory and takes no --host`;
 - `paseo-password` without `--host`: `paseo-password belongs to one host: name
   it with --host KEY`;
 - a malformed host key: `--host must be a host key declared in factory.json`;
@@ -167,7 +190,7 @@ The write has a 30-second deadline (`SECRETS_MANAGER_TIMEOUT_MS`).
 
 | Layer | Module | Responsibility |
 | --- | --- | --- |
-| Domain | `src/domain/secrets.ts` | `SecretMaterial`, reading material from a prompt or standard input, the names and their targets (the factory-wide ones under `tailscale`, a host's under its entry), setting a reference in factory.json, the secrets' tags. Pure. |
+| Domain | `src/domain/secrets.ts` | `SecretMaterial`, reading material from a prompt or standard input, the names and their targets (the factory-wide ones under `tailscale` or `credentials`, a host's under its entry), setting a reference in factory.json, the secrets' tags. Pure. |
 | Application | `src/application/set-secret.ts` | `setSecret`: the order above. |
 | Application | `src/application/secret-store.ts`, `src/application/operator-prompt.ts` | The `SecretStore` and `OperatorPrompt` ports. |
 | Infrastructure | `src/infrastructure/aws-secrets-manager-store.ts` | `secretsManagerStore`: CreateSecret, then PutSecretValue for an existing secret; GetSecretValue for `worker terminate`'s admin client. |
@@ -179,7 +202,8 @@ The write has a 30-second deadline (`SECRETS_MANAGER_TIMEOUT_MS`).
 Tests: `tests/domain/secrets.test.ts` (redaction, line endings, empty and
 oversized material, names and targets, references set without disturbing
 anything else, tags), `tests/application/set-secret.test.ts` (standard input
-and the hidden prompt, the admin client, a host's password, rotation, a
+and the hidden prompt, the admin client, a host's password, each API
+credential stored and rotated, `--host` refused for each, rotation, a
 replaced reference, the
 account check before any material is read, refusals before AWS, material that
 is cancelled, empty or too large, factory.json changing meanwhile),
@@ -194,7 +218,8 @@ process, every output line and file is searched for the value, and a value
 passed as an argument in every position is refused unechoed; and spawned,
 `main.ts` runs with the real SDK against local STS and Secrets Manager
 stand-ins, the value on standard input, and the value is found only in the
-stand-in's stored secret.
+stand-in's stored secret, for the Tailscale auth key and each API
+credential.
 
 That the admin client reaches no worker is asserted in
 `tests/domain/host-projection.test.ts` and
@@ -202,4 +227,5 @@ That the admin client reaches no worker is asserted in
 
 Introduced by [#98](https://github.com/yaunder/factory/issues/98); the admin
 client by [#8](https://github.com/yaunder/fffactory/issues/8), and its read by
-[#9](https://github.com/yaunder/fffactory/issues/9).
+[#9](https://github.com/yaunder/fffactory/issues/9); the API credentials by
+[#67](https://github.com/yaunder/fffactory/issues/67).

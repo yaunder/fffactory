@@ -36,6 +36,7 @@ const EXPECTED = {
   hostname: HOSTNAME,
   release: "0.3.0",
   configurationSha256: CONFIGURATION_SHA256,
+  delivered: [],
 };
 const RERUN = ", then rerun `fffactory status`.";
 
@@ -133,7 +134,7 @@ describe("readiness from a worker's inspection", () => {
       summary:
         "An install of release 0.3.0 started at 2026-09-30T10:55:00.000Z has not finished; it may still be running",
       nextAction:
-        "If it started more than 72 min ago (apply's activation timeout), repair the worker " +
+        "If it started more than 82 min ago (apply's activation timeout), repair the worker " +
         `with \`fffactory apply\`; otherwise wait for it to finish${RERUN}`,
     });
     expect(
@@ -165,7 +166,6 @@ describe("readiness from a worker's inspection", () => {
       installation: installed("0.3.0", verification(HOSTNAME, "pending")),
     });
     const verdict = readinessVerdict(pending, EXPECTED);
-    const policy = "(tailnet SSH policy must let you log in as `factory`)";
     expect(verdict).toEqual({
       status: "not_ready",
       summary:
@@ -175,13 +175,52 @@ describe("readiness from a worker's inspection", () => {
         "log in there as `factory`), then verify the enrollment with `fffactory apply` and " +
         "rerun `fffactory status`.",
       details: [
-        `GitHub: Authenticate GitHub as factory on ${HOSTNAME} ${policy}: run \`tailscale ssh factory@${HOSTNAME}\`, then \`gh auth login --hostname github.com --git-protocol https --web\`, then \`gh auth status\``,
-        `OpenAI Codex: Log in to OpenAI Codex as factory on ${HOSTNAME} ${policy}: run \`tailscale ssh factory@${HOSTNAME}\`, then \`codex login --device-auth\`, then \`codex login status\``,
-        `Claude Code: Log in to Claude Code as factory on ${HOSTNAME} ${policy}: run \`tailscale ssh factory@${HOSTNAME}\`, then \`claude auth login\`, then \`claude auth status\``,
+        `GitHub: Authenticate GitHub as factory on ${HOSTNAME}: run \`tailscale ssh factory@${HOSTNAME}\`, then \`gh auth login --hostname github.com --git-protocol https --web\`, then \`gh auth status --hostname github.com --active\``,
+        `OpenAI Codex: Log in to OpenAI Codex as factory on ${HOSTNAME}: run \`tailscale ssh factory@${HOSTNAME}\`, then \`codex login --device-auth\`, then \`codex login status\``,
+        `Claude Code: Log in to Claude Code as factory on ${HOSTNAME}: run \`tailscale ssh factory@${HOSTNAME}\`, then \`claude auth login\`, then \`claude auth status\``,
         "Paseo clients: enrollment is checked from each client, not the worker",
         "Enrollment as `fffactory apply` last verified it, at 2026-09-30T11:00:00.000Z",
       ],
     });
+  });
+
+  test("a delivered account's steps store a valid credential and apply it, with no login", () => {
+    const pending = inspection(HOSTNAME, {
+      installation: installed("0.3.0", verification(HOSTNAME, "pending")),
+    });
+    const verdict = readinessVerdict(pending, {
+      ...EXPECTED,
+      delivered: ["github", "openai", "anthropic"],
+    });
+    expect(verdict).toEqual({
+      status: "not_ready",
+      summary:
+        "Software ready on release 0.3.0; enrollment pending: GitHub, OpenAI Codex, Claude Code",
+      nextAction:
+        `Enroll each pending account on ${HOSTNAME} as listed, then verify the enrollment with ` +
+        "`fffactory apply` and rerun `fffactory status`.",
+      details: [
+        `GitHub: Replace the GitHub token, which ${HOSTNAME} did not accept: run \`fffactory secret set github-token\`, then \`fffactory apply\``,
+        `OpenAI Codex: Replace the OpenAI API key, which ${HOSTNAME} did not accept: run \`fffactory secret set openai-api-key\`, then \`fffactory apply\``,
+        `Claude Code: Replace the Anthropic API key, which ${HOSTNAME} did not accept: run \`fffactory secret set anthropic-api-key\`, then \`fffactory apply\``,
+        "Paseo clients: enrollment is checked from each client, not the worker",
+        "Enrollment as `fffactory apply` last verified it, at 2026-09-30T11:00:00.000Z",
+      ],
+    });
+  });
+
+  test("a login still to make on the worker keeps the tailnet SSH requirement", () => {
+    const pending = inspection(HOSTNAME, {
+      installation: installed("0.3.0", verification(HOSTNAME, "pending")),
+    });
+    const verdict = readinessVerdict(pending, { ...EXPECTED, delivered: ["github"] });
+    expect(verdict.nextAction).toBe(
+      `Enroll each pending account on ${HOSTNAME} as listed (tailnet SSH policy must let you ` +
+        "log in there as `factory`), then verify the enrollment with `fffactory apply` and " +
+        "rerun `fffactory status`.",
+    );
+    expect(verdict.details[0]).toStartWith("GitHub: Replace the GitHub token");
+    expect(verdict.details[1]).toStartWith("OpenAI Codex: Log in to OpenAI Codex as factory");
   });
 
   test("Paseo clients never keep a worker whose accounts are all enrolled from being ready", () => {
@@ -197,7 +236,7 @@ describe("readiness from a worker's inspection", () => {
     });
     const verdict = readinessVerdict(pending, EXPECTED);
     expect(verdict.details.join("\n")).not.toContain("impostor");
-    expect(inspectedFacts(pending, HOSTNAME).enrollment?.[0]?.next_action?.login).toBe(
+    expect(inspectedFacts(pending, HOSTNAME, []).enrollment?.[0]?.next_action?.login).toBe(
       `tailscale ssh factory@${HOSTNAME}`,
     );
   });
@@ -206,15 +245,20 @@ describe("readiness from a worker's inspection", () => {
     const pending = inspection(HOSTNAME, {
       installation: installed("0.3.0", verification(HOSTNAME, "pending")),
     });
-    const facts = inspectedFacts(pending, HOSTNAME);
+    const facts = inspectedFacts(pending, HOSTNAME, ["github"]);
     expect(facts.installation).toBe("succeeded");
     expect(facts.enrollment?.map(({ id, state }) => `${id}:${state}`)).toEqual([
       "github:pending",
       "openai:pending",
       "anthropic:pending",
     ]);
+    expect(facts.enrollment?.map(({ next_action }) => next_action?.login ?? null)).toEqual([
+      null,
+      `tailscale ssh factory@${HOSTNAME}`,
+      `tailscale ssh factory@${HOSTNAME}`,
+    ]);
     expect(
-      inspectedFacts(inspection(HOSTNAME, { installation: { state: "none" } }), HOSTNAME),
+      inspectedFacts(inspection(HOSTNAME, { installation: { state: "none" } }), HOSTNAME, []),
     ).toMatchObject({ installation: "none", enrollment: null });
   });
 });

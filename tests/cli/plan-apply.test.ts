@@ -137,7 +137,7 @@ const ENROLL = [
   "",
   "  1. GitHub",
   "     $ gh auth login --hostname github.com --git-protocol https --web",
-  "     $ gh auth status",
+  "     $ gh auth status --hostname github.com --active",
   "  2. OpenAI Codex",
   "     $ codex login --device-auth",
   "     $ codex login status",

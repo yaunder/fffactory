@@ -31,8 +31,13 @@ over SSH as `fffactory-admin` (`docs/specs/host-protocol.md`). Rules:
   `runuser` and `env -i`; neither the operator nor `factory` receives broader sudo.
 - `host control-plane` runs only through the activator's fixed `activity`, `install`,
   `reload` and `restart` actions and shares that lock. Activity and reload drop to
-  `factory`; install reads the host projection from standard input and invokes only the
-  active release's setup program; restart is the fixed Paseo systemd action.
+  `factory`; install reads the host projection from standard input, reads the Paseo password
+  by its reference as root and hashes it (bcryptjs at Paseo's cost), and invokes only the
+  active release's setup program, the reference and the hash on its standard input; the
+  password reaches only the hash function. Restart is the fixed Paseo systemd action.
+- `secret-value.ts` reads a delivered secret by its ARN with `/usr/bin/aws` as root, for the
+  `credentials` step and the control-plane install: a `SecretMaterial`, or why not in
+  fffactory's words (the AWS error's name at most).
 - `host dispatch` runs only through the activator's fixed `adoption`, `reconcile` and
   `inspect` actions and shares that lock. It installs only the active release's assets,
   persists canonical desired and observed state, and drops to `factory` for FFFlow,
@@ -59,6 +64,16 @@ over SSH as `fffactory-admin` (`docs/specs/host-protocol.md`). Rules:
   `plugins.json` through `plugin-manifest.ts`, uses one command deadline for the whole
   operation, and runs tools through `runtime-account.ts` as `factory`. Only locked
   `host apply` invokes installation; there is no standalone plugin mutation command.
+- `credentials.ts` implements the `credentials` install step
+  (`docs/specs/credential-delivery.md`): it reads each delivered secret with `/usr/bin/aws` as
+  root into a `SecretMaterial`, checks every one before any tool runs, and reveals material only
+  onto a delivering command's standard input (`ProcessOptions.stdin`), never an argument, an
+  environment or the log. Tools run as `factory` through `AS_FACTORY`, files in `factory`'s home
+  are written as `factory`, and only `/etc/claude-code` is written by root. With Anthropic not
+  delivered it removes Claude Code's managed settings only while they name fffactory's helper
+  (`namesKeyHelper`, the test `verify.ts` uses): anyone else's, or unreadable ones, stay. Its
+  log holds its own lines only, never a tool's output, and a failure names the account and the
+  AWS error name, exit status or deadline.
 - A step's output goes only to its log under `WORKER_PATHS.logs`, written by the step itself as
   it runs (`ProcessOptions.output`), never collected and written afterwards; a verifier's tool
   output goes nowhere. Documents carry fffactory's own words and states, never a tool's output.

@@ -178,13 +178,17 @@ pending. Follow the login instructions it prints next.
 
 ### 4. Enroll accounts and connect Paseo
 
+To skip these logins, deliver API keys instead
+([MACHINE_ONBOARDING.md §Deliver API credentials](MACHINE_ONBOARDING.md#deliver-api-credentials-optional));
+a delivered account needs no login on the worker.
+
 Replace `HOSTNAME` with the worker name printed by apply, such as
 `fff-k3x9q2ab-builder-1`. Log in as the worker's **`factory`** user:
 
 ```bash
 tailscale ssh factory@HOSTNAME
 gh auth login --hostname github.com --git-protocol https --web
-gh auth status
+gh auth status --hostname github.com --active
 codex login --device-auth
 codex login status
 claude auth login

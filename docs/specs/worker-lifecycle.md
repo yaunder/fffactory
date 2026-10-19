@@ -239,7 +239,8 @@ Its machine, its recorded host key, its factory.json entry (and with it its
 repository placements and dispatch settings) and its tailnet devices go; the
 factory's shared infrastructure stays: the state bucket and Terraform state,
 the network, the hosts' IAM role and instance profile, whose policy then allows
-only the Tailscale enrollment key. factory.json keeps `hosts: []` and its
+only the Tailscale enrollment key and the factory-wide credential references
+factory.json sets. factory.json keeps `hosts: []` and its
 `repositories` inventory. To change the size of a single-worker factory,
 terminate the worker, then declare its replacement with the `instance_type`
 and `root_volume_gib` wanted, under a new key or the same one, and run
@@ -283,7 +284,9 @@ The removal, under the same lock and record:
      `paseo_password_secret` and the update only stops allowing it: every other
      attribute as before, nothing unknown until apply, and the policy document
      (its statements' actions and resources compared as sets) as before less
-     that one ARN.
+     that one ARN. The credential references (`credentials.*_secret`) are
+     factory-wide, so removing a host never changes them, and the rule stays as
+     it is: a policy update that drops or adds one is another change, refused.
 
    Any other change, a replacement of the host, another host's change, a pending
    create or update, drift or an action fffactory does not know, fails closed,
@@ -303,7 +306,7 @@ The removal, under the same lock and record:
    isolated fixtures, reaching no AWS account and reading no factory state. A
    fixture's state is synthesized from Terraform's own plans of the example
    with several hosts (two with their own Paseo passwords, one without, one
-   sharing another's) or with one: each resource as planned, its values unknown
+   sharing another's) or with one, and every credential reference: each resource as planned, its values unknown
    until apply filled with fake but well-formed IDs and ARNs, until Terraform
    plans no change for it. Each removal is planned as step 1 plans it (the
    recorded keys from the state's outputs, factory.json without the host
@@ -311,14 +314,14 @@ The removal, under the same lock and record:
    `-refresh=false`, and the plan read back with `showPlan`), and the real
    JSON plan judged by `removalPlanRefusal`. Removing a host with its own
    password plans exactly the instance's `delete` and the policy's in-place
-   `update`, the policy then allowing the enrollment key and the remaining
-   hosts' passwords; removing one without a password, or sharing one, only the
-   `delete`; removing the last host leaves the policy allowing only the
-   enrollment key. Each is allowed. Refused: the same plan judged with another
+   `update`, the policy then allowing the enrollment key, the remaining
+   hosts' passwords and the credential references; removing one without a
+   password, or sharing one, only the `delete`; removing the last host leaves
+   the policy allowing only the enrollment key and the credential references. Each is allowed. Refused: the same plan judged with another
    instance listed, or none, and removals planned together with another host's
-   instance type, the subnet's CIDR block or another host's Paseo password
-   changed, the last a policy update that is more than the removed host's
-   password dropped. With `-refresh=false` each change's `before` values are
+   instance type, the subnet's CIDR block, another host's Paseo password or a
+   credential reference changed, the last two a policy update that is more than
+   the removed host's password dropped. With `-refresh=false` each change's `before` values are
    Terraform's planned values, not what AWS returns on refresh, so the check
    proves the plan's shape and the rule's verdicts on it, not that a production
    refresh adds no drift; drift that does appear is another change, which the
@@ -943,4 +946,6 @@ The D11 refusal of a host removed by hand naming the command:
 
 Introduced by [#6](https://github.com/yaunder/fffactory/issues/6); terminate
 `--keep` by [#9](https://github.com/yaunder/fffactory/issues/9); terminate
-removing the host by [#10](https://github.com/yaunder/fffactory/issues/10).
+removing the host by [#10](https://github.com/yaunder/fffactory/issues/10); the
+credential references it leaves as they are by
+[#68](https://github.com/yaunder/fffactory/issues/68).

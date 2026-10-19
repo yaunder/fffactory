@@ -1,7 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import {
   assessCompleteness,
+  deliveredAccounts,
   type FactoryInstance,
+  type HostKey,
   parseFactoryId,
   parseFactoryInstance,
   parseHostKey,
@@ -259,6 +261,123 @@ describe("parseFactoryInstance", () => {
     });
   });
 
+  describe("credential references", () => {
+    const GITHUB = "arn:aws:secretsmanager:us-east-1:123456789012:secret:f/github-token-AbCdEf";
+    const ANTHROPIC = "arn:aws:secretsmanager:us-east-1:123456789012:secret:f/anthropic-AbCdEf";
+    const OPENAI = "arn:aws:secretsmanager:us-east-1:123456789012:secret:f/openai-AbCdEf";
+
+    test("accepts all three references and every interactive login", () => {
+      const instance = parsed({
+        ...completeDocument(),
+        credentials: {
+          github_token_secret: GITHUB,
+          anthropic_api_key_secret: ANTHROPIC,
+          openai_api_key_secret: OPENAI,
+        },
+        hosts: [{ key: "a", interactive_logins: ["github", "anthropic", "openai"] }],
+      });
+      expect(String(instance.credentials?.github_token_secret)).toBe(GITHUB);
+      expect(instance.hosts?.[0]?.interactive_logins).toEqual(["github", "anthropic", "openai"]);
+    });
+
+    test("accepts an empty credentials object and an empty interactive login list", () => {
+      expect(
+        parseFactoryInstance({
+          schema_version: 1,
+          credentials: {},
+          hosts: [{ key: "a", interactive_logins: [] }],
+        }).valid,
+      ).toBe(true);
+    });
+
+    test.each([
+      "credentials.github_token_secret",
+      "credentials.anthropic_api_key_secret",
+      "credentials.openai_api_key_secret",
+    ])("rejects a raw secret value in %s without echoing it", (path) => {
+      const field = path.split(".")[1] as string;
+      const issues = issuesFor({
+        schema_version: 1,
+        credentials: { [field]: "sk-ant-api03-pasted-material" },
+      });
+      expect(issues).toEqual([{ path, message: expect.stringContaining("Secrets Manager") }]);
+      expect(JSON.stringify(issues)).not.toContain("pasted");
+    });
+
+    test("rejects an unknown credential", () => {
+      expect(
+        issuesFor({ schema_version: 1, credentials: { gitlab_token_secret: GITHUB } }),
+      ).toEqual([
+        { path: "credentials.gitlab_token_secret", message: "is not a recognized field" },
+      ]);
+    });
+
+    test("rejects credentials that are not an object", () => {
+      expect(issuesFor({ schema_version: 1, credentials: [GITHUB] })).toEqual([
+        { path: "credentials", message: "must be an object" },
+      ]);
+    });
+
+    test.each(["Region", "account"] as const)(
+      "rejects a credential in another %s, naming the field only",
+      (kind) => {
+        const arn =
+          kind === "Region"
+            ? "arn:aws:secretsmanager:eu-west-2:123456789012:secret:f/elsewhere-AbCdEf"
+            : "arn:aws:secretsmanager:us-east-1:210987654321:secret:f/elsewhere-AbCdEf";
+        const message =
+          kind === "Region"
+            ? "must be a secret in the factory Region, aws.region"
+            : "must be a secret in the factory account, aws.account_id";
+        const issues = issuesFor({
+          ...completeDocument(),
+          credentials: {
+            github_token_secret: arn,
+            anthropic_api_key_secret: arn,
+            openai_api_key_secret: arn,
+          },
+        });
+        expect(issues).toEqual([
+          { path: "credentials.github_token_secret", message },
+          { path: "credentials.anthropic_api_key_secret", message },
+          { path: "credentials.openai_api_key_secret", message },
+        ]);
+        expect(JSON.stringify(issues)).not.toContain("elsewhere");
+      },
+    );
+
+    test("rejects an unknown interactive login without echoing it", () => {
+      expect(
+        issuesFor({ schema_version: 1, hosts: [{ key: "a", interactive_logins: ["gitlab"] }] }),
+      ).toEqual([
+        {
+          path: "hosts[0].interactive_logins[0]",
+          message: "must be one of github, openai, anthropic",
+        },
+      ]);
+    });
+
+    test.each([
+      ["a string", "github", "hosts[0].interactive_logins", "must be an array"],
+      ["a number", [1], "hosts[0].interactive_logins[0]", "must be a string"],
+    ])("rejects interactive logins holding %s", (_kind, logins, path, message) => {
+      expect(
+        issuesFor({ schema_version: 1, hosts: [{ key: "a", interactive_logins: logins }] }),
+      ).toEqual([{ path, message }]);
+    });
+
+    test("rejects a duplicate interactive login", () => {
+      expect(
+        issuesFor({
+          schema_version: 1,
+          hosts: [{ key: "a", interactive_logins: ["openai", "github", "openai"] }],
+        }),
+      ).toEqual([
+        { path: "hosts[0].interactive_logins[2]", message: 'duplicates account "openai"' },
+      ]);
+    });
+  });
+
   describe("host keys", () => {
     test("rejects duplicate host keys", () => {
       const issues = issuesFor({
@@ -353,6 +472,68 @@ describe("parseFactoryInstance", () => {
   });
 });
 
+describe("deliveredAccounts", () => {
+  const GITHUB = "arn:aws:secretsmanager:us-east-1:123456789012:secret:f/github-token-AbCdEf";
+  const ANTHROPIC = "arn:aws:secretsmanager:us-east-1:123456789012:secret:f/anthropic-AbCdEf";
+  const OPENAI = "arn:aws:secretsmanager:us-east-1:123456789012:secret:f/openai-AbCdEf";
+  const ALL = {
+    github_token_secret: GITHUB,
+    anthropic_api_key_secret: ANTHROPIC,
+    openai_api_key_secret: OPENAI,
+  };
+  const key = (value: string) => value as HostKey;
+
+  function delivered(credentials: unknown, hosts: unknown[], host = "a") {
+    const document = { ...completeDocument(), hosts };
+    if (credentials !== undefined) Object.assign(document, { credentials });
+    return deliveredAccounts(parsed(document), key(host)).map(({ id, secret }) => [
+      id,
+      String(secret),
+    ]);
+  }
+
+  test("a factory without credentials delivers nothing", () => {
+    expect(delivered(undefined, [{ key: "a" }])).toEqual([]);
+    expect(delivered({}, [{ key: "a" }])).toEqual([]);
+  });
+
+  test("every referenced account is delivered to a host listing no interactive login, in enrollment order", () => {
+    expect(delivered(ALL, [{ key: "a" }])).toEqual([
+      ["github", GITHUB],
+      ["openai", OPENAI],
+      ["anthropic", ANTHROPIC],
+    ]);
+    expect(delivered(ALL, [{ key: "a", interactive_logins: [] }])).toHaveLength(3);
+  });
+
+  test("an account the host keeps on interactive login is not delivered to it", () => {
+    expect(delivered(ALL, [{ key: "a", interactive_logins: ["anthropic", "github"] }])).toEqual([
+      ["openai", OPENAI],
+    ]);
+    expect(
+      delivered(ALL, [{ key: "a", interactive_logins: ["github", "openai", "anthropic"] }]),
+    ).toEqual([]);
+  });
+
+  test("an account without a reference is never delivered, listed or not", () => {
+    const githubOnly = { github_token_secret: GITHUB };
+    expect(delivered(githubOnly, [{ key: "a" }])).toEqual([["github", GITHUB]]);
+    expect(delivered(githubOnly, [{ key: "a", interactive_logins: ["openai"] }])).toEqual([
+      ["github", GITHUB],
+    ]);
+  });
+
+  test("each host's interactive logins apply to that host alone", () => {
+    const hosts = [{ key: "a", interactive_logins: ["github"] }, { key: "b" }];
+    expect(delivered({ github_token_secret: GITHUB }, hosts, "a")).toEqual([]);
+    expect(delivered({ github_token_secret: GITHUB }, hosts, "b")).toEqual([["github", GITHUB]]);
+  });
+
+  test("a host factory.json does not declare is delivered nothing", () => {
+    expect(delivered(ALL, [{ key: "a" }], "gone")).toEqual([]);
+  });
+});
+
 describe("assessCompleteness", () => {
   test("a complete document has nothing missing", () => {
     expect(assessCompleteness(parsed(completeDocument()))).toEqual({ complete: true, missing: [] });
@@ -382,6 +563,17 @@ describe("assessCompleteness", () => {
     const complete = completeDocument();
     const tailscale = complete.tailscale as Record<string, unknown>;
     const document = { ...complete, tailscale: { ...tailscale, admin_client_secret: SECRET_ARN } };
+    expect(assessCompleteness(parsed(document))).toEqual({ complete: true, missing: [] });
+  });
+
+  test("credential references and interactive logins are optional", () => {
+    const complete = completeDocument();
+    const [host] = complete.hosts as Record<string, unknown>[];
+    const document = {
+      ...complete,
+      credentials: { github_token_secret: SECRET_ARN },
+      hosts: [{ ...host, interactive_logins: ["openai"] }],
+    };
     expect(assessCompleteness(parsed(document))).toEqual({ complete: true, missing: [] });
   });
 

@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 
-# Authenticate factory-owned Paseo CLI calls without persisting the raw password.
+# Authenticate factory-owned Paseo CLI calls without persisting the raw password. Only these
+# calls carry it: the daemon itself (paseo.service) holds just its bcrypt hash in config.json, so
+# no agent, tool or hook it launches inherits PASEO_PASSWORD.
 set -euo pipefail
 
 readonly secret_reference=${FACTORY_PASEO_SECRET_REFERENCE:-/home/factory/.config/fffactory/paseo-password-secret-arn}
@@ -18,11 +20,12 @@ command -v "${paseo_bin}" >/dev/null || fail 'Paseo is unavailable'
 
 IFS= read -r secret_arn <"${secret_reference}" || true
 [[ -n ${secret_arn} ]] || fail 'no Paseo password secret is declared'
-IFS=: read -r arn_prefix partition service region account resource <<<"${secret_arn}"
+IFS=: read -r arn_prefix _ service region _ <<<"${secret_arn}"
 [[ ${arn_prefix} == arn && ${service} == secretsmanager && -n ${region} ]] \
   || fail 'invalid Paseo password secret ARN'
 
-# Secrets Manager holds the same password as the daemon's stored bcrypt hash.
+# Secrets Manager holds the password whose bcrypt hash the daemon checks: fffactory made it from
+# this value, final line endings dropped as command substitution drops them.
 # Command substitution keeps its value out of logs and argv; do not trace this
 # script or print the environment.
 password=$("${aws_bin}" secretsmanager get-secret-value \

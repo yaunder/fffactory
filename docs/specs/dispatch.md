@@ -34,7 +34,7 @@ entry here and in `DISPATCH_GATES`.
 | Gate | Passes when | When it fails, keeps dispatch |
 | --- | --- | --- |
 | `worker_release` | The workers stage installed and verified the release. | pending until a rerun installs and verifies it; in apply a worker the workers stage did not install never reaches the gates ([Skipped workers](#skipped-workers)), so this gate guards in depth |
-| `github_credential` | The worker's verification found GitHub enrolled for `factory`. | pending, naming the exact GitHub enrollment steps ([readiness §Enrollment](readiness.md#enrollment)) |
+| `github_credential` | The worker's verification found GitHub enrolled for `factory`. | pending, naming the exact GitHub enrollment steps, or, for a GitHub token factory.json delivers to the host, storing a valid one and applying it ([readiness §Enrollment](readiness.md#enrollment)) |
 | `repository_sync` | The repository stage synchronized every placed checkout ([repositories §Repository readiness](repositories.md#repository-readiness-and-dispatch)). | pending until the reported checkouts are resolved |
 | `ffflow_adoption` | The `WorkflowQueue` reports FFFlow adoption passes for the placed repositories. | pending until the placed repositories adopt FFFlow |
 | `paseo_health` | The control-plane stage found Paseo healthy. | pending until Paseo is healthy |
@@ -109,6 +109,26 @@ declaration missing any input is incomplete; nothing is defaulted. Their behavio
 that ship beside them,
 `assets/steps/dispatch/tests/test_factory_dispatch.py` and
 `test_dispatch_schedule.py`, run in CI (not by `bun test`).
+
+The reconciler finds the schedule by its `factory-dispatch` name, fails on more
+than one, and changes it in place, keeping its ID and run history: any
+difference in cadence, timezone, provider, model, mode, working directory or
+prompt is one `paseo schedule update`, followed by `schedule resume` when the
+schedule was paused, and a run limit or expiry that is set is cleared in the
+same update (`--no-max-runs`, `--no-expires-in`, which Paseo 0.11.4 honors and
+0.9.1 misread as values). An ordinary update sends neither flag. Only a schedule
+that no update can bring to the declared state is deleted and created again,
+losing its history: a completed one, one with a thinking option, or one whose
+target is not a new agent. It reads the inspected schedule, run history
+included, on standard input, never as an argument, so a large history neither
+reports drift nor stops reconciliation
+([#43](https://github.com/yaunder/fffactory/issues/43)).
+
+Paseo keeps every run of a schedule in its record
+(`~/.paseo/schedules/<id>.json`), and `schedule inspect` returns all of them.
+0.11.4 has no setting that bounds or prunes that history, so it grows by one
+entry per dispatch run for as long as the schedule lives. fffactory does not
+edit Paseo's private state to trim it.
 
 Moving the dispatch skill into the release is why it is no longer a canonical
 repository skill: `scripts/repository-skills.sh` no longer lists
@@ -190,4 +210,5 @@ configuration flag alone.
 | The dispatch program, schedule reconciler and skill | release assets | `assets/steps/dispatch/` |
 
 Introduced by [#105](https://github.com/yaunder/factory/issues/105). Skipped
-workers: [#134](https://github.com/yaunder/factory/issues/134).
+workers: [#134](https://github.com/yaunder/factory/issues/134). A delivered
+GitHub token's next action: [#70](https://github.com/yaunder/fffactory/issues/70).

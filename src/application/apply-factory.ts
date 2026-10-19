@@ -85,7 +85,7 @@ import {
 import { githubCredential, type PaseoHealth } from "../domain/dispatch-readiness";
 import { locateWorker, type TailnetLocation, thenRerunApply } from "../domain/status";
 import type { PeerView } from "../domain/tailnet";
-import { projectHost, projectHosts } from "../domain/host-projection";
+import { type HostProjection, projectHost, projectHosts } from "../domain/host-projection";
 import { applyWorkers, type WorkersStageDependencies } from "./apply-workers";
 import { applyRepositories, type RepositoryOutcome } from "./apply-repositories";
 import { applyControlPlane, type ControlPlaneOutcome } from "./apply-control-plane";
@@ -676,7 +676,7 @@ async function workersStage(
     deps,
     locked.target,
     tag,
-    request.instance.hosts ?? [],
+    request.instance,
     request.assetsSha256,
     new Set(created),
     new Set(applied.stopped),
@@ -1043,9 +1043,7 @@ async function reconcileWorkerControlPlane(
   view: PeerView,
   tag: string,
   worker: WorkerOutcome,
-  factoryId: FactoryId,
-  release: FactoryApplyRequest["release"],
-  host: Host,
+  projection: HostProjection,
   changes: readonly ChangeType[],
   observation: string | undefined,
 ): Promise<WorkerControlPlane> {
@@ -1058,7 +1056,7 @@ async function reconcileWorkerControlPlane(
       worker: identity,
       address: location.worker,
       changes,
-      projection: projectHost(factoryId, release, host),
+      projection,
       ...(observation === "no-release" ? { activity: { kind: "idle" as const } } : {}),
     },
   );
@@ -1106,6 +1104,7 @@ function dispatchInputFor(
     settings: host.dispatch,
     releaseHealthy: true,
     githubCredential: githubCredential(worker.verification),
+    githubDelivered: worker.delivered.includes("github"),
     repositorySync: repo?.kind === "synchronized" ? "ready" : "pending",
     paseoHealth: cp.paseoHealth,
   };
@@ -1181,9 +1180,7 @@ async function postWorkersStages(
       view,
       tag,
       worker,
-      about.factoryId,
-      request.release,
-      host,
+      projectHost(request.instance, about.factoryId, request.release, host),
       controlPlanePlan.find((item) => item.key === worker.key)?.changes ?? [],
       controlPlanePlan.find((item) => item.key === worker.key)?.observation,
     );
@@ -1247,7 +1244,7 @@ async function infrastructureStage(
       deps,
       locked.target,
       requireTag(request.instance),
-      request.instance.hosts ?? [],
+      request.instance,
       request.assetsSha256,
       new Set(
         createdWorkers(ready.changes, declaredWorkers(request.instance, locked.target.factoryId)),

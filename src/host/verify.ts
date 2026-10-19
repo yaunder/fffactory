@@ -9,9 +9,15 @@
 import { readFile, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { WORKER_PATHS } from "../domain/host-protocol";
+import {
+  ANTHROPIC_KEY_FILE,
+  CLAUDE_MANAGED_SETTINGS,
+  namesKeyHelper,
+} from "../domain/installation";
 import type { Release } from "../domain/instance";
 import {
   ENROLLMENTS,
+  GITHUB_STATUS,
   type EnrollmentId,
   type EnrollmentState,
   RUNTIME_ACCOUNT,
@@ -84,7 +90,7 @@ function pins(text: string): Map<string, string> {
 
 /** How each account's credential is checked, as `factory`. */
 export const CREDENTIAL_CHECKS: Readonly<Record<EnrollmentId, readonly string[]>> = {
-  github: ["gh", "auth", "status", "--hostname", "github.com"],
+  github: GITHUB_STATUS,
   openai: ["codex", "login", "status"],
   anthropic: ["claude", "auth", "status"],
 };
@@ -173,8 +179,24 @@ function verifiers(system: VerifySystem) {
     return outcome.exitCode === 0 ? "enrolled" : "pending";
   }
 
+  /** Whether Claude Code's managed settings name fffactory's key helper. */
+  async function anthropicDelivered(): Promise<boolean> {
+    try {
+      return namesKeyHelper(await readFile(join(system.root, CLAUDE_MANAGED_SETTINGS), "utf8"));
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * `claude auth status` never runs the helper, so with fffactory's helper configured the key
+   * file it reads must also be readable by `factory` and non-empty.
+   */
   async function enrollment(id: EnrollmentId): Promise<EnrollmentState> {
-    return enrolled(CREDENTIAL_CHECKS[id]);
+    const state = await enrolled(CREDENTIAL_CHECKS[id]);
+    if (id !== "anthropic" || state !== "enrolled" || !(await anthropicDelivered())) return state;
+    const key = join(system.root, ANTHROPIC_KEY_FILE);
+    return enrolled(["/usr/bin/test", "-r", key, "-a", "-s", key]);
   }
 
   return { factoryUid, toolchain, workspace, agents, plugins, tailscaled, enrollment };

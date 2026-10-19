@@ -13,14 +13,16 @@
  *   with the real linux-x64 worker executable compiled from this checkout as
  *   `bin/fffactory`, and `tests/bootstrap/stand-in-steps/` in place of its install steps;
  * - `host.json` and `other-host.json`: the host projections apply sends
- *   fff-aaaa1111-builder-1, the container's hostname, and builder-2.
+ *   fff-aaaa1111-builder-1, the container's hostname, and builder-2;
+ * - `credentials-host.json`: builder-1's projection once factory.json delivers it all three API
+ *   credentials, by reference (`tests/bootstrap/credentials.test.sh`).
  */
 import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import packageJson from "../../package.json";
 import { hostProjection, hostProjectionJson } from "../../src/domain/host-projection";
-import type { FactoryId, HostKey, Release } from "../../src/domain/instance";
+import type { FactoryId, HostKey, Release, SecretReference } from "../../src/domain/instance";
 import { packAssetsDirectory } from "../../src/infrastructure/asset-bundle";
 import { sha256Hex } from "../../src/infrastructure/release-tarball";
 import { renderUserData, SAMPLE_INPUTS } from "./user-data";
@@ -104,6 +106,19 @@ try {
       hostProjectionJson(hostProjection("fff-aaaa1111" as FactoryId, key as HostKey, release)),
       { mode: 0o644 },
     );
+  const secret = (name: string) =>
+    `arn:aws:secretsmanager:us-east-1:123456789012:secret:fff-aaaa1111/${name}-AbCdEf` as SecretReference;
+  await writeFile(
+    join(out, "credentials-host.json"),
+    hostProjectionJson(
+      hostProjection("fff-aaaa1111" as FactoryId, "builder-1" as HostKey, release, undefined, {
+        github_token_secret: secret("github-token"),
+        anthropic_api_key_secret: secret("anthropic-api-key"),
+        openai_api_key_secret: secret("openai-api-key"),
+      }),
+    ),
+    { mode: 0o644 },
+  );
 } finally {
   await rm(build, { recursive: true, force: true });
 }

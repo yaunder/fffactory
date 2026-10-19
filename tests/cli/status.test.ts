@@ -320,12 +320,12 @@ describe("fffactory status, a stopped worker (status §Workers)", () => {
     expect(transport.calls.map((call) => call.worker.hostname)).not.toContain(B1);
   });
 
-  test("its JSON verdict is stopped, under the same schema version", async () => {
+  test("its JSON verdict is stopped, a worker state the schema lists", async () => {
     const { context, out } = stoppedScenario();
     expect(await run(["status", "--json"], context)).toBe(0);
     const document = JSON.parse(out[0] ?? "");
     expect(schemaAccepts(document)).toBe(true);
-    expect(document.schema_version).toBe(1);
+    expect(document.schema_version).toBe(2);
     expect(document.status).toBe("ready");
     expect(document.workers[0]).toMatchObject({
       key: "builder-1",
@@ -392,7 +392,7 @@ describe("fffactory status, enrollment pending (readiness §Enrollment)", () => 
         "pending: GitHub, OpenAI Codex, Claude Code",
     );
     expect(out).toContain(
-      `               GitHub: Authenticate GitHub as factory on ${B1} (tailnet SSH policy must let you log in as \`factory\`): run \`tailscale ssh factory@${B1}\`, then \`gh auth login --hostname github.com --git-protocol https --web\`, then \`gh auth status\``,
+      `               GitHub: Authenticate GitHub as factory on ${B1}: run \`tailscale ssh factory@${B1}\`, then \`gh auth login --hostname github.com --git-protocol https --web\`, then \`gh auth status --hostname github.com --active\``,
     );
     expect(out).toContain(
       `             Next: Enroll each pending account on ${B1} as listed (tailnet SSH policy must let you log in there as \`factory\`), then verify the enrollment with \`fffactory apply\` and rerun \`fffactory status\`.`,
@@ -409,12 +409,88 @@ describe("fffactory status, enrollment pending (readiness §Enrollment)", () => 
       title: "GitHub",
       state: "pending",
       next_action: {
-        summary: `Authenticate GitHub as factory on ${B1} (tailnet SSH policy must let you log in as \`factory\`)`,
+        summary: `Authenticate GitHub as factory on ${B1}`,
         login: `tailscale ssh factory@${B1}`,
         commands: [
           "gh auth login --hostname github.com --git-protocol https --web",
-          "gh auth status",
+          "gh auth status --hostname github.com --active",
         ],
+      },
+    });
+  });
+});
+
+describe("fffactory status, a delivered credential not accepted (readiness §Enrollment)", () => {
+  const GITHUB_TOKEN =
+    "arn:aws:secretsmanager:us-east-1:123456789012:secret:example/github-token-AbCdEf" as SecretReference;
+
+  /** builder-1 is delivered the GitHub token, which it did not accept; builder-2 keeps its login. */
+  function deliveredScenario() {
+    const credentials = { github_token_secret: GITHUB_TOKEN };
+    const pending = readyWorker("example", "builder-1", "0.1.0", B1_PASEO_SECRET, credentials);
+    const installation = pending.installation.state === "succeeded" ? pending.installation : null;
+    return harness(
+      store({
+        credentials,
+        hosts: [
+          EXAMPLE.hosts[0],
+          {
+            key: "builder-2",
+            instance_type: "m7i.large",
+            root_volume_gib: 100,
+            interactive_logins: ["github"],
+          },
+        ],
+      }),
+      {},
+      {
+        machines: RUNNING,
+        tailnet: fakeTailnet(peers(peer(B1), peer(B2))).tailnet,
+        transport: fakeTransport({
+          [B1]: statusAnswers({
+            ...pending,
+            installation: {
+              ...(installation ?? installed("0.1.0", null)),
+              verification: verification(B1, "enrolled", {
+                enrollment: [
+                  { id: "github", state: "pending" },
+                  { id: "openai", state: "enrolled" },
+                  { id: "anthropic", state: "enrolled" },
+                ],
+              }),
+            },
+          }),
+          [B2]: statusAnswers(readyWorker("example", "builder-2", "0.1.0")),
+        }).transport,
+      },
+    );
+  }
+
+  test("exits 2 and names storing a valid token, then apply, with no login", async () => {
+    const { context, out } = deliveredScenario();
+    expect(await run(["status"], context)).toBe(2);
+    expect(out).toContain(
+      `               GitHub: Replace the GitHub token, which ${B1} did not accept: run \`fffactory secret set github-token\`, then \`fffactory apply\``,
+    );
+    expect(out).toContain(
+      `             Next: Enroll each pending account on ${B1} as listed, then verify the enrollment with \`fffactory apply\` and rerun \`fffactory status\`.`,
+    );
+    expect(out.join("\n")).not.toContain(`tailscale ssh factory@${B1}`);
+  });
+
+  test("its JSON next action has no login", async () => {
+    const { context, out } = deliveredScenario();
+    expect(await run(["status", "--json"], context)).toBe(2);
+    const document = JSON.parse(out[0] ?? "");
+    expect(schemaAccepts(document)).toBe(true);
+    expect(document.workers[0].enrollment[0]).toEqual({
+      id: "github",
+      title: "GitHub",
+      state: "pending",
+      next_action: {
+        summary: `Replace the GitHub token, which ${B1} did not accept`,
+        login: null,
+        commands: ["fffactory secret set github-token", "fffactory apply"],
       },
     });
   });

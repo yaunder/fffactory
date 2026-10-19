@@ -2,7 +2,14 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import {
+  controlPlaneProjection,
+  hostProjection,
+  hostProjectionJson,
+} from "../../src/domain/host-projection";
 import { WORKER_PATHS } from "../../src/domain/host-protocol";
+import type { FactoryId, HostKey, Release, SecretReference } from "../../src/domain/instance";
+import { sha256Text } from "../../src/infrastructure/release-tarball";
 import { localWorkerSystem, workerInspector } from "../../src/host/inspect";
 import type { ProcessOutcome, ProcessRunner } from "../../src/infrastructure/local-tool-probe";
 import { activate, system } from "./worker-scenarios";
@@ -62,6 +69,47 @@ describe("host inspect's active release", () => {
       version: "0.4.0-rc.1",
       sha256: "c".repeat(64),
     });
+  });
+});
+
+describe("host inspect's configuration (host protocol §inspect)", () => {
+  const plain = hostProjection(
+    "fff-aaaa1111" as FactoryId,
+    "builder-1" as HostKey,
+    "0.3.0" as Release,
+  );
+  const delivered = hostProjection(
+    "fff-aaaa1111" as FactoryId,
+    "builder-1" as HostKey,
+    "0.3.0" as Release,
+    undefined,
+    {
+      github_token_secret:
+        "arn:aws:secretsmanager:eu-west-2:123456789012:secret:fff-aaaa1111/github-token-AbCdEf" as SecretReference,
+    },
+  );
+
+  async function holding(text: string) {
+    await mkdir(join(root, "var/lib/fffactory"), { recursive: true });
+    await writeFile(join(root, WORKER_PATHS.configuration), text);
+    return (await inspect()).configuration;
+  }
+
+  test("digests the control plane's part apart when the file carries credential references", async () => {
+    const text = hostProjectionJson(delivered);
+    expect(await holding(text)).toEqual({
+      state: "present",
+      sha256: sha256Text(text),
+      control_plane_sha256: sha256Text(hostProjectionJson(controlPlaneProjection(delivered))),
+    });
+    expect(sha256Text(hostProjectionJson(controlPlaneProjection(delivered)))).toBe(
+      sha256Text(hostProjectionJson(plain)),
+    );
+  });
+
+  test("reports the file's digest alone when it carries none, or is no projection", async () => {
+    for (const text of [hostProjectionJson(plain), "not a projection", JSON.stringify(delivered)])
+      expect(await holding(text)).toEqual({ state: "present", sha256: sha256Text(text) });
   });
 });
 

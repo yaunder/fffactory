@@ -55,7 +55,7 @@ const WORKER_PATH = [
 describe("the install steps", () => {
   test("are one script per shell install step, in the release's steps directory", () => {
     expect(SCRIPTS).toEqual(
-      INSTALL_STEPS.filter(({ name }) => name !== "plugins")
+      INSTALL_STEPS.filter((step) => !("implementation" in step))
         .map(({ name }) => `${name}.sh`)
         .sort(),
     );
@@ -120,10 +120,39 @@ describe("the release-owned Paseo programs", () => {
     expect(setup).not.toContain("/usr/local/libexec/paseo-auth");
     expect(setup).not.toMatch(/systemctl (start|restart)/);
     expect(setup).not.toContain("factory-dispatch");
+  });
+
+  /**
+   * The daemon authenticates against the bcrypt hash setup merged into config.json, so it never
+   * holds `PASEO_PASSWORD`, which every agent, tool and hook it launches would inherit.
+   */
+  test("the unit starts the daemon directly, without the password, and only with a stored hash", async () => {
     const service = await readFile(join(CONTROL_PLANE, "paseo.service"), "utf8");
-    expect(service).toContain(
-      "ExecStart=/opt/fffactory/current/steps/control-plane/paseo-auth.sh daemon run",
+    const exec = service.split("\n").filter((line) => line.startsWith("ExecStart"));
+    expect(exec).toEqual([
+      'ExecStartPre=/usr/bin/jq --exit-status ".daemon.auth.password | strings | length > 0" /home/factory/.paseo/config.json',
+      "ExecStart=/home/factory/.local/bin/paseo daemon run --home /home/factory/.paseo",
+    ]);
+    const settings = service.split("\n").filter((line) => !line.startsWith("#"));
+    expect(settings.join("\n")).not.toMatch(
+      /paseo-auth|PASEO_PASSWORD|EnvironmentFile|PassEnvironment/,
     );
+  });
+
+  test("setup hands paseo-config.sh the hash it reads after the reference, never as an argument", async () => {
+    const setup = await readFile(join(CONTROL_PLANE, "setup-host.sh"), "utf8");
+    expect(setup).toMatch(
+      /IFS= read -r paseo_secret_arn \|\| true\nIFS= read -r paseo_password_hash \|\| true\n/,
+    );
+    const merge =
+      setup.match(/\n[^\n]*factory_command (?:[^\n]*\\\n)*[^\n]*paseo-config\.sh[^\n]*/)?.[0] ?? "";
+    expect(merge).toMatch(/^\nprintf '%s\\n' "\$\{paseo_password_hash\}" \| factory_command /);
+    expect(merge).toContain("IFS= read -r FACTORY_PASEO_PASSWORD_HASH");
+    expect(merge).not.toMatch(/FACTORY_PASEO_PASSWORD_HASH=/);
+    expect(setup.match(/password_hash/g)?.length).toBe(
+      setup.match(/\$\{paseo_password_hash\}|read -r paseo_password_hash/g)?.length,
+    );
+    expect(setup).not.toMatch(/PASEO_PASSWORD\b|get-secret-value/);
   });
 
   /**

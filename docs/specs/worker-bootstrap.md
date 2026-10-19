@@ -329,6 +329,13 @@ steps, and the host projections of builder-1 and builder-2.
   the projection on standard input; a directory where the release link belongs
   failing the install with a recorded reason; another worker's projection and
   an unfinished bootstrap refused, changing nothing.
+- `harness.test.sh`, the real `harness` step from the packed release, run as
+  `host apply` runs it, with stand-in `codex` and `claude` already at the
+  release's pins so it installs nothing: Codex's requirements
+  ([host protocol §Agent pins](host-protocol.md#agent-pins)) root:root 0644
+  with exactly their three settings, a rerun leaving them byte-identical, a
+  directory and file `factory` could write replaced, and the file written
+  even when the install then fails.
 
 `scripts/terraform-check.ts` compares each planned host's `user_data`,
 rendered by the managed Terraform, with `tests/support/user-data.ts`'s

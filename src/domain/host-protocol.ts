@@ -77,10 +77,19 @@ export type ReleaseState =
   | { readonly state: "active"; readonly version: string; readonly sha256: string }
   | { readonly state: "broken" };
 
-/** The host's configuration: none yet, its SHA-256, or a file `fffactory-admin` cannot read. */
+/**
+ * The host's configuration: none yet, its SHA-256, or a file `fffactory-admin` cannot read.
+ * `control_plane_sha256` digests the part of it the control plane installs from
+ * (`controlPlaneProjection`): a worker reports it when its file is a host projection, and one
+ * from before credential references reports none, its whole file being that part.
+ */
 export type ConfigurationState =
   | { readonly state: "none" }
-  | { readonly state: "present"; readonly sha256: string }
+  | {
+      readonly state: "present";
+      readonly sha256: string;
+      readonly control_plane_sha256?: string;
+    }
   | { readonly state: "unreadable" };
 
 export interface ServiceObservation {
@@ -121,9 +130,13 @@ function releaseJson(release: ReleaseState) {
 }
 
 function configurationJson(configuration: ConfigurationState) {
-  return configuration.state === "present"
-    ? { state: configuration.state, sha256: configuration.sha256 }
-    : { state: configuration.state };
+  if (configuration.state !== "present") return { state: configuration.state };
+  const { sha256, control_plane_sha256 } = configuration;
+  return {
+    state: configuration.state,
+    sha256,
+    ...(control_plane_sha256 === undefined ? {} : { control_plane_sha256 }),
+  };
 }
 
 /** The document as the worker prints it: keys in a fixed order, two-space indented. */
@@ -181,7 +194,18 @@ function parseConfiguration(value: unknown): ConfigurationState {
     case "unreadable":
       return { state: configuration.state };
     case "present":
-      return { state: "present", sha256: sha256(configuration.sha256, "configuration.sha256") };
+      return {
+        state: "present",
+        sha256: sha256(configuration.sha256, "configuration.sha256"),
+        ...(configuration.control_plane_sha256 === undefined
+          ? {}
+          : {
+              control_plane_sha256: sha256(
+                configuration.control_plane_sha256,
+                "configuration.control_plane_sha256",
+              ),
+            }),
+      };
     default:
       throw new Invalid("configuration.state is not a known state");
   }

@@ -29,6 +29,7 @@ import { hostProjectionSha256, projectHost, type Sha256 } from "../domain/host-p
 import type { RandomBytes } from "../domain/initialization";
 import {
   assessCompleteness,
+  deliveredAccounts,
   type FactoryId,
   type FactoryInstance,
   type Host,
@@ -1239,9 +1240,10 @@ async function readiness(
     hostname: power.worker.hostname,
     release: power.pinned,
     configurationSha256: hostProjectionSha256(
-      projectHost(power.factoryId, power.pinned, power.host),
+      projectHost(power.request.instance, power.factoryId, power.pinned, power.host),
       deps.sha256,
     ),
+    delivered: deliveredAccounts(power.request.instance, power.host.key).map(({ id }) => id),
   }).verdict;
 }
 

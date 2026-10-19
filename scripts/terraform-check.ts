@@ -16,7 +16,9 @@
  * 5. the empty factory check: the factory root planned from the example without hosts, as
  *    `fffactory worker terminate` leaves a factory whose last host it removed, plans no
  *    instance and keeps the shared infrastructure, its hosts' policy allowing only the
- *    Tailscale enrollment key;
+ *    Tailscale enrollment key; and the credentials check: planned from the example with every
+ *    `credentials.*_secret` set, the hosts' policy allows exactly the enrollment key, the
+ *    host's Paseo password and the three credential references;
  * 6. the removal plan check (`terraform-removal-check.ts`): `worker terminate`'s scoped
  *    removal rule, `removalPlanRefusal`, judges Terraform's real removal plans, each planned
  *    from a local state for several hosts or one that `terraform-state-fixture.ts`
@@ -132,7 +134,12 @@ ${endpoints}
 type RootModule = (typeof ROOT_MODULES)[number];
 
 /** The example's projection for `factoryId`, or, with `empty`, that of the example without hosts. */
-async function exampleVariables(factoryId: FactoryId, root: RootModule, empty = false) {
+async function exampleVariables(
+  factoryId: FactoryId,
+  root: RootModule,
+  empty = false,
+  credentials?: Record<string, string>,
+) {
   const example = JSON.parse(await readFile(join(ROOT, "examples/factory.json"), "utf8"));
   const bucket = `${factoryId}-${example.state_backend.bucket.slice(example.factory_id.length + 1)}`;
   const parsed = parseFactoryInstance({
@@ -140,6 +147,7 @@ async function exampleVariables(factoryId: FactoryId, root: RootModule, empty = 
     factory_id: factoryId,
     state_backend: { bucket },
     ...(empty ? { hosts: [] } : {}),
+    ...(credentials === undefined ? {} : { credentials }),
   });
   if (!parsed.valid) throw new Error("examples/factory.json is not a valid instance");
   const projection = project(root, parsed.instance);
@@ -201,15 +209,47 @@ function emptyFactoryProblems(json: unknown, variables: Record<string, unknown>)
   ])
     if (plannedResources(root, type as string, name as string).length !== 1)
       problems.push(`the plan does not keep ${type}.${name}`);
-  const [policy] = plannedResources(root, "aws_iam_role_policy", "read_secrets");
-  const document = isJson(policy?.values) ? policy.values.policy : undefined;
-  const statements =
-    typeof document === "string" ? [JSON.parse(document).Statement].flat() : undefined;
-  const resources = statements?.flatMap((statement: Json) => [statement.Resource].flat());
+  const resources = policyResources(root);
   const auth = variables.tailscale_auth_key_secret_arn;
   if (resources === undefined || resources.length !== 1 || resources[0] !== auth)
     problems.push("the hosts' policy does not allow exactly the Tailscale enrollment key");
   return problems;
+}
+
+/** The resources the planned hosts' secret-reading policy allows, or undefined if unread. */
+function policyResources(root: unknown): unknown[] | undefined {
+  const [policy] = plannedResources(root, "aws_iam_role_policy", "read_secrets");
+  const document = isJson(policy?.values) ? policy.values.policy : undefined;
+  const statements =
+    typeof document === "string" ? [JSON.parse(document).Statement].flat() : undefined;
+  return statements?.flatMap((statement: Json) => [statement.Resource].flat());
+}
+
+/** The example's credential references, in its factory's Region and account. */
+const EXAMPLE_CREDENTIALS = Object.fromEntries(
+  ["github_token_secret", "anthropic_api_key_secret", "openai_api_key_secret"].map((field) => [
+    field,
+    `arn:aws:secretsmanager:us-east-1:123456789012:secret:example/${field}-AbCdEf`,
+  ]),
+);
+
+/**
+ * What is wrong with the plan of a factory with credential references: a policy allowing
+ * anything but the enrollment key, the hosts' Paseo passwords and those references.
+ */
+function credentialProblems(json: unknown, variables: Record<string, unknown>): string[] {
+  const expected = [
+    variables.tailscale_auth_key_secret_arn,
+    ...Object.values(variables.paseo_password_secret_arns as Record<string, string>),
+    ...Object.values(EXAMPLE_CREDENTIALS),
+  ].sort();
+  const resources = policyResources(plannedRoot(json));
+  return resources !== undefined &&
+    JSON.stringify([...resources].sort()) === JSON.stringify(expected)
+    ? []
+    : [
+        "the hosts' policy does not allow exactly the enrollment key, Paseo passwords and credentials",
+      ];
 }
 
 /** Every host whose planned user data differs from the bootstrap tests' rendering. */
@@ -384,30 +424,45 @@ async function main(): Promise<number> {
     const [factoryId] = FACTORY_IDS as [FactoryId];
     const directory = join(tree, "factory");
     const at = session(directory, `plan-factory-${factoryId}`);
-    const inputs = join(work, `factory-${factoryId}-empty.tfvars.json`);
-    const planFile = join(work, `factory-${factoryId}-empty.tfplan`);
+    /** The factory root planned once from `variables`, as `terraform show -json` gives it. */
+    const planned = async (label: string, variables: object): Promise<unknown> => {
+      const inputs = join(work, `factory-${factoryId}-${label}.tfvars.json`);
+      const planFile = join(work, `factory-${factoryId}-${label}.tfplan`);
+      await writeFile(inputs, JSON.stringify(variables), { mode: 0o600 });
+      await run(
+        at,
+        [
+          "plan",
+          "-input=false",
+          "-no-color",
+          "-refresh=false",
+          `-var-file=${inputs}`,
+          `-out=${planFile}`,
+        ],
+        timeout,
+      );
+      const { stdout } = await run(at, ["show", "-json", "-no-color", planFile], timeout);
+      return JSON.parse(stdout);
+    };
     const variables = await exampleVariables(factoryId, "factory", true);
-    await writeFile(inputs, JSON.stringify(variables), { mode: 0o600 });
-    await run(
-      at,
-      [
-        "plan",
-        "-input=false",
-        "-no-color",
-        "-refresh=false",
-        `-var-file=${inputs}`,
-        `-out=${planFile}`,
-      ],
-      timeout,
-    );
-    const { stdout } = await run(at, ["show", "-json", "-no-color", planFile], timeout);
-    const empty = emptyFactoryProblems(JSON.parse(stdout), { ...variables });
+    const empty = emptyFactoryProblems(await planned("empty", variables), { ...variables });
     if (empty.length > 0) {
       console.error(`Empty factory check failed:\n${empty.map((p) => `  ${p}`).join("\n")}`);
       return 1;
     }
     console.log(
       "empty factory: no host is planned; the network and host identity stay, its policy allowing only the enrollment key",
+    );
+    const delivering = await exampleVariables(factoryId, "factory", false, EXAMPLE_CREDENTIALS);
+    const credentials = credentialProblems(await planned("credentials", delivering), {
+      ...delivering,
+    });
+    if (credentials.length > 0) {
+      console.error(`Credentials check failed:\n${credentials.map((p) => `  ${p}`).join("\n")}`);
+      return 1;
+    }
+    console.log(
+      "credentials: the hosts' policy allows the enrollment key, the Paseo passwords and every credential reference",
     );
     if (!(await removalCheck(work, `http://127.0.0.1:${server.port}`, session, cache))) return 1;
     console.log(

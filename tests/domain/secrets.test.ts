@@ -105,6 +105,23 @@ describe("resolveSecretTarget", () => {
     });
   });
 
+  test.each([
+    ["github-token", "credentials.github_token_secret", "GitHub token"],
+    ["anthropic-api-key", "credentials.anthropic_api_key_secret", "Anthropic API key"],
+    ["openai-api-key", "credentials.openai_api_key_secret", "OpenAI API key"],
+  ])("the API credential %s goes to %s, named under the factory ID", (name, field, what) => {
+    expect(resolveSecretTarget(FACTORY, name, undefined) as unknown).toEqual({
+      ok: true,
+      target: {
+        name,
+        field,
+        secretName: `fff-abcd1234/${name}`,
+        description: `${what} of factory fff-abcd1234`,
+        factoryId: "fff-abcd1234",
+      },
+    });
+  });
+
   test("a Paseo password goes to its host's paseo_password_secret", () => {
     expect(resolveSecretTarget(FACTORY, "paseo-password", "builder-2") as unknown).toEqual({
       ok: true,
@@ -125,7 +142,8 @@ describe("resolveSecretTarget", () => {
       FACTORY,
       VALUE,
       undefined,
-      "unknown secret name; expected tailscale-auth-key, tailscale-admin-client or paseo-password",
+      "unknown secret name; expected tailscale-auth-key, tailscale-admin-client, paseo-password, " +
+        "github-token, anthropic-api-key or openai-api-key",
     ],
     [
       "a factory without an ID",
@@ -148,6 +166,16 @@ describe("resolveSecretTarget", () => {
       "builder-1",
       "tailscale-admin-client belongs to the whole factory and takes no --host",
     ],
+    ...["github-token", "anthropic-api-key", "openai-api-key"].map(
+      (name) =>
+        [
+          `a host for the factory-wide ${name}`,
+          FACTORY,
+          name,
+          "builder-1",
+          `${name} belongs to the whole factory and takes no --host`,
+        ] as const,
+    ),
     [
       "a Paseo password without a host",
       FACTORY,
@@ -203,6 +231,30 @@ describe("secret references in factory.json", () => {
     expect(secretReference(updated, admin.target)).toBe(ADMIN_ARN);
     expect(secretReference(updated, key.target)).toBe(ARN);
     expect(updated.hosts).toEqual(FACTORY.hosts);
+    expect(parseFactoryInstance(updated).valid).toBe(true);
+  });
+
+  test("each API credential's reference lands under credentials, leaving the rest alone", () => {
+    let updated = FACTORY;
+    const arns: Record<string, SecretReference> = {};
+    for (const name of ["github-token", "anthropic-api-key", "openai-api-key"]) {
+      const target = resolveSecretTarget(updated, name, undefined);
+      if (!target.ok) throw new Error(target.message);
+      expect(secretReference(updated, target.target)).toBeUndefined();
+      const arn =
+        `arn:aws:secretsmanager:eu-west-2:123456789012:secret:fff-abcd1234/${name}-AbCdEf` as SecretReference;
+      arns[name] = arn;
+      updated = withSecretReference(updated, target.target, arn);
+      expect(secretReference(updated, target.target)).toBe(arn);
+    }
+    expect(updated.credentials as unknown).toEqual({
+      github_token_secret: arns["github-token"],
+      anthropic_api_key_secret: arns["anthropic-api-key"],
+      openai_api_key_secret: arns["openai-api-key"],
+    });
+    expect(updated.tailscale).toEqual(FACTORY.tailscale);
+    expect(updated.hosts).toEqual(FACTORY.hosts);
+    expect(Object.keys(updated)).toEqual([...Object.keys(FACTORY), "credentials"]);
     expect(parseFactoryInstance(updated).valid).toBe(true);
   });
 

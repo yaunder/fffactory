@@ -10,7 +10,7 @@ import type { WorkflowAdoption, WorkflowQueue } from "../../src/application/work
 import { DISPATCH_GATES, type DispatchGate } from "../../src/domain/dispatch-readiness";
 import type { DispatchInspection } from "../../src/domain/dispatch-projection";
 import type { HostKey } from "../../src/domain/instance";
-import { enrollmentNextAction } from "../../src/domain/readiness";
+import { describeNextAction, enrollmentNextAction } from "../../src/domain/readiness";
 import type { WorkerIdentity } from "../../src/domain/rollout";
 import { resolveWorker, type WorkerAddress } from "../../src/domain/tailnet";
 import { peer, TAG } from "../support/fake-workers";
@@ -41,6 +41,7 @@ function worker(overrides: Partial<GatedDispatchWorker> = {}): GatedDispatchWork
     settings: SETTINGS,
     releaseHealthy: true,
     githubCredential: "enrolled",
+    githubDelivered: false,
     repositorySync: "ready",
     paseoHealth: "healthy",
     ...overrides,
@@ -147,10 +148,24 @@ describe("the dispatch stage (dispatch §Requested versus active)", () => {
     const outcome = outcomes[0];
     expect(outcome?.kind).toBe("pending");
     if (outcome?.kind !== "pending") throw new Error("expected pending");
-    const next = enrollmentNextAction("github", HOSTNAME);
-    const line = outcome.nextActions.find((entry) => entry.includes("GitHub"));
-    expect(line).toContain(next.login);
-    for (const command of next.commands) expect(line).toContain(command);
+    expect(outcome.nextActions).toEqual([
+      `GitHub is not authenticated for the runtime account on ${HOSTNAME}: ` +
+        describeNextAction(enrollmentNextAction("github", HOSTNAME, false)),
+    ]);
+  });
+
+  test("a delivered GitHub token not accepted names storing a valid one", async () => {
+    const { queue } = fakeQueue();
+    const { outcomes } = await run(
+      [worker({ githubCredential: "pending", githubDelivered: true })],
+      queue,
+    );
+    const outcome = outcomes[0];
+    if (outcome?.kind !== "pending") throw new Error("expected pending");
+    expect(outcome.nextActions).toEqual([
+      `GitHub is not authenticated for the runtime account on ${HOSTNAME}: ` +
+        describeNextAction(enrollmentNextAction("github", HOSTNAME, true)),
+    ]);
   });
 
   test("rerunning with an active agent is a no-op: dispatch stays active and nothing restarts", async () => {

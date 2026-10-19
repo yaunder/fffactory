@@ -10,7 +10,7 @@ import { join } from "node:path";
 import { WORKER_PATHS } from "../../src/domain/host-protocol";
 import { hostProjection, hostProjectionJson } from "../../src/domain/host-projection";
 import { type HostApplyRecord, INSTALL_STEPS, parseHostApply } from "../../src/domain/installation";
-import type { FactoryId, HostKey, Release } from "../../src/domain/instance";
+import type { FactoryId, HostKey, Release, SecretReference } from "../../src/domain/instance";
 import { ENROLLMENTS, type Verification } from "../../src/domain/readiness";
 import {
   type ApplySystem,
@@ -161,6 +161,25 @@ describe("host apply, installing (host protocol §apply)", () => {
     expect((await stat(at(WORKER_PATHS.lastApply))).mode & 0o777).toBe(0o644);
   });
 
+  test("keeps a projection carrying credential references exactly as given (D3)", async () => {
+    await worker();
+    const delivered = hostProjectionJson(
+      hostProjection("fff-aaaa1111" as FactoryId, "builder-1" as HostKey, RELEASE, undefined, {
+        github_token_secret:
+          "arn:aws:secretsmanager:eu-west-2:123456789012:secret:fff-aaaa1111/github-token-AbCdEf" as SecretReference,
+      }),
+    );
+    const result = await workerApplier(
+      applySystem({ readInput: async () => delivered }),
+      fakeVerifier().verifier,
+    ).apply();
+    expect(result).toMatchObject({
+      state: "succeeded",
+      configuration_sha256: sha256Text(delivered),
+    });
+    expect(await readFile(at(WORKER_PATHS.configuration), "utf8")).toBe(delivered);
+  });
+
   test("keeps each step's output in its log, never in the document", async () => {
     await worker();
     const result = await workerApplier(applySystem(), fakeVerifier().verifier).apply();
@@ -221,6 +240,7 @@ describe("host apply, installing (host protocol §apply)", () => {
       { name: "systemd", status: "succeeded", reason: null },
       { name: "harness", status: "failed", reason: "exited with status 3" },
       { name: "plugins", status: "not_run", reason: null },
+      { name: "credentials", status: "not_run", reason: null },
     ]);
     expect(await readlink(at(WORKER_PATHS.activeRelease))).toBe(`releases/${RELEASE}`);
     expect((await kept()).state).toBe("failed");
@@ -260,11 +280,12 @@ describe("host apply, installing (host protocol §apply)", () => {
     };
     await workerApplier(applySystem({ run }), fakeVerifier().verifier).apply();
     expect(seen).toEqual([
-      "packages: running not_run,not_run,not_run,not_run,not_run",
-      "user: running succeeded,not_run,not_run,not_run,not_run",
-      "systemd: running succeeded,succeeded,not_run,not_run,not_run",
-      "harness: running succeeded,succeeded,succeeded,not_run,not_run",
-      "plugins: running succeeded,succeeded,succeeded,succeeded,not_run",
+      "packages: running not_run,not_run,not_run,not_run,not_run,not_run",
+      "user: running succeeded,not_run,not_run,not_run,not_run,not_run",
+      "systemd: running succeeded,succeeded,not_run,not_run,not_run,not_run",
+      "harness: running succeeded,succeeded,succeeded,not_run,not_run,not_run",
+      "plugins: running succeeded,succeeded,succeeded,succeeded,not_run,not_run",
+      "credentials: running succeeded,succeeded,succeeded,succeeded,succeeded,not_run",
     ]);
   });
 
@@ -397,12 +418,104 @@ describe("host apply's native plugin step", () => {
     await writeFile(join(RELEASE_DIRECTORY(), "steps/plugins.json"), "invalid");
     const { verifier, runs } = fakeVerifier();
     const result = await realWorkerApplier(applySystem(), verifier).apply();
-    expect(result.state !== "refused" && result.steps.at(-1)).toEqual({
+    expect(result.state !== "refused" && result.steps.at(-2)).toEqual({
       name: "plugins",
       status: "failed",
       reason: "plugin installation or verification failed",
     });
     expect(runs()).toBe(0);
+  });
+});
+
+describe("host apply's native credentials step (credential delivery)", () => {
+  const TOKEN = "ghp_SECRETgithubTOKEN0123456789";
+  const GITHUB_ARN =
+    "arn:aws:secretsmanager:eu-west-2:123456789012:secret:fff-aaaa1111/github-token-AbCdEf" as SecretReference;
+  const DELIVERING = hostProjectionJson(
+    hostProjection("fff-aaaa1111" as FactoryId, "builder-1" as HostKey, RELEASE, undefined, {
+      github_token_secret: GITHUB_ARN,
+    }),
+  );
+
+  async function nativeWorker() {
+    await worker();
+    await writeFile(
+      join(RELEASE_DIRECTORY(), "steps/plugins.json"),
+      JSON.stringify({ schema: 1, providers: { claude: { plugins: [] }, codex: { plugins: [] } } }),
+    );
+  }
+
+  /** Shell steps run for real; Secrets Manager answers `secret`; every other tool succeeds. */
+  function tools(secret: ProcessOutcome) {
+    const seen: { argv: readonly string[]; stdin: string | undefined }[] = [];
+    const answer = (argv: readonly string[]): ProcessOutcome => {
+      if (argv[0] === "/usr/bin/aws") return secret;
+      const stdout = argv.includes("hosts") ? '{"hosts":{}}' : "[]";
+      return { kind: "exited", exitCode: 0, stdout, stderr: "" };
+    };
+    const run: ProcessRunner = async (argv, timeout, options) => {
+      if (argv[0] === "/bin/bash") return bunProcessRunner(argv, timeout, options);
+      expect(await flockExclusive(at(WORKER_PATHS.applyLock))).toBeUndefined();
+      const stdin = options?.stdin && new TextDecoder().decode(options.stdin);
+      seen.push({ argv, stdin });
+      return answer(argv);
+    };
+    return { run, seen };
+  }
+
+  test("runs last, inside the install lock, delivering what the projection references", async () => {
+    await nativeWorker();
+    const { run, seen } = tools({
+      kind: "exited",
+      exitCode: 0,
+      stdout: `"${TOKEN}"\n`,
+      stderr: "",
+    });
+    const result = await realWorkerApplier(
+      applySystem({ run, readInput: async () => DELIVERING }),
+      fakeVerifier().verifier,
+    ).apply();
+    expect(result.state).toBe("succeeded");
+    expect(result.state !== "refused" && result.steps.at(-1)).toEqual({
+      name: "credentials",
+      status: "succeeded",
+      reason: null,
+    });
+    expect(seen.find(({ argv }) => argv[0] === "/usr/bin/aws")?.argv).toContain(GITHUB_ARN);
+    expect(seen.filter(({ stdin }) => stdin === TOKEN)).toHaveLength(1);
+    const log = await readFile(at(join(WORKER_PATHS.logs, "credentials.log")), "utf8");
+    expect(log).toBe(
+      "github: delivered\n" +
+        "anthropic: not delivered; no API key helper of fffactory's to remove\n" +
+        "--- fffactory: step credentials succeeded\n",
+    );
+    expect(log).not.toContain(TOKEN);
+    expect(await readFile(at(WORKER_PATHS.lastApply), "utf8")).not.toContain(TOKEN);
+  });
+
+  test("a secret it cannot read fails the step and the install, naming the account", async () => {
+    await nativeWorker();
+    const { run } = tools({
+      kind: "exited",
+      exitCode: 254,
+      stdout: "",
+      stderr: "An error occurred (ResourceNotFoundException) when calling GetSecretValue",
+    });
+    const { verifier, runs } = fakeVerifier();
+    const result = await realWorkerApplier(
+      applySystem({ run, readInput: async () => DELIVERING }),
+      verifier,
+    ).apply();
+    expect(result).toMatchObject({ state: "failed", verification: null });
+    expect(result.state !== "refused" && result.steps.at(-1)).toEqual({
+      name: "credentials",
+      status: "failed",
+      reason: "github: reading its secret failed (ResourceNotFoundException)",
+    });
+    expect(runs()).toBe(0);
+    expect(await readFile(at(join(WORKER_PATHS.logs, "credentials.log")), "utf8")).toBe(
+      "--- fffactory: step credentials failed: github: reading its secret failed (ResourceNotFoundException)\n",
+    );
   });
 });
 

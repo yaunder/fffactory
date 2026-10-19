@@ -117,10 +117,11 @@ if [[ ${matches} == false && ${mode} == apply ]]; then
       --cwd "${cwd}" "$(jq -r .prompt <<<"${desired}")" --json >/dev/null
   elif [[ $(jq -r '
     .target.type != "new-agent" or .target.config.thinkingOptionId != null
-    or .status == "completed" or .maxRuns != null or .expiresAt != null
+    or .status == "completed"
   ' <<<"${current}") == true ]]; then
-    # Paseo 0.9.1 cannot clear limits through its broken negated update flags.
-    # Recreate only when an in-place update cannot reach the declared state.
+    # Paseo's update reaches only new-agent schedules, has no thinking option flag, and
+    # cannot reopen a completed schedule. Recreate only when an in-place update cannot
+    # reach the declared state: recreating drops the schedule's identity and run history.
     "${paseo}" schedule delete "${ids}" --json >/dev/null
     "${paseo}" schedule create --cron "$(jq -r .cron <<<"${desired}")" \
       --timezone "$(jq -r .timezone <<<"${desired}")" \
@@ -129,13 +130,18 @@ if [[ ${matches} == false && ${mode} == apply ]]; then
       --mode "$(jq -r .mode <<<"${desired}")" \
       --cwd "${cwd}" "$(jq -r .prompt <<<"${desired}")" --json >/dev/null
   else
+    # Paseo 0.11.4 clears limits in place (0.9.1 misread its negated flags as values).
+    # Only a limit that is set is cleared, so an ordinary update sends neither flag.
+    clear_limits=()
+    [[ $(jq -r '.maxRuns != null' <<<"${current}") == true ]] && clear_limits+=(--no-max-runs)
+    [[ $(jq -r '.expiresAt != null' <<<"${current}") == true ]] && clear_limits+=(--no-expires-in)
     "${paseo}" schedule update "${ids}" \
       --cron "$(jq -r .cron <<<"${desired}")" \
       --timezone "$(jq -r .timezone <<<"${desired}")" \
       --name "${SCHEDULE_NAME}" --prompt "$(jq -r .prompt <<<"${desired}")" \
       --provider "$(jq -r '.provider + "/" + .model' <<<"${desired}")" \
       --mode "$(jq -r .mode <<<"${desired}")" --cwd "${cwd}" \
-      --json >/dev/null
+      ${clear_limits[@]+"${clear_limits[@]}"} --json >/dev/null
     if [[ $(jq -r .status <<<"${current}") != active ]]; then
       "${paseo}" schedule resume "${ids}" --json >/dev/null
     fi

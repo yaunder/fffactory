@@ -1,12 +1,18 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { compareSync } from "bcryptjs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { hostProjection, hostProjectionJson } from "../../src/domain/host-projection";
+import { CREDENTIAL_COMMAND_TIMEOUT_MS } from "../../src/domain/installation";
 import type { FactoryId, HostKey, Release, SecretReference } from "../../src/domain/instance";
 import type { ApplySystem } from "../../src/host/apply";
 import { workerControlPlane } from "../../src/host/control-plane";
-import type { ProcessRunner } from "../../src/infrastructure/local-tool-probe";
+import type {
+  ProcessOptions,
+  ProcessOutcome,
+  ProcessRunner,
+} from "../../src/infrastructure/local-tool-probe";
 import { system } from "./worker-scenarios";
 
 let root: string;
@@ -22,6 +28,43 @@ const ARN =
 const PROJECTION = hostProjectionJson(
   hostProjection("fff-aaaa1111" as FactoryId, "builder-1" as HostKey, "0.3.0" as Release, ARN),
 );
+const WITHOUT_PASSWORD = hostProjectionJson(
+  hostProjection("fff-aaaa1111" as FactoryId, "builder-1" as HostKey, "0.3.0" as Release),
+);
+const PASSWORD = "Paseo-pw 7f3e9a\u00e9";
+const SETUP = "/opt/fffactory/current/steps/control-plane/setup-host.sh";
+
+interface Call {
+  readonly argv: readonly string[];
+  readonly timeout: number;
+  readonly env: Readonly<Record<string, string>>;
+  readonly stdin: string | undefined;
+}
+
+/** Answers Secrets Manager with `secret` (its JSON `SecretString`), and every other command 0. */
+function recording(secret: ProcessOutcome | string | null = PASSWORD) {
+  const calls: Call[] = [];
+  const run: ProcessRunner = async (argv, timeout, options?: ProcessOptions) => {
+    calls.push({
+      argv: [...argv],
+      timeout,
+      env: { ...(options?.env ?? {}) },
+      stdin: options?.stdin === undefined ? undefined : new TextDecoder().decode(options.stdin),
+    });
+    if (argv[0] !== "/usr/bin/aws") return { kind: "exited", exitCode: 0, stdout: "", stderr: "" };
+    if (typeof secret === "object" && secret !== null) return secret;
+    return { kind: "exited", exitCode: 0, stdout: `${JSON.stringify(secret)}\n`, stderr: "" };
+  };
+  return { calls, run };
+}
+
+/** The bcrypt hash setup was sent, after checking the reference line before it. */
+function sentHash(calls: readonly Call[]): string {
+  const setup = calls.find((call) => call.argv[0] === "/bin/bash");
+  const [reference, hash, rest] = (setup?.stdin ?? "").split("\n");
+  expect({ reference, rest }).toEqual({ reference: ARN, rest: "" });
+  return hash ?? "";
+}
 
 function endpoint(
   run: ProcessRunner,
@@ -78,21 +121,113 @@ describe("the worker control-plane endpoint", () => {
     });
   });
 
-  test("streams only the validated secret reference to the active release setup step", async () => {
-    let seen: { argv: readonly string[]; stdin?: Uint8Array } | undefined;
-    const run: ProcessRunner = async (argv, _timeout, options) => {
-      seen = { argv, ...(options?.stdin ? { stdin: options.stdin } : {}) };
-      return { kind: "exited", exitCode: 0, stdout: "", stderr: "" };
-    };
+  test("reads the Paseo password by its reference as root and sends setup only the reference and Paseo's bcrypt hash", async () => {
+    const { calls, run } = recording();
     expect(await endpoint(run).install()).toEqual({ kind: "done" });
-    expect(seen?.argv).toEqual([
-      "/bin/bash",
-      join(root, "/opt/fffactory/current/steps/control-plane/setup-host.sh"),
+    expect(calls.map((call) => call.argv)).toEqual([
+      [
+        "/usr/bin/aws",
+        "secretsmanager",
+        "get-secret-value",
+        "--region",
+        "us-east-1",
+        "--secret-id",
+        ARN,
+        "--query",
+        "SecretString",
+        "--output",
+        "json",
+      ],
+      ["/bin/bash", join(root, SETUP)],
     ]);
-    expect(new TextDecoder().decode(seen?.stdin)).toBe(`${ARN}\n`);
-    expect(PROJECTION).toContain(ARN);
-    expect(PROJECTION).not.toContain("raw-password");
+    expect(calls[0]?.timeout).toBe(CREDENTIAL_COMMAND_TIMEOUT_MS);
+    expect(calls[0]?.env).toEqual({
+      PATH: "/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+      HOME: "/root",
+      LANG: "C.UTF-8",
+      AWS_PAGER: "",
+    });
+    const hash = sentHash(calls);
+    // Paseo's own form and cost: bcryptjs's hashSync(password, 12), as `paseo daemon set-password`.
+    expect(hash).toMatch(/^\$2b\$12\$[./A-Za-z0-9]{53}$/);
+    expect(compareSync(PASSWORD, hash)).toBe(true);
+    expect(compareSync(`${PASSWORD}x`, hash)).toBe(false);
   });
+
+  test("the password reaches no argument, environment or setup input, only its hash", async () => {
+    const { calls, run } = recording();
+    await endpoint(run).install();
+    const seen = calls.flatMap((call) => [
+      ...call.argv,
+      ...Object.values(call.env),
+      call.stdin ?? "",
+    ]);
+    expect(seen.filter((text) => text.includes(PASSWORD))).toEqual([]);
+    expect(seen.filter((text) => text.includes("Paseo-pw"))).toEqual([]);
+  });
+
+  test("hashes the password as paseo-auth.sh sends it: final line endings dropped, all else kept", async () => {
+    const { calls, run } = recording(`  ${PASSWORD} \n\n`);
+    expect(await endpoint(run).install()).toEqual({ kind: "done" });
+    expect(compareSync(`  ${PASSWORD} `, sentHash(calls))).toBe(true);
+  });
+
+  test("a host without a Paseo password reads no secret and sends setup two empty lines", async () => {
+    const { calls, run } = recording();
+    expect(await endpoint(run, WITHOUT_PASSWORD).install()).toEqual({ kind: "done" });
+    expect(calls).toEqual([
+      {
+        argv: ["/bin/bash", join(root, SETUP)],
+        timeout: expect.any(Number),
+        env: expect.any(Object),
+        stdin: "\n\n",
+      },
+    ]);
+  });
+
+  test.each([
+    [
+      {
+        kind: "exited" as const,
+        exitCode: 254,
+        stdout: "",
+        stderr:
+          "An error occurred (AccessDeniedException) when calling the GetSecretValue operation: no",
+      },
+      "Paseo password: reading its secret failed (AccessDeniedException)",
+    ],
+    [
+      { kind: "exited" as const, exitCode: 255, stdout: "", stderr: "Could not connect" },
+      "Paseo password: reading its secret failed (exit status 255)",
+    ],
+    [{ kind: "timed_out" as const }, "Paseo password: reading its secret timed out"],
+    [
+      { kind: "not_found" as const },
+      "Paseo password: reading its secret failed (the AWS CLI is not installed)",
+    ],
+    [
+      { kind: "not_started" as const, code: "EACCES" },
+      "Paseo password: reading its secret failed (EACCES)",
+    ],
+    [
+      { kind: "not_started" as const, code: "not a code" },
+      "Paseo password: reading its secret failed (unexpected error)",
+    ],
+    [
+      { kind: "exited" as const, exitCode: 0, stdout: "not json", stderr: "" },
+      "Paseo password: Secrets Manager's answer could not be read",
+    ],
+    ["", "Paseo password: its secret is empty"],
+    [" \t\n", "Paseo password: its secret is empty"],
+    [null, "Paseo password: its secret is empty"],
+  ])(
+    "a password it cannot read or use fails the install before setup runs (%#)",
+    async (secret, reason) => {
+      const { calls, run } = recording(secret);
+      expect(await endpoint(run).install()).toEqual({ kind: "failed", reason });
+      expect(calls.map((call) => call.argv[0])).toEqual(["/usr/bin/aws"]);
+    },
+  );
 
   test("restarts only through the fixed systemd action", async () => {
     const calls: readonly string[][] = [];

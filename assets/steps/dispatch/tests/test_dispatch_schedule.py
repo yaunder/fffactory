@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-"""Exercise schedule reconciliation with the pinned CLI's JSON contract."""
+"""Exercise schedule reconciliation with the pinned CLI's (Paseo 0.11.4) JSON contract."""
 
 import json
 import os
@@ -32,23 +32,29 @@ elif args[:2] == ["schedule", "inspect"]:
 elif args[:2] == ["schedule", "delete"]:
     save(None); print("{}")
 elif args[:2] in (["schedule", "create"], ["schedule", "update"]):
-    # Paseo 0.9.1 misreads Commander negated flags as values, not clears.
-    if args[1] == "update" and "--no-max-runs" in args:
-        raise SystemExit("INVALID_INTEGER: --max-runs must be a positive integer")
-    if args[1] == "update" and "--no-expires-in" in args:
-        raise SystemExit("invalid expires-in duration")
+    # Paseo 0.11.4 refuses to update anything but a new-agent schedule, and has no
+    # update flag for the thinking option. It keeps the status; resume reactivates.
+    if args[1] == "update" and record["target"]["type"] != "new-agent":
+        raise SystemExit("Schedule not found: " + args[2])
     provider, model = flag("--provider").split("/", 1)
     value = record or {"id":"sched-1"}
+    config = dict(value.get("target", {}).get("config", {}))
+    config.update({"provider":provider,"model":model,"modeId":flag("--mode"),"cwd":flag("--cwd")})
     value.update({
       "name":flag("--name"),
       "prompt":flag("--prompt") if args[1] == "update" else args[-2],
       "cadence":{"type":"cron","expression":flag("--cron"),"timezone":flag("--timezone")},
-      "target":{"type":"new-agent","config":{"provider":provider,"model":model,
-        "modeId":flag("--mode"),"cwd":flag("--cwd")}},
-      "status":"active", "maxRuns":value.get("maxRuns"), "expiresAt":value.get("expiresAt")
+      "target":{"type":"new-agent","config":config},
+      "status":value.get("status", "active"), "maxRuns":value.get("maxRuns"),
+      "expiresAt":value.get("expiresAt")
     })
+    # Paseo 0.11.4 clears limits with the negated flags (0.9.1 misread them as values).
+    if "--no-max-runs" in args: value["maxRuns"] = None
+    if "--no-expires-in" in args: value["expiresAt"] = None
     save(value); print(json.dumps(value))
 elif args[:2] == ["schedule", "resume"]:
+    if record["status"] == "completed":
+        raise SystemExit("Schedule " + args[2] + " is already completed")
     record["status"] = "active"; save(record); print("{}")
 else:
     raise SystemExit("unexpected paseo command: " + str(args))
@@ -151,6 +157,7 @@ class DispatchScheduleTest(unittest.TestCase):
         self.assertEqual(sum("schedule create" in line for line in calls), 1)
         self.assertEqual(sum("schedule update" in line for line in calls), 1)
         self.assertFalse(any("schedule delete" in line for line in calls))
+        self.assertFalse(any("--no-" in line for line in calls))
 
         self.assertEqual(self.invoke("--apply").returncode, 0)
         self.assertEqual(sum("schedule update" in line for line in
@@ -206,7 +213,7 @@ class DispatchScheduleTest(unittest.TestCase):
         self.assertFalse(any(line.startswith(("schedule create ", "schedule delete "))
                              for line in calls))
 
-    def test_recreates_schedule_with_limits(self):
+    def test_clears_limits_in_place_keeping_identity_and_history(self):
         self.requested = True
         self.active = True
         self.dispatch.update(mode="bypassPermissions")
@@ -219,15 +226,50 @@ class DispatchScheduleTest(unittest.TestCase):
                 result = self.invoke("--apply")
                 self.assertEqual(result.returncode, 0, result.stderr)
                 current = json.loads(self.state.read_text())
-                current.update(limits)
+                current.update(limits, runs=[{"id": "previous-run", "status": "succeeded"}])
                 self.state.write_text(json.dumps(current))
                 self.assertEqual(self.invoke("--check").returncode, 1)
                 result = self.invoke("--apply")
                 self.assertEqual(result.returncode, 0, result.stderr)
                 updated = json.loads(self.state.read_text())
+                self.assertEqual(updated["id"], current["id"])
+                self.assertEqual(updated["runs"], current["runs"])
                 self.assertIsNone(updated["maxRuns"])
                 self.assertIsNone(updated["expiresAt"])
                 self.assertEqual(updated["target"]["config"]["modeId"], "bypassPermissions")
+                calls = self.calls.read_text().splitlines()
+                self.assertEqual(sum("schedule create" in line for line in calls), 1)
+                self.assertFalse(any("schedule delete" in line for line in calls))
+                updates = [line for line in calls if line.startswith("schedule update ")]
+                self.assertEqual(len(updates), 1)
+                # Only a limit that is set is cleared, so an ordinary update sends neither flag.
+                self.assertEqual("--no-max-runs" in updates[0], "maxRuns" in limits)
+                self.assertEqual("--no-expires-in" in updates[0], "expiresAt" in limits)
+                self.assertEqual(self.invoke("--check").returncode, 0)
+
+    def test_recreates_schedule_an_update_cannot_reach(self):
+        self.requested = True
+        self.active = True
+        self.write_projection()
+        unreachable = (
+            ("completed", lambda schedule: schedule.update(status="completed")),
+            ("thinking option", lambda schedule:
+                schedule["target"]["config"].update(thinkingOptionId="high")),
+            ("existing-agent target", lambda schedule: schedule.update(
+                target={"type": "agent", "agentId": "agent-1"})),
+        )
+        for name, change in unreachable:
+            with self.subTest(name):
+                self.state.write_text("null")
+                self.calls.write_text("")
+                result = self.invoke("--apply")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                current = json.loads(self.state.read_text())
+                change(current)
+                self.state.write_text(json.dumps(current))
+                self.assertEqual(self.invoke("--check").returncode, 1)
+                result = self.invoke("--apply")
+                self.assertEqual(result.returncode, 0, result.stderr)
                 calls = self.calls.read_text().splitlines()
                 self.assertEqual(sum("schedule create" in line for line in calls), 2)
                 self.assertEqual(sum("schedule delete" in line for line in calls), 1)

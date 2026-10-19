@@ -5,6 +5,8 @@
  * factory.json keeps only the secret's ARN.
  */
 import {
+  CREDENTIAL_SECRET_FIELDS,
+  type CredentialSecretField,
   type FactoryId,
   type FactoryInstance,
   type HostKey,
@@ -12,6 +14,7 @@ import {
   type SecretReference,
   type TailscaleSecretField,
 } from "./instance";
+import { enrollmentOf } from "./readiness";
 import { FACTORY_ID_TAG, MANAGED_BY_TAG } from "./resource-naming";
 import { fieldPath, itemPath } from "./validation";
 
@@ -69,27 +72,65 @@ export function readSecretMaterial(raw: string, source: MaterialSource): Materia
 }
 
 /** The secrets factory.json refers to, by the name `fffactory secret set` takes. */
-export type SecretName = "tailscale-auth-key" | "tailscale-admin-client" | "paseo-password";
+export type SecretName =
+  | "tailscale-auth-key"
+  | "tailscale-admin-client"
+  | "paseo-password"
+  | "github-token"
+  | "anthropic-api-key"
+  | "openai-api-key";
 
 const SECRET_NAMES: readonly SecretName[] = [
   "tailscale-auth-key",
   "tailscale-admin-client",
   "paseo-password",
+  "github-token",
+  "anthropic-api-key",
+  "openai-api-key",
 ];
 
-/** The secrets that belong to the whole factory, each under factory.json's `tailscale`. */
+/** The secrets that belong to the whole factory, under factory.json's `tailscale` or `credentials`. */
 type FactorySecretName = Exclude<SecretName, "paseo-password">;
 
+/** Where a factory-wide secret's reference lives: one field of one top-level section. */
+type FactorySecretField =
+  | { readonly section: "tailscale"; readonly field: TailscaleSecretField }
+  | { readonly section: "credentials"; readonly field: CredentialSecretField };
+
 /**
- * Each factory-wide secret's field under `tailscale` and what it is. The auth key is the
- * workers' join-only enrollment key; the admin client is the operator's own Tailscale OAuth
- * client, which no worker ever receives.
+ * Each factory-wide secret's field and what it is. The auth key is the workers' join-only
+ * enrollment key; the admin client is the operator's own Tailscale OAuth client, which no
+ * worker ever receives. The API credentials are delivered to the hosts that keep no human
+ * login for their account.
  */
 const FACTORY_SECRETS: Readonly<
-  Record<FactorySecretName, { readonly field: TailscaleSecretField; readonly what: string }>
+  Record<FactorySecretName, FactorySecretField & { readonly what: string }>
 > = {
-  "tailscale-auth-key": { field: "auth_key_secret", what: "Tailscale auth key" },
-  "tailscale-admin-client": { field: "admin_client_secret", what: "Tailscale admin client" },
+  "tailscale-auth-key": {
+    section: "tailscale",
+    field: "auth_key_secret",
+    what: "Tailscale auth key",
+  },
+  "tailscale-admin-client": {
+    section: "tailscale",
+    field: "admin_client_secret",
+    what: "Tailscale admin client",
+  },
+  "github-token": {
+    section: "credentials",
+    field: CREDENTIAL_SECRET_FIELDS.github,
+    what: enrollmentOf("github").credential,
+  },
+  "anthropic-api-key": {
+    section: "credentials",
+    field: CREDENTIAL_SECRET_FIELDS.anthropic,
+    what: enrollmentOf("anthropic").credential,
+  },
+  "openai-api-key": {
+    section: "credentials",
+    field: CREDENTIAL_SECRET_FIELDS.openai,
+    what: enrollmentOf("openai").credential,
+  },
 };
 
 /** Where one secret lives in Secrets Manager and in factory.json. */
@@ -157,12 +198,12 @@ export function resolveSecretTarget(
     return refuse("factory.json needs factory_id before a secret can be named");
   if (name === "paseo-password") return hostTarget(instance, factoryId, host);
   if (host !== undefined) return refuse(`${name} belongs to the whole factory and takes no --host`);
-  const { field, what } = FACTORY_SECRETS[name];
+  const { section, field, what } = FACTORY_SECRETS[name];
   return {
     ok: true,
     target: {
       name,
-      field: fieldPath("tailscale", field),
+      field: fieldPath(section, field),
       secretName: `${factoryId}/${name}`,
       description: `${what} of factory ${factoryId}`,
       factoryId,
@@ -170,9 +211,9 @@ export function resolveSecretTarget(
   };
 }
 
-/** The `tailscale` field of a factory-wide target; a host's target has none. */
-function tailscaleField(target: SecretTarget): TailscaleSecretField | undefined {
-  return target.name === "paseo-password" ? undefined : FACTORY_SECRETS[target.name].field;
+/** The section and field of a factory-wide target; a host's target has none. */
+function factoryField(target: SecretTarget): FactorySecretField | undefined {
+  return target.name === "paseo-password" ? undefined : FACTORY_SECRETS[target.name];
 }
 
 /** The reference factory.json currently holds for the target, if any. */
@@ -180,8 +221,9 @@ export function secretReference(
   instance: FactoryInstance,
   target: SecretTarget,
 ): SecretReference | undefined {
-  const field = tailscaleField(target);
-  if (field !== undefined) return instance.tailscale?.[field];
+  const factory = factoryField(target);
+  if (factory?.section === "tailscale") return instance.tailscale?.[factory.field];
+  if (factory?.section === "credentials") return instance.credentials?.[factory.field];
   return instance.hosts?.find((host) => host.key === target.hostKey)?.paseo_password_secret;
 }
 
@@ -197,9 +239,13 @@ export function withSecretReference(
   target: SecretTarget,
   arn: SecretReference,
 ): FactoryInstance {
-  const field = tailscaleField(target);
-  if (field !== undefined)
-    return withEntry(instance, "tailscale", withEntry(instance.tailscale, field, arn));
+  const factory = factoryField(target);
+  if (factory !== undefined)
+    return withEntry(
+      instance,
+      factory.section,
+      withEntry(instance[factory.section], factory.field, arn),
+    );
   const hosts = (instance.hosts ?? []).map((host) =>
     host.key === target.hostKey ? withEntry(host, "paseo_password_secret", arn) : host,
   );

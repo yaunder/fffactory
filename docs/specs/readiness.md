@@ -2,9 +2,10 @@
 
 Infrastructure success, software success and usability are different
 outcomes. Once a release is installed on a worker, fixed verifiers say
-whether its software works, and enrollment checks say which human steps it
-still waits for. fffactory checks enrollment and names its exact next steps;
-it never performs a human enrollment. Design:
+whether its software works, and enrollment checks say which accounts it
+still waits for. fffactory checks enrollment and names its exact next steps:
+a human login on the worker, or, for an account whose API credential it
+delivers, storing a valid credential; it never performs a human login. Design:
 [fffactory-v2.md §Human enrollment and readiness](../designs/fffactory-v2.md#human-enrollment-and-readiness).
 
 ```text
@@ -49,12 +50,24 @@ and found no credential, `unknown` when it could not run (the tool is missing,
 
 | `id` | Title | Checked with, as `factory` | Next action |
 | --- | --- | --- | --- |
-| `github` | GitHub | `gh auth status --hostname github.com` | Authenticate GitHub as factory on HOST: `tailscale ssh factory@HOST`, then `gh auth login --hostname github.com --git-protocol https --web`, then `gh auth status` |
+| `github` | GitHub | `gh auth status --hostname github.com --active` | Authenticate GitHub as factory on HOST: `tailscale ssh factory@HOST`, then `gh auth login --hostname github.com --git-protocol https --web`, then `gh auth status --hostname github.com --active` |
 | `openai` | OpenAI Codex | `codex login status` | Log in to OpenAI Codex as factory on HOST: `tailscale ssh factory@HOST`, then `codex login --device-auth`, then `codex login status` |
-| `anthropic` | Claude Code | `claude auth status` | Log in to Claude Code as factory on HOST: `tailscale ssh factory@HOST`, then `claude auth login`, then `claude auth status` |
+| `anthropic` | Claude Code | `claude auth status`, and, while Claude Code's managed settings name fffactory's API key helper, `test -r KEY -a -s KEY` for its key file | Log in to Claude Code as factory on HOST: `tailscale ssh factory@HOST`, then `claude auth login`, then `claude auth status` |
 
-Each summary ends "(tailnet SSH policy must let you log in as `factory`)". A
-next action is structured (`enrollmentNextAction`): a `summary`, the `login`
+GitHub's check is `--active` (D15), for both ways of enrolling: gh exits 1 when
+any account it stores for the host is invalid, even when the active one works,
+so a stale second account would otherwise fail readiness.
+
+An account can also be enrolled by delivering its API credential, which the
+`credentials` install step writes into the tool's own store on every apply
+([credential delivery](credential-delivery.md)); the checks above are the same
+either way. `claude auth status` passes on a configured helper without running
+it, even with its key missing, so while `/etc/claude-code/managed-settings.json`
+names fffactory's helper (`cat /home/factory/.config/fffactory/anthropic-api-key`),
+`anthropic` is `enrolled` only when `factory` can also read a non-empty key file
+there, and `pending` otherwise; a helper check that cannot run is `unknown`.
+
+A next action is structured (`enrollmentNextAction`): a `summary`, the `login`
 that reaches the runtime account on that worker, and the `commands` to run
 there, in order. Credentials belong to `factory`, where agents use them, so
 the login is Tailscale SSH as `factory`: the tailnet vouches for the host key,
@@ -62,12 +75,29 @@ and tailnet SSH policy must let the operator log in as `factory`, an
 administrator's step outside fffactory. `fffactory-admin`'s only sudo rule is
 the activator, so it cannot switch to `factory`.
 
+An account **delivered** to the worker (`deliveredAccounts`: factory.json
+references its credential and the host does not list it in
+`interactive_logins`) is enrolled by apply, not by a login (D8). When it is
+`pending` or `unknown`, the worker did not accept what apply delivered, so its
+next action has no `login` (null) and its `commands` run on the workstation:
+store a valid credential, then apply it again
+([credential delivery §Renewal](credential-delivery.md#renewal)).
+
+| `id` | Delivered credential | Next action |
+| --- | --- | --- |
+| `github` | GitHub token | Replace the GitHub token, which HOST did not accept: `fffactory secret set github-token`, then `fffactory apply` |
+| `openai` | OpenAI API key | Replace the OpenAI API key, which HOST did not accept: `fffactory secret set openai-api-key`, then `fffactory apply` |
+| `anthropic` | Anthropic API key | Replace the Anthropic API key, which HOST did not accept: `fffactory secret set anthropic-api-key`, then `fffactory apply` |
+
 The worker reports each account's state and nothing else. The CLI names every
-next action itself (`enrollmentReport`), from the account's `id` and the
-hostname the CLI resolved for the worker, never from the worker's document: a
-compromised worker could otherwise put any command in front of the operator.
-An account the worker did not report is `unknown`, and an `id` the CLI does
-not know makes the document malformed.
+next action itself (`enrollmentReport`), from the account's `id`, the
+hostname the CLI resolved for the worker and the accounts its own factory.json
+delivers to that host, never from the worker's document: a compromised worker
+could otherwise put any command in front of the operator. Status and the
+dispatch gate's inputs read the delivered accounts from factory.json; apply
+from the host projection it streamed, which it built from factory.json. An
+account the worker did not report is `unknown`, and an `id` the CLI does not
+know makes the document malformed.
 
 **Paseo clients** are not a worker account. Paseo is installed on workers, but
 a client's enrollment can be observed only from that client, so worker verify
@@ -83,27 +113,32 @@ Human output renders a worker's enrollment from its `WorkerEnrollment`
 (`workerEnrollment`): the worker's `hostname`, the one `login` that reaches the
 runtime account, the `requirement` that login carries
 (`tailnet_ssh_as_runtime`: tailnet SSH policy must let the operator log in as
-`factory`), and each account still to enroll, in the order above, as its `id`,
-`title` and `commands`. It is the structure the CLI lays out
-(`src/cli/presentation/`), and it publishes nothing. The published wording is
-unchanged and stays in the domain: status's `details` (`pendingEnrollmentLines`,
-each account as `describeNextAction`'s sentence) and its `--json`
-`next_action` (`summary`, `login`, `commands`), whose `summary` ends with the
-tailnet-policy caveat.
+`factory`), each account still to enroll there, in the order above, as its `id`,
+`title` and `commands`, and apart, each `delivered` account still to enroll, as
+its `id`, `title`, `credential` and the `secret` name `fffactory secret set`
+takes. It is the structure the CLI lays out (`src/cli/presentation/`), and it
+publishes nothing. The published wording stays in the domain: status's
+`details` (`pendingEnrollmentLines`, each account as `describeNextAction`'s
+sentence) and its `--json` `next_action` (`summary`, `login`, `commands`). The
+tailnet-policy caveat is said once per worker, by apply's login and status's
+worker next action, never in an account's `summary`.
 
 - `fffactory apply` shows an installed worker with accounts to enroll as
   action needed (`! KEY   installed and verified · enrollment pending (N)`),
   never ready, and its `Verification` row as `!`, never `✔`, the verdict
   followed by `· enrollment pending on N worker(s)`, and ends with one Next block rendered from each such worker's
-  `WorkerEnrollment`: the login once, with the requirement it carries
+  `WorkerEnrollment`: first each delivered credential a worker did not accept,
+  once for every worker (`Replace the GitHub token, which KEY did not accept:`
+  and `fffactory secret set github-token`), then, for each worker with an
+  account to log in to, the login once, with the requirement it carries
   (`tailnet SSH policy must allow it`), each account numbered with its command
   lines, then `exit` back to the workstation; after the last worker, `fffactory
   apply` to verify the enrollment again and `fffactory status` to confirm
   ([plan and apply §What apply prints](plan-apply.md#what-apply-prints)).
 - `fffactory status` shows a software-ready worker with enrollment pending as
   not ready (exit 2), each pending account's steps as details, and the
-  structured next actions in `--json`
-  ([status §Readiness](status.md#readiness)). It reads the verification the
+  structured next actions in `--json`, a delivered account's with a null
+  `login` ([status §Readiness](status.md#readiness)). It reads the verification the
   last install recorded, since `status` runs unprivileged and only root can
   check `factory`'s credentials: after enrolling, rerun `fffactory apply`,
   which verifies again.
@@ -122,7 +157,9 @@ they all pass; a worker whose host does not request dispatch stops at usable.
 
 The dispatch gates reuse this document's enrollment: the GitHub credential gate
 reads the worker's GitHub enrollment state, and a pending or unknown credential
-keeps dispatch pending and surfaces the same GitHub next action named above.
+keeps dispatch pending and surfaces the same GitHub next action named above:
+the login, or, when factory.json delivers the GitHub token to the host, storing
+a valid one and applying it.
 
 - `fffactory apply` drives dispatch and reports each worker's outcome
   (`not_requested`, `active`, `pending` with the blocking gates and their next
@@ -141,24 +178,41 @@ keeps dispatch pending and surfaces the same GitHub next action named above.
 
 | Layer | Module | Responsibility |
 | --- | --- | --- |
-| Domain | `src/domain/readiness.ts` | `ENROLLMENTS`, `PASEO_CLIENTS`, enrollment states, `enrollmentNextAction`, `enrollmentReport`, `WorkerEnrollment` and `workerEnrollment`, the published wording (`describeNextAction`, `pendingEnrollmentLines`), `workerReadiness`, the verify document and its parser. Pure. |
-| CLI adapter | `src/cli/presentation/workers.ts` | Apply's enrollment steps, rendered from a `WorkerEnrollment` (`enrollmentSteps`), and a worker's Result row, never ready while enrollment is pending. |
+| Domain | `src/domain/readiness.ts` | `ENROLLMENTS` (each with its deliverable credential and secret name), `PASEO_CLIENTS`, enrollment states, `GITHUB_STATUS`, `enrollmentNextAction` (a login, or a delivered account's replacement), `enrollmentReport`, `WorkerEnrollment`, `workerEnrollment` and `pendingCount`, the published wording (`describeNextAction`, `pendingEnrollmentLines`), `workerReadiness`, the verify document and its parser. Pure. |
+| Domain | `src/domain/instance.ts`, `src/domain/host-projection.ts`, `src/domain/rollout.ts` | The accounts delivered to a host (`deliveredAccounts`), those a projection delivers (`projectedAccounts`), and an installed worker's outcome carrying them (`delivered`). Pure. |
+| CLI adapter | `src/cli/presentation/workers.ts` | Apply's enrollment steps, rendered from a `WorkerEnrollment` (`enrollmentSteps`, and `deliveredSteps` for the credentials to replace), and a worker's Result row, never ready while enrollment is pending. |
 | Worker | `src/host/verify.ts` | `workerVerifier`: the checks and enrollment checks, over the injected process runner. |
-| Domain | `src/domain/status.ts` | The enrollment verdict status shows. |
+| Domain | `src/domain/status.ts` | The enrollment verdict status shows, from the accounts factory.json delivers (`Expectation.delivered`). |
 | Domain | `src/domain/dispatch-readiness.ts` | The dispatch gates and the dispatch progression ([dispatch](dispatch.md)). Pure. |
 
 Tests: `tests/domain/readiness.test.ts` (each next action, named for the
-resolved hostname and never the worker's; an unreported account unknown;
+resolved hostname and never the worker's; a delivered account's replacement,
+with no login, from the CLI's delivered set; an unreported account unknown;
 Paseo clients mentioned, never counted; a worker's enrollment grouped as a
-`WorkerEnrollment`, one login and each pending account in order; the readiness progression, the
+`WorkerEnrollment`, one login and each pending account in order, delivered
+accounts apart; the readiness progression, the
 document's round trip, every malformed field, instructions a worker sends
 never read, additions ignored), `tests/cli/presentation/workers.test.ts` and
 `tests/cli/presentation/apply.test.ts` (apply's enrollment steps from a
 `WorkerEnrollment`, the login and its requirement once per worker, then the
-return, apply and status), `tests/host/verify.test.ts` (including a worker
-the real verifier finds healthy and fully enrolled judged ready by status), `tests/domain/status.test.ts` and
-`tests/cli/status.test.ts` (enrollment pending with exact steps, in text and
-JSON), and the container cases of `tests/bootstrap/host-apply.test.sh`
-(pending, then enrolled once the stand-in `gh` is).
+return, apply and status; a delivered credential to replace said once for every
+worker, before the logins, and with none left no login or return),
+`tests/host/verify.test.ts` (GitHub checked with `--active`; including a worker
+the real verifier finds healthy and fully enrolled judged ready by status, and
+fffactory's Claude Code helper with its key file missing or empty pending), `tests/domain/status.test.ts`,
+`tests/application/status.test.ts` and `tests/cli/status.test.ts` (enrollment
+pending with exact steps, in text and JSON; a delivered account's from
+factory.json, with no login and no tailnet-policy caveat),
+`tests/domain/dispatch-readiness.test.ts`, `tests/application/apply-dispatch.test.ts`
+and `tests/application/apply-factory-pipeline.test.ts` (the GitHub gate's next
+action, a delivered token's replacement included), `tests/domain/rollout.test.ts`
+and `tests/application/apply-workers.test.ts` (an installed worker keeping the
+accounts its projection delivered), and the container cases of
+`tests/bootstrap/host-apply.test.sh`
+(pending, then enrolled once the stand-in `gh` is) and of
+`tests/bootstrap/credentials.test.sh` (every account enrolled by delivery, and
+Anthropic pending once its key file is emptied).
 
-Introduced by [#101](https://github.com/yaunder/factory/issues/101).
+Introduced by [#101](https://github.com/yaunder/factory/issues/101); the Anthropic key-file
+check by [#69](https://github.com/yaunder/fffactory/issues/69); GitHub's `--active` check and
+delivered accounts' next actions by [#70](https://github.com/yaunder/fffactory/issues/70).

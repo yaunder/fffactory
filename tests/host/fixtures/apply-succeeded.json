@@ -31,6 +31,11 @@
       "name": "plugins",
       "status": "succeeded",
       "reason": null
+    },
+    {
+      "name": "credentials",
+      "status": "succeeded",
+      "reason": null
     }
   ],
   "verification": {

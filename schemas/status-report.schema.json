@@ -1,12 +1,12 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/yaunder/factory/schemas/status-report.schema.json",
-  "title": "fffactory status --json report, schema version 1",
+  "title": "fffactory status --json report, schema version 2",
   "description": "Consumers must ignore inventory check IDs, and fields, they do not know.",
   "type": "object",
   "required": ["schema_version", "release", "status", "factory", "inventories", "workers"],
   "properties": {
-    "schema_version": { "const": 1 },
+    "schema_version": { "const": 2 },
     "release": { "$ref": "#/$defs/release" },
     "status": { "$ref": "#/$defs/status" },
     "factory": {
@@ -175,7 +175,7 @@
         "title": { "type": "string", "minLength": 1 },
         "state": { "enum": ["enrolled", "pending", "unknown"] },
         "next_action": {
-          "description": "The exact steps; null exactly when enrolled.",
+          "description": "The exact steps; null exactly when enrolled. login is null for an account whose API credential factory.json delivers: its commands run where fffactory does.",
           "oneOf": [
             { "type": "null" },
             {
@@ -183,7 +183,7 @@
               "required": ["summary", "login", "commands"],
               "properties": {
                 "summary": { "type": "string", "minLength": 1 },
-                "login": { "type": "string", "minLength": 1 },
+                "login": { "type": ["string", "null"], "minLength": 1 },
                 "commands": { "type": "array", "items": { "type": "string", "minLength": 1 } }
               }
             }

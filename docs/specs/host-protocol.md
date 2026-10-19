@@ -206,7 +206,7 @@ indented by two spaces, on standard output. Without `--json` it refuses (exit
 | --- | --- | --- |
 | `/opt/fffactory/current` | `host apply` | A symbolic link `releases/<version>`. Absent: no release. |
 | `/opt/fffactory/releases/<version>/.fffactory-assets.json` | the activator ([worker bootstrap §Activator](worker-bootstrap.md#activator)) | The marker `{"release", "sha256"}`; it must record `<version>` and a SHA-256. |
-| `/var/lib/fffactory/host.json` | `host apply` | The host's configuration; its SHA-256 is reported. |
+| `/var/lib/fffactory/host.json` | `host apply` | The host's configuration; its SHA-256 is reported, and, when it is a host projection carrying `credentials`, that of its control-plane part apart ([§The host projection](#the-host-projection)). |
 | `/var/lib/fffactory/last-apply.json` | `host apply` | The last install's record ([apply](#apply)), summarized as `installation`. |
 | `/var/lib/fffactory/bootstrap-complete` | bootstrap | Present: bootstrap finished. |
 | `/etc/os-release` | the base image | `ID` and `VERSION_ID`, quoted or not. |
@@ -248,7 +248,7 @@ name (`uname -m`). A value that is not a short token of letters, digits, `.`,
 | Field | Values |
 | --- | --- |
 | `release` | `{"state": "none"}`: no `current` link, the explicit empty state. `{"state": "active", "version", "sha256"}`: the link names a release whose marker records it. `{"state": "broken"}`: anything else (not a link, another target, a missing or mismatched marker). |
-| `configuration` | `{"state": "none"}`: no file. `{"state": "present", "sha256"}`. `{"state": "unreadable"}`: it exists but cannot be read. |
+| `configuration` | `{"state": "none"}`: no file. `{"state": "present", "sha256"}`, and `control_plane_sha256` after it when the file is a host projection carrying `credentials`: the SHA-256 of its control-plane part, the projection without them. Absent, the whole file is that part, as on a worker from before credential references. `{"state": "unreadable"}`: it exists but cannot be read. |
 | `installation` | `{"state": "none"}`: no record. `{"state": "unreadable"}`: a record that cannot be read as one. Otherwise the record's `state` (`running`, `succeeded` or `failed`), `release`, `configuration_sha256`, `failed_step` (the first failed step's name, or null), `started_at`, `finished_at`, `verification` (the verify document, or null) and `failure` (the record's, below; absent reads as null). A worker that reports no `installation` field, from before #101, reads as `none`. |
 | `services[].state` | What `systemctl is-active` prints: `active`, `reloading`, `refreshing`, `inactive`, `failed`, `activating`, `deactivating`, `maintenance`; else `unknown`, as when it cannot run. |
 | `evidence.os` | `null` when os-release is unreadable or lacks either value. |
@@ -291,7 +291,7 @@ sudo -n /usr/local/libexec/fffactory-activate /home/fffactory-admin/fffactory-re
    ([worker bootstrap §Activator](worker-bootstrap.md#activator)). The host
    projection is streamed on standard input, which the activator passes to
    `host apply`. The CLI waits for every step's timeout plus verification and
-   five minutes (`ACTIVATION_TIMEOUT_MS`, 72 minutes).
+   five minutes (`ACTIVATION_TIMEOUT_MS`, 82 minutes).
 
 ### The host projection
 
@@ -305,19 +305,32 @@ on standard input and kept as `/var/lib/fffactory/host.json`:
   "host_key": "builder-1",
   "hostname": "fff-aaaa1111-builder-1",
   "release": "0.3.0",
-  "paseo_password_secret": "arn:aws:secretsmanager:eu-west-2:123456789012:secret:fff-aaaa1111/paseo-password-builder-1-AbCdEf"
+  "paseo_password_secret": "arn:aws:secretsmanager:eu-west-2:123456789012:secret:fff-aaaa1111/paseo-password-builder-1-AbCdEf",
+  "credentials": {
+    "github_token_secret": "arn:aws:secretsmanager:eu-west-2:123456789012:secret:fff-aaaa1111/github-token-AbCdEf",
+    "anthropic_api_key_secret": "arn:aws:secretsmanager:eu-west-2:123456789012:secret:fff-aaaa1111/anthropic-api-key-AbCdEf",
+    "openai_api_key_secret": "arn:aws:secretsmanager:eu-west-2:123456789012:secret:fff-aaaa1111/openai-api-key-AbCdEf"
+  }
 }
 ```
 
 `paseo_password_secret` is present exactly when the host declares
 `hosts[].paseo_password_secret`: a validated Secrets Manager ARN, the
 reference the [control plane](control-plane.md) installs Paseo's password
-from, never the password it names. The projection holds no secret material,
-and never appears in an argument, a plan or a log. `release` is the release
-factory.json pins, which the CLI/pin match guard makes the running one's.
-No factory-wide reference is projected: the worker reads its Tailscale key
-only at first boot, through Terraform, and the operator's Tailscale admin
-client, `tailscale.admin_client_secret`, never reaches a worker
+from, never the password it names. `credentials` holds the references of the
+API credentials delivered to the host
+([instance configuration §API credentials](instance-configuration.md#api-credentials),
+`deliveredAccounts`): each `credentials.*_secret` factory.json sets whose
+account the host does not list in `interactive_logins`, under the same field
+name, in this order. It is absent when none is delivered, never empty. The
+`credentials` install step reads them on the worker and delivers each to its
+tool ([credential delivery](credential-delivery.md)). The projection holds
+no secret material, and never appears in an argument, a plan or a log.
+`release` is the release factory.json pins, which the CLI/pin match guard makes
+the running one's. No other factory-wide reference is projected: the worker
+reads its Tailscale key only at first boot, through Terraform, and the
+operator's Tailscale admin client, `tailscale.admin_client_secret`, never
+reaches a worker
 ([secrets §The Tailscale admin client](secrets.md#the-tailscale-admin-client)).
 Repositories and dispatch travel in their own documents
 ([repositories](repositories.md), [dispatch](dispatch.md)).
@@ -326,8 +339,17 @@ Its text is canonical: keys in this order, two-space indented, one final
 newline. `host apply` refuses any other text, so the file it keeps has exactly
 the SHA-256 the CLI computes for it.
 
+Its *control-plane part* (`controlPlaneProjection`) is the projection without
+`credentials`: what a projection was before credential references, and all
+the control plane installs from. The control-plane plan digests only that part
+([control plane §Planned state](control-plane.md#planned-state)), and `host
+inspect` reports its digest apart from the file's, so adding, changing or
+removing a credential reference plans no Paseo change. `status` still compares
+the whole file's digest: a changed reference is a configuration apply has not
+delivered yet.
+
 There is one projection per host, built from factory.json's host as it
-stands: the workers stage sends the ones `projectHosts` builds from the
+stands, and its delivered references from the instance's `credentials`: the workers stage sends the ones `projectHosts` builds from the
 instance itself, the control-plane stage installs Paseo from it, and plan and
 `status` compare its digest with the one `host inspect` reports
 ([status §Readiness](status.md#readiness),
@@ -377,7 +399,7 @@ No arguments: the activator passes none. In order, it:
    renamed over `/opt/fffactory/current`, so the link is never absent or half
    made. From here the requested release is active, healthy or not.
 5. **Runs the install steps** in order, in this one process: `packages`,
-   `user`, `systemd`, `harness`, `plugins` (`INSTALL_STEPS`,
+   `user`, `systemd`, `harness`, `plugins`, `credentials` (`INSTALL_STEPS`,
    `domain/installation.ts`). The first four run `/bin/bash <release>/steps/<name>.sh` as
    root with their own timeouts and only `PATH`, `HOME=/root`, `LANG` and its
    inputs in the environment: `FFFACTORY_RELEASE`, `FFFACTORY_STEPS` (the
@@ -392,8 +414,11 @@ No arguments: the activator passes none. In order, it:
    rewritten after each step. It **stops at the first step that fails** (a
    non-zero exit, its timeout, or bash missing or not starting); the later
    steps stay `not_run`. Nothing waits for or polls a marker file: the process
-   orders the steps. The final `plugins` step runs in TypeScript inside the same
-   install lock and record, with its own command budget and log as described below.
+   orders the steps. The `plugins` and `credentials` steps run in TypeScript
+   inside the same install lock and record, each with its own command budget and
+   log: `plugins` as described below, `credentials` as
+   [credential delivery](credential-delivery.md) describes, given the
+   projection's `credentials` references.
 6. **Verifies**, once every step succeeded: the verifiers of `host verify`, in
    process ([verify](#verify)), within `VERIFY_TIMEOUT_MS` (5 minutes);
    verification that takes longer fails the install.
@@ -428,8 +453,40 @@ reports it and the next apply repairs it. Nothing on this path uses SSM.
 | `packages` | Amazon Linux packages (Git, Git LFS, GCC, Make, jq, Node 22 and npm, Python 3.11, ...), Node 22 as the default, the GitHub CLI, and a checksum-verified ripgrep. |
 | `user` | The runtime account's `/workspace` directories, private `.codex` and `.claude`, login profile, npm prefix, and the system's Git defaults. |
 | `systemd` | `tailscaled.service` enabled and active. |
-| `harness` | Codex and Claude Code for `factory` at the versions and npm integrity values `versions.env` pins. |
+| `harness` | Codex's system requirements, then Codex and Claude Code for `factory` at the versions and npm integrity values `versions.env` pins ([Agent pins](#agent-pins)). |
 | `plugins` | The Claude Code plugins `plugins.json` pins, from marketplace checkouts at their pinned revisions; undeclared ones removed. |
+| `credentials` | The API credentials delivered to the host, read from Secrets Manager with the instance role and written to each tool's own store, the material only on standard input; Claude Code's key file, and its managed settings while they name fffactory's API key helper, removed when Anthropic is not delivered ([credential delivery](credential-delivery.md)). |
+
+### Agent pins
+
+`steps/versions.env` pins Codex 0.163.0 and Claude Code 2.1.302, each with its
+npm registry integrity value. The `harness` step downloads each package with
+`npm pack` as `factory`, refuses one whose integrity differs from its pin, and
+installs both into `factory`'s npm prefix; agents already reporting their pins
+are left alone. Readiness's `agents` check compares the same pins
+([readiness](readiness.md)).
+
+Before installing, on every worker and whether or not any credential is
+delivered, the step writes `/etc/codex/requirements.toml`, root:root 0644 in a
+root:root 0755 `/etc/codex`, with exactly:
+
+```toml
+cli_auth_credentials_store = "file"
+check_for_update_on_startup = false
+[features]
+daemon_auto_start = false
+```
+
+Codex enforces its requirements file on every process, `codex app-server`
+(Paseo's launch path) included: neither `factory`'s `~/.codex/config.toml` nor
+`-c` overrides it, and `factory` cannot write it. Codex 0.163.0 turns
+`daemon_auto_start` on by default: a persistent server that keeps stale keys
+across sessions and carries an auto-updater that could move it off the pin.
+The file turns that off, stops the update check, and keeps credentials in the
+file store, since a headless worker has no keyring. The step writes it whole
+beside the target and renames it over whatever was there, resetting the
+directory's owner and mode, so a rerun leaves the same bytes. It holds no
+trust entries and no credential.
 
 ### Plugin installation
 
@@ -486,7 +543,8 @@ Tests: `tests/host/plugins.test.ts`, the native step cases in
     { "name": "user", "status": "succeeded", "reason": null },
     { "name": "systemd", "status": "succeeded", "reason": null },
     { "name": "harness", "status": "failed", "reason": "exited with status 1" },
-    { "name": "plugins", "status": "not_run", "reason": null }
+    { "name": "plugins", "status": "not_run", "reason": null },
+    { "name": "credentials", "status": "not_run", "reason": null }
   ],
   "verification": null,
   "failure": null
@@ -555,7 +613,8 @@ refuses (exit 1). They change nothing and never echo what a tool printed.
 `enrolled`, `pending` or `unknown`, for the accounts `github`, `openai` and
 `anthropic`. Summaries are fffactory's own printable one-line text. The
 document carries states only, never instructions: the CLI names each
-account's next action itself, from its `id` and the hostname the CLI resolved
+account's next action itself, from its `id`, the hostname the CLI resolved and
+the accounts the CLI's factory.json delivers to the host
 ([readiness §Enrollment](readiness.md#enrollment)), and ignores anything else
 a worker sends with an account. So a compromised worker cannot put a command
 in front of the operator.
@@ -784,6 +843,7 @@ yet refuses too: the CLI cannot tell it from one the worker missed.
 | Worker | `src/host/inspect.ts` | `workerInspector` over a `WorkerSystem` (root, process runner, hostname, machine, free space); `localWorkerSystem`. |
 | Worker | `src/host/apply.ts` | `workerApplier` over an `ApplySystem` (a `WorkerSystem` with the clock, privilege, standard input, release and install lock): the steps, their logs and the record. |
 | Worker | `src/host/install-lock.ts` | `flockExclusive`: the install lock over `flock(2)`, through libc. |
+| Worker | `src/host/credentials.ts` | `workerCredentials`: the `credentials` install step ([credential delivery](credential-delivery.md)). |
 | Worker | `src/host/verify.ts` | `workerVerifier`: the verifiers and enrollment checks. |
 | Worker | `src/host/dispatch.ts` | Dispatch adoption, installation, reconciliation and checked observation, with privilege drop. |
 | Worker | `src/host/work.ts` | `workerWork`: the work inspection, over the worker's working trees, as `factory`, read-only. |
@@ -816,7 +876,10 @@ timeout, every refusal changing nothing, and reading standard input to its
 limit. `tests/host/install-lock.test.ts` (one holder at a time, across
 processes, never inherited). `tests/host/verify.test.ts` (each check passing and failing,
 each enrollment state, factory's commands through `runuser` and `env -i`, no
-tool output in the document). `tests/domain/host-projection.test.ts`,
+tool output in the document, the Anthropic key-file check).
+`tests/host/credentials.test.ts`, the native credentials step in
+`tests/host/apply.test.ts` and `tests/bootstrap/credentials.test.sh` (the
+`credentials` step, [credential delivery](credential-delivery.md)). `tests/domain/host-projection.test.ts`,
 `tests/domain/installation.test.ts`, `tests/domain/readiness.test.ts`,
 `tests/domain/rollout.test.ts` (every outcome; an answer for another worker or
 release; a busy worker skipped; a new worker's first boot), `tests/domain/host-protocol.test.ts` (every
@@ -846,7 +909,11 @@ transport), `tests/domain/work-inspection.test.ts`,
 `tests/bootstrap/activator.test.sh`,
 `tests/assets/steps/steps.test.ts` (one script per shell step, parsing with
 `bash -n`, no marker polling, jq's re-evaluation markers, the plugin manifest
-valid, no SSM anywhere on the worker path), the container cases of
+valid, no SSM anywhere on the worker path), `tests/bootstrap/harness.test.sh`
+(the real `harness` step on Amazon Linux 2023 with agents already at their
+pins: Codex's requirements, their owner, mode and exact bytes, a rerun leaving
+them byte-identical, a factory-writable directory and file replaced, and the
+file written even when the install then fails), the container cases of
 `tests/bootstrap/host-apply.test.sh`, which run the real linux-x64 worker
 executable's `host apply` under the real activator on Amazon Linux 2023 over
 stand-in steps (`scripts/bootstrap-test.sh`), including `fffactory-admin`
@@ -859,4 +926,9 @@ or reaches a worker or tailnet.
 Introduced by [#100](https://github.com/yaunder/factory/issues/100); `apply`,
 `verify` and the host projection by
 [#101](https://github.com/yaunder/factory/issues/101); `work inspect` by
-[#9](https://github.com/yaunder/fffactory/issues/9).
+[#9](https://github.com/yaunder/fffactory/issues/9); the Codex 0.163.0 and
+Claude Code 2.1.302 pins and Codex's requirements by
+[#65](https://github.com/yaunder/fffactory/issues/65); the projection's
+credential references and the control-plane part's digest by
+[#68](https://github.com/yaunder/fffactory/issues/68); the `credentials` step by
+[#69](https://github.com/yaunder/fffactory/issues/69).

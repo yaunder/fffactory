@@ -21,7 +21,12 @@
  * listed the plan names none, and the tailnet judges every worker, as before.
  */
 import { activateCommand, UPLOAD_COMMAND } from "../domain/host-protocol";
-import { type HostProjection, hostProjectionJson } from "../domain/host-projection";
+import {
+  type HostProjection,
+  hostProjectionJson,
+  projectedAccounts,
+} from "../domain/host-projection";
+import type { EnrollmentId } from "../domain/readiness";
 import {
   ACTIVATION_TIMEOUT_MS,
   type ActivationAnswer,
@@ -122,6 +127,8 @@ export type WorkersStage =
 interface Delivery {
   readonly release: WorkerRelease;
   readonly projection: Uint8Array;
+  /** The accounts whose credential the projection delivers (`projectedAccounts`). */
+  readonly delivered: readonly EnrollmentId[];
 }
 
 /** Called with every outcome so far, as each worker's ends, for the operation record. */
@@ -242,7 +249,9 @@ async function install(
   if (stopped !== undefined) return stopped;
   deps.progress({ kind: "installing", ...worker });
   const answer = await activate(deps, worker, address, delivery);
-  return isAnswer(answer) ? activationOutcome(worker, request.release, answer) : answer;
+  return isAnswer(answer)
+    ? activationOutcome(worker, request.release, answer, delivery.delivered)
+    : answer;
 }
 
 /** A booting worker's progress: when its wait began, how many looks it took, and its upload. */
@@ -275,7 +284,7 @@ async function lookAtBootedWorker(
   if (!isAnswer(answer)) return answer;
   // The tarball stays where it was uploaded, so the next look only activates it again.
   if (awaitsFirstBoot(worker, answer)) return { booting: "Its bootstrap has not finished" };
-  return activationOutcome(worker, request.release, answer);
+  return activationOutcome(worker, request.release, answer, delivery.delivered);
 }
 
 /** What one look at a new worker found: its outcome, or what it shows while it boots. */
@@ -424,6 +433,7 @@ export async function applyWorkers(
   const workers = request.projections.map((projection) => ({
     worker: { key: projection.host_key, hostname: projection.hostname },
     projection: new TextEncoder().encode(hostProjectionJson(projection)),
+    delivered: projectedAccounts(projection),
   }));
   const release = await deps.assets.workerRelease();
   if (release === undefined)
@@ -433,12 +443,12 @@ export async function applyWorkers(
     );
   const view = await deps.peers.view();
   const outcomes: WorkerOutcome[] = [];
-  for (const { worker, projection } of workers) {
+  for (const { worker, projection, delivered } of workers) {
     if (deps.interrupted()) return { kind: "interrupted", outcomes, installing: undefined };
     const halted = outcomes.some((outcome) => !rolloutContinues(outcome));
     const outcome: WorkerOutcome | Interruption = halted
       ? { ...worker, kind: "not_attempted" }
-      : await attempt(deps, worker, view, { release, projection }, request);
+      : await attempt(deps, worker, view, { release, projection, delivered }, request);
     if ("interrupted" in outcome) return interruptedAt(outcomes, outcome);
     outcomes.push(outcome);
     await record([...outcomes]);

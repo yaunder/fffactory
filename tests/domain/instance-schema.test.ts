@@ -24,6 +24,20 @@ const valid: Record<string, unknown>[] = [
   { schema_version: 1, tailscale: { auth_key_secret: ARN, admin_client_secret: ARN } },
   {
     schema_version: 1,
+    credentials: {
+      github_token_secret: ARN,
+      anthropic_api_key_secret: ARN,
+      openai_api_key_secret: ARN,
+    },
+  },
+  { schema_version: 1, credentials: {} },
+  { schema_version: 1, hosts: [{ key: "a", interactive_logins: [] }] },
+  {
+    schema_version: 1,
+    hosts: [{ key: "a", interactive_logins: ["github", "anthropic", "openai"] }],
+  },
+  {
+    schema_version: 1,
     hosts: [
       {
         key: "a",
@@ -78,6 +92,14 @@ const invalid: Record<string, unknown>[] = [
   { schema_version: 1, hosts: [{ key: "a", root_volume_gib: 8.5 }] },
   { schema_version: 1, hosts: [{ key: "a", paseo_password_secret: "hunter2" }] },
   { schema_version: 1, hosts: [{ key: "a", dispatch: { enabled: 1 } }] },
+  { schema_version: 1, credentials: { github_token_secret: "ghp_pasted" } },
+  { schema_version: 1, credentials: { anthropic_api_key_secret: "sk-ant-pasted" } },
+  { schema_version: 1, credentials: { openai_api_key_secret: "sk-pasted" } },
+  { schema_version: 1, credentials: { gitlab_token_secret: ARN } },
+  { schema_version: 1, credentials: [ARN] },
+  { schema_version: 1, hosts: [{ key: "a", interactive_logins: "github" }] },
+  { schema_version: 1, hosts: [{ key: "a", interactive_logins: ["gitlab"] }] },
+  { schema_version: 1, hosts: [{ key: "a", interactive_logins: ["github", "github"] }] },
   { schema_version: 1, hosts: [{ key: "a", dispatch: { cwd: "home/factory" } }] },
 ];
 

@@ -8,6 +8,7 @@ import { accountExpectation } from "../domain/aws-account";
 import { hostProjectionSha256, projectHost, type Sha256 } from "../domain/host-projection";
 import {
   assessCompleteness,
+  deliveredAccounts,
   type FactoryId,
   type FactoryInstance,
   type Host,
@@ -82,6 +83,7 @@ async function workerStatus(
   { transport, sha256 }: Pick<StatusDependencies, "transport" | "sha256">,
   target: StatusTarget,
   observed: Observed,
+  instance: FactoryInstance,
   host: Host,
 ): Promise<WorkerStatus> {
   const hostname = hostName(target.factoryId, host.key);
@@ -108,9 +110,10 @@ async function workerStatus(
     hostname,
     release: target.release,
     configurationSha256: hostProjectionSha256(
-      projectHost(target.factoryId, target.release, host),
+      projectHost(instance, target.factoryId, target.release, host),
       sha256,
     ),
+    delivered: deliveredAccounts(instance, host.key).map(({ id }) => id),
   });
   if (inspection.kind !== "inspected" || inspection.inspection.release.state !== "active")
     return {
@@ -250,7 +253,7 @@ export async function factoryStatus(
   ]);
   const workers = await Promise.all(
     (instance.hosts ?? []).map((host) =>
-      workerStatus(deps, target, { inventory, view, tag }, host),
+      workerStatus(deps, target, { inventory, view, tag }, instance, host),
     ),
   );
   return {

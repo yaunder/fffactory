@@ -50,6 +50,7 @@ function installed(key: string, pending: readonly string[] = []): WorkerOutcome 
         state: pending.includes(id) ? ("pending" as const) : ("enrolled" as const),
       })),
     },
+    delivered: [],
   };
 }
 
@@ -102,7 +103,7 @@ describe("fffactory apply, worker report (plan-apply §Apply)", () => {
       "",
       "  1. GitHub",
       "     $ gh auth login --hostname github.com --git-protocol https --web",
-      "     $ gh auth status",
+      "     $ gh auth status --hostname github.com --active",
       "",
       "  Return to your workstation:",
       "    $ exit",

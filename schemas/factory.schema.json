@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/yaunder/factory/schemas/factory.schema.json",
   "title": "FFFactory instance (factory.json) schema version 1",
-  "description": "Structural rules for .fffactory/factory.json. Every field but schema_version may be absent; fffactory validate reports completeness separately and also rejects duplicate host keys, duplicate repositories and undeclared repository placement.",
+  "description": "Structural rules for .fffactory/factory.json. Every field but schema_version may be absent; fffactory validate reports completeness separately and also rejects duplicate host keys, duplicate repositories, undeclared repository placement and secrets outside the factory Region and account.",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema_version"],
@@ -52,6 +52,16 @@
         }
       }
     },
+    "credentials": {
+      "description": "Factory-wide API credentials, delivered to every host that does not list the account in interactive_logins.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "github_token_secret": { "$ref": "#/$defs/secretReference" },
+        "anthropic_api_key_secret": { "$ref": "#/$defs/secretReference" },
+        "openai_api_key_secret": { "$ref": "#/$defs/secretReference" }
+      }
+    },
     "repositories": { "type": "array", "items": { "$ref": "#/$defs/repository" } },
     "hosts": { "type": "array", "items": { "$ref": "#/$defs/host" } }
   },
@@ -98,6 +108,12 @@
         "root_volume_gib": { "type": "integer", "minimum": 8, "maximum": 16384 },
         "paseo_password_secret": { "$ref": "#/$defs/secretReference" },
         "repositories": { "type": "array", "items": { "$ref": "#/$defs/repositoryKey" } },
+        "interactive_logins": {
+          "description": "Accounts kept on a human's login on this host; their credentials references are not delivered to it.",
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "enum": ["github", "openai", "anthropic"] }
+        },
         "dispatch": {
           "type": "object",
           "additionalProperties": false,

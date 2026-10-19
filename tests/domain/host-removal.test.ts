@@ -303,6 +303,35 @@ describe("the scoped removal plan (worker-lifecycle §Terminate (remove))", () =
       ).toBeUndefined();
     });
 
+    test("the factory-wide credential references stay: a removal never changes them (D2)", () => {
+      const github =
+        "arn:aws:secretsmanager:eu-west-2:123456789012:secret:fff-abcd1234/github-token-AbCdEf";
+      const openai =
+        "arn:aws:secretsmanager:eu-west-2:123456789012:secret:fff-abcd1234/openai-api-key-AbCdEf";
+      expect(
+        removalPlanRefusal(
+          plan(
+            destroying(),
+            policyUpdate(
+              policy([AUTH, PASEO_1, PASEO_2, github, openai]),
+              policy([AUTH, PASEO_2, github, openai]),
+            ),
+          ),
+          withSecret,
+        ),
+      ).toBeUndefined();
+      for (const removal of [withSecret, REMOVING])
+        expect(
+          removalPlanRefusal(
+            plan(
+              destroying(),
+              policyUpdate(policy([AUTH, PASEO_1, github, openai]), policy([AUTH, openai])),
+            ),
+            removal,
+          ),
+        ).toMatchObject({ details: [`${HOST_SECRETS_POLICY} would be updated in place`] });
+    });
+
     test("any other policy change fails closed", () => {
       const refused = [
         // Without a secret of the removed host's to drop.

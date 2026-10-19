@@ -7,6 +7,8 @@
  */
 import {
   assessCompleteness,
+  CREDENTIAL_SECRET_FIELDS,
+  type CredentialSecretField,
   type FactoryId,
   type FactoryInstance,
   type Issue,
@@ -33,6 +35,11 @@ export interface FactoryVariables {
   readonly tailscale_tag: string;
   /** By host key, for hosts that declare a Paseo password reference. */
   readonly paseo_password_secret_arns: Readonly<Record<string, string>>;
+  /**
+   * factory.json's `credentials` references, by field name: factory-wide, so every host's
+   * shared role may read each one, whichever hosts keep that account on a human's login.
+   */
+  readonly credential_secret_arns: Readonly<Partial<Record<CredentialSecretField, string>>>;
   readonly hosts: Readonly<Record<string, HostMachine>>;
 }
 
@@ -90,6 +97,12 @@ export function projectFactoryVariables(
         hosts.flatMap((host) =>
           host.paseo_password_secret === undefined ? [] : [[host.key, host.paseo_password_secret]],
         ),
+      ),
+      credential_secret_arns: Object.fromEntries(
+        Object.values(CREDENTIAL_SECRET_FIELDS).flatMap((field) => {
+          const arn = complete.credentials?.[field];
+          return arn === undefined ? [] : [[field, arn]];
+        }),
       ),
       hosts: Object.fromEntries(
         hosts.map((host) => [

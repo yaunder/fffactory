@@ -29,6 +29,7 @@ import type { Verification } from "../domain/readiness";
 import { MATERIALIZED_MARKER } from "../domain/release-assets";
 import type { ProcessOutcome } from "../infrastructure/local-tool-probe";
 import { sha256Text } from "../infrastructure/release-tarball";
+import { workerCredentials } from "./credentials";
 import { exists, markerRecords, operatingSystem, tokenOr, type WorkerSystem } from "./inspect";
 import type { ExclusiveLock } from "./install-lock";
 import { workerPlugins } from "./plugins";
@@ -51,11 +52,11 @@ export interface HostApplier {
   apply(): Promise<HostApplyResult>;
 }
 
-/** A step's name and timeout; shell assets by default, or the native plugin implementation. */
+/** A step's name and timeout; shell assets by default, or a native implementation. */
 export interface InstallStep {
   readonly name: string;
   readonly timeoutMs: number;
-  readonly implementation?: "plugins";
+  readonly implementation?: "plugins" | "credentials";
 }
 
 /** A step's environment; the release's steps directory is always part of it. */
@@ -221,8 +222,8 @@ async function runStep(
   system: ApplySystem,
   step: InstallStep,
   env: StepEnvironment,
+  projection: HostProjection,
 ): Promise<string | undefined> {
-  const script = join(env.FFFACTORY_STEPS, `${step.name}.sh`);
   const path = join(WORKER_PATHS.logs, `${step.name}.log`);
   let log: FileHandle;
   try {
@@ -231,15 +232,7 @@ async function runStep(
     return `its log ${path} could not be opened (${errorCode(error)})`;
   }
   try {
-    const reason =
-      step.implementation === "plugins"
-        ? (await workerPlugins(system, env.FFFACTORY_STEPS, "install", step.timeoutMs, log.fd))
-          ? undefined
-          : "plugin installation or verification failed"
-        : failure(
-            await system.run(["/bin/bash", script], step.timeoutMs, { env, output: log.fd }),
-            step.timeoutMs,
-          );
+    const reason = await runImplementation(system, step, env, projection, log);
     const ended = reason === undefined ? "succeeded" : `failed: ${reason}`;
     await log.write(`--- fffactory: step ${step.name} ${ended}\n`);
     return reason;
@@ -248,17 +241,46 @@ async function runStep(
   }
 }
 
+/** One step's own work: a shell asset, or a native step; why it failed, or undefined. */
+async function runImplementation(
+  system: ApplySystem,
+  step: InstallStep,
+  env: StepEnvironment,
+  projection: HostProjection,
+  log: FileHandle,
+): Promise<string | undefined> {
+  switch (step.implementation) {
+    case "plugins":
+      return (await workerPlugins(system, env.FFFACTORY_STEPS, "install", step.timeoutMs, log.fd))
+        ? undefined
+        : "plugin installation or verification failed";
+    case "credentials":
+      return workerCredentials(system, projection.credentials, step.timeoutMs, async (line) => {
+        await log.write(`${line}\n`);
+      });
+    case undefined: {
+      const script = join(env.FFFACTORY_STEPS, `${step.name}.sh`);
+      const outcome = await system.run(["/bin/bash", script], step.timeoutMs, {
+        env,
+        output: log.fd,
+      });
+      return failure(outcome, step.timeoutMs);
+    }
+  }
+}
+
 /** Runs the steps in order, recording each, and stops at the first that fails. */
 async function runSteps(
   system: ApplySystem,
   steps: readonly InstallStep[],
   env: StepEnvironment,
+  projection: HostProjection,
   record: ReturnType<typeof recorder>,
   doing: (what: string) => void,
 ): Promise<boolean> {
   for (const step of steps) {
     doing(`running step ${step.name}`);
-    const reason = await runStep(system, step, env);
+    const reason = await runStep(system, step, env, projection);
     doing("recording the install");
     const results: StepResult[] = withStep(
       record.current().steps,
@@ -364,7 +386,7 @@ async function install(
       doing = what;
     };
     let verification: Verification | null = null;
-    if (await runSteps(system, steps, env, record, setDoing)) {
+    if (await runSteps(system, steps, env, checked.projection, record, setDoing)) {
       doing = "verifying";
       const verified = await verifyWithin(verifier, verifyTimeoutMs);
       if (verified === undefined)

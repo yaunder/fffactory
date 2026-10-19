@@ -45,7 +45,7 @@ function request(...keys: string[]): WorkersStageRequest {
   return {
     tag: TAG,
     release: RELEASE,
-    projections: keys.map((key) => projectHost(FACTORY, RELEASE, { key: key as HostKey })),
+    projections: keys.map((key) => hostProjection(FACTORY, key as HostKey, RELEASE)),
     created: [],
     stopped: [],
   };
@@ -99,6 +99,21 @@ function stage(
 const installs = (hostname: string) => installableWorker(appliedRecord(hostname));
 
 describe("the workers stage (plan-apply §The workers stage)", () => {
+  test("an installed worker carries the accounts its projection delivers", async () => {
+    const { deps, record } = stage({ script: { [B1]: installs(B1) } });
+    const github =
+      "arn:aws:secretsmanager:us-east-1:123456789012:secret:fff-abcd1234/github-token-AbCdEf" as SecretReference;
+    const projections = [
+      hostProjection(FACTORY, "builder-1" as HostKey, RELEASE, undefined, {
+        github_token_secret: github,
+      }),
+    ];
+    const result = await applyWorkers(deps, { ...request(), projections }, record);
+    expect(result.outcomes).toEqual([
+      expect.objectContaining({ kind: "installed", delivered: ["github"] }),
+    ]);
+  });
+
   test("uploads the release tarball, then activates it with its digest and the host's projection", async () => {
     const { deps, record, transport, progress } = stage({ script: { [B1]: installs(B1) } });
     const result = await applyWorkers(deps, request("builder-1"), record);
@@ -111,6 +126,7 @@ describe("the workers stage (plan-apply §The workers stage)", () => {
           kind: "installed",
           release: RELEASE,
           verification: verification(B1, "pending"),
+          delivered: [],
         },
       ],
     });
@@ -144,18 +160,24 @@ describe("the workers stage (plan-apply §The workers stage)", () => {
     ]);
   });
 
-  test("streams each worker the projection it was given, Paseo secret reference included", async () => {
+  test("streams each worker the projection it was given, its secret references included", async () => {
     const arn =
       "arn:aws:secretsmanager:eu-west-2:123456789012:secret:fff-abcd1234/paseo-AbCdEf" as SecretReference;
-    const projected = projectHost(FACTORY, RELEASE, {
-      key: "builder-1" as HostKey,
-      paseo_password_secret: arn,
-    });
+    const token =
+      "arn:aws:secretsmanager:eu-west-2:123456789012:secret:fff-abcd1234/github-token-AbCdEf" as SecretReference;
+    const host = { key: "builder-1" as HostKey, paseo_password_secret: arn };
+    const projected = projectHost(
+      { schema_version: 1, credentials: { github_token_secret: token }, hosts: [host] },
+      FACTORY,
+      RELEASE,
+      host,
+    );
     const { deps, record, transport } = stage({ script: { [B1]: installs(B1) } });
     await applyWorkers(deps, { ...request(), projections: [projected] }, record);
     const sent = new TextDecoder().decode(transport.calls[1]?.stdin);
     expect(sent).toBe(hostProjectionJson(projected));
     expect(sent).toContain(arn);
+    expect(sent).toContain(token);
   });
 
   test("updates workers one at a time, recording each outcome as it ends", async () => {

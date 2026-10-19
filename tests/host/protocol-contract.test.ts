@@ -80,6 +80,7 @@ describe("host inspect, CLI side", () => {
       hostname: WORKER_HOSTNAME,
       release: "0.3.0",
       configurationSha256: HOST_CONFIGURATION_SHA256,
+      delivered: [],
     };
     const verdicts: Record<string, unknown> = {};
     for (const { fixture: name } of SCENARIOS) {
@@ -109,6 +110,13 @@ describe("host inspect, CLI side", () => {
         status: "not_ready",
         summary:
           "Software ready on release 0.3.0; enrollment pending: GitHub, OpenAI Codex, Claude Code",
+      },
+      "inspect-credentials.json": {
+        release: "0.3.0",
+        configuration: "2f95fc2e8e64d5560410f2ee7035fefcdbaf1db8932f2f1f11676943fdebee24",
+        installation: "succeeded",
+        status: "not_ready",
+        summary: "Its host configuration is not the one factory.json projects for it",
       },
       "inspect-failed-install.json": {
         release: "0.3.0",
@@ -142,6 +150,15 @@ describe("host inspect, CLI side", () => {
       expect(
         parseHostInspection(JSON.stringify({ ...document, protocol_version: version })),
       ).toEqual({ ok: false, kind: "unsupported_version", version });
+  });
+
+  test("a worker holding credential references reports its control-plane part apart (D3)", async () => {
+    const parsed = parseHostInspection(await fixture("inspect-credentials.json"));
+    expect(parsed.ok && parsed.inspection.configuration).toEqual({
+      state: "present",
+      sha256: "2f95fc2e8e64d5560410f2ee7035fefcdbaf1db8932f2f1f11676943fdebee24",
+      control_plane_sha256: HOST_CONFIGURATION_SHA256,
+    });
   });
 
   test("a worker from before installs were recorded reports none", async () => {
@@ -243,13 +260,14 @@ describe("host apply and host verify, CLI side", () => {
         WORKER,
         "0.3.0",
         readActivation(exitCode, await fixture(name)),
+        [],
       );
       outcomes[name] =
         outcome.kind === "installed"
           ? {
               kind: outcome.kind,
               release: outcome.release,
-              enrollment: enrollmentReport(outcome.verification, WORKER.hostname).map(
+              enrollment: enrollmentReport(outcome.verification, WORKER.hostname, []).map(
                 ({ id, state }) => `${id}:${state}`,
               ),
             }
@@ -284,7 +302,9 @@ describe("host apply and host verify, CLI side", () => {
     if (!parsed.ok) throw new Error(`rejected: ${JSON.stringify(parsed)}`);
     expect(`${verificationJson(parsed.document)}\n`).toBe(text);
     expect(
-      enrollmentReport(parsed.document, WORKER_HOSTNAME).map(({ id, state }) => `${id}:${state}`),
+      enrollmentReport(parsed.document, WORKER_HOSTNAME, []).map(
+        ({ id, state }) => `${id}:${state}`,
+      ),
     ).toEqual(["github:enrolled", "openai:pending", "anthropic:pending"]);
   });
 });

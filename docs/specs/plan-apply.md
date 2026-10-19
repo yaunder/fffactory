@@ -342,7 +342,7 @@ block. An installed worker with enrollment pending and a skipped one:
 
   1. GitHub
      $ gh auth login --hostname github.com --git-protocol https --web
-     $ gh auth status
+     $ gh auth status --hostname github.com --active
   2. OpenAI Codex
      $ codex login --device-auth
      $ codex login status
@@ -378,8 +378,25 @@ already gave says only `skipped`. Summaries are shown as data, never read for
 inline code.
 
 Each account's steps are apply's own, named for the hostname it resolved, never
-text from the worker ([readiness §Enrollment](readiness.md#enrollment)). Failed
-and not-attempted workers' rows go to standard error. The exit status is 0 when every
+text from the worker ([readiness §Enrollment](readiness.md#enrollment)). An
+account whose API credential factory.json delivers to the worker, as the host
+projection apply streamed says, is enrolled by apply itself; when the worker
+did not accept it, its step comes first, once for every worker it concerns,
+with no login: store a valid one, then apply again
+([credential delivery §Renewal](credential-delivery.md#renewal)):
+
+```text
+── Next: enroll 1 account on builder-1 ──────────────
+  Replace the GitHub token, which builder-1 did not accept:
+    $ fffactory secret set github-token
+  Refresh enrollment verification, reviewing the new plan:
+    $ fffactory apply
+  Then confirm:
+    $ fffactory status
+  Paseo clients: enrollment is checked from each client, not the worker
+```
+
+Failed and not-attempted workers' rows go to standard error. The exit status is 0 when every
 worker was installed and verified or is stopped, 2 when one was skipped and
 none failed, and 1 when one failed, including a new worker whose first boot did
 not finish in time. The dispatch stage never fails a skipped worker: it reports
@@ -1085,7 +1102,7 @@ Apply this plan? Only "yes" applies it: yes
 
   1. GitHub
      $ gh auth login --hostname github.com --git-protocol https --web
-     $ gh auth status
+     $ gh auth status --hostname github.com --active
   2. OpenAI Codex
      $ codex login --device-auth
      $ codex login status
@@ -1138,11 +1155,14 @@ commands bold cyan, and the Next heading bold.
   whose GitHub account is to enroll, the repository gate of one whose
   repositories are unresolved or skipped, the Paseo gate of one whose control
   plane failed or was deferred, the release gate of one not installed. Then
-  each worker's enrollment: the login once, with the requirement it carries
+  each delivered credential a worker did not accept, once for every worker it
+  concerns, with the `fffactory secret set` that replaces it. Then
+  each worker's enrollment still to log in to: the login once, with the requirement it carries
   (`WorkerEnrollment.requirement`; [readiness §Where it is
   reported](readiness.md#where-it-is-reported)), its accounts numbered with
   their command lines, then `exit` back to the workstation. After the last
-  worker, `fffactory apply` verifies the enrollment again, since `status`
+  worker (or the credentials, when no login is left), `fffactory apply`
+  delivers and verifies the enrollment again, since `status`
   only reads the verification apply recorded, and `fffactory status`
   confirms. The Paseo clients note ends the block when a worker was
   installed. Its title names the enrollment when that is all it asks
@@ -1787,10 +1807,11 @@ question), `tests/cli/presentation/workers.test.ts` (each worker outcome's
 row and status across its later stages, an installed worker never ready while
 enrollment or a later stage is pending or failed, a stopped worker's start
 command with the instance and profile, the enrollment's login once and its
-accounts numbered), `tests/cli/presentation/apply.test.ts` (the 2026-10-05 run
+accounts numbered, delivered accounts grouped apart), `tests/cli/presentation/apply.test.ts` (the 2026-10-05 run
 as [What apply prints](#what-apply-prints) shows it, plain and in color; the
 Applying rows; the Result and Next block with nothing pending, one and several
-workers to enroll, mixed failed, skipped and not-attempted workers on both
+workers to enroll, a delivered credential to replace with no login, and once for
+several workers before their logins, mixed failed, skipped and not-attempted workers on both
 streams in order, a failed worker's next action that a skipped one's shares
 on standard error, enrolled workers with pending or failed dispatch and the
 gate their enrollment covers said once, a repository gap, a deferred
