@@ -7,8 +7,10 @@
   deliberately broken modules in `terraform/fixtures/`. Running the modules
   with the managed Terraform is `scripts/terraform-check.ts` (`just terraform-check`, in CI).
 - `steps/` checks the install steps: one script per shell step in `INSTALL_STEPS`, `bash -n` and
-  executable, no marker polling or v1 inputs, jq's re-evaluation markers, and the plugin
-  manifest passing the native TypeScript validator. It also scans the whole worker path, from the workers
+  executable, no marker polling or v1 inputs, jq's re-evaluation markers, `packages.sh`'s
+  pinned tools (each installed through its one checked installer, from its pinned URL,
+  checksum before install, skipped at its pin), and the plugin manifest passing the native
+  TypeScript validator. It also scans the whole worker path, from the workers
   stage to the steps, for SSM. The Paseo programs in `control-plane/` it checks parse, are
   executable and name no v1 paths or markers, that `setup-host.sh` hands the worker's
   addresses and the password hash (never as an argument) to `paseo-config.sh`, whose own

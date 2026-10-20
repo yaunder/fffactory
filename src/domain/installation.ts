@@ -31,7 +31,7 @@ const MINUTE_MS = 60_000;
  * left.
  */
 export const INSTALL_STEPS = [
-  /** Amazon Linux packages, the GitHub CLI and ripgrep. */
+  /** Amazon Linux packages, the GitHub CLI, and pinned ripgrep, just and pnpm. */
   { name: "packages", timeoutMs: 20 * MINUTE_MS },
   /** The runtime account's directories, profile, npm prefix and Git defaults. */
   { name: "user", timeoutMs: 5 * MINUTE_MS },

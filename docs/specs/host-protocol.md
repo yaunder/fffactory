@@ -450,7 +450,7 @@ reports it and the next apply repairs it. Nothing on this path uses SSM.
 
 | Step | Does |
 | --- | --- |
-| `packages` | Amazon Linux packages (Git, Git LFS, GCC, Make, jq, Node 22 and npm, Python 3.11, ...), Node 22 as the default, the GitHub CLI, and a checksum-verified ripgrep. |
+| `packages` | Amazon Linux packages (Git, Git LFS, GCC, Make, jq, Node 22 and npm, Python 3.11, ...), Node 22 as the default, the GitHub CLI, and a checksum-verified ripgrep, just and pnpm (pnpm's native binary, `@pnpm/exe.linux-x64`) in `/usr/local/bin`: each at the version `packages.sh` pins, downloaded only from its pinned upstream URL and checked against its pinned sha256 before anything is installed, a mismatch failing the step, and skipped when its `--version` already reports the pin. |
 | `user` | The runtime account's `/workspace` directories, private `.codex` and `.claude`, login profile, npm prefix, and the system's Git defaults. |
 | `systemd` | `tailscaled.service` enabled and active. |
 | `harness` | Codex's system requirements, then Codex and Claude Code for `factory` at the versions and npm integrity values `versions.env` pins ([Agent pins](#agent-pins)). |
