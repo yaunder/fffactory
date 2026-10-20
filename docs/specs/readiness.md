@@ -32,15 +32,18 @@ the install fails.
 | Check | Passes when |
 | --- | --- |
 | `factory_account` | `id -u factory` names the runtime account. |
-| `toolchain` | As `factory`, Git, Git LFS, the GitHub CLI, ripgrep, jq, npm, Python 3.11, GNU Make and GCC run, and `node --version` is 22.x. Otherwise the summary names each one that does not. |
+| `toolchain` | As `factory`, Git, Git LFS, the GitHub CLI, ripgrep, just, pnpm, jq, npm, Python 3.11, GNU Make and GCC run, and `node --version` is 22.x. Otherwise the summary names each one that does not. |
 | `workspace` | `/workspace/repos` and `/workspace/cache` are directories owned by `factory`. |
 | `agents` | As `factory`, `codex --version` and `claude --version` report the versions the release's `steps/versions.env` pins. |
 | `plugins` | The `plugins` step's own `verify` passes: the pinned plugins, at their revisions and contents, and nothing undeclared. |
 | `tailscaled` | `systemctl is-active tailscaled.service` prints `active`. |
 
 A command runs as `factory` through
-`runuser -u factory -- /usr/bin/env -i HOME=/home/factory PATH=/home/factory/.local/bin:/usr/local/bin:/usr/bin:/bin LANG=C.UTF-8 DISABLE_UPDATES=1 ...`:
-exactly the environment its agents get, and nothing of root's.
+`runuser -u factory -- /usr/bin/env -i HOME=/home/factory PATH=/home/factory/.local/bin:/usr/local/bin:/usr/bin:/bin LANG=C.UTF-8 DISABLE_UPDATES=1 ...`,
+from `/home/factory`: exactly the environment its agents get, and nothing of
+root's. The working directory is fixed because pnpm reads the project there:
+one `factory` cannot read would fail it, and one pinning another package manager
+would make it fetch that.
 
 ## Enrollment
 

@@ -20,14 +20,13 @@ import {
   namesKeyHelper,
 } from "../domain/installation";
 import { CREDENTIAL_SECRET_FIELDS, type SecretReference } from "../domain/instance";
-import { ENROLLMENTS, type EnrollmentId, RUNTIME_ACCOUNT } from "../domain/readiness";
+import { ENROLLMENTS, type EnrollmentId } from "../domain/readiness";
 import { SecretMaterial } from "../domain/secrets";
 import type { ProcessOutcome } from "../infrastructure/local-tool-probe";
 import type { WorkerSystem } from "./inspect";
-import { AS_FACTORY } from "./runtime-account";
+import { AS_FACTORY, FACTORY_HOME } from "./runtime-account";
 import { AWS_ENV, readSecretValue } from "./secret-value";
 
-const FACTORY_HOME = `/home/${RUNTIME_ACCOUNT}`;
 const GITHUB = ["--hostname", "github.com"] as const;
 /**
  * A GitHub login, as gh lists it: letters, digits, `-` and `_` (an Enterprise Managed User's is

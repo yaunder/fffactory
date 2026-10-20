@@ -1,6 +1,7 @@
 import { RUNTIME_ACCOUNT } from "../domain/readiness";
 
-const FACTORY_HOME = `/home/${RUNTIME_ACCOUNT}`;
+/** The runtime account's home: its commands' HOME, and their working directory. */
+export const FACTORY_HOME = `/home/${RUNTIME_ACCOUNT}`;
 
 /**
  * How a command runs as the runtime account: `runuser`, then `env -i` so it gets exactly the
