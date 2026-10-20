@@ -20,6 +20,8 @@ tool() {
 tool git 'echo "git version 2.47.1"'
 tool gh 'if [[ "${1:-} ${2:-}" == "auth status" ]]; then [[ -e /tmp/enrolled-github ]]; else echo "gh version 2.63.0"; fi'
 tool rg 'echo "ripgrep 15.2.0"'
+tool just 'echo "just 1.59.0"'
+tool pnpm 'echo "12.14.0"'
 tool jq 'echo "jq-1.7.1"'
 tool node 'echo "v22.12.0"'
 tool npm 'echo "10.9.0"'

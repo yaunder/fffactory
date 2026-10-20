@@ -26,7 +26,7 @@ import {
 } from "../domain/readiness";
 import type { ProcessOutcome } from "../infrastructure/local-tool-probe";
 import { tokenOr, type WorkerSystem } from "./inspect";
-import { AS_FACTORY } from "./runtime-account";
+import { AS_FACTORY, FACTORY_HOME } from "./runtime-account";
 import { workerPlugins } from "./plugins";
 
 /** What verification needs of the worker. */
@@ -47,12 +47,15 @@ export const PLUGINS_TIMEOUT_MS = 2 * 60_000;
 
 export { AS_FACTORY } from "./runtime-account";
 
+// TODO(re-evaluate when a worker is found running a pnpm or just other than its pin): check the reported versions against the pins
 /** The tools the packages step installs, each with the command that shows it runs. */
 export const TOOLCHAIN: readonly (readonly [string, readonly string[]])[] = [
   ["Git", ["git", "--version"]],
   ["Git LFS", ["git", "lfs", "version"]],
   ["GitHub CLI", ["gh", "--version"]],
   ["ripgrep", ["rg", "--version"]],
+  ["just", ["just", "--version"]],
+  ["pnpm", ["pnpm", "--version"]],
   ["jq", ["jq", "--version"]],
   ["Node 22", ["node", "--version"]],
   ["npm", ["npm", "--version"]],
@@ -96,8 +99,10 @@ export const CREDENTIAL_CHECKS: Readonly<Record<EnrollmentId, readonly string[]>
 };
 
 function verifiers(system: VerifySystem) {
+  // In factory's home, not wherever verify started: pnpm reads the project in its directory.
+  const cwd = join(system.root, FACTORY_HOME);
   const asFactory = (argv: readonly string[]) =>
-    system.run([...AS_FACTORY, ...argv], CHECK_TIMEOUT_MS, { env: {} });
+    system.run([...AS_FACTORY, ...argv], CHECK_TIMEOUT_MS, { cwd, env: {} });
   const steps = join(system.root, WORKER_PATHS.releases, system.release, "steps");
 
   /** The runtime account's user ID, or undefined when it does not exist. */

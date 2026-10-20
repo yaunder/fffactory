@@ -26,9 +26,9 @@ import { HOST_PROTOCOL_VERSION, WORKER_PATHS } from "../domain/host-protocol";
 import { REPOSITORY_MANIFEST_PATH } from "../domain/repository-placement";
 import type { ProcessOutcome } from "../infrastructure/local-tool-probe";
 import type { ApplySystem } from "./apply";
+import { FACTORY_HOME } from "./runtime-account";
 
 const TIMEOUT_MS = 15 * 60_000;
-const FACTORY_HOME = "/home/factory";
 const STABLE_DISPATCHER = "/usr/local/bin/factory-dispatch";
 const INSTALLED_SKILL = `${FACTORY_HOME}/.agents/skills/dispatch/SKILL.md`;
 const CLAUDE_SKILL = `${FACTORY_HOME}/.claude/skills/dispatch`;

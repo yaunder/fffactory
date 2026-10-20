@@ -80,5 +80,6 @@ over SSH as `fffactory-admin` (`docs/specs/host-protocol.md`). Rules:
 - Documents carry states, never instructions: the CLI names every next action itself, so a
   worker's document never puts text in front of the operator as something to run.
 - Verifiers run the runtime account's commands through `AS_FACTORY` (`runuser`, then
-  `env -i`), never with root's environment. They change nothing.
+  `env -i`) from `FACTORY_HOME`, never with root's environment or working directory. They
+  change nothing.
 - Nothing here names or uses SSM; `tests/assets/steps/steps.test.ts` scans this directory.

@@ -101,6 +101,77 @@ describe("the install steps", () => {
   });
 });
 
+/**
+ * `packages.sh`'s upstream build tools (host protocol §apply, the `packages` row): each is
+ * downloaded only from its pinned URL, checked against its pinned sha256 before anything is
+ * extracted or installed, installed into /usr/local/bin, and skipped when it already reports
+ * its pin. The real download needs network and root, so it is checked statically.
+ */
+describe("packages.sh's pinned tools", async () => {
+  const text = await readFile(join(STEPS, "packages.sh"), "utf8");
+  const joined = text.replace(/ *\\\n\s*/g, " ");
+  const pin = (name: string) => text.match(new RegExp(`^readonly ${name}="([^"]*)"$`, "m"))?.[1];
+  const installer = joined.match(/^install_verified_binary\(\) \{\n[\s\S]*?\n\}\n/m)?.[0] ?? "";
+  const calls = joined
+    .split("\n")
+    .filter((line) => line.startsWith("install_verified_binary "))
+    .map((line) => line.trim());
+  const position = (pattern: RegExp) => installer.search(pattern);
+
+  test("pins just and pnpm, as ripgrep, to an exact version and a sha256", () => {
+    for (const tool of ["RIPGREP", "JUST", "PNPM"]) {
+      expect({ tool, version: pin(`${tool}_VERSION`) }).toEqual({
+        tool,
+        version: expect.stringMatching(/^\d+\.\d+\.\d+$/),
+      });
+      expect({ tool, sha256: pin(`${tool}_SHA256`) }).toEqual({
+        tool,
+        sha256: expect.stringMatching(/^[0-9a-f]{64}$/),
+      });
+    }
+  });
+
+  test("installs ripgrep, just and pnpm into /usr/local/bin through the one checked installer, from their pinned upstream URLs", () => {
+    expect(calls).toEqual([
+      'install_verified_binary rg "ripgrep ${RIPGREP_VERSION}" "https://github.com/BurntSushi/ripgrep/releases/download/${RIPGREP_VERSION}/ripgrep-${RIPGREP_VERSION}-x86_64-unknown-linux-musl.tar.gz" "${RIPGREP_SHA256}" "ripgrep-${RIPGREP_VERSION}-x86_64-unknown-linux-musl/rg"',
+      'install_verified_binary just "just ${JUST_VERSION}" "https://github.com/casey/just/releases/download/${JUST_VERSION}/just-${JUST_VERSION}-x86_64-unknown-linux-musl.tar.gz" "${JUST_SHA256}" just',
+      'install_verified_binary pnpm "${PNPM_VERSION}" "https://registry.npmjs.org/@pnpm/exe.linux-x64/-/exe.linux-x64-${PNPM_VERSION}.tgz" "${PNPM_SHA256}" package/pnpm',
+    ]);
+    expect(installer).toContain('local destination="/usr/local/bin/${name}"');
+    expect(installer).toMatch(
+      /\n\s*install -o root -g root -m 0755 "\$\{work\}\/\$\{member\}" "\$\{destination\}"\n/,
+    );
+  });
+
+  test("downloads nothing else, and installs nothing it has not checked", () => {
+    expect(
+      text.match(/https:\/\/[^\s"]+/g)?.filter((url) => !calls.join("\n").includes(url)),
+    ).toEqual(["https://cli.github.com/packages/rpm/gh-cli.repo"]);
+    expect(text.match(/\bcurl\b/g)).toHaveLength(1);
+    expect(text.match(/\binstall -o\b/g)).toHaveLength(1);
+    expect(installer).toMatch(
+      /\bcurl --fail [^\n]*"\$\{url\}" --output "\$\{work\}\/\$\{archive\}"/,
+    );
+    const checked = position(
+      /\|\s*\(cd "\$\{work\}" && sha256sum --check --status\)\s*\|\|\s*fail /,
+    );
+    expect(installer).toMatch(/printf '%s {2}%s\\n' "\$\{sha256\}" "\$\{archive\}"/);
+    expect(position(/\bcurl\b/)).toBeGreaterThan(-1);
+    expect(checked).toBeGreaterThan(position(/\bcurl\b/));
+    expect(position(/\btar --extract\b/)).toBeGreaterThan(checked);
+    expect(position(/\binstall -o\b/)).toBeGreaterThan(checked);
+  });
+
+  test("skips a tool whose --version already reports its pin", () => {
+    const skip = position(
+      /current="\$\("\$\{destination\}" --version 2>\/dev\/null \| head -n 1\)"[^\n]*\n\s*if \[\[ \$\{current\} == "\$\{reported\}" \|\| \$\{current\} == "\$\{reported\} "\* \]\]; then/,
+    );
+    expect(skip).toBeGreaterThan(-1);
+    expect(position(/\n\s*return 0\n/)).toBeGreaterThan(skip);
+    expect(position(/\bcurl\b/)).toBeGreaterThan(position(/\n\s*return 0\n/));
+  });
+});
+
 describe("the release-owned Paseo programs", () => {
   test("are executable bash and carry no v1 deployment or marker assumptions", async () => {
     for (const script of CONTROL_PLANE_SCRIPTS) {

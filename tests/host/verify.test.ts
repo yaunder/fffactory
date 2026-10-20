@@ -75,9 +75,9 @@ const HEALTHY: Record<string, ProcessOutcome> = {
 
 /** A runner answering from `HEALTHY` and `overrides`, and exit 0 for anything else. */
 function runner(overrides: Record<string, ProcessOutcome> = {}) {
-  const calls: { argv: readonly string[]; timeoutMs: number; env: unknown }[] = [];
+  const calls: { argv: readonly string[]; timeoutMs: number; cwd?: string; env: unknown }[] = [];
   const run: ProcessRunner = async (argv, timeoutMs, options) => {
-    calls.push({ argv, timeoutMs, env: options?.env });
+    calls.push({ argv, timeoutMs, cwd: options?.cwd, env: options?.env });
     const asFactory = AS_FACTORY.every((token, index) => argv[index] === token);
     const command = (asFactory ? argv.slice(AS_FACTORY.length) : argv)
       .map((token) => token.split("/").at(-1))
@@ -129,6 +129,33 @@ describe("host verify's software checks (readiness §Verification)", () => {
       id: "toolchain",
       status: "failed",
       summary: "Missing, failing or the wrong version: GitHub CLI, ripgrep, Node 22",
+    });
+  });
+
+  test("just and pnpm run as factory, in the agents' environment, for the toolchain to pass", async () => {
+    const { verification, calls } = await verify();
+    expect(statusOf(verification).toolchain).toBe("passed");
+    for (const tool of ["just", "pnpm"]) {
+      expect(calls).toContainEqual({
+        argv: [...AS_FACTORY, tool, "--version"],
+        timeoutMs: CHECK_TIMEOUT_MS,
+        cwd: join(root, "home/factory"),
+        env: {},
+      });
+    }
+  });
+
+  test.each([
+    ["just", "missing", exited(127)],
+    ["just", "failing", exited(1)],
+    ["pnpm", "missing", exited(127)],
+    ["pnpm", "failing", exited(1)],
+  ])("names %s when it is %s", async (tool, _how, outcome) => {
+    const { verification } = await verify({ [`${tool} --version`]: outcome });
+    expect(verification.checks.find((check) => check.id === "toolchain")).toEqual({
+      id: "toolchain",
+      status: "failed",
+      summary: `Missing, failing or the wrong version: ${tool}`,
     });
   });
 
@@ -214,11 +241,21 @@ describe("host verify's enrollment (readiness §Enrollment)", () => {
         "--active",
       ],
       timeoutMs: CHECK_TIMEOUT_MS,
+      cwd: join(root, "home/factory"),
       env: {},
     });
-    const tools = calls.filter(({ argv }) => argv[0] === AS_FACTORY[0]).length;
+    const asFactory = calls.filter(({ argv }) => argv[0] === AS_FACTORY[0]);
     // Every tool, both agents, three credentials and the two plugin lists.
-    expect(tools).toBe(TOOLCHAIN.length + 2 + 3 + 2);
+    expect(asFactory.length).toBe(TOOLCHAIN.length + 2 + 3 + 2);
+  });
+
+  test("runs factory's commands in factory's home, never the directory verify started in", async () => {
+    // pnpm reads the project in its working directory: one factory cannot read fails it,
+    // and one pinning another package manager makes it fetch that.
+    const { calls } = await verify();
+    const asFactory = calls.filter(({ argv }) => argv[0] === AS_FACTORY[0]);
+    expect(asFactory.length).toBeGreaterThan(0);
+    for (const call of asFactory) expect(call.cwd).toBe(join(root, "home/factory"));
   });
 
   test("a worker it finds healthy and fully enrolled is ready in status", async () => {
