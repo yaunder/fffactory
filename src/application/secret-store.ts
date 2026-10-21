@@ -51,6 +51,17 @@ export type SecretChange =
  */
 export type SecretRemoval = SecretChange | { readonly kind: "invalid"; readonly reason: string };
 
+/**
+ * One secret as DescribeSecret finds it by its ARN: its name, ARN, tags and whether it is
+ * pending deletion, what its ownership is judged on, and never its value. `unusable`: Secrets
+ * Manager answered, but without a usable name or ARN, so nothing can be judged.
+ */
+export type SecretDescription =
+  | { readonly kind: "found"; readonly secret: ListedSecret }
+  | { readonly kind: "absent" }
+  | { readonly kind: "unusable" }
+  | { readonly kind: "failed"; readonly reason: string };
+
 /** Whether Secrets Manager still finds one secret, pending deletion or not. */
 export type SecretPresence =
   | { readonly kind: "present" }
@@ -61,9 +72,9 @@ export type SecretPresence =
  * Port: Secrets Manager. Material written goes to AWS and nowhere else, and material read
  * leaves the adapter only as `SecretMaterial`: never into a log, an error message or a
  * command argument. `write` and `read` reject, naming the AWS error but never quoting it, when
- * a call fails; `list`, `restore`, `remove` and `exists` resolve every AWS failure the same
- * way, as `failed`, but `remove`'s `invalid` (`docs/specs/secrets.md` §Deleting a factory's
- * secrets).
+ * a call fails; `list`, `restore`, `remove`, `describe` and `exists` resolve every AWS failure
+ * the same way, as `failed`, but `remove`'s `invalid` and `describe`'s `unusable`
+ * (`docs/specs/secrets.md` §Deleting a factory's secrets).
  */
 export interface SecretStore {
   /** Creates the secret named `name`, or stores a new value in it when it already exists. */
@@ -79,6 +90,12 @@ export interface SecretStore {
   restore(request: SecretLookup): Promise<SecretChange>;
   /** Deletes the secret without a recovery window (DeleteSecret, ForceDeleteWithoutRecovery). */
   remove(request: SecretLookup): Promise<SecretRemoval>;
+  /**
+   * The secret's name, ARN, tags and deleted date (DescribeSecret): a reference ListSecrets did
+   * not list, as it may not for a while after a change, judged as a listed one would be. A
+   * description without a usable name or ARN is `unusable`.
+   */
+  describe(request: SecretLookup): Promise<SecretDescription>;
   /** Whether Secrets Manager still finds the secret (DescribeSecret). */
   exists(request: SecretLookup): Promise<SecretPresence>;
 }

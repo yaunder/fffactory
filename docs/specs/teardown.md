@@ -92,8 +92,12 @@ Teardown goes in this order, and stops at the first refusal:
    [provisioning §Tagged VPCs](provisioning.md#tagged-vpcs)), its tagged secrets
    ([secrets §Listing](secrets.md#listing)) and the tailnet's devices. A
    listing that fails refuses teardown, naming it
-   ([Refusals](#refusals)). A worker whose machine is `pending` or `stopping`
-   refuses it too, before anything is asked.
+   ([Refusals](#refusals)). Each factory.json reference under `<id>/` the
+   secrets listing did not find is then looked up with `DescribeSecret` and
+   judged as a listed one: owned, kept, or already absent; one whose lookup
+   fails or cannot be judged refuses teardown too
+   ([secrets §Listing](secrets.md#listing)). A worker whose machine is
+   `pending` or `stopping` refuses it too, before anything is asked.
 9. The guarded destroy plan: `plan -destroy` of the `factory` root under
    Terraform's state lock, with factory.json projected with the host keys the
    state records, into a plan directory of its own, judged by
@@ -275,6 +279,9 @@ releases the lock. Each is a summary, details and a next action
 | Admin client unreadable | the error, by name | the `secretsmanager:GetSecretValue` permission, then rerun |
 | Admin client refused | `The Tailscale admin client could not be used: REASON` | the OAuth client (scope `devices:core`), then rerun |
 | EC2 instances, VPCs or secrets cannot be listed | the listing's own failure, such as `EC2 DescribeVpcs failed: UnauthorizedOperation` | the permission (`ec2:DescribeInstances`, `ec2:DescribeVpcs`, `secretsmanager:ListSecrets`), then rerun |
+| A reference under `<id>/` not listed cannot be looked up (`secretUnresolved`) | `The secret ARN could not be looked up: REASON`, such as `Secrets Manager DescribeSecret failed: AccessDeniedException`, each such reference listed; details `ListSecrets did not list it, as it may not for a few minutes after a change, so only DescribeSecret can tell whether the factory owns it.` | ``Check your network connection and that the credentials may call secretsmanager:DescribeSecret, then rerun `fffactory teardown`.`` |
+| Such a reference described without a usable name or ARN (`unusable`) | `Secrets Manager described the secret ARN without a usable name or ARN`; details add `Secrets Manager answered, but not in full: its ownership is judged on the name, ARN and tags it answers.`: no network or permission problem | ``Rerun `fffactory teardown`; if Secrets Manager answers the same again, check the secret in the Secrets Manager console.`` |
+| Such a reference describing another secret | `Secrets Manager described OTHER, another secret than ARN names`; details add `A partial ARN, without the six characters Secrets Manager adds after a hyphen, can resolve to another secret: what it describes is never judged for this reference.` | ``Check that factory.json names the secret by its full ARN, as the Secrets Manager console shows it, then rerun `fffactory teardown`.`` |
 | The tailnet's devices cannot be listed | `The tailnet's devices could not be listed: REASON` | the OAuth client, then rerun |
 | A worker's machine `pending` or `stopping` | `EC2 instance ID of HOSTNAME is STATE` | wait, then rerun |
 | The state records unreadable host keys | `The host keys the factory's Terraform state records could not be read` | ``Check the factory's Terraform state with `fffactory plan`, then rerun `fffactory teardown`.`` |
@@ -377,10 +384,16 @@ earlier run reported. What is gone is found gone, and reported so:
   the report says `infrastructure: absent`.
 - Devices already deleted are not found: nothing to delete.
 - Owned secrets already deleted are not listed. factory.json's references
-  under `<id>/` the listing does not find are each looked for with
-  `DescribeSecret`, in the Region their ARN names: those it no longer finds
-  are reported already absent (`absent`, in the review and the report); one
-  still found, or whose look fails, stays `unlisted`, never reported kept.
+  under `<id>/` the listing does not find are each looked up with
+  `DescribeSecret`, in the Region their ARN names
+  ([secrets §Listing](secrets.md#listing)): those it no longer finds are
+  reported already absent (`absent`, in the review and the report); one it
+  still finds is judged as a listed one, deleted when owned (as one the
+  listing has not caught up with yet) and kept when not; one whose lookup
+  fails or cannot be judged refuses the rerun, removing nothing, until the
+  lookup succeeds. No
+  run ends `done`, or deletes the state bucket, while a reference under
+  `<id>/` is unresolved.
 - A secret left pending deletion, or still being deleted, is restored, then
   deleted again ([secrets §Deletion and absence](secrets.md#deletion-and-absence)).
 - The state bucket is emptied from what is left in it, then deleted. A
@@ -532,15 +545,17 @@ D11. A finished teardown reports (`TeardownReport`):
   when its reported hostname is that for a well-formed key (`ShownDevice`);
 - `devicesUnchecked`: `not checked: teardown deletes the admin client only
   after the devices` when the admin client was already gone ([Rerun](#rerun));
-- the owned secrets deleted, those already absent (`absent`, [Rerun](#rerun)),
-  and the kept ones in three groups
-  (`keptSecrets`): tagged with the factory ID but not owned (by name and ARN,
-  never their tags); referenced by
-  factory.json outside the factory's names (such as `fffv/*`); and referenced
-  under `<id>/` but not listed with the factory's tag (`unlisted`). The last
-  are reported apart, never as kept: they may already be gone, as on a rerun,
-  or were never tagged. A reference to a tagged secret is listed once, with
-  it;
+- the owned secrets deleted, listed or looked up by their reference
+  ([secrets §Listing](secrets.md#listing)), those already absent (`absent`,
+  [Rerun](#rerun)), and the kept ones in two groups (`keptSecrets`): tagged
+  with the factory ID but not owned (by name and ARN, never their tags); and
+  referenced by factory.json but not owned, outside the factory's names (such
+  as `fffv/*`) or under them but made by hand. A reference to a tagged secret
+  is listed once, with it. Every reference under `<id>/` is one of these by
+  the time anything is shown: one whose ownership cannot be told refuses
+  teardown ([Refusals](#refusals)). An owned secret neither listed nor
+  referenced by factory.json cannot be seen, so `done` does not cover it
+  ([secrets §Listing](secrets.md#listing), accepted risk);
 - the state bucket (`TeardownBucket`): its name, and `outcome` `deleted`, or
   `not_found` in the [no-bucket mode](#no-state-bucket): not found by this run,
   so not deleted by it;
@@ -578,14 +593,12 @@ output:
    well-formed only marked), `VPCs`, `Tailnet devices` (`delete ID (HOSTNAME),
    ...`, `none to delete`, or `DEVICES_NOT_CHECKED` with
    `CHECK_UNCHECKED_DEVICES` under it), `Owned secrets` (`delete NAME, ...,
-   each confirmed gone`, or `none to delete`), `Already absent`, `Not listed`
-   (references under the factory's names not listed, reported apart and never
-   as kept) and `State bucket` (`BUCKET, deleted last, with the lock`, or
+   each confirmed gone`, or `none to delete`), `Already absent` and `State bucket` (`BUCKET, deleted last, with the lock`, or
    `BUCKET: not found by this run, so not deleted by it`); without a state
    bucket, `ranWithoutLock` under them. A `Kept` section follows when anything
    is kept: the devices listed but not deleted (`Possibly its devices`, `Untagged look-alikes`), the
    secrets tagged but not owned (`Tagged, not owned`, by name and ARN) and
-   those factory.json refers to outside its names (`Referenced`).
+   those factory.json refers to but the factory does not own (`Referenced`).
 2. **The question**, at a terminal without `--confirm`, on standard error
    after a blank line ([Confirmation](#confirmation)).
 3. **Each step** as it starts, under a `Removing` section: `Stopping dispatch
@@ -599,7 +612,7 @@ output:
 
 | Outcome | Stream | Shows | Exit |
 | --- | --- | --- | --- |
-| `done` | standard output | `✔ Removed factory ID: nothing it owns remains` (without a state bucket, `✔ Removed what was left of factory ID`); a `Result` section: `Infrastructure` (`destroyed: N resources` and each, `already absent: the destroy plan found nothing`, or `not found by EC2: no instance or VPC is tagged with the factory ID`), the instances, `Tailnet devices` (`deleted ID, ...`, `none found` or `DEVICES_NOT_CHECKED`), `Owned secrets` (`deleted NAME, ..., each confirmed gone`, or `none found`), `Already absent`, `Not listed`, `State bucket` (`BUCKET, deleted`, or not found by this run) and `ranWithoutLock`; the `Kept` section; then the Next block of the advice it leaves: `CHECK_UNCHECKED_DEVICES` when the devices were not checked, `CHECK_LISTED_DEVICES` when any were listed but kept, `checkOutsideEc2` without a state bucket, `REVOKE_SOURCES` (the Tailscale auth key and OAuth client, the tailnet policy entries, and the API credentials kept with their grants), and `FACTORY_JSON_KEPT`: factory.json is left as it is and still describes the factory, so `fffactory apply` would create a new one (D11) | 0; 128 + the signal's number when interrupted during the state bucket's last deletion ([Interruption](#interruption)) |
+| `done` | standard output | `✔ Removed factory ID: nothing it owns remains` (without a state bucket, `✔ Removed what was left of factory ID`), claiming only what it can see: an owned secret neither listed nor referenced by factory.json is not ([secrets §Listing](secrets.md#listing), an accepted risk); a `Result` section: `Infrastructure` (`destroyed: N resources` and each, `already absent: the destroy plan found nothing`, or `not found by EC2: no instance or VPC is tagged with the factory ID`), the instances, `Tailnet devices` (`deleted ID, ...`, `none found` or `DEVICES_NOT_CHECKED`), `Owned secrets` (`deleted NAME, ..., each confirmed gone`, or `none found`), `Already absent`, `State bucket` (`BUCKET, deleted`, or not found by this run) and `ranWithoutLock`; the `Kept` section; then the Next block of the advice it leaves: `CHECK_UNCHECKED_DEVICES` when the devices were not checked, `CHECK_LISTED_DEVICES` when any were listed but kept, `checkOutsideEc2` without a state bucket, `REVOKE_SOURCES` (the Tailscale auth key and OAuth client, the tailnet policy entries, and the API credentials kept with their grants), and `FACTORY_JSON_KEPT`: factory.json is left as it is and still describes the factory, so `fffactory apply` would create a new one (D11) | 0; 128 + the signal's number when interrupted during the state bucket's last deletion ([Interruption](#interruption)) |
 | `refused` | standard error | `✖ Refusing to remove the factory: SUMMARY` and its details, for each refusal; where dispatch was left stopped (`dispatchLeftStopped`); the operation record; a Next block of each next action once | 1 |
 | no terminal, no `--confirm` | standard error | `✖` and `TEARDOWN_UNCONFIRMABLE` | 1 |
 | incomplete factory.json, another account, a pin mismatch, an unready bucket, a held lock | standard error | as `plan` words them, `Refusing to remove the factory: ...`; each missing field `PATH: is required to remove a factory` | 1 |
@@ -676,7 +689,7 @@ operator's credentials need, in the factory's account and Region:
 | `s3:PutObject`, `s3:GetObject`, `s3:DeleteObject`, `s3:DeleteObjectVersion` | `arn:aws:s3:::BUCKET/<factory ID>-lock.json`, and `s3:PutObject` on `arn:aws:s3:::BUCKET/<factory ID>-operations/*` | The lock and the operation record ([worker lifecycle §Tiers](worker-lifecycle.md#tiers)). |
 | `ec2:DescribeInstances`, `ec2:DescribeVpcs` | `*` (EC2 does not scope them to resources) | The inventory and the leftover check ([provisioning §Tagged VPCs](provisioning.md#tagged-vpcs)). |
 | `secretsmanager:GetSecretValue` | The secret `tailscale.admin_client_secret` refers to | The Tailscale admin client. |
-| `secretsmanager:ListSecrets`; `secretsmanager:RestoreSecret`, `secretsmanager:DeleteSecret`, `secretsmanager:DescribeSecret` | `*`; `arn:aws:secretsmanager:REGION:ACCOUNT:secret:<factory ID>/*` | Listing, deleting and confirming the absence of the owned secrets ([secrets §Permissions](secrets.md#permissions)); `DescribeSecret` also looks for the references already absent. |
+| `secretsmanager:ListSecrets`; `secretsmanager:RestoreSecret`, `secretsmanager:DeleteSecret`, `secretsmanager:DescribeSecret` | `*`; `arn:aws:secretsmanager:REGION:ACCOUNT:secret:<factory ID>/*` | Listing, deleting and confirming the absence of the owned secrets ([secrets §Permissions](secrets.md#permissions)); `DescribeSecret` also looks up each reference under `<id>/` the listing left out ([secrets §Listing](secrets.md#listing)): a denial refuses teardown. |
 | What Terraform needs to destroy the `factory` root | The state object `factory/terraform.tfstate` and Terraform's lock beside it (`s3:GetObject`, `s3:PutObject`, `s3:DeleteObject`, `s3:ListBucket`); refreshing every resource the root holds, and the public Amazon Linux image parameter (`ssm:GetParameter`); deleting them: `ec2:TerminateInstances` on the factory's instances, `ec2:DeleteSecurityGroup`, `ec2:DisassociateRouteTable`, `ec2:DeleteRoute`, `ec2:DeleteRouteTable`, `ec2:DetachInternetGateway`, `ec2:DeleteInternetGateway`, `ec2:DeleteSubnet`, `ec2:DeleteVpc`, and `iam:RemoveRoleFromInstanceProfile`, `iam:DeleteInstanceProfile`, `iam:DeleteRolePolicy`, `iam:DeleteRole` on `<factory ID>-host` | The guarded destroy plan and its apply ([provisioning §Destroy plan](provisioning.md#destroy-plan)). |
 | `s3:ListBucketVersions`, `s3:DeleteObject`, `s3:DeleteObjectVersion`, `s3:DeleteBucket` | `arn:aws:s3:::BUCKET` and `arn:aws:s3:::BUCKET/*` | Emptying and deleting the state bucket ([provisioning §Deleting the state bucket](provisioning.md#deleting-the-state-bucket)). |
 
@@ -811,12 +824,12 @@ names.
 
 | Layer | Module | Responsibility |
 | --- | --- | --- |
-| Domain | `src/domain/teardown.ts` | The guarded destroy plan's rule and its consistency with the exit code (`destroyPlanRefusal`, `destroyPlanMismatch`), `VpcInventory`; the devices teardown deletes and lists (`selectFactoryDevices`, `FactoryDevices`); the kept secrets' groups (`keptSecrets`) and the factory's names (`underFactoryNames`); the confirmation rule (`teardownConfirmation`, `typedIdConfirms`) and question; the gates' next actions (`teardownGateActions`) and the review invalidated by changed machines (`machinesChanged`); the review and report (`TeardownReview`, `TeardownReport`), carrying only what may be printed (`ShownMachine`, `ShownDevice`, `ShownSecret`); the steps (`TeardownStep`), where a partial teardown stopped (`TeardownStop`) and what remains of each kind (`remainingAt`, `TeardownRemaining`, `stoppedPartWay`); an interruption's words (`interruptedTeardown`, its lock `none` without a state bucket); the state bucket's outcome (`TeardownBucket`); without a state bucket, why it runs without the lock (`ranWithoutLock`), what it leaves to the operator outside EC2 (`checkOutsideEc2`) and its refusals (`taggedWithoutBucket`, `bucketAppeared`); the words of every refusal and of the report's advice. Pure. |
+| Domain | `src/domain/teardown.ts` | The guarded destroy plan's rule and its consistency with the exit code (`destroyPlanRefusal`, `destroyPlanMismatch`), `VpcInventory`; the devices teardown deletes and lists (`selectFactoryDevices`, `FactoryDevices`); the kept secrets' groups (`keptSecrets`), the factory's names (`underFactoryNames`), the references under them to look up (`unlistedReferences`) and the refusal of one that cannot be (`secretUnresolved`); the confirmation rule (`teardownConfirmation`, `typedIdConfirms`) and question; the gates' next actions (`teardownGateActions`) and the review invalidated by changed machines (`machinesChanged`); the review and report (`TeardownReview`, `TeardownReport`), carrying only what may be printed (`ShownMachine`, `ShownDevice`, `ShownSecret`); the steps (`TeardownStep`), where a partial teardown stopped (`TeardownStop`) and what remains of each kind (`remainingAt`, `TeardownRemaining`, `stoppedPartWay`); an interruption's words (`interruptedTeardown`, its lock `none` without a state bucket); the state bucket's outcome (`TeardownBucket`); without a state bucket, why it runs without the lock (`ranWithoutLock`), what it leaves to the operator outside EC2 (`checkOutsideEc2`) and its refusals (`taggedWithoutBucket`, `bucketAppeared`); the words of every refusal and of the report's advice. Pure. |
 | Domain | `src/domain/initialization.ts` | `isGeneratedFactoryId`. |
 | Domain | `src/domain/worker-lifecycle.ts` | `removalGate` and `RemovalGateActions`: terminate's gates, their next actions completed by the command refused. |
 | Domain | `src/domain/operation.ts` | `TEARDOWN_OPERATION` and the teardown stage's statuses. |
-| Domain | `src/domain/secrets.ts` | `classifySecrets` and `refersTo`. |
-| Application | `src/application/teardown-factory.ts` | `teardownFactory`: the order above, under the lock and its record, the lock and record never touched once the bucket is gone; without a state bucket, the same steps from the admin session on without them (`withoutBucket`, `cleanUp`, a `TeardownLog` that writes nothing), the factory rechecked once confirmed (`stillWithoutBucket`); how far it got and what is left (`Progress`), every ending (`refusedUnder`, `failedUnder`, `partialUnder`, `interruptedUnder`), the interrupt checked once the run returns. |
+| Domain | `src/domain/secrets.ts` | `classifySecrets`, which judges listed and described secrets alike, and `refersTo`. |
+| Application | `src/application/teardown-factory.ts` | `teardownFactory`: the order above, under the lock and its record, the lock and record never touched once the bucket is gone; without a state bucket, the same steps from the admin session on without them (`withoutBucket`, `cleanUp`, a `TeardownLog` that writes nothing), the secrets listed then each reference under `<id>/` not listed looked up (`resolvedSecrets`), the factory rechecked once confirmed (`stillWithoutBucket`); how far it got and what is left (`Progress`), every ending (`refusedUnder`, `failedUnder`, `partialUnder`, `interruptedUnder`), the interrupt checked once the run returns. |
 | Application | `src/application/worker-removal.ts` | Shared with `worker terminate`: `inspectForRemoval`, `openTailnetAdmin`, `deleteDevices`. |
 | Application | `src/application/stop-dispatch.ts`, `src/application/delete-owned-secret.ts` | `stopDispatch`, `deleteOwnedSecret`. |
 | Application | `src/application/plan-store.ts` | `PlanStore.removeAll`. |
@@ -832,7 +845,10 @@ devices deleted and a hand-chosen ID's only listed, `acme` against
 `acme-lab`, a malformed key ignored, what a generated ID is; the confirmation
 rule, the typed ID, the mismatch never echoing its value; the gates' next
 actions, for a declared worker and an undeclared one; the kept secrets'
-groups; the destroy plan's consistency with its exit code; once reviewed, a
+groups, those already absent left out, and the references under the
+factory's names to look up, never `acme-lab/`'s for `acme`; a reference whose
+lookup failed, answered without a usable name or ARN, or described another
+secret, each worded for why; the destroy plan's consistency with its exit code; once reviewed, a
 namespace device not shown only listed; `machinesChanged`, a machine reviewed
 shutting down and gone since no change; the shown machines and devices
 carrying no tag and no malformed host key; what remains where it stopped and
@@ -876,7 +892,15 @@ found past its deadline, refusing the rerun until it is gone; a secret listed
 pending deletion; an admin client gone while resources remain, or outside
 `<id>/`, refused; an admin client in another Region looked for there; the
 admin client unreadable, the pending-deletion hint only when it is still
-found; a bucket answering 403; a machine reviewed shutting down gone since; a
+found; a reference ListSecrets did not list (secrets §Listing): an owned
+one described, deleted and confirmed gone, the run `done` and the bucket
+deleted; one not owned, by hand or without both tags, kept; one no longer
+found already absent; one named by its full and its partial ARN described,
+deleted once and confirmed gone; one also pending deletion restored, deleted
+and confirmed gone; one whose lookup is denied, answers without a usable name
+or ARN, or describes another secret, refusing in its own words and removing
+nothing; the denied one's rerun finishing once the lookup succeeds, also after
+the admin client was deleted; a bucket answering 403; a machine reviewed shutting down gone since; a
 failure after dispatch was stopped naming it; a plan directory not removed
 never overwriting a refusal; an interrupt at each step, during each of the
 destroy plan's Terraform commands, during EC2's listing after the destroy,
@@ -893,7 +917,8 @@ listing failing once confirmed, each removing nothing, never a lock, record,
 bucket or Terraform call, a rerun after a teardown that deleted the bucket
 ending done with the devices not checked and the secrets already absent, a
 device or a secret left partial with no bucket among what remains and a rerun
-finishing it, the state bucket's outcome `not_found` and `infrastructure`
+finishing it, a reference not listed whose lookup is denied refusing and, once
+it succeeds, the owned secret deleted, the state bucket's outcome `not_found` and `infrastructure`
 `not_found_by_ec2`, the admin client gone indeed when a tagged VPC is refused,
 an interrupt at the question, while deleting the secrets, once confirmed as
 S3 or each EC2 listing answers (no further call started), and before anything
@@ -905,7 +930,7 @@ interrupted bucket deletion, the typed 403). terminate's own tests
 (`tests/application/worker-lifecycle.test.ts`) cover the shared helpers.
 
 `tests/cli/presentation/teardown.test.ts` (the review: the target, each
-kind, the kept apart, the references not listed apart from them, a malformed
+kind, the kept apart, the references already absent apart from them, a malformed
 host key only marked, devices not checked with their advice, no state bucket
 without a destroy plan; each step; every outcome on its stream: a finished
 teardown with its advice, the devices listed but kept, without a state bucket

@@ -7,7 +7,7 @@
  * mismatched `--confirm` or a typed answer.
  */
 import type { FactoryTeardown, TeardownProgress } from "../../application/teardown-factory";
-import type { FactoryId, SecretReference } from "../../domain/instance";
+import type { FactoryId } from "../../domain/instance";
 import { changesSomething, changeTally, type ResourceChange } from "../../domain/plan";
 import {
   CHECK_LISTED_DEVICES,
@@ -102,30 +102,11 @@ function listedDeviceRows({ possible, untagged }: ListedDevices): Row[] {
   ];
 }
 
-/** The secrets kept, and those referenced under the factory's names but not listed. */
+/** The secrets kept: tagged but not owned, and referenced but not owned. */
 function keptSecretRows(kept: KeptSecrets): Row[] {
   return [
     ...listRow("Tagged, not owned", kept.tagged.map(secretText)),
     ...listRow("Referenced", kept.referenced),
-  ];
-}
-
-/** References under `<id>/` the listing did not find: not deleted, and never reported kept. */
-function unlistedRow(unlisted: readonly SecretReference[]): Row[] {
-  if (unlisted.length === 0) return [];
-  return [
-    {
-      label: "Not listed",
-      value: shown(listed(unlisted)),
-      details: [
-        {
-          kind: "text",
-          lines: [
-            "referenced under the factory's names, but not listed with its tags: not deleted, and they may already be gone",
-          ],
-        },
-      ],
-    },
   ];
 }
 
@@ -193,7 +174,6 @@ export function teardownReviewBlocks(review: TeardownReview, selection: Selectio
     ...listRow("VPCs", review.vpcIds),
     plannedDevices(review, selection),
     ...plannedSecrets(review),
-    ...unlistedRow(review.secrets.kept.unlisted),
     { label: "State bucket", value: bucketValue(review.bucket, false) },
   ];
   return [
@@ -350,7 +330,6 @@ function resultRows(report: TeardownReport): Row[] {
           : shown(`deleted ${listed(secrets.removed)}, each confirmed gone`),
     },
     ...listRow("Already absent", secrets.absent),
-    ...unlistedRow(secrets.kept.unlisted),
     { label: "State bucket", value: bucketValue(report.bucket, true) },
   ];
 }

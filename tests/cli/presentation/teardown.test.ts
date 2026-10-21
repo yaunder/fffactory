@@ -60,7 +60,7 @@ const TARGET_ROWS = [
   "  Release   0.3.0",
 ];
 
-const NO_KEPT = { tagged: [], referenced: [], unlisted: [] };
+const NO_KEPT = { tagged: [], referenced: [] };
 
 function review(fields: Partial<TeardownReview> = {}): TeardownReview {
   return {
@@ -130,7 +130,7 @@ describe("the review (teardown §Order, step 10)", () => {
     ]);
   });
 
-  test("what it keeps, apart; references not listed reported apart, never as kept", () => {
+  test("what it keeps, apart; references already absent apart from them", () => {
     const lines = plain(
       teardownReviewBlocks(
         review({
@@ -144,8 +144,7 @@ describe("the review (teardown §Order, step 10)", () => {
             absent: [arn(`${FACTORY}/paseo-password`)],
             kept: {
               tagged: [{ name: "fff-abcd1234-other", arn: arn("fff-abcd1234-other") }],
-              referenced: [SOURCE],
-              unlisted: [arn(`${FACTORY}/hand-made`)],
+              referenced: [SOURCE, arn(`${FACTORY}/hand-made`)],
             },
           },
         }),
@@ -161,15 +160,13 @@ describe("the review (teardown §Order, step 10)", () => {
       "  Tailnet devices   none to delete",
       "  Owned secrets     none to delete",
       `  Already absent    ${arn(`${FACTORY}/paseo-password`)}`,
-      `  Not listed        ${arn(`${FACTORY}/hand-made`)}`,
-      "    referenced under the factory's names, but not listed with its tags: not deleted, and they may already be gone",
       `  State bucket      ${BUCKET}, deleted last, with the lock`,
       "",
       rule("Kept"),
       "  Possibly its devices   n2CNTRL (fff-abcd1234-lab)",
       "  Untagged look-alikes   n3CNTRL",
       `  Tagged, not owned      fff-abcd1234-other (${arn("fff-abcd1234-other")})`,
-      `  Referenced             ${SOURCE}`,
+      `  Referenced             ${SOURCE}, ${arn(`${FACTORY}/hand-made`)}`,
     ]);
   });
 
@@ -294,7 +291,7 @@ describe("a finished teardown (teardown §Report)", () => {
         secrets: {
           removed: [],
           absent: OWNED.map(arn),
-          kept: { tagged: [], referenced: [SOURCE], unlisted: [] },
+          kept: { tagged: [], referenced: [SOURCE] },
         },
       }),
     });

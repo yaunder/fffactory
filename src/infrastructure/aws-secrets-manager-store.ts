@@ -3,6 +3,7 @@ import type {
   SecretsManagerClientConfig,
 } from "@aws-sdk/client-secrets-manager";
 import type {
+  SecretDescription,
   SecretListing,
   SecretListRequest,
   SecretLookup,
@@ -65,18 +66,19 @@ export interface ListSecretsInput {
   readonly NextToken: string | undefined;
 }
 
+/** The fields of one listed secret, or of a DescribeSecret answer, the adapter reads. */
+export interface SecretEntry {
+  readonly ARN?: string | undefined;
+  readonly Name?: string | undefined;
+  readonly Tags?:
+    | readonly { readonly Key?: string | undefined; readonly Value?: string | undefined }[]
+    | undefined;
+  readonly DeletedDate?: Date | undefined;
+}
+
 /** The fields of one ListSecrets page the adapter reads. */
 export interface SecretListPage {
-  readonly SecretList?:
-    | readonly {
-        readonly ARN?: string | undefined;
-        readonly Name?: string | undefined;
-        readonly Tags?:
-          | readonly { readonly Key?: string | undefined; readonly Value?: string | undefined }[]
-          | undefined;
-        readonly DeletedDate?: Date | undefined;
-      }[]
-    | undefined;
+  readonly SecretList?: readonly SecretEntry[] | undefined;
   readonly NextToken?: string | undefined;
 }
 
@@ -95,7 +97,7 @@ export interface SecretsManagerCalls extends AwsCalls {
   listSecrets(input: ListSecretsInput): Promise<SecretListPage>;
   restoreSecret(input: SecretIdInput): Promise<unknown>;
   deleteSecret(input: DeleteSecretInput): Promise<unknown>;
-  describeSecret(input: SecretIdInput): Promise<unknown>;
+  describeSecret(input: SecretIdInput): Promise<SecretEntry>;
 }
 
 /**
@@ -139,21 +141,28 @@ function arnOf(answer: SecretAnswer): SecretReference {
   return parsed.value;
 }
 
+/** A listed or described secret; undefined without a usable name or ARN. */
+function secretOf(entry: SecretEntry): ListedSecret | undefined {
+  const arn = parseSecretReference(entry.ARN ?? "");
+  if (!arn.ok || !entry.Name) return undefined;
+  const tags = (entry.Tags ?? []).flatMap(({ Key, Value }) =>
+    Key === undefined ? [] : [[Key, Value ?? ""] as const],
+  );
+  return {
+    name: entry.Name,
+    arn: arn.value,
+    tags: Object.fromEntries(tags),
+    pendingDeletion: entry.DeletedDate !== undefined && entry.DeletedDate !== null,
+  };
+}
+
 /** One page's secrets; an entry without a usable name or ARN fails the listing. */
 function secretsOf(page: SecretListPage): ListedSecret[] {
   return (page.SecretList ?? []).map((entry) => {
-    const arn = parseSecretReference(entry.ARN ?? "");
-    if (!arn.ok || !entry.Name)
+    const secret = secretOf(entry);
+    if (secret === undefined)
       throw new AdapterRefusal("Secrets Manager listed a secret without a usable name or ARN");
-    const tags = (entry.Tags ?? []).flatMap(({ Key, Value }) =>
-      Key === undefined ? [] : [[Key, Value ?? ""] as const],
-    );
-    return {
-      name: entry.Name,
-      arn: arn.value,
-      tags: Object.fromEntries(tags),
-      pendingDeletion: entry.DeletedDate !== undefined && entry.DeletedDate !== null,
-    };
+    return secret;
   });
 }
 
@@ -188,17 +197,17 @@ function failed(error: unknown): { readonly kind: "failed"; readonly reason: str
 }
 
 /**
- * One call on one secret by its ARN: `absent` when Secrets Manager does not find it
- * (`ResourceNotFoundException`), `invalid`'s answer to an `InvalidRequestException` when it is
- * given one, described as the session describes a failure, and `failed` for any other failure.
+ * One call on one secret by its ARN, answering `call`'s result: `absent` when Secrets Manager
+ * does not find it (`ResourceNotFoundException`), `invalid`'s answer to an
+ * `InvalidRequestException` when it is given one, described as the session describes a failure,
+ * and `failed` for any other failure, an answer `call` cannot use (`AdapterRefusal`) included.
  */
-async function onSecret<T extends SecretRemoval | SecretPresence>(
+async function onSecret<T extends SecretRemoval | SecretPresence | SecretDescription>(
   open: OpenCalls<SecretsManagerCalls>,
   timeoutMs: number,
   request: SecretLookup,
   operation: string,
-  call: (calls: SecretsManagerCalls, input: SecretIdInput) => Promise<unknown>,
-  found: T,
+  call: (calls: SecretsManagerCalls, input: SecretIdInput) => Promise<T>,
   invalid?: (reason: string) => T,
 ): Promise<T | { readonly kind: "absent" } | { readonly kind: "failed"; readonly reason: string }> {
   try {
@@ -209,8 +218,7 @@ async function onSecret<T extends SecretRemoval | SecretPresence>(
       `Secrets Manager ${operation}`,
       async (calls) => {
         try {
-          await call(calls, { SecretId: request.reference });
-          return found;
+          return await call(calls, { SecretId: request.reference });
         } catch (error) {
           const name = errorName(error);
           if (name === "ResourceNotFoundException") return { kind: "absent" } as const;
@@ -230,8 +238,9 @@ async function onSecret<T extends SecretRemoval | SecretPresence>(
  * exists, and reads a secret's current value by its ARN. The material is only ever the
  * `SecretString` of one request or answer, and leaves a read only as `SecretMaterial`;
  * failures are described by error name, never by a message that could echo it. For teardown
- * it lists the secrets by the factory-ID tag, scheduled ones included, restores and
- * force-deletes one by its ARN, and looks for it with DescribeSecret.
+ * it lists the secrets by the factory-ID tag, scheduled ones included, describes one by its ARN
+ * (name, ARN, tags and deleted date, never its value), restores and force-deletes one, and looks
+ * for it with DescribeSecret.
  */
 export function secretsManagerStore(
   open: OpenCalls<SecretsManagerCalls> = sdkSecretsManagerCalls(),
@@ -289,32 +298,37 @@ export function secretsManagerStore(
       }
     },
     restore: (request) =>
-      onSecret(
-        open,
-        timeoutMs,
-        request,
-        "RestoreSecret",
-        (calls, input) => calls.restoreSecret(input),
-        { kind: "done" } as const,
-      ),
+      onSecret(open, timeoutMs, request, "RestoreSecret", async (calls, input) => {
+        await calls.restoreSecret(input);
+        return { kind: "done" } as const;
+      }),
     remove: (request) =>
       onSecret<SecretRemoval>(
         open,
         timeoutMs,
         request,
         "DeleteSecret",
-        (calls, input) => calls.deleteSecret({ ...input, ForceDeleteWithoutRecovery: true }),
-        { kind: "done" },
+        async (calls, input) => {
+          await calls.deleteSecret({ ...input, ForceDeleteWithoutRecovery: true });
+          return { kind: "done" };
+        },
         (reason) => ({ kind: "invalid", reason }),
       ),
-    exists: (request) =>
-      onSecret(
+    describe: (request) =>
+      onSecret<SecretDescription>(
         open,
         timeoutMs,
         request,
         "DescribeSecret",
-        (calls, input) => calls.describeSecret(input),
-        { kind: "present" } as const,
+        async (calls, input) => {
+          const secret = secretOf(await calls.describeSecret(input));
+          return secret === undefined ? { kind: "unusable" } : { kind: "found", secret };
+        },
       ),
+    exists: (request) =>
+      onSecret(open, timeoutMs, request, "DescribeSecret", async (calls, input) => {
+        await calls.describeSecret(input);
+        return { kind: "present" } as const;
+      }),
   };
 }

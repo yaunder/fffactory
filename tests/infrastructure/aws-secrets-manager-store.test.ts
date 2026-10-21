@@ -355,6 +355,7 @@ describe("deleting a factory's secrets over stubbed calls (secrets §Deleting a 
     });
     const store = secretsManagerStore(gone.open);
     expect(await store.exists(LOOKUP)).toEqual({ kind: "absent" });
+    expect(await store.describe(LOOKUP)).toEqual({ kind: "absent" });
     expect(await store.restore(LOOKUP)).toEqual({ kind: "absent" });
     expect(await store.remove(LOOKUP)).toEqual({ kind: "absent" });
   });
@@ -369,10 +370,12 @@ describe("deleting a factory's secrets over stubbed calls (secrets §Deleting a 
       await store.restore(LOOKUP),
       await store.remove(LOOKUP),
       await store.exists(LOOKUP),
+      await store.describe(LOOKUP),
     ];
     expect(results).toEqual([
       { kind: "failed", reason: "Secrets Manager RestoreSecret failed: AccessDeniedException" },
       { kind: "failed", reason: "Secrets Manager DeleteSecret failed: AccessDeniedException" },
+      { kind: "failed", reason: "Secrets Manager DescribeSecret failed: AccessDeniedException" },
       { kind: "failed", reason: "Secrets Manager DescribeSecret failed: AccessDeniedException" },
     ]);
     expect(JSON.stringify(results)).not.toContain(VALUE);
@@ -399,6 +402,37 @@ describe("deleting a factory's secrets over stubbed calls (secrets §Deleting a 
       { kind: "failed", reason: "Secrets Manager DescribeSecret failed: InvalidRequestException" },
     ]);
     expect(JSON.stringify(results)).not.toContain(VALUE);
+  });
+
+  test("DescribeSecret's answer describes the secret by name, ARN, tags and deleted date", async () => {
+    const stub = stubbed({
+      describeSecret: async (input) => {
+        stub.calls.push(`DescribeSecret ${input.SecretId}`);
+        return {
+          ARN,
+          Name: NAME,
+          Tags: [
+            { Key: "fffactory:factory-id", Value: "fff-abcd1234" },
+            { Key: "fffactory:managed-by", Value: "fffactory" },
+          ],
+          DeletedDate: new Date("2026-10-21T00:00:00Z"),
+        };
+      },
+    });
+    expect(await secretsManagerStore(stub.open).describe(LOOKUP)).toEqual({
+      kind: "found",
+      secret: { name: NAME, arn: ARN, tags: TAGS, pendingDeletion: true },
+    });
+    expect(stub.calls).toEqual([`DescribeSecret ${ARN}`, "close"]);
+    expect(stub.sessions.map(({ region }) => region)).toEqual(["eu-west-2"]);
+  });
+
+  test("a description without a usable name or ARN is unusable, never judged", async () => {
+    const answers = [{ Name: NAME }, { ARN: "not an ARN", Name: NAME }, { ARN }];
+    for (const answer of answers) {
+      const stub = stubbed({ describeSecret: async () => answer });
+      expect(await secretsManagerStore(stub.open).describe(LOOKUP)).toEqual({ kind: "unusable" });
+    }
   });
 
   test("a call past its deadline is failed: it is no proof of deletion", async () => {
@@ -509,6 +543,35 @@ describe("deleting a factory's secrets with the real SDK against a local stub", 
       reason: "Secrets Manager ListSecrets failed: AccessDeniedException",
     });
     expect(await store.exists(LOOKUP)).toEqual({
+      kind: "failed",
+      reason: "Secrets Manager DescribeSecret failed: AccessDeniedException",
+    });
+  });
+
+  test("describes a secret the listing would not show: its tags, scheduled or not, or absent", async () => {
+    const { store, stub } = againstStub();
+    stub.add(NAME, TAGS, true);
+    stub.add("fff-abcd1234/hand-made", {});
+    expect(await store.describe(LOOKUP)).toEqual({
+      kind: "found",
+      secret: { name: NAME, arn: ARN, tags: TAGS, pendingDeletion: true },
+    });
+    const handMade = stubArn("fff-abcd1234/hand-made") as SecretReference;
+    expect(await store.describe({ ...LOOKUP, reference: handMade })).toEqual({
+      kind: "found",
+      secret: { name: "fff-abcd1234/hand-made", arn: handMade, tags: {}, pendingDeletion: false },
+    });
+    const gone = stubArn("fff-abcd1234/github-token") as SecretReference;
+    expect(await store.describe({ ...LOOKUP, reference: gone })).toEqual({ kind: "absent" });
+    expect(stub.requests.at(0)).toEqual({ operation: "DescribeSecret", body: { SecretId: ARN } });
+    // A description carries no value: the stub's secret value never leaves it.
+    expect(JSON.stringify(await store.describe(LOOKUP))).not.toContain("stub value");
+  });
+
+  test("a description refused is failed, by its name", async () => {
+    const { store, stub } = againstStub({ failing: { DescribeSecret: "AccessDeniedException" } });
+    stub.add(NAME, TAGS);
+    expect(await store.describe(LOOKUP)).toEqual({
       kind: "failed",
       reason: "Secrets Manager DescribeSecret failed: AccessDeniedException",
     });

@@ -62,6 +62,8 @@ import { hostName } from "../domain/resource-naming";
 import type { WorkerIdentity } from "../domain/rollout";
 import {
   classifySecrets,
+  type ListedSecret,
+  refersTo,
   type SecretInventory,
   secretReferences,
   secretRegion,
@@ -96,6 +98,7 @@ import {
   ranWithoutLock,
   remainingAt,
   secretsRemain,
+  secretUnresolved,
   selectFactoryDevices,
   shownDevices,
   shownMachines,
@@ -121,6 +124,8 @@ import {
   thenRerunTeardown,
   typedIdConfirms,
   underFactoryNames,
+  unlistedReferences,
+  type UnresolvedSecret,
 } from "../domain/teardown";
 import { type Refusal, removalGate } from "../domain/worker-lifecycle";
 import type { OperationLocation } from "./apply-factory";
@@ -145,7 +150,7 @@ import type { PlanStore } from "./plan-store";
 import { projectFactoryVariables } from "./project-terraform-inputs";
 import { diagnosticsFileOf, type Provisioner, type SavedPlanRequest } from "./provisioner";
 import { type AccountRequirement, requireExpectedAccount } from "./require-expected-account";
-import type { SecretPresence, SecretStore } from "./secret-store";
+import type { SecretDescription, SecretPresence, SecretStore } from "./secret-store";
 import { stopDispatch } from "./stop-dispatch";
 import type { TailnetAdmin, TailnetAdminSession } from "./tailnet-admin";
 import type { TailnetPeers } from "./tailnet-peers";
@@ -713,8 +718,9 @@ interface Inventory {
   readonly vpcIds: readonly string[];
   /** The tailnet's devices; undefined when the admin client is already gone: not checked. */
   readonly devices: readonly TailnetDevice[] | undefined;
+  /** Listed, or looked up by their reference (`resolvedSecrets`). */
   readonly secrets: SecretInventory;
-  /** The secrets kept (`keptSecrets`), `unlisted` without those already absent. */
+  /** The secrets kept (`keptSecrets`). */
   readonly kept: KeptSecrets;
   /** References under `<id>/` the listing did not find and DescribeSecret no longer finds. */
   readonly absent: readonly SecretReference[];
@@ -823,28 +829,62 @@ async function adminClientPresence(
   return presence.kind;
 }
 
+/** What one reference's lookup found: the secret it names, nothing, or no answer to judge. */
+type ReferenceLookup =
+  | { readonly kind: "found"; readonly secret: ListedSecret }
+  | { readonly kind: "absent"; readonly reference: SecretReference }
+  | { readonly kind: "unresolved"; readonly refusal: Refusal };
+
+function lookedUp(reference: SecretReference, look: SecretDescription): ReferenceLookup {
+  const unresolved = (why: UnresolvedSecret): ReferenceLookup => ({
+    kind: "unresolved",
+    refusal: secretUnresolved(reference, why),
+  });
+  if (look.kind === "absent") return { kind: "absent", reference };
+  if (look.kind === "failed" || look.kind === "unusable") return unresolved(look);
+  if (!refersTo(reference, look.secret.arn))
+    return unresolved({ kind: "another", arn: look.secret.arn });
+  return { kind: "found", secret: look.secret };
+}
+
 /**
- * The secrets teardown keeps, and the references under `<id>/` the listing did not find that
- * DescribeSecret no longer finds either: already absent, as a rerun finds them. One still
- * found, or whose look failed, stays `unlisted`.
+ * The factory's secrets (D7): those the listing found, then each factory.json reference under
+ * `<id>/` it did not (`unlistedReferences`), looked up by DescribeSecret in the Region its ARN
+ * names and judged by the same rule (`classifySecrets`). ListSecrets may leave out a secret
+ * changed in the last few minutes, so one owned is still deleted, one not owned kept, and one no
+ * longer found already absent. A look that fails, or that describes another secret than the
+ * reference names, refuses: its ownership is unknown, never taken for kept or absent.
  */
-async function sortedSecrets(
+async function resolvedSecrets(
   deps: TeardownDependencies,
   teardown: Teardown,
-  secrets: SecretInventory,
-): Promise<Pick<Inventory, "kept" | "absent">> {
-  const kept = keptSecrets(teardown.factoryId, secrets);
+  listed: readonly ListedSecret[],
+): Promise<
+  | ({ readonly kind: "resolved" } & Pick<Inventory, "secrets" | "kept" | "absent">)
+  | { readonly kind: "refused"; readonly refusals: readonly Refusal[] }
+> {
+  const { factoryId } = teardown;
   const { credentials } = teardown.request;
+  const references = secretReferences(teardown.request.instance);
+  const unlisted = unlistedReferences(factoryId, classifySecrets(factoryId, listed, references));
   const looks = await Promise.all(
-    kept.unlisted.map((reference) =>
-      deps.secrets.exists({ reference, region: secretRegion(reference), credentials }),
+    unlisted.map(async (reference) =>
+      lookedUp(
+        reference,
+        await deps.secrets.describe({ reference, region: secretRegion(reference), credentials }),
+      ),
     ),
   );
-  const gone = (index: number) => looks[index]?.kind === "absent";
-  return {
-    kept: { ...kept, unlisted: kept.unlisted.filter((_, index) => !gone(index)) },
-    absent: kept.unlisted.filter((_, index) => gone(index)),
-  };
+  const refusals = looks.flatMap((look) => (look.kind === "unresolved" ? [look.refusal] : []));
+  if (refusals.length > 0) return { kind: "refused", refusals };
+  const absent = looks.flatMap((look) => (look.kind === "absent" ? [look.reference] : []));
+  const found = looks.flatMap((look) => (look.kind === "found" ? [look.secret] : []));
+  // Two references may name one secret, by its full and its partial ARN: it is judged once.
+  const described = found.filter(
+    (secret, index) => found.findIndex(({ arn }) => arn === secret.arn) === index,
+  );
+  const secrets = classifySecrets(factoryId, [...listed, ...described], references);
+  return { kind: "resolved", secrets, kept: keptSecrets(secrets, absent), absent };
 }
 
 type Listing =
@@ -855,11 +895,12 @@ type Listing =
 type Judged = (machines: readonly Machine[], vpcIds: readonly string[]) => readonly Refusal[];
 
 /**
- * The factory's tagged instances and VPCs, its secrets and the tailnet's devices (none
- * without an admin session: not checked). A listing that fails refuses: it is never taken for
- * one that found nothing. What `judged` finds in EC2's listings refuses too, before anything
- * is asked: under the lock, a worker's machine on its way to running or stopped; without a
- * state bucket, anything tagged.
+ * The factory's tagged instances and VPCs, its secrets (`resolvedSecrets`) and the tailnet's
+ * devices (none without an admin session: not checked). A listing that fails refuses: it is
+ * never taken for one that found nothing; so does a reference under `<id>/` whose ownership
+ * cannot be told. What `judged` finds in EC2's listings refuses too, before anything is asked:
+ * under the lock, a worker's machine on its way to running or stopped; without a state bucket,
+ * anything tagged.
  */
 async function listInventory(
   deps: TeardownDependencies,
@@ -883,19 +924,17 @@ async function listInventory(
   if (devices.kind === "failed") return refused(inventoryUnavailable("devices", devices.reason));
   const refusals = judged(machines.machines, vpcs.vpcIds);
   if (refusals.length > 0) return { kind: "refused", refusals };
-  const classified = classifySecrets(
-    factoryId,
-    secrets.secrets,
-    secretReferences(teardown.request.instance),
-  );
+  const resolved = await resolvedSecrets(deps, teardown, secrets.secrets);
+  if (resolved.kind === "refused") return resolved;
   return {
     kind: "listed",
     inventory: {
       machines: machines.machines,
       vpcIds: vpcs.vpcIds,
       devices: devices.kind === "unchecked" ? undefined : devices.devices,
-      secrets: classified,
-      ...(await sortedSecrets(deps, teardown, classified)),
+      secrets: resolved.secrets,
+      kept: resolved.kept,
+      absent: resolved.absent,
     },
   };
 }

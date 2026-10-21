@@ -8,8 +8,10 @@
  * out secrets scheduled for deletion unless `IncludePlannedDeletion`, and pages by
  * `MaxResults` (at most `pageSize`); DeleteSecret without `ForceDeleteWithoutRecovery`
  * schedules the deletion, and with it refuses a secret already scheduled
- * (`InvalidRequestException`) and succeeds for one that does not exist; a forced deletion
- * goes on being described, scheduled, for `lingering` looks, as AWS deletes asynchronously.
+ * (`InvalidRequestException`) and succeeds for one that does not exist; DescribeSecret answers
+ * a secret's name, ARN, tags and deleted date, never its value, whatever ListSecrets would show;
+ * a forced deletion goes on being described, scheduled, for `lingering` looks, as AWS deletes
+ * asynchronously.
  */
 
 const TARGET = "secretsmanager.";

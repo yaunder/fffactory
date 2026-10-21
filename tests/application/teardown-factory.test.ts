@@ -353,7 +353,7 @@ describe("fffactory teardown: the happy path (teardown §Order)", () => {
         devices: { removed: [], possible: [], untagged: [] },
         secrets: {
           removed: OWNED.map(({ name }) => name),
-          kept: { tagged: [], referenced: [SOURCE_ARN], unlisted: [] },
+          kept: { tagged: [], referenced: [SOURCE_ARN] },
         },
         bucket: { name: BUCKET, outcome: "deleted" },
         withoutLock: undefined,
@@ -483,7 +483,6 @@ describe("fffactory teardown: the happy path (teardown §Order)", () => {
           kept: {
             tagged: [{ name: tagged.name, arn: tagged.arn }],
             referenced: [SOURCE_ARN],
-            unlisted: [],
           },
         },
       },
@@ -1917,6 +1916,221 @@ describe("fffactory teardown: a rerun (teardown §Rerun)", () => {
   });
 });
 
+/** Secrets Manager refusing to describe a secret: its ownership cannot be told. */
+const DESCRIBE_DENIED = {
+  kind: "failed",
+  reason: "Secrets Manager DescribeSecret failed: AccessDeniedException",
+} as const;
+
+/** The refusal of a reference ListSecrets did not list and DescribeSecret could not be asked about. */
+const unresolved = (reference: SecretReference) => ({
+  summary: `The secret ${reference} could not be looked up: ${DESCRIBE_DENIED.reason}`,
+  nextAction:
+    "Check your network connection and that the credentials may call secretsmanager:DescribeSecret, then rerun `fffactory teardown`.",
+});
+
+/** The finished report's secrets. */
+function reportedSecrets(result: Awaited<ReturnType<typeof teardownFactory>>) {
+  if (result.kind !== "done") throw new Error(`teardown ended ${result.kind}`);
+  return result.report.secrets;
+}
+
+describe("fffactory teardown: a reference ListSecrets does not list (secrets §Listing)", () => {
+  test("an owned secret the listing leaves out is described, judged owned, and deleted for good", async () => {
+    const w = world({ workers: { "builder-1": "running" } });
+    // ListSecrets lags behind a change: it lists the admin client, not the auth key.
+    w.secrets.unlisted.add(AUTH_ARN);
+    const result = await teardownFactory(w.deps, request(w));
+    expect(reportedSecrets(result)).toEqual({
+      removed: [`${FACTORY}/tailscale-admin-client`, `${FACTORY}/tailscale-auth-key`],
+      absent: [],
+      kept: { tagged: [], referenced: [SOURCE_ARN] },
+    });
+    const review = w.progress.find((event) => event.kind === "review");
+    expect(review).toMatchObject({
+      review: {
+        secrets: {
+          owned: [
+            { name: `${FACTORY}/tailscale-admin-client`, arn: ADMIN_ARN },
+            { name: `${FACTORY}/tailscale-auth-key`, arn: AUTH_ARN },
+          ],
+        },
+      },
+    });
+    expect(w.secrets.calls).toContain(`describe ${AUTH_ARN}`);
+    expectAllRemoved(w);
+    expectNothingOwned(w);
+  });
+
+  test("a reference the listing leaves out that the factory does not own is kept, never deleted", async () => {
+    // Under the factory's names, but made by hand, or tagged without the managed-by tag.
+    const handMade = secret(`${FACTORY}/github-token`, {});
+    const tagged = secret(`${FACTORY}/anthropic-api-key`, { "fffactory:factory-id": FACTORY });
+    const w = world({ listing: { kind: "listed", secrets: [...OWNED, handMade, tagged] } });
+    w.secrets.unlisted.add(handMade.arn);
+    w.secrets.unlisted.add(tagged.arn);
+    const base = instanceOf([]);
+    const instance = {
+      ...base,
+      credentials: { github_token_secret: handMade.arn, anthropic_api_key_secret: tagged.arn },
+    };
+    const result = await teardownFactory(w.deps, request(w, { instance }));
+    expect(reportedSecrets(result)).toEqual({
+      removed: OWNED_NAMES,
+      absent: [],
+      kept: { tagged: [{ name: tagged.name, arn: tagged.arn }], referenced: [handMade.arn] },
+    });
+    expect(w.secrets.calls.filter((call) => /^(remove|restore)/.test(call))).toEqual(
+      OWNED.map(({ arn: owned }) => `remove ${owned}`),
+    );
+    expect(w.secrets.secrets()).toEqual([handMade, tagged]);
+    expect(w.lockStore.buckets.has(BUCKET)).toBe(false);
+  });
+
+  test("a reference the listing leaves out and DescribeSecret no longer finds is already absent", async () => {
+    const w = world({ listing: { kind: "listed", secrets: [OWNED[1] as ListedSecret] } });
+    const result = await teardownFactory(w.deps, request(w));
+    expect(reportedSecrets(result)).toEqual({
+      removed: [`${FACTORY}/tailscale-admin-client`],
+      absent: [AUTH_ARN],
+      kept: { tagged: [], referenced: [SOURCE_ARN] },
+    });
+  });
+
+  test("one that cannot be described refuses, removing nothing; the rerun finishes once it can", async () => {
+    const w = world({ workers: { "builder-1": "running" } });
+    w.secrets.unlisted.add(AUTH_ARN);
+    w.secrets.describeFails.set(AUTH_ARN, DESCRIBE_DENIED);
+    expect(await teardownFactory(w.deps, request(w))).toMatchObject({
+      kind: "refused",
+      refusals: [unresolved(AUTH_ARN)],
+      dispatchStopped: [],
+    });
+    expectNothingRemoved(w);
+    expect(records(w)[0]).toMatchObject({ status: "refused" });
+    w.secrets.describeFails.clear();
+    expect((await teardownFactory(w.deps, request(w))).kind).toBe("done");
+    expectNothingOwned(w);
+  });
+
+  test("a description of another secret than the reference names refuses: never judged for it", async () => {
+    const w = world();
+    const other = secret(`${FACTORY}/github-token`);
+    const secrets = fakeSecretStore({
+      values: { [ADMIN_ARN]: ADMIN_SECRET },
+      listing: { kind: "listed", secrets: [OWNED[1] as ListedSecret] },
+      described: { kind: "found", secret: other },
+    });
+    expect(await teardownFactory({ ...w.deps, secrets: secrets.store }, request(w))).toMatchObject({
+      kind: "refused",
+      refusals: [
+        {
+          summary: `Secrets Manager described ${other.arn}, another secret than ${AUTH_ARN} names`,
+          nextAction:
+            "Check that factory.json names the secret by its full ARN, as the Secrets Manager console shows it, then rerun `fffactory teardown`.",
+        },
+      ],
+    });
+    expect(secrets.calls.filter((call) => /^(remove|restore)/.test(call))).toEqual([]);
+    expect(w.lockStore.buckets.has(BUCKET)).toBe(true);
+  });
+
+  test("a description without a usable name or ARN refuses, worded as no network or permission problem", async () => {
+    const w = world();
+    const secrets = fakeSecretStore({
+      values: { [ADMIN_ARN]: ADMIN_SECRET },
+      listing: { kind: "listed", secrets: [OWNED[1] as ListedSecret] },
+      described: { kind: "unusable" },
+    });
+    expect(await teardownFactory({ ...w.deps, secrets: secrets.store }, request(w))).toMatchObject({
+      kind: "refused",
+      refusals: [
+        {
+          summary: `Secrets Manager described the secret ${AUTH_ARN} without a usable name or ARN`,
+          nextAction:
+            "Rerun `fffactory teardown`; if Secrets Manager answers the same again, check the secret in the Secrets Manager console.",
+        },
+      ],
+    });
+    expect(secrets.calls.filter((call) => /^(remove|restore)/.test(call))).toEqual([]);
+    expect(w.lockStore.buckets.has(BUCKET)).toBe(true);
+  });
+
+  test("two references naming one unlisted secret, by its full and partial ARN, delete it once", async () => {
+    const w = world();
+    w.secrets.unlisted.add(AUTH_ARN);
+    const partial = AUTH_ARN.slice(0, -"-AbCdEf".length) as SecretReference;
+    const base = instanceOf([]);
+    const instance = {
+      ...base,
+      credentials: { ...base.credentials, anthropic_api_key_secret: partial },
+    };
+    const result = await teardownFactory(w.deps, request(w, { instance }));
+    expect(reportedSecrets(result)).toEqual({
+      removed: [`${FACTORY}/tailscale-admin-client`, `${FACTORY}/tailscale-auth-key`],
+      absent: [],
+      kept: { tagged: [], referenced: [SOURCE_ARN] },
+    });
+    expect(w.secrets.calls.filter((call) => call.startsWith("describe")).sort()).toEqual([
+      `describe ${partial}`,
+      `describe ${AUTH_ARN}`,
+    ]);
+    expect(w.secrets.calls.filter((call) => call === `remove ${AUTH_ARN}`)).toHaveLength(1);
+    expectNothingOwned(w);
+  });
+
+  test("an owned secret the listing leaves out while pending deletion is restored, deleted and gone", async () => {
+    const pending = { ...(OWNED[0] as ListedSecret), pendingDeletion: true };
+    const w = world({ listing: { kind: "listed", secrets: [pending, OWNED[1] as ListedSecret] } });
+    w.secrets.unlisted.add(AUTH_ARN);
+    const result = await teardownFactory(w.deps, request(w));
+    expect(reportedSecrets(result)).toEqual({
+      removed: [`${FACTORY}/tailscale-admin-client`, `${FACTORY}/tailscale-auth-key`],
+      absent: [],
+      kept: { tagged: [], referenced: [SOURCE_ARN] },
+    });
+    const auth = w.secrets.calls.filter((call) => call.endsWith(` ${AUTH_ARN}`));
+    expect(auth.slice(0, 3)).toEqual([
+      `describe ${AUTH_ARN}`,
+      `restore ${AUTH_ARN}`,
+      `remove ${AUTH_ARN}`,
+    ]);
+    expect(auth.at(-1)).toBe(`exists ${AUTH_ARN}`);
+    expectNothingOwned(w);
+  });
+
+  test("a rerun after the admin client was deleted refuses one that cannot be described, keeping the bucket", async () => {
+    const w = world({ workers: { "builder-1": "stopped" } });
+    w.secrets.removeFails.set(AUTH_ARN, {
+      kind: "failed",
+      reason: "Secrets Manager DeleteSecret failed: AccessDeniedException",
+    });
+    expect(await teardownFactory(w.deps, request(w))).toMatchObject({
+      kind: "partial",
+      stoppedAt: "secrets",
+      remaining: { secrets: [`${FACTORY}/tailscale-auth-key`] },
+    });
+    w.secrets.removeFails.clear();
+    w.secrets.unlisted.add(AUTH_ARN);
+    w.secrets.describeFails.set(AUTH_ARN, DESCRIBE_DENIED);
+    expect(await teardownFactory(w.deps, request(w))).toMatchObject({
+      kind: "refused",
+      refusals: [unresolved(AUTH_ARN)],
+    });
+    expect(w.lockStore.buckets.has(BUCKET)).toBe(true);
+    expect(w.secrets.secrets().map(({ arn: left }) => left)).toEqual([AUTH_ARN]);
+    w.secrets.describeFails.clear();
+    expect(await teardownFactory(w.deps, request(w))).toMatchObject({
+      kind: "done",
+      report: {
+        devicesUnchecked: DEVICES_NOT_CHECKED,
+        secrets: { removed: [`${FACTORY}/tailscale-auth-key`], absent: [ADMIN_ARN] },
+      },
+    });
+    expectNothingOwned(w);
+  });
+});
+
 describe("fffactory teardown: an interrupt keeps the lock at every step (teardown §Interruption)", () => {
   const STEPS: readonly TeardownStep[] = [
     "authorizing",
@@ -2242,7 +2456,7 @@ describe("fffactory teardown: no state bucket (teardown §No state bucket)", () 
         secrets: {
           removed: OWNED_NAMES,
           absent: [],
-          kept: { tagged: [], referenced: [SOURCE_ARN], unlisted: [] },
+          kept: { tagged: [], referenced: [SOURCE_ARN] },
         },
         bucket: { name: BUCKET, outcome: "not_found" },
         withoutLock: ranWithoutLock(BUCKET),
@@ -2510,7 +2724,7 @@ describe("fffactory teardown: no state bucket (teardown §No state bucket)", () 
         secrets: {
           removed: [],
           absent: [AUTH_ARN, ADMIN_ARN],
-          kept: { tagged: [], referenced: [SOURCE_ARN], unlisted: [] },
+          kept: { tagged: [], referenced: [SOURCE_ARN] },
         },
         bucket: { name: BUCKET, outcome: "not_found" },
         withoutLock: ranWithoutLock(BUCKET),
@@ -2554,6 +2768,27 @@ describe("fffactory teardown: no state bucket (teardown §No state bucket)", () 
       report: { devices: { removed: ["n0CNTRL"] }, withoutLock: ranWithoutLock(BUCKET) },
     });
     expect(admin.devices()).toEqual([]);
+    expect(w.secrets.secrets()).toEqual([]);
+    expectNoBucketTouched(w);
+  });
+
+  test("an owned secret the listing leaves out is described and deleted; one not described refuses first", async () => {
+    const w = bucketless();
+    w.secrets.unlisted.add(AUTH_ARN);
+    w.secrets.describeFails.set(AUTH_ARN, DESCRIBE_DENIED);
+    expect(await teardownFactory(w.deps, request(w))).toMatchObject({
+      kind: "refused",
+      refusals: [unresolved(AUTH_ARN)],
+    });
+    expectNothingDeleted(w);
+    w.secrets.describeFails.clear();
+    const result = await teardownFactory(w.deps, request(w));
+    expect(result).toMatchObject({ kind: "done", report: { withoutLock: ranWithoutLock(BUCKET) } });
+    expect(reportedSecrets(result)).toEqual({
+      removed: [`${FACTORY}/tailscale-admin-client`, `${FACTORY}/tailscale-auth-key`],
+      absent: [],
+      kept: { tagged: [], referenced: [SOURCE_ARN] },
+    });
     expect(w.secrets.secrets()).toEqual([]);
     expectNoBucketTouched(w);
   });

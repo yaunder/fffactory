@@ -267,7 +267,7 @@ export function secretRegion(arn: SecretReference): string {
   return region;
 }
 
-/** A secret as Secrets Manager lists it: what its ownership is judged on. */
+/** A secret as Secrets Manager lists or describes it: what its ownership is judged on. */
 export interface ListedSecret {
   readonly name: string;
   readonly arn: SecretReference;
@@ -279,8 +279,8 @@ export interface ListedSecret {
 declare const ownedBrand: unique symbol;
 
 /**
- * A listed secret the factory owns. Only `classifySecrets` makes one, so nothing deletes a
- * secret the ownership rule did not pass.
+ * A listed or described secret the factory owns. Only `classifySecrets` makes one, so nothing
+ * deletes a secret the ownership rule did not pass.
  */
 export type OwnedSecret = ListedSecret & { readonly [ownedBrand]: "OwnedSecret" };
 
@@ -337,9 +337,9 @@ export interface SecretInventory {
 }
 
 /**
- * Sorts the secrets listed by the factory-ID tag, and factory.json's references, by
- * ownership. A listed secret whose factory-ID tag is not exactly this factory's (the listing
- * filters by prefix) is another factory's, and is in no group.
+ * Sorts the secrets listed by the factory-ID tag, or described by a reference the listing left
+ * out, and factory.json's references, by ownership. A secret whose factory-ID tag is not exactly
+ * this factory's (the listing filters by prefix) is another factory's, and is in no group.
  */
 export function classifySecrets(
   factoryId: FactoryId,

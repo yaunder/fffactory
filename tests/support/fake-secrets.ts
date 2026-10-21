@@ -1,6 +1,7 @@
 import type { OperatorPrompt } from "../../src/application/operator-prompt";
 import type {
   SecretChange,
+  SecretDescription,
   SecretListing,
   SecretListRequest,
   SecretLookup,
@@ -10,7 +11,12 @@ import type {
   SecretWrite,
 } from "../../src/application/secret-store";
 import type { SecretReference } from "../../src/domain/instance";
-import { type ListedSecret, SecretMaterial, secretRegion } from "../../src/domain/secrets";
+import {
+  type ListedSecret,
+  refersTo,
+  SecretMaterial,
+  secretRegion,
+} from "../../src/domain/secrets";
 
 /**
  * SecretStore keeping secrets in memory by name, as Secrets Manager would: the first write
@@ -18,9 +24,10 @@ import { type ListedSecret, SecretMaterial, secretRegion } from "../../src/domai
  * the revealed value, so tests can prove the material reached the store and nowhere else.
  * `read` answers a reference with its value in `values`, and rejects for any other, or with
  * `readFailsWith`; each read is recorded. `list` answers `listing` (none by default), `restore`
- * answers `restored` (`done` by default), and `remove` and `exists` answer `removed` and
- * `presence` in order, the last answer repeating (`done` and `absent` by default); each of
- * these calls is recorded in `calls`, as `OPERATION ARN-or-factory-ID`.
+ * answers `restored` (`done` by default), `describe` answers `described` (`absent` by default),
+ * and `remove` and `exists` answer `removed` and `presence` in order, the last answer repeating
+ * (`done` and `absent` by default); each of these calls is recorded in `calls`, as
+ * `OPERATION ARN-or-factory-ID`.
  */
 export function fakeSecretStore(
   options: {
@@ -31,6 +38,7 @@ export function fakeSecretStore(
     restored?: SecretChange;
     removed?: SecretRemoval | readonly SecretRemoval[];
     presence?: readonly SecretPresence[];
+    described?: SecretDescription;
   } = {},
 ) {
   const writes: (Omit<SecretWrite, "material"> & { value: string })[] = [];
@@ -63,6 +71,10 @@ export function fakeSecretStore(
     remove: async (request) => {
       record("remove", request);
       return next(removals) ?? { kind: "done" };
+    },
+    describe: async (request) => {
+      record("describe", request);
+      return options.described ?? { kind: "absent" };
     },
     exists: async (request) => {
       record("exists", request);
@@ -127,12 +139,14 @@ export function fakePrompt(
  * it left: `list` answers the secrets still there (or `listing`'s failure), `read` the value in
  * `values` of one there and not pending deletion, `restore` cancels a pending deletion, `remove`
  * deletes one (a pending one is refused as invalid, a missing one succeeds, as a forced deletion
- * does), and `exists` finds one still there, only when asked in the Region its ARN names: asked
- * anywhere else, Secrets Manager finds nothing, which proves nothing. A test changes the world
- * between runs through the mutable `removeFails` (`remove`'s answer by ARN), `restoreFails`
- * (`restore`'s) and `lingering` (ARNs a deletion leaves pending, still found, as a deletion not
- * yet done), and `finishDeletion`, which ends one such deletion. Every call is recorded in
- * `calls`, as `fakeSecretStore` records them.
+ * does), and `describe` and `exists` find one still there, by its full or partial ARN, only when
+ * asked in the Region its ARN names: asked anywhere else, Secrets Manager finds nothing, which
+ * proves nothing. A test changes the world between runs through the mutable `removeFails`
+ * (`remove`'s answer by ARN), `restoreFails` (`restore`'s), `describeFails` (`describe`'s),
+ * `unlisted` (ARNs `list` leaves out though they are there, as ListSecrets may for a while after
+ * a change) and `lingering` (ARNs a deletion leaves pending, still found, as a deletion not yet
+ * done), and `finishDeletion`, which ends one such deletion. Every call is recorded in `calls`,
+ * as `fakeSecretStore` records them.
  */
 export function fakeSecretsManager(
   options: {
@@ -145,8 +159,12 @@ export function fakeSecretsManager(
   const calls: string[] = [];
   const removeFails = new Map<string, SecretRemoval>();
   const restoreFails = new Map<string, SecretChange>();
+  const describeFails = new Map<string, Extract<SecretDescription, { kind: "failed" }>>();
+  const unlisted = new Set<string>();
   const lingering = new Set<string>();
-  const find = (reference: string) => secrets.find(({ arn }) => arn === reference);
+  // By its full ARN, or a partial one without the six characters Secrets Manager adds.
+  const find = (reference: string) =>
+    secrets.find(({ arn }) => refersTo(reference as SecretReference, arn));
   const record = (operation: string, reference: string) => calls.push(`${operation} ${reference}`);
   const replace = (reference: string, change: (secret: ListedSecret) => ListedSecret[]) => {
     secrets = secrets.flatMap((secret) => (secret.arn === reference ? change(secret) : [secret]));
@@ -154,7 +172,12 @@ export function fakeSecretsManager(
   const store: SecretStore = {
     list: async (request) => {
       calls.push(`list ${request.factoryId}`);
-      return options.listing ?? { kind: "listed", secrets: [...secrets] };
+      return (
+        options.listing ?? {
+          kind: "listed",
+          secrets: secrets.filter(({ arn }) => !unlisted.has(arn)),
+        }
+      );
     },
     read: async ({ reference }) => {
       const secret = find(reference);
@@ -187,6 +210,13 @@ export function fakeSecretsManager(
       );
       return { kind: "done" };
     },
+    describe: async ({ reference, region }) => {
+      record("describe", reference);
+      const failure = describeFails.get(reference);
+      if (failure !== undefined) return failure;
+      const secret = region === secretRegion(reference) ? find(reference) : undefined;
+      return secret === undefined ? { kind: "absent" } : { kind: "found", secret };
+    },
     exists: async ({ reference, region }) => {
       record("exists", reference);
       const found = region === secretRegion(reference) && find(reference) !== undefined;
@@ -206,6 +236,8 @@ export function fakeSecretsManager(
     calls,
     removeFails,
     restoreFails,
+    describeFails,
+    unlisted,
     lingering,
     finishDeletion,
     secrets: () => secrets,

@@ -310,32 +310,50 @@ export function underFactoryNames(factoryId: FactoryId, reference: SecretReferen
   return secretNameOf(reference).startsWith(`${factoryId}/`);
 }
 
-/** The secrets teardown leaves, in three groups the report lists apart. */
+/** The secrets teardown leaves, in two groups the report lists apart. */
 export interface KeptSecrets {
   /** Tagged with the factory ID, but not owned (D7): kept. */
   readonly tagged: readonly ShownSecret[];
-  /** factory.json references outside the factory's names, such as a `fffv/*` source: kept. */
-  readonly referenced: readonly SecretReference[];
   /**
-   * factory.json references under `<id>/` that the listing did not find: not deleted, and never
-   * reported kept, since they may be gone already (a rerun) or were never tagged.
+   * factory.json references that are no owned secret, such as a `fffv/*` source, or one under
+   * `<id>/` made by hand: kept.
    */
-  readonly unlisted: readonly SecretReference[];
+  readonly referenced: readonly SecretReference[];
+}
+
+/**
+ * factory.json references under the factory's names (`<id>/`) that are no secret the listing
+ * found tagged with the factory ID, owned or not. ListSecrets may leave out a secret changed in
+ * the last few minutes, so each is looked up by DescribeSecret and judged on what it finds before
+ * anything is shown: none may be taken for kept or absent unseen.
+ */
+export function unlistedReferences(
+  factoryId: FactoryId,
+  inventory: SecretInventory,
+): SecretReference[] {
+  return inventory.referencedNotOwned.filter(
+    (reference) =>
+      underFactoryNames(factoryId, reference) &&
+      !inventory.taggedNotOwned.some((secret) => refersTo(reference, secret.arn)),
+  );
 }
 
 /**
  * What `classifySecrets` keeps, grouped for the report: a reference to a tagged secret is
- * listed once, with it; one under the factory's names that nothing listed is `unlisted`.
+ * listed once, with it; one DescribeSecret no longer finds (`absent`) is not kept, but already
+ * gone.
  */
-export function keptSecrets(factoryId: FactoryId, inventory: SecretInventory): KeptSecrets {
-  const others = inventory.referencedNotOwned.filter(
-    (reference) => !inventory.taggedNotOwned.some((secret) => refersTo(reference, secret.arn)),
-  );
-  const ours = (reference: SecretReference) => underFactoryNames(factoryId, reference);
+export function keptSecrets(
+  inventory: SecretInventory,
+  absent: readonly SecretReference[],
+): KeptSecrets {
   return {
     tagged: inventory.taggedNotOwned.map(shownSecret),
-    referenced: others.filter((reference) => !ours(reference)),
-    unlisted: others.filter(ours),
+    referenced: inventory.referencedNotOwned.filter(
+      (reference) =>
+        !absent.includes(reference) &&
+        !inventory.taggedNotOwned.some((secret) => refersTo(reference, secret.arn)),
+    ),
   };
 }
 
@@ -597,6 +615,63 @@ export function inventoryUnavailable(part: InventoryPart, reason: string): Refus
   return refusal(listingFailed(part, reason), thenRerunTeardown(INVENTORY_CHECKS[part]), [
     "Nothing was removed: a listing that failed is never taken for one that found nothing.",
   ]);
+}
+
+/**
+ * Why DescribeSecret's answer for a reference the listing left out cannot be judged: the call
+ * failed (`reason` names the error, never quoting AWS), it answered without a usable name or
+ * ARN, or it described another secret (`arn`) than the reference names.
+ */
+export type UnresolvedSecret =
+  | { readonly kind: "failed"; readonly reason: string }
+  | { readonly kind: "unusable" }
+  | { readonly kind: "another"; readonly arn: SecretReference };
+
+const SECRET_LISTING_LAGS =
+  "ListSecrets did not list it, as it may not for a few minutes after a change, so only DescribeSecret can tell whether the factory owns it.";
+const OWNER_UNKNOWN =
+  "Nothing was removed: a secret whose owner is unknown is never taken for one kept or already gone.";
+
+/**
+ * A factory.json reference under the factory's names that ListSecrets did not list and whose
+ * DescribeSecret answer cannot be judged: whether the factory owns it is unknown, so it is
+ * refused like a listing that failed, never taken for kept or absent. Only a failed call is a
+ * network or permission problem; an incomplete answer, or one about another secret, is worded
+ * for what it is.
+ */
+export function secretUnresolved(reference: SecretReference, why: UnresolvedSecret): Refusal {
+  switch (why.kind) {
+    case "failed":
+      return refusal(
+        `The secret ${reference} could not be looked up: ${why.reason}`,
+        thenRerunTeardown(
+          "Check your network connection and that the credentials may call secretsmanager:DescribeSecret",
+        ),
+        [SECRET_LISTING_LAGS, OWNER_UNKNOWN],
+      );
+    case "unusable":
+      return refusal(
+        `Secrets Manager described the secret ${reference} without a usable name or ARN`,
+        `Rerun ${TEARDOWN}; if Secrets Manager answers the same again, check the secret in the Secrets Manager console.`,
+        [
+          SECRET_LISTING_LAGS,
+          "Secrets Manager answered, but not in full: its ownership is judged on the name, ARN and tags it answers.",
+          OWNER_UNKNOWN,
+        ],
+      );
+    case "another":
+      return refusal(
+        `Secrets Manager described ${why.arn}, another secret than ${reference} names`,
+        thenRerunTeardown(
+          "Check that factory.json names the secret by its full ARN, as the Secrets Manager console shows it",
+        ),
+        [
+          SECRET_LISTING_LAGS,
+          "A partial ARN, without the six characters Secrets Manager adds after a hyphen, can resolve to another secret: what it describes is never judged for this reference.",
+          OWNER_UNKNOWN,
+        ],
+      );
+  }
 }
 
 /**

@@ -30,11 +30,13 @@ versioned in-memory `support/memory-lock-store.ts` (whose bucket deletion remove
 bucket's records and break log, and can stop before the lock, or after it with the bucket left,
 `deletionLeaves`, or at an interrupt set by `beforeLock`, and whose `unreachable` buckets answer
 `bucketExists` with S3's 403) and `support/memory-plan-store.ts`,
-the fakes in `support/fake-secrets.ts` (Secrets Manager, whose listing, restore, deletion and
-looks answer as scripted and are recorded in `calls`; `fakeSecretsManager`, a world of secrets
-those calls change, so a rerun sees what the run before deleted, with failures a test sets and
-clears between runs, deletions left lingering until `finishDeletion`, and looks (`exists`) that
-find a secret only in the Region its ARN names; and the operator prompt) and
+the fakes in `support/fake-secrets.ts` (Secrets Manager, whose listing, restore, deletion,
+descriptions and looks answer as scripted and are recorded in `calls`; `fakeSecretsManager`, a
+world of secrets those calls change, so a rerun sees what the run before deleted, with failures
+a test sets and clears between runs, secrets the listing leaves out though they are there
+(`unlisted`, as ListSecrets lags), deletions left lingering until `finishDeletion`, and
+descriptions and looks (`describe`, `exists`) that find a secret by its full or partial ARN,
+only in the Region its ARN names; and the operator prompt) and
 `support/fake-provisioner.ts` (a scripted `fakeProvisioner`, and `fakeFactoryWorld`, a
 factory whose Terraform state changes as plans apply and whose apply can be stopped part
 way, which can replace a host or change its instance type in place (`resize`), and whose
@@ -50,7 +52,7 @@ once those versions are deleted, and refusing with `InvalidArgument` a version m
 gave, DeleteObjects with per-key
 failures (`undeletable`) recorded in `deleteBatches`, and DeleteBucket refused while
 anything is left, `forcePathStyle`) or `support/stub-secrets-manager.ts` (which also answers `GetSecretValue`, and ListSecrets,
-RestoreSecret, DeleteSecret and DescribeSecret as AWS documents them: tag filters by prefix,
+RestoreSecret, DeleteSecret and DescribeSecret (name, ARN, tags and deleted date) as AWS documents them: tag filters by prefix,
 scheduled secrets, pages of `pageSize`, a forced deletion of a scheduled secret refused and one
 still described for `lingering` looks), with AWS's documentation example
 keys and account `123456789012`. The terminal prompt runs over a `PassThrough` stand-in

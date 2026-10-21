@@ -22,6 +22,7 @@ import {
   machinesChanged,
   ranWithoutLock,
   remainingAt,
+  secretUnresolved,
   stateStillRecords,
   stoppedPartWay,
   REVOKE_SOURCES,
@@ -38,6 +39,7 @@ import {
   taggedWithoutBucket,
   teardownQuestion,
   typedIdConfirms,
+  unlistedReferences,
 } from "../../src/domain/teardown";
 import { removalGate } from "../../src/domain/worker-lifecycle";
 
@@ -520,32 +522,91 @@ const listed = (name: string, tags: Record<string, string>): ListedSecret => ({
 const BOTH = { "fffactory:factory-id": ID, "fffactory:managed-by": "fffactory" };
 
 describe("the secrets teardown keeps (teardown §Report)", () => {
-  test("keeps referenced sources and tagged secrets apart from references it did not find", () => {
-    const secrets = [
-      listed(`${ID}/tailscale-auth-key`, BOTH),
-      listed(`${ID}/github-token`, { "fffactory:factory-id": ID }),
-    ];
-    const references = [
-      `arn:aws:secretsmanager:eu-west-2:123456789012:secret:${ID}/tailscale-auth-key` as SecretReference,
-      ARN("fffv/anthropic-api-key"),
-      ARN(`${ID}/github-token`),
-      ARN(`${ID}/tailscale-admin-client`),
-    ];
+  const secrets = [
+    listed(`${ID}/tailscale-auth-key`, BOTH),
+    listed(`${ID}/github-token`, { "fffactory:factory-id": ID }),
+  ];
+  const references = [
+    `arn:aws:secretsmanager:eu-west-2:123456789012:secret:${ID}/tailscale-auth-key` as SecretReference,
+    ARN("fffv/anthropic-api-key"),
+    ARN(`${ID}/github-token`),
+    ARN(`${ID}/tailscale-admin-client`),
+    ARN(`${ID}/hand-made`),
+  ];
+
+  test("keeps referenced sources and tagged secrets, those found already absent left out", () => {
     const inventory = classifySecrets(ID, secrets, references);
-    expect(keptSecrets(ID, inventory)).toEqual({
+    expect(keptSecrets(inventory, [ARN(`${ID}/tailscale-admin-client`)])).toEqual({
       // By name and ARN only: never its tags.
       tagged: [{ name: `${ID}/github-token`, arn: ARN(`${ID}/github-token`) }],
-      referenced: [ARN("fffv/anthropic-api-key")],
-      unlisted: [ARN(`${ID}/tailscale-admin-client`)],
+      referenced: [ARN("fffv/anthropic-api-key"), ARN(`${ID}/hand-made`)],
     });
   });
 
-  test("a reference under acme-lab/ is not under acme/", () => {
-    const inventory = classifySecrets("acme" as FactoryId, [], [ARN("acme-lab/github-token")]);
-    expect(keptSecrets("acme" as FactoryId, inventory)).toEqual({
+  test("looks up only the references under the factory's names that no tagged secret answers", () => {
+    const inventory = classifySecrets(ID, secrets, references);
+    expect(unlistedReferences(ID, inventory)).toEqual([
+      ARN(`${ID}/tailscale-admin-client`),
+      ARN(`${ID}/hand-made`),
+    ]);
+  });
+
+  test("a reference under acme-lab/ is not under acme/: kept, never looked up for acme", () => {
+    const acme = "acme" as FactoryId;
+    const inventory = classifySecrets(acme, [], [ARN("acme-lab/github-token")]);
+    expect(unlistedReferences(acme, inventory)).toEqual([]);
+    expect(keptSecrets(inventory, [])).toEqual({
       tagged: [],
       referenced: [ARN("acme-lab/github-token")],
-      unlisted: [],
+    });
+  });
+});
+
+describe("a reference the listing left out that cannot be judged (teardown §Refusals)", () => {
+  const reference = ARN(`${ID}/tailscale-auth-key`);
+  const LAGS =
+    "ListSecrets did not list it, as it may not for a few minutes after a change, so only DescribeSecret can tell whether the factory owns it.";
+  const NOTHING_REMOVED =
+    "Nothing was removed: a secret whose owner is unknown is never taken for one kept or already gone.";
+
+  test("a lookup that failed names its error, and the network or the permission", () => {
+    expect(
+      secretUnresolved(reference, {
+        kind: "failed",
+        reason: "Secrets Manager DescribeSecret failed: AccessDeniedException",
+      }),
+    ).toEqual({
+      summary: `The secret ${reference} could not be looked up: Secrets Manager DescribeSecret failed: AccessDeniedException`,
+      details: [LAGS, NOTHING_REMOVED],
+      nextAction:
+        "Check your network connection and that the credentials may call secretsmanager:DescribeSecret, then rerun `fffactory teardown`.",
+    });
+  });
+
+  test("an answer without a usable name or ARN is no network or permission problem", () => {
+    expect(secretUnresolved(reference, { kind: "unusable" })).toEqual({
+      summary: `Secrets Manager described the secret ${reference} without a usable name or ARN`,
+      details: [
+        LAGS,
+        "Secrets Manager answered, but not in full: its ownership is judged on the name, ARN and tags it answers.",
+        NOTHING_REMOVED,
+      ],
+      nextAction:
+        "Rerun `fffactory teardown`; if Secrets Manager answers the same again, check the secret in the Secrets Manager console.",
+    });
+  });
+
+  test("a description of another secret names it, and the reference to correct", () => {
+    const other = ARN(`${ID}/github-token`);
+    expect(secretUnresolved(reference, { kind: "another", arn: other })).toEqual({
+      summary: `Secrets Manager described ${other}, another secret than ${reference} names`,
+      details: [
+        LAGS,
+        "A partial ARN, without the six characters Secrets Manager adds after a hyphen, can resolve to another secret: what it describes is never judged for this reference.",
+        NOTHING_REMOVED,
+      ],
+      nextAction:
+        "Check that factory.json names the secret by its full ARN, as the Secrets Manager console shows it, then rerun `fffactory teardown`.",
     });
   });
 });
