@@ -11,10 +11,12 @@
  *
  * A refusal, a decline or a failure before the destroy deletes nothing and releases the lock;
  * a refusal after dispatch was stopped leaves it stopped, for `fffactory apply` to restart.
- * Once the destroy started, what stops the run is `partial`: how far it got and what remains
- * of each kind. A rerun inventories again and finishes from what remains, an admin client an
- * earlier teardown already deleted included (§Rerun). An interrupt keeps the lock, and is
- * reported whatever the run returned (§Interruption).
+ * Once the destroy started, what stops the run is `partial`: how far it got and what remains of
+ * each kind. A rerun inventories again and finishes from what remains, an admin client an
+ * earlier teardown already deleted included (§Rerun), and deletes the devices of every host key
+ * an earlier teardown remembered in its record as its destroy began, unless an apply or upgrade
+ * may have changed the factory since (§Devices). An interrupt keeps the lock, and is reported
+ * whatever the run returned (§Interruption).
  *
  * Without a state bucket there is no lock to take and no record to write (§No state bucket,
  * D10): once EC2 lists nothing tagged with the factory ID, the same review, confirmation and
@@ -43,10 +45,13 @@ import {
   type OperationRecord,
   type OperationStatus,
   operationKey,
+  rememberedHostKeys,
   type StageStatus,
-  startStageOperation,
+  type StoredOperation,
+  startTeardownOperation,
   TEARDOWN_OPERATION,
   withDispatch,
+  withHostKeys,
   withStage,
 } from "../domain/operation";
 import {
@@ -98,6 +103,7 @@ import {
   NO_LISTED_DEVICES,
   ranWithoutLock,
   remainingAt,
+  rememberedKeysUnreadable,
   secretsRemain,
   secretUnresolved,
   selectFactoryDevices,
@@ -447,7 +453,13 @@ interface TeardownLog {
   readonly deleted: () => void;
   readonly seal: () => void;
   readonly start: () => Promise<void>;
-  readonly stage: (status: TeardownStep) => Promise<void>;
+  /**
+   * Writes the step reached, remembering `keys` in the record (`withHostKeys`) when given: only
+   * `applying`'s write gives them, the last before the destroy, so only a teardown whose
+   * destroy may have begun remembers any (§Devices). Should that write fail, the record goes on
+   * without them.
+   */
+  readonly stage: (status: TeardownStep, keys?: readonly string[]) => Promise<void>;
   readonly dispatch: (outcomes: readonly DispatchOutcome[]) => Promise<void>;
   /** Ends the record; resolves to why its write failed, if it did. */
   readonly finish: (
@@ -470,7 +482,7 @@ function teardownLog(
   lock: FactoryLock,
 ): TeardownLog {
   const { clock } = teardown.request;
-  let record: OperationRecord = startStageOperation(lock.record, TEARDOWN_OPERATION, "authorizing");
+  let record: OperationRecord = startTeardownOperation(lock.record);
   let written = false;
   let reached: TeardownStep = "authorizing";
   let state: "open" | "sealed" | "gone" = "open";
@@ -493,11 +505,19 @@ function teardownLog(
       if (state === "open") state = "sealed";
     },
     start: () => write(record),
-    stage: async (status: TeardownStep) => {
+    stage: async (status, keys) => {
       // Interrupted, the step is never started: the caller checks the interrupt next.
       if (deps.interrupted()) return;
       reached = status;
-      await write(withStage(record, TEARDOWN_OPERATION, status, clock()));
+      const staged = withStage(record, TEARDOWN_OPERATION, status, clock());
+      if (keys === undefined) return write(staged);
+      try {
+        await write(withHostKeys(staged, keys, clock()));
+      } catch (error) {
+        // The destroy will not start: the record that ends the teardown remembers none of them.
+        record = staged;
+        throw error;
+      }
     },
     dispatch: (outcomes) => write(withDispatch(record, outcomes, clock())),
     finish: (status, outcome, failure) =>
@@ -761,11 +781,14 @@ async function operate(
   const passing: Judged = (machines) => machines.flatMap((machine) => inPassing(teardown, machine));
   const begun = await inventoried(deps, teardown, log, progress, passing);
   if (begun.kind !== "run") return begun;
+  const remembered = await rememberedKeys(deps, teardown);
+  if (deps.interrupted()) return interruptedUnder(log, progress);
+  if (remembered.kind === "refused") return refusedUnder(log, progress, [remembered.refusal]);
   const { factoryId } = teardown;
   const planId = newPlanId(teardown.request.randomBytes);
   const files = await deps.planStore.create(factoryId, planId);
   try {
-    return await planned(deps, teardown, log, begun.run, files.factory);
+    return await planned(deps, teardown, log, begun.run, files.factory, remembered.keys);
   } finally {
     // Once the bucket is gone the plans went before it (`removeAll`): nothing after the
     // bucket's deletion may turn a finished teardown into a failure. Nor may this plan's
@@ -773,6 +796,41 @@ async function operate(
     // that fails is left at that, never overwriting how the run ended.
     if (!log.gone()) await deps.planStore.remove(factoryId, planId).catch(() => undefined);
   }
+}
+
+/**
+ * The host keys earlier teardowns remembered in their operation records (§Devices), read under
+ * the lock with the inventory; they join this teardown's known keys, which it remembers in its
+ * own record as its destroy starts, so a chain of reruns carries them forward. A destroy deletes
+ * the state's `host_keys` output first, and EC2 stops listing a terminated instance, so after
+ * an earlier destroy began only these name a host factory.json does not declare. Records that
+ * cannot be listed or read, or one that cannot be judged, refuse: none is taken for one
+ * remembering nothing. Without a state bucket there is none to read: the bucket goes only once
+ * the devices are gone.
+ */
+async function rememberedKeys(
+  deps: TeardownDependencies,
+  teardown: Teardown,
+): Promise<
+  | { readonly kind: "remembered"; readonly keys: readonly string[] }
+  | { readonly kind: "refused"; readonly refusal: Refusal }
+> {
+  let stored: readonly StoredOperation[];
+  try {
+    // TODO(re-evaluate when a factory's operation records number in the thousands): every
+    // record is listed and read, apply's too, a few at a time; keep the remembered keys and the
+    // last apply that changed the factory in one object beside the lock instead.
+    stored = await deps.lockStore.readOperations(teardown.bucket);
+  } catch (error) {
+    return { kind: "refused", refusal: inventoryUnavailable("records", reasonOf(error)) };
+  }
+  const remembered = rememberedHostKeys(teardown.factoryId, stored);
+  if (remembered.kind === "unreadable")
+    return {
+      kind: "refused",
+      refusal: rememberedKeysUnreadable(teardown.bucket.bucket, remembered.records),
+    };
+  return remembered;
 }
 
 /**
@@ -1036,7 +1094,10 @@ interface Run {
 
 /** What teardown removes from the devices on, once reviewed and confirmed. */
 interface Removal extends Run {
-  /** Every host key the factory knows: declared, recorded in its state, tagged in EC2. */
+  /**
+   * Every host key the factory knows: declared, recorded in its state, tagged in EC2, and
+   * remembered by earlier teardowns.
+   */
   readonly keys: readonly string[];
   /** The IDs of the devices the review showed deleted: no other is deleted unseen. */
   readonly shownDeleted: readonly string[];
@@ -1052,13 +1113,17 @@ interface Planned extends Removal {
   readonly planning: Extract<DestroyPlanning, { readonly kind: "planned" }>;
 }
 
-/** The plan, then what will be removed and kept, shown, then the confirmation. */
+/**
+ * The plan, then what will be removed and kept, shown, then the confirmation. Every known key,
+ * `remembered` among them, is remembered in the record as the destroy starts (`destroy`).
+ */
 async function planned(
   deps: TeardownDependencies,
   teardown: Teardown,
   log: TeardownLog,
   run: Run,
   planFile: string,
+  remembered: readonly string[],
 ): Promise<FactoryTeardown> {
   await log.stage("planning");
   if (deps.interrupted()) return interruptedUnder(log, run.progress);
@@ -1071,6 +1136,7 @@ async function planned(
     ...declaredKeys(teardown),
     ...planning.recorded,
     ...run.inventory.machines.flatMap(({ hostKey }) => (hostKey === undefined ? [] : [hostKey])),
+    ...remembered,
   ];
   const removal = reviewed(deps, teardown, run, {
     keys,
@@ -1426,7 +1492,10 @@ async function destroy(
   run: Planned,
 ): Promise<FactoryTeardown> {
   const { progress } = run;
-  await log.stage("applying");
+  // The known keys are remembered with this step alone, the last written before the destroy: a
+  // write that fails fails the teardown here, so whenever a destroy began its record holds them,
+  // and a teardown that never began one remembers none (§Devices).
+  await log.stage("applying", run.keys);
   if (deps.interrupted()) return interruptedUnder(log, progress);
   deps.progress({ kind: "destroying" });
   progress.stop = "destroy";

@@ -3,7 +3,9 @@
  * versioned objects in memory and implements what the lock store uses: HeadBucket, reads of
  * the bucket's versioning, public access block, default encryption and policy, PutObject,
  * conditional or not (`If-None-Match: *`), GetObject, HeadObject, DeleteObject by version (or,
- * on a versioned bucket, without one, which writes a delete marker), and
+ * on a versioned bucket, without one, which writes a delete marker), ListObjectsV2 (the current
+ * objects under a prefix, by key, in pages of `listPageSize` resumed from its continuation
+ * token), and
  * `x-amz-expected-bucket-owner`; and for deleting the bucket, ListObjectVersions (versions and
  * delete markers, by key and then newest first, each with `IsLatest` and `LastModified`, in
  * pages of `max-keys` resumed from the key and version markers, even once the version named is
@@ -42,6 +44,8 @@ export interface StubS3Options {
   readonly hang?: boolean;
   /** Keys DeleteObjects reports it could not delete, each with this S3 error code. */
   readonly undeletable?: Readonly<Record<string, string>>;
+  /** Keys per ListObjectsV2 page; 1000, S3's own, unless set. */
+  readonly listPageSize?: number;
   /** Runs after each ListObjectVersions answer is made, as a write racing the deletion would. */
   readonly afterListing?: () => void;
 }
@@ -157,6 +161,7 @@ const BUCKET_QUERIES = [
   "policy",
   "versions",
   "delete",
+  "list-type",
 ];
 
 const XML_ESCAPES: Record<string, string> = {
@@ -406,6 +411,32 @@ export function stubS3(options: StubS3Options = {}): StubS3 {
     return answer;
   }
 
+  /**
+   * ListObjectsV2: the bucket's current objects under `prefix`, by key, a page at a time; the
+   * continuation token is the last key of the page before, as S3's is opaque.
+   */
+  function listObjects(request: Addressed, url: URL): Response {
+    const prefix = url.searchParams.get("prefix") ?? "";
+    const after = url.searchParams.get("continuation-token");
+    const keys = [...objects.keys()]
+      .filter((path) => path.startsWith(`${request.bucket}/${prefix}`))
+      .map((path) => path.slice(request.bucket.length + 1))
+      .sort()
+      .filter((key) => after === null || key > after);
+    const size = options.listPageSize ?? DELETE_LIMIT;
+    const page = keys.slice(0, size);
+    const truncated = keys.length > size;
+    const next = truncated
+      ? `<NextContinuationToken>${escapeXml(page.at(-1) as string)}</NextContinuationToken>`
+      : "";
+    const contents = page.map((key) => `<Contents><Key>${escapeXml(key)}</Key></Contents>`);
+    return xml(
+      `<ListBucketResult><Name>${request.bucket}</Name><Prefix>${escapeXml(prefix)}</Prefix>` +
+        `<KeyCount>${page.length}</KeyCount><MaxKeys>${size}</MaxKeys>` +
+        `<IsTruncated>${truncated}</IsTruncated>${next}${contents.join("")}</ListBucketResult>`,
+    );
+  }
+
   function deleteObjects(request: Addressed): Response {
     const body = bodyOf(request);
     const named = deleteRequest(body);
@@ -494,6 +525,7 @@ export function stubS3(options: StubS3Options = {}): StubS3 {
     PUT: put,
     GET: (request, url) => {
       if (request.setting === "versions") return listVersions(request, url);
+      if (request.setting === "list-type") return listObjects(request, url);
       return request.setting ? setting(request, request.setting) : get(request);
     },
     POST: (request) =>

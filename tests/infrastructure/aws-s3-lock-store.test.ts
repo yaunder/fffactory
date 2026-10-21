@@ -8,7 +8,13 @@ import {
   newLockRecord,
   serializeLock,
 } from "../../src/domain/factory-lock";
-import { operationKey, startOperation, withStage } from "../../src/domain/operation";
+import {
+  operationKey,
+  operationsPrefix,
+  serializeOperation,
+  startOperation,
+  withStage,
+} from "../../src/domain/operation";
 import { FACTORY_STATE_KEY } from "../../src/domain/plan";
 import { DELETION_INTERRUPTED } from "../../src/domain/state-bucket-deletion";
 import type { FactoryId, Release } from "../../src/domain/instance";
@@ -72,6 +78,7 @@ function stubbed(script: Partial<S3Calls> = {}) {
       bucketPolicy: async () => tlsOnlyPolicy(BUCKET.bucket),
       putNewObject: async () => ({ VersionId: "v1" }),
       getObject: async () => ({ VersionId: "v1", body: JSON.stringify(RECORD) }),
+      listObjects: async () => ({ IsTruncated: false }),
       deleteObjectVersion: async () => {},
       putObject: async () => {},
       headObject: async () => ({ VersionId: "v1", ETag: '"etag-1"' }),
@@ -306,6 +313,85 @@ describe("S3 lock store over stubbed calls", () => {
     ]);
   });
 
+  test("reads every object under the operation records' prefix, page by page, each by its key", async () => {
+    const listed: (string | undefined)[][] = [];
+    const reads: string[][] = [];
+    const prefix = operationsPrefix(FACTORY);
+    const pages: Record<string, { Contents: { Key: string }[]; next?: string }> = {
+      first: { Contents: [{ Key: `${prefix}a.json` }, { Key: `${prefix}b.json` }], next: "t1" },
+      t1: { Contents: [{ Key: `${prefix}c.json` }] },
+    };
+    const store = s3LockStore(
+      stubbed({
+        listObjects: async (...call) => {
+          listed.push(call);
+          const page = pages[call[3] ?? "first"];
+          return {
+            Contents: page?.Contents,
+            IsTruncated: page?.next !== undefined,
+            NextContinuationToken: page?.next,
+          };
+        },
+        getObject: async (...call) => {
+          reads.push(call);
+          return { VersionId: "v1", body: `text of ${call[2]}` };
+        },
+      }).open,
+    );
+    expect(await store.readOperations(BUCKET)).toEqual(
+      ["a", "b", "c"].map((name) => ({
+        key: `${prefix}${name}.json`,
+        text: `text of ${prefix}${name}.json`,
+      })),
+    );
+    expect(listed).toEqual([
+      [BUCKET.bucket, OWNER, prefix, undefined],
+      [BUCKET.bucket, OWNER, prefix, "t1"],
+    ]);
+    expect(reads.map((call) => call.slice(0, 2))).toEqual([
+      [BUCKET.bucket, OWNER],
+      [BUCKET.bucket, OWNER],
+      [BUCKET.bucket, OWNER],
+    ]);
+  });
+
+  test("reading the operation records refuses an unreadable listing and names failures", async () => {
+    const untold = s3LockStore(
+      stubbed({ listObjects: async () => ({ Contents: [], IsTruncated: true }) }).open,
+    );
+    await expect(untold.readOperations(BUCKET)).rejects.toThrow(
+      "S3 listed the operation records in the state bucket fff-abcd1234-state without saying where the next page starts",
+    );
+    const keyless = s3LockStore(
+      stubbed({ listObjects: async () => ({ Contents: [{}], IsTruncated: false }) }).open,
+    );
+    await expect(keyless.readOperations(BUCKET)).rejects.toThrow(
+      "S3 listed an operation record in the state bucket fff-abcd1234-state without its key",
+    );
+    const denied = s3LockStore(
+      stubbed({
+        listObjects: async () => {
+          throw sdkError("AccessDenied");
+        },
+      }).open,
+    );
+    const error = await denied.readOperations(BUCKET).catch((caught: Error) => caught);
+    expect((error as Error).message).toBe(
+      "S3 ListObjectsV2 on the state bucket failed: AccessDenied",
+    );
+    const unread = s3LockStore(
+      stubbed({
+        listObjects: async () => ({ Contents: [{ Key: `${operationsPrefix(FACTORY)}a.json` }] }),
+        getObject: async () => {
+          throw sdkError("AccessDenied");
+        },
+      }).open,
+    );
+    await expect(unread.readOperations(BUCKET)).rejects.toThrow(
+      "S3 GetObject on the state bucket failed: AccessDenied",
+    );
+  });
+
   test("the Terraform state's revision is its version and entity tag", async () => {
     const heads: string[][] = [];
     const store = s3LockStore(
@@ -496,6 +582,34 @@ describe("S3 lock store with the real SDK against a local stub", () => {
     const key = `${BUCKET.bucket}/${operationKey(record)}`;
     expect(JSON.parse(stub?.objects.get(key)?.body ?? "")).toEqual(applying);
     expect(stub?.requests.at(-1)).toBe(`PUT /${key} owner=${OWNER}`);
+  });
+
+  test("reads back every operation record under the factory's prefix, page by page", async () => {
+    const store = againstStub({ ...withBucket, listPageSize: 2 });
+    const records = ["aaaaaaaa", "bbbbbbbb", "cccccccc"].map((lock_id) =>
+      startOperation({ ...RECORD, lock_id }, undefined),
+    );
+    for (const record of records) await store.writeOperation(BUCKET, record);
+    await store.create(BUCKET, RECORD);
+    // Another factory's records, and a deleted one, are not read.
+    stub?.objects.set(`${BUCKET.bucket}/fff-zzzz9999-operations/x.json`, {
+      version: "o1",
+      body: "{}",
+      etag: "e1",
+    });
+    const gone = `${operationsPrefix(FACTORY)}gone.json`;
+    stub?.objects.set(`${BUCKET.bucket}/${gone}`, { version: "o2", body: "{}", etag: "e2" });
+    stub?.markDeleted(BUCKET.bucket, gone);
+    expect(await store.readOperations(BUCKET)).toEqual(
+      records.map((record) => ({ key: operationKey(record), text: serializeOperation(record) })),
+    );
+    const listings = stub?.requests.filter((line) =>
+      line.startsWith(`GET /${BUCKET.bucket}?list-type`),
+    );
+    expect(listings).toEqual([
+      `GET /${BUCKET.bucket}?list-type owner=${OWNER}`,
+      `GET /${BUCKET.bucket}?list-type owner=${OWNER}`,
+    ]);
   });
 
   test("reads the Terraform state's revision, which every write changes", async () => {

@@ -13,7 +13,13 @@ import {
   parseLockRecord,
   serializeLock,
 } from "../domain/factory-lock";
-import { type OperationRecord, operationKey, serializeOperation } from "../domain/operation";
+import {
+  type OperationRecord,
+  operationKey,
+  operationsPrefix,
+  type StoredOperation,
+  serializeOperation,
+} from "../domain/operation";
 import { FACTORY_STATE_KEY } from "../domain/plan";
 import {
   type BucketDeletion,
@@ -43,6 +49,9 @@ import {
  */
 export const S3_TIMEOUT_MS = 30_000;
 
+/** How many operation records are read at once, each GetObject in a session of its own. */
+const RECORD_READS = 8;
+
 /** The object calls the lock store makes, each bound to the factory's account. */
 export interface S3Calls extends AwsCalls {
   headBucket(bucket: string, owner: string): Promise<void>;
@@ -66,6 +75,13 @@ export interface S3Calls extends AwsCalls {
     owner: string,
     key: string,
   ): Promise<{ readonly VersionId?: string | undefined; readonly body: string }>;
+  /** One page of ListObjectsV2 under `prefix`, from the start or from `token`. */
+  listObjects(
+    bucket: string,
+    owner: string,
+    prefix: string,
+    token: string | undefined,
+  ): Promise<ObjectPage>;
   /** Permanently deletes one version of an object. */
   deleteObjectVersion(bucket: string, owner: string, key: string, version: string): Promise<void>;
   /** Writes an object, replacing any at `key`. */
@@ -95,6 +111,13 @@ export interface S3Calls extends AwsCalls {
 export interface VersionMarker {
   readonly key: string;
   readonly version: string | undefined;
+}
+
+/** The fields of one ListObjectsV2 page the adapter reads. */
+export interface ObjectPage {
+  readonly Contents?: readonly { readonly Key?: string | undefined }[] | undefined;
+  readonly IsTruncated?: boolean | undefined;
+  readonly NextContinuationToken?: string | undefined;
 }
 
 /** One version, or delete marker, of a ListObjectVersions page. */
@@ -194,6 +217,11 @@ export function sdkS3Calls(config: Partial<S3ClientConfig> = {}): OpenCalls<S3Ca
           body: (await answer.Body?.transformToString()) ?? "",
         };
       },
+      listObjects: (Bucket, ExpectedBucketOwner, Prefix, ContinuationToken) =>
+        client.send(
+          new s3.ListObjectsV2Command({ Bucket, ExpectedBucketOwner, Prefix, ContinuationToken }),
+          options,
+        ),
       deleteObjectVersion: async (Bucket, ExpectedBucketOwner, Key, VersionId) => {
         await client.send(
           new s3.DeleteObjectCommand({ Bucket, ExpectedBucketOwner, Key, VersionId }),
@@ -443,9 +471,45 @@ const remains = (
   lock,
 });
 
+/** One ListObjectsV2 page's keys, each one S3 named. */
+function pageKeys(page: ObjectPage, bucket: string): string[] {
+  return (page.Contents ?? []).map(({ Key }) => {
+    if (!Key)
+      throw new AdapterRefusal(
+        `S3 listed an operation record in the state bucket ${bucket} without its key`,
+      );
+    return Key;
+  });
+}
+
+/** Where a truncated ListObjectsV2 page says the next one starts; undefined on the last page. */
+function nextToken(page: ObjectPage, bucket: string): string | undefined {
+  if (!page.IsTruncated) return undefined;
+  if (!page.NextContinuationToken)
+    throw new AdapterRefusal(
+      `S3 listed the operation records in the state bucket ${bucket} without saying where the ` +
+        "next page starts",
+    );
+  return page.NextContinuationToken;
+}
+
+/** Every key ListObjectsV2 lists under `prefix`, page by page. */
+async function listKeys(calls: S3Calls, bucket: StateBucket, prefix: string): Promise<string[]> {
+  const keys: string[] = [];
+  let token: string | undefined;
+  do {
+    const page = await calls.listObjects(bucket.bucket, bucket.accountId, prefix, token);
+    keys.push(...pageKeys(page, bucket.bucket));
+    token = nextToken(page, bucket.bucket);
+  } while (token !== undefined);
+  return keys;
+}
+
 /**
  * The factory lock, operation records and state revision in the state bucket over S3. Every
  * request requires the bucket to be owned by the factory's account (`ExpectedBucketOwner`).
+ * Operation records are read back by listing their prefix (ListObjectsV2), then GetObject of
+ * each, a few at a time, each read with its own deadline.
  * The lock is created with a conditional write, and removed by object version, so a lock that
  * replaced it is never touched; the bucket must be versioned, as backend bootstrap creates it.
  * A lock left from before versioning was in effect is its `null` version: held, and removed by
@@ -743,6 +807,21 @@ export function s3LockStore(
           serializeOperation(record),
         ),
       ),
+
+    async readOperations(bucket) {
+      const keys = await session(bucket, "ListObjectsV2", (calls) =>
+        listKeys(calls, bucket, operationsPrefix(bucket.factoryId)),
+      );
+      const read = (key: string) =>
+        session(bucket, "GetObject", async (calls): Promise<StoredOperation> => {
+          const { body } = await calls.getObject(bucket.bucket, bucket.accountId, key);
+          return { key, text: body };
+        });
+      const stored: StoredOperation[] = [];
+      for (let start = 0; start < keys.length; start += RECORD_READS)
+        stored.push(...(await Promise.all(keys.slice(start, start + RECORD_READS).map(read))));
+      return stored;
+    },
 
     stateRevision: (bucket) =>
       session(bucket, "HeadObject", async (calls) => {

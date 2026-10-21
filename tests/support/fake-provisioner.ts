@@ -126,20 +126,21 @@ export const STATE_BUCKET_ADDRESS = "module.state_bucket.aws_s3_bucket.state";
  * `before` and an `after`, as `terraform show -json` does: a host machine's `before` names the
  * instance its state holds (`instanceIds`, or one made up from its key). Given the resources
  * the hosts' secret-reading policy allows in the state (`secretArns`), it also plans that
- * policy's in-place update whenever the projected secrets differ, as Terraform renders it. Applying a saved plan applies its
- * changes one at a time, each written to the state (a new revision in `store`), and runs
- * `beforeChange` before each: a test can stop the apply part way through by throwing there,
- * as an interrupted Terraform does. A destroy plan (`PlanRequest.destroy`) deletes the root
- * outputs the state records (`ROOT_OUTPUTS`, in `output_changes`) and every host machine and
- * the network it holds; its network exists from the start when `network` says so, as an empty
- * factory's does once applied. Its apply deletes the outputs first, before any resource, as
- * Terraform 1.16.4 does: stopped part way, it leaves resources and no output, never outputs
- * alone; failing before its first change (`beforeChange(0)` throwing), it leaves the outputs
- * and resources as they were, as Terraform does when it fails before it begins. The state records its root outputs from the start when `rootOutputs` says so (by
- * default, once the network exists), once a change other than a destroy's is applied, and no
- * longer once a destroy deleted them. A test makes a state that records outputs but no resource
- * directly, by clearing `hosts` and `network` and leaving `rootOutputs`: its destroy plan
- * deletes only those outputs.
+ * policy's in-place update whenever the projected secrets differ, as Terraform renders it.
+ * Applying a saved plan applies its changes one at a time, each written to the state (a new
+ * revision in `store`), and runs `beforeChange` before each: a test can stop the apply part way
+ * through by throwing there, as an interrupted Terraform does. A destroy plan
+ * (`PlanRequest.destroy`) deletes the root outputs the state records (`ROOT_OUTPUTS`, in
+ * `output_changes`) and every host machine and the network it holds; its network exists from
+ * the start when `network` says so, as an empty factory's does once applied. Its apply deletes
+ * the outputs first, before any resource, as Terraform 1.16.4 does: stopped part way, it leaves
+ * resources and no output, never outputs alone; failing before its first change
+ * (`beforeChange(0)` throwing), it leaves the outputs and resources as they were, as Terraform
+ * does when it fails before it begins. The state records its root outputs from the start when
+ * `rootOutputs` says so (by default, once the network exists), once a change other than a
+ * destroy's is applied, and no longer once a destroy deleted them. A test makes a state that
+ * records outputs but no resource directly, by clearing `hosts` and `network` and leaving
+ * `rootOutputs`: its destroy plan deletes only those outputs.
  */
 export function fakeFactoryWorld(options: {
   readonly store: { readonly buckets: Set<string>; readonly states: Map<string, string> };

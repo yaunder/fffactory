@@ -15,7 +15,20 @@ import {
 } from "../../src/application/teardown-factory";
 import type { WorkflowQueue } from "../../src/application/workflow-queue";
 import { newLockRecord } from "../../src/domain/factory-lock";
-import type { FactoryInstance, SecretReference } from "../../src/domain/instance";
+import type {
+  FactoryId,
+  FactoryInstance,
+  HostKey,
+  SecretReference,
+} from "../../src/domain/instance";
+import {
+  finishOperation,
+  type OperationRecord,
+  operationKey,
+  serializeOperation,
+  startOperation,
+  withStage,
+} from "../../src/domain/operation";
 import type { ListedSecret } from "../../src/domain/secrets";
 import type { Machine, MachineInventory, MachineState } from "../../src/domain/status";
 import {
@@ -2009,6 +2022,350 @@ function reportedSecrets(result: Awaited<ReturnType<typeof teardownFactory>>) {
   if (result.kind !== "done") throw new Error(`teardown ended ${result.kind}`);
   return result.report.secrets;
 }
+
+describe("fffactory teardown: a rerun remembers the host keys an earlier run knew (teardown §Devices, §Rerun)", () => {
+  /** A hand-chosen factory ID (D9): its tagged namespace devices of no known key are only listed. */
+  const HAND = "acme" as FactoryId;
+  const GHOST_DEVICE = { id: "nG", hostname: `${HAND}-ghost` };
+
+  /** Each run's own random bytes, so each takes its own lock ID and writes its own record. */
+  let runs = 0;
+  const ownRun = () => {
+    runs += 1;
+    const fill = runs;
+    return (count: number) => new Uint8Array(count).fill(fill);
+  };
+
+  /**
+   * A hand-chosen factory declaring `builder-1`, and `ghost`, which EC2 lists in `ghostState`
+   * outside the factory's Terraform state, as `worker terminate` leaves a host it removed while
+   * its machine shuts down: known only by its host key tag. A machine shutting down finishes
+   * terminating as the destroy runs. Each has a tagged device; `failing` names those whose
+   * deletion fails.
+   */
+  function ghostWorld(
+    failing: Record<string, string> = {},
+    ghostState: MachineState = "shutting-down",
+  ) {
+    const strays: Machine[] = [{ instanceId: "i-ghost", state: ghostState, hostKey: "ghost" }];
+    const w = world({ workers: { "builder-1": "stopped" }, strays });
+    const admin = fakeTailnetAdmin({
+      devices: [
+        tailnetDevice("n1", `${HAND}-builder-1`, [WORKER_TAG]),
+        tailnetDevice("nG", `${HAND}-ghost`, [WORKER_TAG]),
+      ],
+      failing,
+    });
+    if (ghostState === "shutting-down")
+      w.terraform.world.beforeChange = () => {
+        strays.length = 0;
+      };
+    const deps: TeardownDependencies = { ...w.deps, tailnetAdmin: admin.admin };
+    const instance = { ...instanceOf(["builder-1"]), factory_id: HAND };
+    const run = (overrides: Partial<TeardownRequest> = {}) =>
+      request(w, { confirm: HAND, instance, randomBytes: ownRun(), ...overrides });
+    return { w, admin, deps, run, strays };
+  }
+
+  /** The devices the last review showed deleted. */
+  const reviewedDeleted = (w: World) =>
+    w.progress
+      .flatMap((event) => (event.kind === "review" ? [event.review.devices.deleted] : []))
+      .at(-1);
+
+  test("a device of a key EC2 alone named, not deleted once the destroy completed, is deleted by the rerun", async () => {
+    const failing: Record<string, string> = { nG: "Tailscale answered HTTP 500" };
+    const g = ghostWorld(failing);
+    expect(await teardownFactory(g.deps, g.run())).toMatchObject({
+      kind: "partial",
+      stoppedAt: "devices",
+      remaining: { devices: ["nG"], bucket: BUCKET },
+    });
+    // EC2 no longer lists it, the state records nothing and factory.json never declared it.
+    expect(g.strays).toEqual([]);
+    expect(g.w.terraform.world.hosts.size).toBe(0);
+    delete failing.nG;
+    expect(await teardownFactory(g.deps, g.run())).toMatchObject({
+      kind: "done",
+      report: { devices: { removed: ["nG"], possible: [], untagged: [] } },
+    });
+    // Shown deleted in the review like any other known key's device: devices shown are deleted.
+    expect(reviewedDeleted(g.w)).toEqual([GHOST_DEVICE]);
+    expect(g.admin.devices()).toEqual([]);
+  });
+
+  test("an interrupt once the destroy completed, then a rerun, deletes the device", async () => {
+    const g = ghostWorld();
+    let interrupted = false;
+    const { provisioner } = g.w.terraform;
+    const destroying: TeardownDependencies = {
+      ...g.deps,
+      provisioner: {
+        ...provisioner,
+        applyPlan: async (plan) => {
+          await provisioner.applyPlan(plan);
+          interrupted = true;
+        },
+      },
+      interrupted: () => interrupted,
+    };
+    expect(await teardownFactory(destroying, g.run())).toMatchObject({
+      kind: "interrupted",
+      locked: true,
+      removing: true,
+    });
+    expect(g.admin.devices().map(({ id }) => id)).toEqual(["n1", "nG"]);
+    // Once fffactory has exited, the operator breaks the lock it kept.
+    g.w.lockStore.locks.clear();
+    expect(await teardownFactory(g.deps, g.run())).toMatchObject({
+      kind: "done",
+      report: { devices: { removed: ["n1", "nG"], possible: [] } },
+    });
+    expect(g.admin.devices()).toEqual([]);
+  });
+
+  test("tagged leftovers removed by hand after the destroy, then a rerun, deletes the device", async () => {
+    const g = ghostWorld({}, "stopped");
+    expect(await teardownFactory(g.deps, g.run())).toMatchObject({
+      kind: "partial",
+      stoppedAt: "leftovers",
+    });
+    // The operator terminates the leftover instance in the EC2 console, as the next action says.
+    g.strays.length = 0;
+    expect(await teardownFactory(g.deps, g.run())).toMatchObject({
+      kind: "done",
+      report: { devices: { removed: ["n1", "nG"], possible: [] } },
+    });
+  });
+
+  test("a chain of reruns carries the remembered keys forward, each in its own record", async () => {
+    const failing: Record<string, string> = { nG: "Tailscale answered HTTP 500" };
+    const g = ghostWorld(failing);
+    const stillThere = { kind: "partial", stoppedAt: "devices", remaining: { devices: ["nG"] } };
+    expect(await teardownFactory(g.deps, g.run())).toMatchObject(stillThere);
+    const first = [...g.w.lockStore.operations.keys()];
+    expect(await teardownFactory(g.deps, g.run())).toMatchObject(stillThere);
+    const second = [...g.w.lockStore.operations.entries()].filter(([key]) => !first.includes(key));
+    expect(second.map(([, record]) => record.host_keys)).toEqual([
+      ["builder-1", "ghost"] as HostKey[],
+    ]);
+    // Even without the first run's record, the second's remembers what the first knew.
+    for (const key of first) g.w.lockStore.operations.delete(key);
+    delete failing.nG;
+    expect(await teardownFactory(g.deps, g.run())).toMatchObject({
+      kind: "done",
+      report: { devices: { removed: ["nG"], possible: [] } },
+    });
+  });
+
+  test("remembers every well-formed known key with the step that starts its destroy, and none before", async () => {
+    const g = ghostWorld();
+    g.strays.push({ instanceId: "i-odd", state: "shutting-down", hostKey: "Not A Key" });
+    const { provisioner } = g.w.terraform;
+    let writesAtDestroy = 0;
+    const deps: TeardownDependencies = {
+      ...g.deps,
+      provisioner: {
+        ...provisioner,
+        applyPlan: async (plan) => {
+          writesAtDestroy = g.w.lockStore.operationWrites.length;
+          return provisioner.applyPlan(plan);
+        },
+      },
+    };
+    expect(await teardownFactory(deps, g.run())).toMatchObject({ kind: "done" });
+    const beforeDestroy = g.w.lockStore.operationWrites.slice(0, writesAtDestroy);
+    // Declared, recorded in the state, tagged in EC2: each well-formed key once, written with
+    // the applying step, the last before the destroy; no earlier step remembers any.
+    expect(beforeDestroy.at(-1)).toMatchObject({
+      operation: "teardown",
+      stages: [{ name: "teardown", status: "applying" }],
+      host_keys: ["builder-1", "ghost"],
+    });
+    expect(beforeDestroy.slice(0, -1).map(({ host_keys }) => host_keys)).toEqual(
+      beforeDestroy.slice(0, -1).map(() => []),
+    );
+  });
+
+  test.each(["declined", "refused at the gates"] as const)(
+    "a teardown %s remembers no key: a host removed since is no known key of the next one",
+    async (ending) => {
+      const g = ghostWorld({}, "stopped");
+      const list = g.deps.machines.list;
+      let listings = 0;
+      const deps: TeardownDependencies = {
+        ...g.deps,
+        prompt: fakePrompt({ interactive: true, answers: ["no"] }).prompt,
+        machines: {
+          ...g.deps.machines,
+          // EC2 lists another instance once dispatch is stopped: the review no longer holds.
+          list: async (...args) => {
+            listings += 1;
+            const listed = await list(...args);
+            if (ending !== "refused at the gates" || listings !== 2 || listed.kind !== "machines")
+              return listed;
+            const late: Machine = { instanceId: "i-late", state: "stopped", hostKey: "late" };
+            return { ...listed, machines: [...listed.machines, late] };
+          },
+        },
+      };
+      const first = ending === "declined" ? g.run({ confirm: undefined }) : g.run();
+      expect(await teardownFactory(deps, first)).toMatchObject({
+        kind: ending === "declined" ? "declined" : "refused",
+      });
+      expect(g.w.lockStore.operationWrites.map(({ host_keys }) => host_keys)).toEqual(
+        g.w.lockStore.operationWrites.map(() => []),
+      );
+      // The ghost host is removed after all, as `worker terminate` removes one: EC2 no longer
+      // lists it, and its device's name may be another factory's by now.
+      g.strays.length = 0;
+      expect(await teardownFactory(g.deps, g.run())).toMatchObject({
+        kind: "done",
+        report: { devices: { removed: ["n1"], possible: [GHOST_DEVICE] } },
+      });
+      expect(g.admin.devices()).toMatchObject([{ id: "nG" }]);
+    },
+  );
+
+  /** A record of an apply started a minute after the teardowns, its infrastructure stage at `status`. */
+  function laterApply(status: "applied" | "declined"): OperationRecord {
+    const lock = newLockRecord({
+      factoryId: HAND,
+      operation: "apply",
+      holder: { principal: "arn:aws:sts::123456789012:assumed-role/Admin/op", host: "laptop" },
+      now: new Date(NOW.getTime() + 60_000),
+      release: RELEASE,
+      randomBytes: (count) => new Uint8Array(count).fill(9),
+    });
+    const started = withStage(startOperation(lock, undefined), "infrastructure", status, NOW);
+    return finishOperation(started, status === "applied" ? "succeeded" : "declined", NOW);
+  }
+
+  test.each([
+    { apply: "applied", ghost: "listed" },
+    { apply: "declined", ghost: "deleted" },
+  ] as const)(
+    "after an apply $apply since the destroy began, the remembered device is $ghost",
+    async ({ apply, ghost }) => {
+      const failing: Record<string, string> = { nG: "Tailscale answered HTTP 500" };
+      const g = ghostWorld(failing);
+      expect(await teardownFactory(g.deps, g.run())).toMatchObject({
+        kind: "partial",
+        stoppedAt: "devices",
+      });
+      const record = laterApply(apply);
+      g.w.lockStore.store(BUCKET, operationKey(record), serializeOperation(record));
+      delete failing.nG;
+      const rerun = g.run({ clock: () => new Date(NOW.getTime() + 120_000) });
+      expect(await teardownFactory(g.deps, rerun)).toMatchObject({
+        kind: "done",
+        report: {
+          devices:
+            ghost === "listed"
+              ? { removed: [], possible: [GHOST_DEVICE] }
+              : { removed: ["nG"], possible: [] },
+        },
+      });
+    },
+  );
+
+  test("an earlier record it cannot read refuses before anything is removed; once restored, the rerun finishes", async () => {
+    const w = world({ workers: { "builder-1": "stopped" } });
+    const key = `${FACTORY}-operations/2026-09-30T09:00:00.000Z-cccccccc.json`;
+    w.lockStore.store(BUCKET, key, "{not json");
+    expect(await teardownFactory(w.deps, request(w))).toMatchObject({
+      kind: "refused",
+      refusals: [
+        {
+          summary: "An earlier operation record of the factory could not be read",
+          details: expect.arrayContaining([`Operation record s3://${BUCKET}/${key}`]),
+        },
+      ],
+      operation: { bucket: BUCKET },
+    });
+    expectNothingRemoved(w);
+    const [refused] = records(w);
+    const restored = { ...(refused as OperationRecord), host_keys: ["builder-1" as HostKey] };
+    w.lockStore.store(BUCKET, key, serializeOperation(restored));
+    expect(await teardownFactory(w.deps, request(w))).toMatchObject({ kind: "done" });
+    expectNothingOwned(w);
+  });
+
+  test.each([
+    "authorizing",
+    "inventorying",
+    "planning",
+    "stopping_dispatch",
+    "inspecting",
+    "applying",
+  ] as const)(
+    "a record write that fails at %s fails the teardown before its destroy",
+    async (step) => {
+      const w = world({ workers: { "builder-1": "running" } });
+      const write = w.lockStore.writeOperation.bind(w.lockStore);
+      let failed = false;
+      w.lockStore.writeOperation = async (bucket, record) => {
+        if (!failed && record.status === "running" && record.stages[0]?.status === step) {
+          failed = true;
+          throw new Error("S3 PutObject failed: SlowDown");
+        }
+        await write(bucket, record);
+      };
+      expect(await teardownFactory(w.deps, request(w))).toMatchObject({
+        kind: "failed",
+        refusal: { summary: expect.stringContaining("S3 PutObject failed: SlowDown") },
+      });
+      expect(failed).toBe(true);
+      expectNothingRemoved(w);
+      expect(w.terraform.world.hosts.size).toBe(1);
+      expect(w.lockStore.operationWrites.at(-1)).toMatchObject({
+        status: "failed",
+        host_keys: [],
+      });
+    },
+  );
+
+  test("an interrupt as the records are read starts nothing more", async () => {
+    const w = world({ workers: { "builder-1": "running" } });
+    let interrupted = false;
+    const read = w.lockStore.readOperations.bind(w.lockStore);
+    w.lockStore.readOperations = async (bucket) => {
+      const stored = await read(bucket);
+      interrupted = true;
+      return stored;
+    };
+    const result = await teardownFactory({ ...w.deps, interrupted: () => interrupted }, request(w));
+    expect(result).toMatchObject({
+      kind: "interrupted",
+      locked: true,
+      reached: "inventorying",
+      removing: false,
+      lock: "held",
+      dispatchStopped: [],
+    });
+    expect(w.lockStore.operationWrites.at(-1)?.stages[0]?.status).toBe("inventorying");
+    expect(w.terraform.calls).toEqual([]);
+    expect(w.planStore.calls).toEqual([]);
+    expect(w.queue.reconcile).toEqual([]);
+  });
+
+  test("operation records that cannot be read refuse, never taken for none", async () => {
+    const w = world({ workers: { "builder-1": "stopped" } });
+    w.lockStore.readOperations = async () => {
+      throw new Error("S3 ListObjectsV2 on the state bucket failed: AccessDenied");
+    };
+    expect(await teardownFactory(w.deps, request(w))).toMatchObject({
+      kind: "refused",
+      refusals: [
+        {
+          summary:
+            "The operation records in the state bucket could not be read: S3 ListObjectsV2 on the state bucket failed: AccessDenied",
+        },
+      ],
+    });
+    expectNothingRemoved(w);
+  });
+});
 
 describe("fffactory teardown: a reference ListSecrets does not list (secrets §Listing)", () => {
   test("an owned secret the listing leaves out is described, judged owned, and deleted for good", async () => {

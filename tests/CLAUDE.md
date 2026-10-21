@@ -29,7 +29,8 @@ AWS through a fake `CallerIdentity` or `VpcQuotaProbe` (`support/doctor-fakes.ts
 versioned in-memory `support/memory-lock-store.ts` (whose bucket deletion removes only that
 bucket's records and break log, and can stop before the lock, or after it with the bucket left,
 `deletionLeaves`, or at an interrupt set by `beforeLock`, and whose `unreachable` buckets answer
-`bucketExists` with S3's 403) and `support/memory-plan-store.ts`,
+`bucketExists` with S3's 403, and which reads back its operation records, with any text `store` put
+under their prefix, through `readOperations`) and `support/memory-plan-store.ts`,
 the fakes in `support/fake-secrets.ts` (Secrets Manager, whose listing, restore, deletion,
 descriptions and looks answer as scripted and are recorded in `calls`; `fakeSecretsManager`, a
 world of secrets those calls change, so a rerun sees what the run before deleted, with failures
@@ -50,8 +51,8 @@ version ID writes one (`markDeleted`), whose deletion makes the version under it
 ListObjectVersions with `IsLatest` and `LastModified`, in pages resumed after their markers even
 once those versions are deleted, and refusing with `InvalidArgument` a version marker it never
 gave, DeleteObjects with per-key
-failures (`undeletable`) recorded in `deleteBatches`, and DeleteBucket refused while
-anything is left, `forcePathStyle`) or `support/stub-secrets-manager.ts` (which also answers `GetSecretValue`, and ListSecrets,
+failures (`undeletable`) recorded in `deleteBatches`, DeleteBucket refused while
+anything is left, and ListObjectsV2 under a prefix in pages of `listPageSize`, `forcePathStyle`) or `support/stub-secrets-manager.ts` (which also answers `GetSecretValue`, and ListSecrets,
 RestoreSecret, DeleteSecret and DescribeSecret (name, ARN, tags and deleted date) as AWS documents them: tag filters by prefix,
 scheduled secrets, pages of `pageSize`, a forced deletion of a scheduled secret refused and one
 still described for `lingering` looks), with AWS's documentation example

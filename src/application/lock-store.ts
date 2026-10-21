@@ -2,7 +2,7 @@ import type { CredentialSelection } from "../domain/aws-account";
 import type { StateBucketReadiness } from "../domain/backend-bootstrap";
 import type { HeldLock, LockBreakEntry, LockRecord } from "../domain/factory-lock";
 import type { FactoryId } from "../domain/instance";
-import type { OperationRecord } from "../domain/operation";
+import type { OperationRecord, StoredOperation } from "../domain/operation";
 import type { BucketDeletion } from "../domain/state-bucket-deletion";
 
 /** The factory's state bucket, reached with the credentials the account check allowed. */
@@ -40,11 +40,12 @@ export type LockCreation =
   | { readonly created: false; readonly held: HeldLock | undefined };
 
 /**
- * Port: the state bucket, as the factory's operations use it: its readiness, the
- * factory-wide lock (one object, `lockKey`) and its break log, the records of operations
- * that held the lock, the revision of the factory's Terraform state, and, last of all, its
- * deletion. Every call but `deleteBucket` rejects, naming the AWS error but never quoting it,
- * when it cannot complete; `deleteBucket` resolves every failure the same way, as `remains`.
+ * Port: the state bucket, as the factory's operations use it: its readiness, the factory-wide
+ * lock (one object, `lockKey`) and its break log, the records of operations that held the lock,
+ * written and, for teardown, read back, the revision of the factory's Terraform state, and,
+ * last of all, its deletion. Every call but `deleteBucket` rejects, naming the AWS error but
+ * never quoting it, when it cannot complete; `deleteBucket` resolves every failure the same
+ * way, as `remains`.
  */
 export interface LockStore {
   /**
@@ -65,6 +66,12 @@ export interface LockStore {
   logBreak(bucket: StateBucket, key: string, entry: LockBreakEntry): Promise<void>;
   /** Writes an operation's record at `operationKey(record)`, replacing its earlier one. */
   writeOperation(bucket: StateBucket, record: OperationRecord): Promise<void>;
+  /**
+   * Every object under the factory's operation records' prefix (`operationsPrefix`), by key with
+   * its text: what teardown reads back for the host keys earlier teardowns remembered
+   * (`rememberedHostKeys`).
+   */
+  readOperations(bucket: StateBucket): Promise<readonly StoredOperation[]>;
   /**
    * An opaque revision of the factory's Terraform state object (`FACTORY_STATE_KEY`) that
    * changes whenever the state is written; undefined when there is no state yet.

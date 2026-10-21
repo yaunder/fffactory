@@ -18,10 +18,12 @@ import {
   dispatchLeftStopped,
   FACTORY_JSON_KEPT,
   interruptedTeardown,
+  inventoryUnavailable,
   leftoversUnverified,
   machinesChanged,
   ranWithoutLock,
   remainingAt,
+  rememberedKeysUnreadable,
   secretUnresolved,
   stateStillRecords,
   stoppedPartWay,
@@ -730,6 +732,34 @@ describe("teardown's words (teardown §Refusals, §Report)", () => {
       ],
       nextAction:
         "Check your network connection and that the credentials may call ec2:DescribeInstances, then rerun `fffactory teardown`.",
+    });
+  });
+
+  test("operation records that cannot be listed or read refuse, never taken for none", () => {
+    expect(
+      inventoryUnavailable("records", "S3 ListObjectsV2 on the state bucket failed: AccessDenied"),
+    ).toEqual({
+      summary:
+        "The operation records in the state bucket could not be read: S3 ListObjectsV2 on the state bucket failed: AccessDenied",
+      details: [
+        "Nothing was removed: a listing that failed is never taken for one that found nothing.",
+      ],
+      nextAction:
+        "Check your network connection and that the credentials may list and read the state bucket's operation records (s3:ListBucket, s3:GetObject), then rerun `fffactory teardown`.",
+    });
+  });
+
+  test("an earlier operation record it cannot read refuses, naming it: it may hide a host key", () => {
+    const key = "acme-operations/2026-09-30T11:00:00.000Z-cccccccc.json";
+    expect(rememberedKeysUnreadable("acme-state", [key])).toEqual({
+      summary: "An earlier operation record of the factory could not be read",
+      details: [
+        `Operation record s3://acme-state/${key}`,
+        "Teardown remembers in its operation record every host key it knew as its destroy begins, so a rerun still deletes those hosts' tailnet devices once the Terraform state no longer records them, until an apply changes the factory: a record it cannot read may hide one, or the apply that ended it.",
+        "Nothing was removed.",
+      ],
+      nextAction:
+        "Restore each record named to its latest version that reads, in the state bucket, or delete it if fffactory did not write it, then rerun `fffactory teardown`.",
     });
   });
 

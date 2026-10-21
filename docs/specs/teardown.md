@@ -97,7 +97,11 @@ Teardown goes in this order, and stops at the first refusal:
    judged as a listed one: owned, kept, or already absent; one whose lookup
    fails or cannot be judged refuses teardown too
    ([secrets §Listing](secrets.md#listing)). A worker whose machine is
-   `pending` or `stopping` refuses it too, before anything is asked.
+   `pending` or `stopping` refuses it too, before anything is asked. Then the
+   host keys earlier teardowns remembered as their destroy began, unless an
+   apply or upgrade may have changed the factory since, are read back from the
+   operation records ([Devices](#devices)): records that cannot be listed or
+   read, or one that cannot be judged, refuse teardown.
 9. The guarded destroy plan: `plan -destroy` of the `factory` root under
    Terraform's state lock, with factory.json projected with the host keys the
    state records, into a plan directory of its own, judged by
@@ -213,8 +217,9 @@ reported hostname tells whose it is (`selectFactoryDevices`,
 `src/domain/teardown.ts`):
 
 1. For each known key, declared in factory.json, recorded in the Terraform
-   state's `host_keys` output or carried by an EC2 instance's host key tag
-   (each well-formed key once), the devices `selectWorkerDevices` finds for `<id>-<key>`: the
+   state's `host_keys` output, carried by an EC2 instance's host key tag or
+   remembered by an earlier teardown (below) (each well-formed key once), the
+   devices `selectWorkerDevices` finds for `<id>-<key>`: the
    reported hostname exactly, ignoring case, never the MagicDNS label. Those
    carrying the factory's tag are deleted; the others are listed.
 2. Every other device whose hostname, lowercased, is in the factory's namespace
@@ -247,14 +252,73 @@ run with the secrets and the bucket kept, the admin client among them.
 (`fff-abcd1234-lab`) shares its namespace; `fff-abcd1234`'s teardown deletes
 its tagged devices that match no known key of `fff-abcd1234`.
 
-**Known limitation:** a destroy that has begun deletes the `host_keys` output
-first ([Rerun](#rerun)). So on a rerun after a destroy stopped part way, a
-host factory.json does not declare and EC2 no longer lists (its instance
-terminated, by that destroy or otherwise) is no longer a known key, even while
-the state still holds it. Its device falls to step 2: deleted under a
-generated ID, but only listed under a hand-chosen one, among the devices
-listed but kept, with `CHECK_LISTED_DEVICES` telling the operator to check it
-([Partial failure](#partial-failure), [Report](#report)).
+**Remembered keys.** A destroy that has begun deletes the `host_keys` output
+first, a finished one every root output, and EC2 stops listing an instance
+once it has terminated. So on a rerun after a destroy began, a host
+factory.json does not declare (one EC2 alone tagged, as a machine `worker
+terminate` removed is while it shuts down, or a leftover terminated by hand)
+would otherwise be no known key, and under a hand-chosen ID its device would
+fall to step 2 and only be listed. Teardown therefore remembers its known keys
+in its [operation record](#operation-record) (`host_keys`) as its destroy
+begins, and reads back, with the inventory, every earlier record under the
+factory's prefix (`LockStore.readOperations`, `rememberedHostKeys`): each
+teardown record's keys join step 1's, and this teardown remembers them with
+its own when its destroy begins, so a chain of reruns that reach the destroy
+carries them forward. They only widen step 1's exact `<id>-<key>` matches: an
+untagged device is still only listed, and step 2 is unchanged. Their devices
+are shown in the review like any other known key's.
+
+Only a teardown whose destroy may have begun remembers keys: they are written
+with its `applying` step alone, the last write before the destroy, so a
+teardown declined, refused, failed or interrupted before it remembers none,
+and the factory it leaves carrying on is not later taken for one being torn
+down. And they are remembered only until an apply or upgrade may have changed
+the factory: a teardown record is passed over once any record of an apply or an
+upgrade started after it, or in the same millisecond, whose infrastructure
+stage is `applying`, `applied` or `failed` (the record cannot tell a failed
+plan from a failed apply, so it counts). From then on the factory's hosts are
+that apply's, and its Terraform state names them again; a key only the earlier
+teardown knew is no known key, and its device under a hand-chosen ID is only
+listed. An apply declined, refused, unchanged or interrupted before
+`applying`, and every worker operation, bound nothing. Records are ordered by
+the start time their key names ([plan and apply §Operation
+records](plan-apply.md#operation-records)).
+
+Another operation's record remembers nothing; an object under the prefix that
+`operationKey` never names is not a record and is passed over. A teardown
+record without `host_keys`, written before teardown remembered any, remembers
+none. A record that cannot be read (not this factory's JSON record naming its
+operation, a teardown's whose `host_keys` is present but not a list of
+well-formed host keys, or another operation's whose `stages` is not a list of
+stages) may hide a key, or the apply that bounds one, so it refuses teardown
+before anything is removed, never taken for either: `An earlier operation
+record of the factory could not be read`, each named (`Operation record
+s3://BUCKET/KEY`), next action ``Restore each record named from an earlier
+version in the state bucket, or delete it if fffactory did not write it, then
+rerun `fffactory teardown`.`` (`rememberedKeysUnreadable`). Records that
+cannot be listed or read at all refuse as a listing that fails: `The operation
+records in the state bucket could not be read: REASON`. The records stay until
+the state bucket is deleted, which happens only once the devices are gone
+([Order](#order)), so whenever a device teardown would delete remains, so do
+they; without a state bucket there is nothing to read, and nothing is missed
+([No state bucket](#no-state-bucket)). Every record is listed and read, apply's
+too, so the read grows with the factory's history, a few GetObject calls at a
+time (`TODO(re-evaluate when a factory's operation records number in the
+thousands)` in `src/application/teardown-factory.ts`).
+
+**Accepted risk:** records are ordered by the start time the operator's own
+clock gave them. An apply started from a machine whose clock is behind the
+teardown's by more than the time between them sorts before it, and the
+teardown's keys stay remembered. The other way, an apply started before the
+teardown from a machine whose clock is ahead of the teardown's by at least the
+time between them sorts after it, or in its millisecond, and the teardown's
+keys are passed over: a rerun deletes less than the first run would have, a
+key only that teardown knew being no known key, its device under a
+hand-chosen ID only listed. **Accepted risk:** while remembered, a key is
+matched as a declared key is: under a hand-chosen ID another factory extends
+(`acme`, `acme-lab`), a remembered `lab-builder-1` deletes a tagged
+`acme-lab-builder-1`, as the declared key would have before the destroy
+began, also once `worker terminate` has since removed that host.
 
 ## Confirmation
 
@@ -299,6 +363,8 @@ releases the lock. Each is a summary, details and a next action
 | Such a reference described without a usable name or ARN (`unusable`) | `Secrets Manager described the secret ARN without a usable name or ARN`; details add `Secrets Manager answered, but not in full: its ownership is judged on the name, ARN and tags it answers.`: no network or permission problem | ``Rerun `fffactory teardown`; if Secrets Manager answers the same again, check the secret in the Secrets Manager console.`` |
 | Such a reference describing another secret | `Secrets Manager described OTHER, another secret than ARN names`; details add `A partial ARN, without the six characters Secrets Manager adds after a hyphen, can resolve to another secret: what it describes is never judged for this reference.` | ``Check that factory.json names the secret by its full ARN, as the Secrets Manager console shows it, then rerun `fffactory teardown`.`` |
 | The tailnet's devices cannot be listed | `The tailnet's devices could not be listed: REASON` | the OAuth client, then rerun |
+| The operation records cannot be listed or read | `The operation records in the state bucket could not be read: REASON` | the permission (`s3:ListBucket`, `s3:GetObject`), then rerun |
+| An earlier operation record cannot be read ([Devices](#devices)) | `An earlier operation record of the factory could not be read`, each named | restore it to its latest version that reads, or delete it if fffactory did not write it, then rerun |
 | A worker's machine `pending` or `stopping` | `EC2 instance ID of HOSTNAME is STATE` | wait, then rerun |
 | The state records unreadable host keys | `The host keys the factory's Terraform state records could not be read` | ``Check the factory's Terraform state with `fffactory plan`, then rerun `fffactory teardown`.`` |
 | factory.json cannot be projected | `factory.json cannot be projected into the destroy plan's Terraform inputs`, each issue listed | Fix factory.json, then rerun |
@@ -410,8 +476,13 @@ earlier run reported. What is gone is found gone, and reported so:
   did not destroy, and one that fails before it begins (a stale saved plan, a
   state lock it cannot take) leaves the state as it was: never outputs alone.
   The rerun destroys what is left. Without the `host_keys` output, a host
-  only that output named is no longer a known key ([Devices](#devices)).
-- Devices already deleted are not found: nothing to delete.
+  only that output, or a since terminated EC2 instance, named is known from
+  the operation record of the run that knew it as its destroy began
+  ([Devices](#devices)).
+- Devices already deleted are not found: nothing to delete. Those of every
+  key an earlier teardown knew as its destroy began are deleted as that run
+  would have, its record remembering the key, unless an apply or upgrade may
+  have changed the factory since ([Devices](#devices)).
 - Owned secrets already deleted are not listed. factory.json's references
   under `<id>/` the listing does not find are each looked up with
   `DescribeSecret`, in the Region their ARN names
@@ -454,7 +525,8 @@ lists an instance or VPC tagged with the factory ID, or the destroy plan
 changes a resource (root outputs alone are no resource: their deletion goes
 on). Nothing is deleted, and no dispatch is stopped; the next
 action stores an admin client again. So a rerun never deletes less than the
-first run would have, but for D9's known limitation
+first run would have, unless an apply or upgrade may have changed the factory
+since, or the operator's clock put the earlier teardown before one
 ([Devices](#devices)). Any other unreadable admin client, one outside
 `<id>/`, one still found (pending deletion, or a denial) or whose look fails,
 refuses as before ([Refusals](#refusals)). So an admin client still found
@@ -553,6 +625,27 @@ the operation's status alike and `failure` naming why. An interrupted teardown
 writes no more of it, and leaves it `running` at the step it reached. With the
 admin client [already gone](#rerun), `removing_devices` is skipped.
 
+Teardown's record alone carries `host_keys`: `[]` when the lock is taken,
+and so for every step before `applying`; then, written with `applying`, every
+well-formed known key, those earlier teardowns remembered among them
+([Devices](#devices)). Every step up to `applying` is written before the
+destroy starts, and one whose write fails fails teardown before it, its
+record ending without the keys; so the keys are in the bucket whenever a
+destroy may have begun. **Accepted risk:** they are there without one only in
+a record left `running` at `applying`: one interrupted as that step is
+written, or one whose `applying` PutObject timed out on the client after S3
+stored it, the `failed` record that would end the teardown without them not
+written either. Its keys stay remembered until a later apply or upgrade bounds
+them ([Devices](#devices)). A later teardown reads them back, with apply's and
+upgrade's records to bound them (`LockStore.readOperations`: ListObjectsV2
+under `<factory ID>-operations/`, then GetObject of each, a few at a time);
+these are the only records fffactory reads to decide anything
+([plan and apply §Operation records](plan-apply.md#operation-records)).
+
+```json
+{ "operation": "teardown", "stages": [{ "name": "teardown", "status": "applying" }], "host_keys": ["builder-1", "old-1"], "...": "as every record" }
+```
+
 Without a state bucket there is no record at all
 ([No state bucket](#no-state-bucket)): its endings name no `operation`.
 
@@ -624,7 +717,8 @@ output:
 1. **The review** (`review`), the `Teardown` section: the factory, its
    account and Region and release, then one row per kind:
    `Infrastructure` (`N to destroy` and each delete under it, `nothing to
-   destroy: the factory root is gone` when the plan changes nothing, `no
+   destroy: the factory root is gone` when the plan destroys no resource: it
+   changes nothing, or deletes only root outputs; `no
    destroy plan: EC2 lists nothing tagged with the factory ID` without a state
    bucket), `EC2 instances` (`ID (KEY, STATE)`, a host key tag that is not
    well-formed only marked), `VPCs`, `Tailnet devices` (`delete ID (HOSTNAME),
@@ -723,7 +817,7 @@ operator's credentials need, in the factory's account and Region:
 | --- | --- | --- |
 | `sts:GetCallerIdentity` | `*` | The account check. |
 | `s3:ListBucket`, `s3:GetBucketVersioning`, `s3:GetBucketPublicAccessBlock`, `s3:GetEncryptionConfiguration`, `s3:GetBucketPolicy` | `arn:aws:s3:::BUCKET` | Whether the state bucket exists and is ready, as `plan` asks ([provisioning §Backend bootstrap](provisioning.md#backend-bootstrap)). |
-| `s3:PutObject`, `s3:GetObject`, `s3:DeleteObject`, `s3:DeleteObjectVersion` | `arn:aws:s3:::BUCKET/<factory ID>-lock.json`, and `s3:PutObject` on `arn:aws:s3:::BUCKET/<factory ID>-operations/*` | The lock and the operation record ([worker lifecycle §Tiers](worker-lifecycle.md#tiers)). |
+| `s3:PutObject`, `s3:GetObject`, `s3:DeleteObject`, `s3:DeleteObjectVersion` | `arn:aws:s3:::BUCKET/<factory ID>-lock.json`, and `s3:PutObject` and `s3:GetObject` on `arn:aws:s3:::BUCKET/<factory ID>-operations/*` (listed with `s3:ListBucket` on the bucket) | The lock and the operation record, and reading back the host keys earlier teardowns remembered ([Devices](#devices), [worker lifecycle §Tiers](worker-lifecycle.md#tiers)). |
 | `ec2:DescribeInstances`, `ec2:DescribeVpcs` | `*` (EC2 does not scope them to resources) | The inventory and the leftover check ([provisioning §Tagged VPCs](provisioning.md#tagged-vpcs)). |
 | `secretsmanager:GetSecretValue` | The secret `tailscale.admin_client_secret` refers to | The Tailscale admin client. |
 | `secretsmanager:ListSecrets`; `secretsmanager:RestoreSecret`, `secretsmanager:DeleteSecret`, `secretsmanager:DescribeSecret` | `*`; `arn:aws:secretsmanager:REGION:ACCOUNT:secret:<factory ID>/*` | Listing, deleting and confirming the absence of the owned secrets ([secrets §Permissions](secrets.md#permissions)); `DescribeSecret` also looks up each reference under `<id>/` the listing left out ([secrets §Listing](secrets.md#listing)): a denial refuses teardown. |
@@ -793,7 +887,10 @@ In this mode teardown goes:
    as it is now.``), one answering 403, anything tagged or a listing that
    fails refuses, removing nothing.
 7. The [devices](#devices) (step 16), listed afresh, by the keys factory.json
-   declares: with no state and no tagged instance, there are no others. Then
+   declares: with no state and no tagged instance, there are no others, and
+   no record remembering any is needed. An earlier teardown deletes the bucket,
+   and its records with it, only once the devices are gone, so a factory with
+   no bucket left has no device a record could name. Then
    the owned secrets (step 17), the admin client among them, only after the
    devices, and the local saved plans (step 18), a saved bootstrap plan among
    them. There is no bucket to delete.
@@ -864,14 +961,15 @@ names.
 | Domain | `src/domain/teardown.ts` | The guarded destroy plan's rule and its consistency with the exit code (`destroyPlanRefusal`, `destroyPlanMismatch`), `VpcInventory`; the devices teardown deletes and lists (`selectFactoryDevices`, `FactoryDevices`); the kept secrets' groups (`keptSecrets`), the factory's names (`underFactoryNames`), the references under them to look up (`unlistedReferences`) and the refusal of one that cannot be (`secretUnresolved`); the confirmation rule (`teardownConfirmation`, `typedIdConfirms`) and question; the gates' next actions (`teardownGateActions`) and the review invalidated by changed machines (`machinesChanged`); the review and report (`TeardownReview`, `TeardownReport`), carrying only what may be printed (`ShownMachine`, `ShownDevice`, `ShownSecret`); the steps (`TeardownStep`), where a partial teardown stopped (`TeardownStop`) and what remains of each kind (`remainingAt`, `TeardownRemaining`, `stoppedPartWay`); an interruption's words (`interruptedTeardown`, its lock `none` without a state bucket); the state bucket's outcome (`TeardownBucket`); without a state bucket, why it runs without the lock (`ranWithoutLock`), what it leaves to the operator outside EC2 (`checkOutsideEc2`) and its refusals (`taggedWithoutBucket`, `bucketAppeared`); the words of every refusal and of the report's advice. Pure. |
 | Domain | `src/domain/initialization.ts` | `isGeneratedFactoryId`. |
 | Domain | `src/domain/worker-lifecycle.ts` | `removalGate` and `RemovalGateActions`: terminate's gates, their next actions completed by the command refused. |
-| Domain | `src/domain/operation.ts` | `TEARDOWN_OPERATION` and the teardown stage's statuses. |
+| Domain | `src/domain/operation.ts` | `TEARDOWN_OPERATION` and the teardown stage's statuses; its record remembering host keys (`startTeardownOperation`, `withHostKeys`) and reading them back from the records under `operationsPrefix`, bounded by the last apply or upgrade that may have changed the factory (`rememberedHostKeys`, `StoredOperation`). |
 | Domain | `src/domain/secrets.ts` | `classifySecrets`, which judges listed and described secrets alike, and `refersTo`. |
 | Application | `src/application/teardown-factory.ts` | `teardownFactory`: the order above, under the lock and its record, the lock and record never touched once the bucket is gone; without a state bucket, the same steps from the admin session on without them (`withoutBucket`, `cleanUp`, a `TeardownLog` that writes nothing), the secrets listed then each reference under `<id>/` not listed looked up (`resolvedSecrets`), the factory rechecked once confirmed (`stillWithoutBucket`); how far it got and what is left (`Progress`), every ending (`refusedUnder`, `failedUnder`, `partialUnder`, `interruptedUnder`), the interrupt checked once the run returns. |
 | Application | `src/application/worker-removal.ts` | Shared with `worker terminate`: `inspectForRemoval`, `openTailnetAdmin`, `deleteDevices`. |
 | Application | `src/application/stop-dispatch.ts`, `src/application/delete-owned-secret.ts` | `stopDispatch`, `deleteOwnedSecret`. |
 | Application | `src/application/plan-store.ts` | `PlanStore.removeAll`. |
-| Application | `src/application/lock-store.ts`, `src/application/provisioner.ts`, `src/application/machine-inventory.ts` | `LockStore.deleteBucket` (and its `interrupted`), `StateBucketUnreachable`, `PlanRequest.destroy`, `MachineInventorySource.listVpcs`. |
+| Application | `src/application/lock-store.ts`, `src/application/provisioner.ts`, `src/application/machine-inventory.ts` | `LockStore.deleteBucket` (and its `interrupted`), `LockStore.readOperations`, `StateBucketUnreachable`, `PlanRequest.destroy`, `MachineInventorySource.listVpcs`. |
 | Infrastructure | `src/infrastructure/plan-store.ts` | `removeAll`: the factory's plan directory, removed whole. |
+| Infrastructure | `src/infrastructure/aws-s3-lock-store.ts` | `readOperations`: ListObjectsV2 under the operation records' prefix, page by page, then GetObject of each, a few at a time, each with its own deadline. |
 | Infrastructure | `src/infrastructure/tailscale-api-admin.ts` | `tailscaleApiBase`: Tailscale's API, or the loopback stand-in `FFFACTORY_TAILSCALE_API` names, read only run from source ([worker lifecycle §Tailnet device removal](worker-lifecycle.md#tailnet-device-removal)). |
 | CLI adapter | `src/cli/commands/teardown.ts` | `fffactory teardown`: its arguments, refused unechoed; the use case wired to the context; the review and each step streamed; the account check's refusal; the exit code (0 done, 2 partial, 1 otherwise; 128 + N by `src/cli/interrupts.ts`); `waitsOnInterrupt`. |
 | CLI adapter | `src/cli/presentation/teardown.ts` | The review (`teardownReviewBlocks`), each step (`teardownProgressLine`), and every outcome as one report on one stream (`teardownOutcome`), with `withCommands` for fffactory's words that name commands. |
@@ -886,7 +984,8 @@ groups, those already absent left out, and the references under the
 factory's names to look up, never `acme-lab/`'s for `acme`; a reference whose
 lookup failed, answered without a usable name or ARN, or described another
 secret, each worded for why; the destroy plan's consistency with its exit code,
-root output changes counted, a plan deleting only outputs agreeing with exit 2; once reviewed, a
+root output changes counted, a plan deleting only outputs agreeing with exit 2; the refusals of
+operation records that cannot be read, naming each; once reviewed, a
 namespace device not shown only listed; `machinesChanged`, a machine reviewed
 shutting down and gone since no change; the shown machines and devices
 carrying no tag and no malformed host key; what remains where it stopped and
@@ -943,7 +1042,19 @@ deleted once and confirmed gone; one also pending deletion restored, deleted
 and confirmed gone; one whose lookup is denied, answers without a usable name
 or ARN, or describes another secret, refusing in its own words and removing
 nothing; the denied one's rerun finishing once the lookup succeeds, also after
-the admin client was deleted; a bucket answering 403; a machine reviewed shutting down gone since; a
+the admin client was deleted; remembered host keys under a hand-chosen ID (a
+key EC2 alone named, its device not deleted once the destroy completed, then
+deleted by the rerun and shown deleted in its review; an interrupt after the
+destroy, and tagged leftovers removed by hand, each then a rerun deleting it;
+a chain of reruns carrying the keys forward without the first record; the keys
+written with the applying step alone, well-formed only, none before; a
+teardown declined or refused at the gates remembering none, its host's device
+then only listed; an apply that changed the factory since passing them over,
+a declined one not; a record write failing at each step up to `applying`
+failing teardown before its destroy, its record ending without the keys; an
+interrupt as the records are read starting nothing more; an earlier record
+that cannot be read, and records that cannot be listed, refusing before
+anything is removed); a bucket answering 403; a machine reviewed shutting down gone since; a
 failure after dispatch was stopped naming it; a plan directory not removed
 never overwriting a refusal; an interrupt at each step, during each of the
 destroy plan's Terraform commands, during EC2's listing after the destroy,
@@ -969,8 +1080,17 @@ S3 or each EC2 listing answers (no further call started), and before anything
 is listed, keeping no lock, its `withoutLock` worded by `interruptedTeardown`
 as returned, and a run interrupted at its end still `done`; only
 `bucketExists` asked of the state bucket), `tests/infrastructure/plan-store.test.ts`
-(`removeAll`) and `tests/infrastructure/aws-s3-lock-store.test.ts` (an
-interrupted bucket deletion, the typed 403). terminate's own tests
+(`removeAll`), `tests/infrastructure/aws-s3-lock-store.test.ts` (an
+interrupted bucket deletion, the typed 403, the operation records read back
+page by page against stubbed calls and the local S3 stub, and an unreadable
+listing or a failure named), and `tests/domain/operation.test.ts` (a
+teardown's remembered host keys: written well-formed and once, read back from
+every teardown record, one without `host_keys` remembering none, another
+operation's and an object never keyed as a record passed over, those started
+before an apply or upgrade whose infrastructure stage is `applying`,
+`applied` or `failed`, or in its millisecond, passed over, and those before
+one that changed nothing or a worker operation kept, and each record that
+cannot be read named). terminate's own tests
 (`tests/application/worker-lifecycle.test.ts`) cover the shared helpers.
 
 `tests/cli/presentation/teardown.test.ts` (the review: the target, each

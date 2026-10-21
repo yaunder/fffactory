@@ -7,17 +7,17 @@
  * (`terraform-state-fixture.ts`) of the example with one host or two, from an empty state, or
  * from a state that records root outputs but no resource (the one-host state stripped of its
  * resources, as the PR #89 review reproduced it), as teardown plans it: the recorded host keys
- * read through the provisioner's `output`, factory.json projected with `projectFactoryVariables`
- * and those keys, `plan -destroy -detailed-exitcode -out` with Terraform's state lock, and the
- * saved plan read back through the provisioner's `showPlan`. The plan must delete every managed resource and
- * every root output the state holds and change nothing else, its exit code agreeing
- * (`destroyPlanMismatch`), and `destroyPlanRefusal` must pass it with EC2 listing the instances
- * the state records, and refuse it with EC2 listing none or another, and once any one resource
- * change is tampered into something other than a delete, or any one output change into
- * something other than a delete. An empty state's plan must change nothing, and pass; the
- * outputs-only state's must exit 2 deleting only its outputs, and pass. The plans run with
- * `-refresh=false`: the state is the fixture's, never AWS's. The removal check's tree, state and
- * session serve it (`RemovalCheckContext`).
+ * read through the provisioner's `output`, factory.json projected with
+ * `projectFactoryVariables` and those keys, `plan -destroy -detailed-exitcode -out` with
+ * Terraform's state lock, and the saved plan read back through the provisioner's `showPlan`.
+ * The plan must delete every managed resource and every root output the state holds and change
+ * nothing else, its exit code agreeing (`destroyPlanMismatch`), and `destroyPlanRefusal` must
+ * pass it with EC2 listing the instances the state records, and refuse it with EC2 listing none
+ * or another, and once any one resource change is tampered into something other than a delete,
+ * or any one output change into something other than a delete. An empty state's plan must
+ * change nothing, and pass; the outputs-only state's must exit 2 deleting only its outputs, and
+ * pass. The plans run with `-refresh=false`: the state is the fixture's, never AWS's. The
+ * removal check's tree, state and session serve it (`RemovalCheckContext`).
  */
 import { rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";

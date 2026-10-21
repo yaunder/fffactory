@@ -6,7 +6,13 @@ import {
 } from "../../src/application/lock-store";
 import type { StateBucketReadiness } from "../../src/domain/backend-bootstrap";
 import type { HeldLock, LockBreakEntry, LockRecord } from "../../src/domain/factory-lock";
-import { type OperationRecord, operationKey } from "../../src/domain/operation";
+import {
+  type OperationRecord,
+  operationKey,
+  operationsPrefix,
+  type StoredOperation,
+  serializeOperation,
+} from "../../src/domain/operation";
 import { type BucketDeletion, DELETION_INTERRUPTED } from "../../src/domain/state-bucket-deletion";
 
 /** A state bucket as backend bootstrap leaves it. */
@@ -22,7 +28,8 @@ export const READY_BUCKET: StateBucketReadiness = {
  * write that never replaces a lock, each write gets a new version, and `remove` deletes only
  * the version it names. Buckets are keyed by name and record every call; each is ready as
  * backend bootstrap leaves it unless `readiness` says otherwise. Operation records are kept
- * by key, each write replacing the last, with every write in `operationWrites`; the
+ * by key, each write replacing the last, with every write in `operationWrites`, and read back
+ * as their text by `readOperations`, with any text `store` put under their prefix; the
  * factory's Terraform state revision per bucket is `states`, absent before any apply. Break
  * logs and operation records are kept by key, each remembering its bucket: deleting a bucket
  * removes its own, then its lock, then the bucket, and an interrupt by then (`beforeLock` can
@@ -42,6 +49,8 @@ export class MemoryLockStore implements LockStore {
   readonly operations = new Map<string, OperationRecord>();
   /** Every operation record written, in order. */
   readonly operationWrites: OperationRecord[] = [];
+  /** Objects `store` put in a bucket by key, such as a damaged record, read back as they are. */
+  readonly texts = new Map<string, string>();
   /** The factory's Terraform state revision per bucket; absent while there is no state. */
   readonly states = new Map<string, string>();
   /** The bucket each break log entry and operation record was written to, by key. */
@@ -129,8 +138,30 @@ export class MemoryLockStore implements LockStore {
     this.calls.push(`writeOperation ${bucket.bucket} ${record.stages.at(-1)?.status}`);
     this.requireBucket(bucket);
     this.operations.set(operationKey(record), record);
+    this.texts.delete(operationKey(record));
     this.written.set(operationKey(record), bucket.bucket);
     this.operationWrites.push(record);
+  }
+
+  /** Puts `text` at `key` in `bucket`, as a record damaged or written by hand would be. */
+  store(bucket: string, key: string, text: string): void {
+    this.operations.delete(key);
+    this.texts.set(key, text);
+    this.written.set(key, bucket);
+  }
+
+  async readOperations(bucket: StateBucket): Promise<readonly StoredOperation[]> {
+    this.calls.push(`readOperations ${bucket.bucket}`);
+    this.requireBucket(bucket);
+    const prefix = operationsPrefix(bucket.factoryId);
+    return [...this.written]
+      .filter(([key, written]) => written === bucket.bucket && key.startsWith(prefix))
+      .flatMap(([key]) => {
+        const record = this.operations.get(key);
+        const text = record === undefined ? this.texts.get(key) : serializeOperation(record);
+        return text === undefined ? [] : [{ key, text }];
+      })
+      .sort((a, b) => (a.key < b.key ? -1 : 1));
   }
 
   async stateRevision(bucket: StateBucket): Promise<string | undefined> {
@@ -146,6 +177,7 @@ export class MemoryLockStore implements LockStore {
       if (written === bucket.bucket) {
         this.logs.delete(key);
         this.operations.delete(key);
+        this.texts.delete(key);
         this.written.delete(key);
       }
     this.states.delete(bucket.bucket);

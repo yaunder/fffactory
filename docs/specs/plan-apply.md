@@ -1302,7 +1302,14 @@ of a skip, failure or stop. The operation's `status` is `running` until it ends
 `succeeded`, `partial` (a worker was skipped; a stopped one is not),
 `declined`, `refused` or `failed`, with `failure` naming why (for a worker,
 `worker KEY: SUMMARY`). Records are history: nothing reads them to decide
-anything. A final record that cannot be written after a successful apply does
+anything, but for the host keys a teardown remembers in its own record
+(`host_keys`), which a later teardown reads back
+([teardown §Devices](teardown.md#devices)), passing over those of a teardown
+that started before, or in the same millisecond as, an apply's or upgrade's
+record whose infrastructure stage is `applying`, `applied` or `failed`, by the
+start time each key names; apply's
+and the worker operations' records carry no such field and are written as
+they always were. A final record that cannot be written after a successful apply does
 not fail it: `✖ The operation record could not be finished: REASON`, on
 standard error, last in the Result (only the muted Paseo clients note follows
 it, when there is no Next block) and before the Next block, which stays on
@@ -1683,9 +1690,9 @@ unchanged by where the plan was made.
 | Domain | `src/domain/rollout.ts` | A worker's outcome (`stoppedOutcome` too), the rollout rule, and the first boot wait's rules: its deadline, poll and report intervals, which tailnet states are still joining, a bootstrap refusal to wait for, and the timed-out failure. Pure. |
 | Application | `src/application/plan-store.ts` | The `PlanStore` port, which binds a record to the Terraform plan file its kind names, with `digest` for the check under the lock, `spend` (its record durably removed, its Terraform plan kept), `removeAll` (every plan of a factory, [teardown](teardown.md)'s), and `planStoreDirectory`. |
 | Application | `src/application/factory-lock.ts` | `Interrupted` and `settleFactoryLock`: an interrupted operation keeps its lock. |
-| Application | `src/application/lock-store.ts` | `writeOperation` and `stateRevision` on the state bucket port. |
+| Application | `src/application/lock-store.ts` | `writeOperation` and `stateRevision` on the state bucket port; `readOperations`, teardown's alone. |
 | Infrastructure | `src/infrastructure/plan-store.ts` | `filesystemPlanStore`: private plan directories, the bound plan file's digest (`factory.tfplan` or `backend.tfplan`), spending a plan (unlinking `plan.json`, then fsyncing its directory), pruning either kind and spent leftovers, and removing a factory's directory whole. |
-| Infrastructure | `src/infrastructure/aws-s3-lock-store.ts` | PutObject of operation records; HeadObject of the state object. |
+| Infrastructure | `src/infrastructure/aws-s3-lock-store.ts` | PutObject of operation records, and their ListObjectsV2 and GetObject for teardown; HeadObject of the state object. |
 | CLI adapter | `src/cli/presentation/plan.ts` | Every plan review and refusal in blocks: `planSection` (the target rows and an upgrade's pin move, the infrastructure tally and changes with Terraform's symbols, then each stage's row with each worker's change), `bootstrapSection`, `reviewBlocks`, `savedPlanReport` and `savedBootstrapPlanReport` (`plan`'s saved plan and Next block), `planRefusalReport` (each `PlanRefusal`), `d11Report`, `staleReport`, `unknownPlanReport` and `damagedPlanReport`, with `describeStaleReason` and `describeUnexpectedPlan`, and the unready bucket's AWS CLI commands; `describeRemovalPlan`, still unstyled. |
 | CLI adapter | `src/cli/presentation/command-line.ts` | `fffactoryCommand`: a command a Next block names, with the `--instance` and `--profile` given, quoted for a POSIX shell (`shellWord`). |
 | CLI adapter | `src/cli/presentation/instance-source.ts` | `instanceHeader`: the command, its release, and the instance (`displayPath`, `describeSource`'s words). |

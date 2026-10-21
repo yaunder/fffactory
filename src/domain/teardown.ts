@@ -612,8 +612,11 @@ export function teardownAdminClientUnusable(reason: string): Refusal {
   );
 }
 
-/** What teardown lists before anything is removed, and again after the destroy. */
-export type InventoryPart = "instances" | "vpcs" | "secrets" | "devices";
+/**
+ * What teardown lists before anything is removed, and again after the destroy; under the lock,
+ * also the operation records earlier teardowns remembered host keys in (`records`).
+ */
+export type InventoryPart = "instances" | "vpcs" | "secrets" | "devices" | "records";
 
 const INVENTORY_CHECKS: Readonly<Record<InventoryPart, string>> = {
   instances:
@@ -622,10 +625,15 @@ const INVENTORY_CHECKS: Readonly<Record<InventoryPart, string>> = {
   secrets:
     "Check your network connection and that the credentials may call secretsmanager:ListSecrets",
   devices: `Check the OAuth client at ${TRUST_CREDENTIALS} (scope devices:core)`,
+  records:
+    "Check your network connection and that the credentials may list and read the state bucket's operation records (s3:ListBucket, s3:GetObject)",
 };
 
 function listingFailed(part: InventoryPart, reason: string): string {
-  return part === "devices" ? `The tailnet's devices could not be listed: ${reason}` : reason;
+  if (part === "devices") return `The tailnet's devices could not be listed: ${reason}`;
+  if (part === "records")
+    return `The operation records in the state bucket could not be read: ${reason}`;
+  return reason;
 }
 
 /**
@@ -637,6 +645,27 @@ export function inventoryUnavailable(part: InventoryPart, reason: string): Refus
   return refusal(listingFailed(part, reason), thenRerunTeardown(INVENTORY_CHECKS[part]), [
     "Nothing was removed: a listing that failed is never taken for one that found nothing.",
   ]);
+}
+
+/**
+ * Earlier operation records under the factory's prefix that cannot be read (`rememberedHostKeys`,
+ * by key, each shaped as `operationKey` names one): any could be a teardown's remembering a host
+ * key the state no longer records, whose devices a rerun must still delete (§Devices), or an
+ * apply's that changed the factory since, after which those keys are no longer the factory's;
+ * so the teardown is refused rather than delete less, or more, than it should.
+ */
+export function rememberedKeysUnreadable(bucket: string, records: readonly string[]): Refusal {
+  return refusal(
+    "An earlier operation record of the factory could not be read",
+    thenRerunTeardown(
+      "Restore each record named to its latest version that reads, in the state bucket, or delete it if fffactory did not write it",
+    ),
+    [
+      ...records.map((key) => `Operation record s3://${bucket}/${key}`),
+      "Teardown remembers in its operation record every host key it knew as its destroy begins, so a rerun still deletes those hosts' tailnet devices once the Terraform state no longer records them, until an apply changes the factory: a record it cannot read may hide one, or the apply that ended it.",
+      "Nothing was removed.",
+    ],
+  );
 }
 
 /**
