@@ -104,8 +104,10 @@ Teardown goes in this order, and stops at the first refusal:
    `destroyPlanRefusal` over the instances the inventory listed
    ([provisioning §Destroy plan](provisioning.md#destroy-plan)), and refused
    when Terraform's `-detailed-exitcode` and its JSON plan disagree
-   (`destroyPlanMismatch`): changes reported with no resource change, or
-   resource changes with none reported.
+   (`destroyPlanMismatch`): changes reported with no resource or root output
+   change, or either changed with none reported. Terraform counts a root
+   output change as a change, so a plan deleting only the root outputs, of a
+   state that records root outputs but no resource, agrees with exit 2.
 10. Show what will be removed and kept (`TeardownReview`, the `review`
     progress event): the target (factory.json's path, the factory, its account,
     Region and release), the destroy plan's changes, the instances and VPCs,
@@ -118,11 +120,16 @@ Teardown goes in this order, and stops at the first refusal:
 13. The [gates](#gates): EC2's instances listed again, refused unless they
     are as reviewed, then one fresh inspection of each running worker.
 14. Apply exactly the saved destroy plan, unless it changes nothing (the
-    `factory` root already gone).
+    `factory` root already gone). A plan deleting only the root outputs is
+    applied too, so the state records none, though no resource is destroyed.
 15. Verify that nothing tagged with the factory ID remains: EC2 lists no
     instance and no VPC, and, once the destroy applied, the factory's
     Terraform state records no host key. Anything left, or a listing or read
     that fails, stops the run before devices, secrets and the bucket (D12).
+    Against real Terraform the host key check is a weak backstop: a destroy
+    deletes the root outputs, `host_keys` among them, before any resource, so
+    it mainly catches a Terraform or provider defect, and EC2's listing is the
+    primary check.
 16. Delete the [devices](#devices), listed afresh.
 17. Delete the owned secrets, each confirmed absent
     ([secrets §Deletion and absence](secrets.md#deletion-and-absence)), the
@@ -206,8 +213,8 @@ reported hostname tells whose it is (`selectFactoryDevices`,
 `src/domain/teardown.ts`):
 
 1. For each known key, declared in factory.json, recorded in the Terraform
-   state or carried by an EC2 instance's host key tag (each well-formed key
-   once), the devices `selectWorkerDevices` finds for `<id>-<key>`: the
+   state's `host_keys` output or carried by an EC2 instance's host key tag
+   (each well-formed key once), the devices `selectWorkerDevices` finds for `<id>-<key>`: the
    reported hostname exactly, ignoring case, never the MagicDNS label. Those
    carrying the factory's tag are deleted; the others are listed.
 2. Every other device whose hostname, lowercased, is in the factory's namespace
@@ -239,6 +246,15 @@ run with the secrets and the bucket kept, the admin client among them.
 **Accepted risk:** a hand-chosen ID that extends a generated one
 (`fff-abcd1234-lab`) shares its namespace; `fff-abcd1234`'s teardown deletes
 its tagged devices that match no known key of `fff-abcd1234`.
+
+**Known limitation:** a destroy that has begun deletes the `host_keys` output
+first ([Rerun](#rerun)). So on a rerun after a destroy stopped part way, a
+host factory.json does not declare and EC2 no longer lists (its instance
+terminated, by that destroy or otherwise) is no longer a known key, even while
+the state still holds it. Its device falls to step 2: deleted under a
+generated ID, but only listed under a hand-chosen one, among the devices
+listed but kept, with `CHECK_LISTED_DEVICES` telling the operator to check it
+([Partial failure](#partial-failure), [Report](#report)).
 
 ## Confirmation
 
@@ -287,7 +303,7 @@ releases the lock. Each is a summary, details and a next action
 | The state records unreadable host keys | `The host keys the factory's Terraform state records could not be read` | ``Check the factory's Terraform state with `fffactory plan`, then rerun `fffactory teardown`.`` |
 | factory.json cannot be projected | `factory.json cannot be projected into the destroy plan's Terraform inputs`, each issue listed | Fix factory.json, then rerun |
 | The guarded destroy plan | [provisioning §Destroy plan](provisioning.md#destroy-plan)'s three refusals | as there |
-| Exit code and JSON plan disagree | `Terraform's destroy plan reports changes, but its JSON plan changes no resource` (or `reports no change, but its JSON plan changes resources`) | ``Check the factory's Terraform state with `fffactory plan`, then rerun `fffactory teardown`.`` |
+| Exit code and JSON plan disagree | `Terraform's destroy plan reports changes, but its JSON plan changes no resource or output` (or `reports no change, but its JSON plan changes resources or outputs`) | ``Check the factory's Terraform state with `fffactory plan`, then rerun `fffactory teardown`.`` |
 | Declined | (declined, not refused) | |
 | Dispatch not stopped | `Dispatch could not be stopped on HOSTNAME: REASON` | as an uninspected gate's |
 | EC2's instances changed since the review | `The factory's EC2 instances changed after they were reviewed`, each change listed ([Gates](#gates)) | ``Rerun `fffactory teardown` to review the factory as it is now.`` |
@@ -382,6 +398,19 @@ earlier run reported. What is gone is found gone, and reported so:
 
 - The `factory` root already destroyed: the destroy plan changes nothing, and
   the report says `infrastructure: absent`.
+- A state that records root outputs but no resource: the destroy plan
+  deletes only those outputs, exit 2, which agrees with its JSON plan
+  ([provisioning §Destroy plan](provisioning.md#destroy-plan)). It is
+  applied, the leftover check reads a state without the `host_keys` output as
+  recording no host key, the run goes on through the devices, secrets, plans
+  and bucket, and the report says `infrastructure: absent`, with no change
+  shown: no resource was destroyed. A stopped destroy does not leave such a
+  state: Terraform 1.16.4 deletes the root outputs before any resource, so a
+  destroy stopped once it has begun leaves no output, only the resources it
+  did not destroy, and one that fails before it begins (a stale saved plan, a
+  state lock it cannot take) leaves the state as it was: never outputs alone.
+  The rerun destroys what is left. Without the `host_keys` output, a host
+  only that output named is no longer a known key ([Devices](#devices)).
 - Devices already deleted are not found: nothing to delete.
 - Owned secrets already deleted are not listed. factory.json's references
   under `<id>/` the listing does not find are each looked up with
@@ -422,9 +451,11 @@ kept ([Partial failure](#partial-failure)). Once the destroy plan is made, anyth
 removes before the devices still there refuses it (`The Tailscale admin
 client's secret no longer exists, but the factory's resources remain`): EC2
 lists an instance or VPC tagged with the factory ID, or the destroy plan
-changes something. Nothing is deleted, and no dispatch is stopped; the next
+changes a resource (root outputs alone are no resource: their deletion goes
+on). Nothing is deleted, and no dispatch is stopped; the next
 action stores an admin client again. So a rerun never deletes less than the
-first run would have. Any other unreadable admin client, one outside
+first run would have, but for D9's known limitation
+([Devices](#devices)). Any other unreadable admin client, one outside
 `<id>/`, one still found (pending deletion, or a denial) or whose look fails,
 refuses as before ([Refusals](#refusals)). So an admin client still found
 pending deletion past its deadline (`secrets` partial) refuses the reruns until
@@ -539,7 +570,8 @@ by its version, which is harmless either way.
 D11. A finished teardown reports (`TeardownReport`):
 
 - `infrastructure`: `destroyed`, or `absent` when the destroy plan changed
-  nothing, the `factory` root already gone; without a state bucket
+  no resource (nothing, or only root outputs), the `factory` root already
+  gone; without a state bucket
   `not_found_by_ec2`: no destroy plan was made, EC2 listing no instance or VPC
   tagged with the factory ID, and nothing outside EC2 was looked for
   ([No state bucket](#no-state-bucket)); the resources destroyed, and the
@@ -617,7 +649,7 @@ output:
 
 | Outcome | Stream | Shows | Exit |
 | --- | --- | --- | --- |
-| `done` | standard output | `✔ Removed factory ID: nothing it owns remains` (without a state bucket, `✔ Removed what was left of factory ID`), claiming only what it can see: an owned secret neither listed nor referenced by factory.json is not ([secrets §Listing](secrets.md#listing), an accepted risk); a `Result` section: `Infrastructure` (`destroyed: N resources` and each, `already absent: the destroy plan found nothing`, or `not found by EC2: no instance or VPC is tagged with the factory ID`), the instances, `Tailnet devices` (`deleted ID, ...`, `none found` or `DEVICES_NOT_CHECKED`), `Owned secrets` (`deleted NAME, ..., each confirmed gone`, or `none found`), `Already absent`, `State bucket` (`BUCKET, deleted`, or not found by this run) and `ranWithoutLock`; the `Kept` section; then the Next block of the advice it leaves: `CHECK_UNCHECKED_DEVICES` when the devices were not checked, `CHECK_LISTED_DEVICES` when any were listed but kept, `checkOutsideEc2` without a state bucket, `REVOKE_SOURCES` (the Tailscale auth key and OAuth client, the tailnet policy entries, and the API credentials kept with their grants), and `FACTORY_JSON_KEPT`: factory.json is left as it is and still describes the factory, so `fffactory apply` would create a new one (D11) | 0; 128 + the signal's number when interrupted during the state bucket's last deletion ([Interruption](#interruption)) |
+| `done` | standard output | `✔ Removed factory ID: nothing it owns remains` (without a state bucket, `✔ Removed what was left of factory ID`), claiming only what it can see: an owned secret neither listed nor referenced by factory.json is not ([secrets §Listing](secrets.md#listing), an accepted risk); a `Result` section: `Infrastructure` (`destroyed: N resources` and each, `already absent: the destroy plan destroyed no resource`, or `not found by EC2: no instance or VPC is tagged with the factory ID`), the instances, `Tailnet devices` (`deleted ID, ...`, `none found` or `DEVICES_NOT_CHECKED`), `Owned secrets` (`deleted NAME, ..., each confirmed gone`, or `none found`), `Already absent`, `State bucket` (`BUCKET, deleted`, or not found by this run) and `ranWithoutLock`; the `Kept` section; then the Next block of the advice it leaves: `CHECK_UNCHECKED_DEVICES` when the devices were not checked, `CHECK_LISTED_DEVICES` when any were listed but kept, `checkOutsideEc2` without a state bucket, `REVOKE_SOURCES` (the Tailscale auth key and OAuth client, the tailnet policy entries, and the API credentials kept with their grants), and `FACTORY_JSON_KEPT`: factory.json is left as it is and still describes the factory, so `fffactory apply` would create a new one (D11) | 0; 128 + the signal's number when interrupted during the state bucket's last deletion ([Interruption](#interruption)) |
 | `refused` | standard error | `✖ Refusing to remove the factory: SUMMARY` and its details, for each refusal; where dispatch was left stopped (`dispatchLeftStopped`); the operation record; a Next block of each next action once | 1 |
 | no terminal, no `--confirm` | standard error | `✖` and `TEARDOWN_UNCONFIRMABLE` | 1 |
 | incomplete factory.json, another account, a pin mismatch, an unready bucket, a held lock | standard error | as `plan` words them, `Refusing to remove the factory: ...`; each missing field `PATH: is required to remove a factory` | 1 |
@@ -853,7 +885,8 @@ actions, for a declared worker and an undeclared one; the kept secrets'
 groups, those already absent left out, and the references under the
 factory's names to look up, never `acme-lab/`'s for `acme`; a reference whose
 lookup failed, answered without a usable name or ARN, or described another
-secret, each worded for why; the destroy plan's consistency with its exit code; once reviewed, a
+secret, each worded for why; the destroy plan's consistency with its exit code,
+root output changes counted, a plan deleting only outputs agreeing with exit 2; once reviewed, a
 namespace device not shown only listed; `machinesChanged`, a machine reviewed
 shutting down and gone since no change; the shown machines and devices
 carrying no tag and no malformed host key; what remains where it stopped and
@@ -874,7 +907,7 @@ step by step; the review and the typed ID at a terminal; dispatch stopped on
 every running worker before the first inspection; a `fffv/*` source and a
 tagged secret kept; D9's devices; a device appearing after the review listed,
 not deleted; no device tag or malformed host key tag in the review or report;
-a root already absent; a saved plan's removal never failing a finished
+a root already absent, with no root output either; a saved plan's removal never failing a finished
 teardown; and each refusal
 deleting nothing and leaving the lock released: a held lock, active agents,
 unmanaged checkouts, a worker not located, dispatch not stopped, a machine
@@ -884,9 +917,13 @@ client refused, a machine pending, a decline, a wrong `--confirm`, no terminal,
 no admin client, an incomplete factory.json, another account, a pin mismatch,
 an unready bucket; and once destroyed, a leftover stopping the run before devices,
 secrets and the bucket, and a bucket that remains, recorded `partial`; each
-failure point, the destroy failing part way, tagged leftovers, a state still
+failure point, the destroy failing part way (resources left and no root
+output, as Terraform deletes the outputs first), a state recording only root
+outputs (its output-only plan applied, ending `done`), tagged leftovers, a state still
 recording hosts or whose host keys cannot be read after the destroy (a stubbed
-state read: a consistent world's EC2 lists a recorded host's instance first),
+state read: a consistent world's EC2 lists a recorded host's instance first;
+after an output-only plan's apply too, the read following whether the plan
+applied, not whether it destroyed a resource),
 a device, a secret denied, past its deadline or pending with its restore
 refused, the local plans, the bucket with its lock in each state, listing what
 remains, its next action, and a rerun over the world it left ending with
@@ -894,7 +931,8 @@ nothing owned, the admin client already gone among them; devices listed but
 kept reported past the devices step, and reruns without the admin client
 reporting the devices not checked wherever they stop; the admin client still
 found past its deadline, refusing the rerun until it is gone; a secret listed
-pending deletion; an admin client gone while resources remain, or outside
+pending deletion; an admin client gone while only root outputs remain, ending
+`done`; an admin client gone while resources remain, or outside
 `<id>/`, refused; an admin client in another Region looked for there; the
 admin client unreadable, the pending-deletion hint only when it is still
 found; a reference ListSecrets did not list (secrets §Listing): an owned

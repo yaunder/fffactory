@@ -308,7 +308,10 @@ function resultRows(report: TeardownReport): Row[] {
           details: changeLines(report.changes),
         }
       : report.infrastructure === "absent"
-        ? { label: "Infrastructure", value: "already absent: the destroy plan found nothing" }
+        ? {
+            label: "Infrastructure",
+            value: "already absent: the destroy plan destroyed no resource",
+          }
         : {
             label: "Infrastructure",
             value: "not found by EC2: no instance or VPC is tagged with the factory ID",

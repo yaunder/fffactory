@@ -609,7 +609,9 @@ describe("fffactory teardown: the happy path (teardown §Order)", () => {
 
   test("reports the factory's root already absent when the destroy plan changes nothing", async () => {
     const w = world();
+    // An empty state: no resource, and no root output either.
     w.terraform.world.network = false;
+    w.terraform.world.rootOutputs = false;
     const result = await teardownFactory(w.deps, request(w));
     expect(result).toMatchObject({
       kind: "done",
@@ -834,7 +836,7 @@ describe("fffactory teardown: refusals delete nothing (teardown §Refusals)", ()
       refusals: [
         {
           summary:
-            "Terraform's destroy plan reports changes, but its JSON plan changes no resource",
+            "Terraform's destroy plan reports changes, but its JSON plan changes no resource or output",
         },
       ],
     });
@@ -1391,10 +1393,11 @@ describe("fffactory teardown: an interrupt keeps the lock", () => {
 });
 
 describe("fffactory teardown: each failure point lists what remains, and a rerun finishes it (teardown §Partial failure, §Rerun)", () => {
-  test("the destroy failing part way: the state may still hold resources, and the rerun destroys them", async () => {
+  test("the destroy failing part way: the state still holds resources and no root output, and the rerun destroys them", async () => {
     const w = world({ workers: { "builder-1": "stopped" } });
+    // The root outputs go first, then the host: it fails before the network.
     w.terraform.world.beforeChange = (applied) => {
-      if (applied === 1) throw new Error("`terraform apply` exited with status 1");
+      if (applied === 2) throw new Error("`terraform apply` exited with status 1");
     };
     expect(await teardownFactory(w.deps, request(w))).toMatchObject({
       kind: "partial",
@@ -1412,7 +1415,10 @@ describe("fffactory teardown: each failure point lists what remains, and a rerun
         nextAction: "Rerun `fffactory teardown`: it plans the destroy again from what exists now.",
       },
     });
+    expect(w.terraform.world.hosts.size).toBe(0);
     expect(w.terraform.world.network).toBe(true);
+    // As Terraform leaves a destroy stopped part way: resources, and no root output.
+    expect(w.terraform.world.rootOutputs).toBe(false);
     expect(w.lockStore.locks.size).toBe(0);
     w.terraform.world.beforeChange = undefined;
     expect(await teardownFactory(w.deps, request(w))).toMatchObject({
@@ -1489,6 +1495,75 @@ describe("fffactory teardown: each failure point lists what remains, and a rerun
       report: { infrastructure: "absent", devices: { removed: ["n0CNTRL"] } },
     });
     expect(destroyed(w)).toHaveLength(1);
+    expectNothingOwned(w);
+  });
+
+  /**
+   * `w` with its state stripped of every resource but still recording its root outputs, as the
+   * PR #89 review reproduced it: a state that records root outputs but no resource.
+   */
+  function outputsOnly(w: World) {
+    w.terraform.world.hosts.clear();
+    w.terraform.world.network = false;
+    expect(w.terraform.world.rootOutputs).toBe(true);
+  }
+
+  test("a state recording only root outputs: the rerun applies the output-only plan and ends `done` with nothing owned", async () => {
+    const w = world({ workers: { "builder-1": "stopped" } });
+    outputsOnly(w);
+    expect(await teardownFactory(w.deps, request(w))).toMatchObject({
+      kind: "done",
+      // The plan changes no resource: the state records none.
+      report: {
+        infrastructure: "absent",
+        changes: [],
+        devices: { removed: ["n0CNTRL"] },
+        secrets: { removed: OWNED_NAMES, absent: [] },
+      },
+    });
+    // The output-only plan was applied, its outputs deleted, and nothing left recorded.
+    expect(destroyed(w)).toHaveLength(1);
+    expect(w.terraform.world.rootOutputs).toBe(false);
+    expectNothingOwned(w);
+  });
+
+  test("an output-only plan's apply is checked too: a state still recording hosts after it stops the run (D12)", async () => {
+    const w = world({ workers: { "builder-1": "stopped" } });
+    outputsOnly(w);
+    // The state is read once the plan applied, though it destroyed no resource.
+    const provisioner = stateAfterDestroy(w, { host_keys: ["builder-1"] });
+    expect(await teardownFactory({ ...w.deps, provisioner }, request(w))).toMatchObject({
+      kind: "partial",
+      stoppedAt: "leftovers",
+      refusal: {
+        summary: "The factory's Terraform state still records hosts after the destroy",
+        details: expect.arrayContaining(["Host builder-1"]),
+      },
+    });
+    expect(destroyed(w)).toHaveLength(1);
+    expect(w.admin.calls.filter((call) => call.startsWith("remove"))).toEqual([]);
+    expect(w.secrets.calls.filter((call) => call.startsWith("remove"))).toEqual([]);
+    expect(w.lockStore.buckets.has(BUCKET)).toBe(true);
+  });
+
+  test("a state holding only root outputs, the admin client gone: no resource remains, so it finishes", async () => {
+    const w = world({ listing: { kind: "listed", secrets: [OWNED[0] as ListedSecret] } });
+    // No resource left, the state still recording its outputs: not a resource that remains.
+    w.terraform.world.network = false;
+    expect(w.terraform.world.rootOutputs).toBe(true);
+    expect(await teardownFactory(w.deps, request(w))).toMatchObject({
+      kind: "done",
+      report: {
+        infrastructure: "absent",
+        changes: [],
+        devicesUnchecked: DEVICES_NOT_CHECKED,
+        secrets: { removed: [`${FACTORY}/tailscale-auth-key`] },
+      },
+    });
+    const [plan] = w.terraform.calls.filter(({ call }) => call === "plan");
+    expect(plan?.request).toMatchObject({ destroy: true });
+    expect(destroyed(w)).toHaveLength(1);
+    expect(w.terraform.world.rootOutputs).toBe(false);
     expectNothingOwned(w);
   });
 

@@ -90,8 +90,14 @@ its `before` naming the instance the state holds (`instanceIds`), records it no 
 applied, and, given the secrets the hosts' policy allows (`secretArns`), plans that policy's
 in-place update as Terraform renders it) and writes factory.json to `MemoryInstanceStore`.
 Teardown (`application/teardown-factory.test.ts`) runs against the same world, whose destroy
-plan (`PlanRequest.destroy`) deletes every host machine and its network (`network`, also for a
-factory without hosts), an EC2 inventory the test derives from that world so instances and
+plan (`PlanRequest.destroy`) deletes the root outputs its state records (`rootOutputs`, in
+`output_changes`, counted as changes as `-detailed-exitcode` counts them) and every host machine
+and its network (`network`, also for a factory without hosts), applying the outputs' deletion
+first, as Terraform does, so a destroy stopped part way leaves resources and no output, and one
+failing before its first change (`beforeChange(0)` throwing) leaves outputs and resources as
+they were, as Terraform does when it fails before it begins; a test
+makes a state recording outputs and no resource by clearing `hosts` and `network`, and its plan
+deletes only the outputs; an EC2 inventory the test derives from that world so instances and
 `NETWORK_VPC` vanish once it is destroyed, `fakeWorkflowQueue` and `fakeControlPlane` wrapped
 to order dispatch stops before inspections, `fakeSecretsManager`, and `MemoryPlanStore`'s
 `removeAll`; a rerun runs teardown again over the same world.

@@ -83,6 +83,22 @@ const WHOLE = plan(
   change("module.host_identity.aws_iam_role.host", ["delete"], {}, "aws_iam_role"),
 );
 
+/** A root output's change, as `terraform show -json` gives it in `output_changes`. */
+const output = (actions: readonly string[]) => ({ actions, before: [], after: null });
+
+/** `shown` with `outputChanges` as its `output_changes`. */
+const withOutputs = (shown: object, outputChanges: unknown) => ({
+  ...shown,
+  output_changes: outputChanges,
+});
+
+/** Every root output of the factory root deleted, as a destroy plan of a state recording them. */
+const DELETED_OUTPUTS = {
+  host_keys: output(["delete"]),
+  hosts: output(["delete"]),
+  network: output(["delete"]),
+};
+
 const RERUN =
   "Check the factory's Terraform state with `fffactory plan`, then rerun `fffactory teardown`.";
 const EC2_CHECK =
@@ -111,6 +127,15 @@ describe("the guarded destroy plan (provisioning §Destroy plan)", () => {
     expect(destroyPlanRefusal(plan(), [])).toBeUndefined();
   });
 
+  test("passes root outputs deleted or left beside the deletes, and a plan deleting only outputs", () => {
+    expect(destroyPlanRefusal(withOutputs(WHOLE, DELETED_OUTPUTS), LISTED)).toBeUndefined();
+    // All resources already gone, the state still recording its outputs: a rerun's plan.
+    expect(destroyPlanRefusal(withOutputs(plan(), DELETED_OUTPUTS), [])).toBeUndefined();
+    expect(
+      destroyPlanRefusal(withOutputs(plan(), { host_keys: output(["no-op"]) }), []),
+    ).toBeUndefined();
+  });
+
   test("refuses a plan it cannot read", () => {
     const unreadable = {
       summary: "Terraform's destroy plan could not be read",
@@ -125,6 +150,12 @@ describe("the guarded destroy plan (provisioning §Destroy plan)", () => {
       plan({ address: VPC }),
       plan(change(VPC, [])),
       plan(change("module.network.aws_vpc.\u0007", ["delete"])),
+      withOutputs(WHOLE, []),
+      withOutputs(WHOLE, "host_keys"),
+      withOutputs(WHOLE, { host_keys: null }),
+      withOutputs(WHOLE, { host_keys: { before: [] } }),
+      withOutputs(WHOLE, { host_keys: output([]) }),
+      withOutputs(plan(), { "host_keys\u0007": output(["delete"]) }),
     ])
       expect(destroyPlanRefusal(shown, LISTED)).toEqual(unreadable);
   });
@@ -146,6 +177,30 @@ describe("the guarded destroy plan (provisioning §Destroy plan)", () => {
         details: [line],
         nextAction: RERUN,
       });
+  });
+
+  test("refuses a root output change but a delete or no-op, listing each as output.NAME (ACTIONS)", () => {
+    for (const actions of [["create"], ["update"], ["read"], ["delete", "create"], ["mystery"]])
+      expect(
+        destroyPlanRefusal(
+          withOutputs(WHOLE, { ...DELETED_OUTPUTS, network: output(actions) }),
+          LISTED,
+        ),
+      ).toEqual({
+        summary: "Terraform's destroy plan does more than destroy the factory's resources",
+        details: [`output.network (${actions.join(", ")})`],
+        nextAction: RERUN,
+      });
+    // Resource changes first, each in the plan's order, then the outputs, in theirs.
+    expect(
+      destroyPlanRefusal(
+        withOutputs(plan(change(VPC, ["update"])), {
+          hosts: output(["update"]),
+          host_keys: output(["create"]),
+        }),
+        [],
+      )?.details,
+    ).toEqual([`${VPC} (update)`, "output.hosts (update)", "output.host_keys (create)"]);
   });
 
   test("lists every offending change, in the plan's order", () => {
@@ -614,22 +669,41 @@ describe("a reference the listing left out that cannot be judged (teardown §Ref
 describe("the destroy plan's own consistency (teardown §Refusals)", () => {
   const deleting = [{ address: VPC, actions: ["delete"] }];
   const nothing = [{ address: VPC, actions: ["no-op"] }];
+  const outputsDeleted = [{ name: "host_keys", actions: ["delete"] }];
+  const outputsKept = [{ name: "host_keys", actions: ["no-op"] }];
 
   test("passes when Terraform's exit code and the JSON plan agree", () => {
-    expect(destroyPlanMismatch(true, deleting)).toBeUndefined();
-    expect(destroyPlanMismatch(false, nothing)).toBeUndefined();
-    expect(destroyPlanMismatch(false, [])).toBeUndefined();
+    expect(destroyPlanMismatch(true, deleting, [])).toBeUndefined();
+    expect(destroyPlanMismatch(true, deleting, outputsDeleted)).toBeUndefined();
+    expect(destroyPlanMismatch(false, nothing, [])).toBeUndefined();
+    expect(destroyPlanMismatch(false, nothing, outputsKept)).toBeUndefined();
+    expect(destroyPlanMismatch(false, [], [])).toBeUndefined();
   });
 
-  test("refuses changes reported without a resource change, and the reverse", () => {
-    expect(destroyPlanMismatch(true, nothing)).toEqual({
-      summary: "Terraform's destroy plan reports changes, but its JSON plan changes no resource",
+  test("passes changes reported for root outputs alone: every resource already gone", () => {
+    // Terraform's -detailed-exitcode counts root output changes as changes.
+    expect(destroyPlanMismatch(true, [], outputsDeleted)).toBeUndefined();
+    expect(destroyPlanMismatch(true, nothing, outputsDeleted)).toBeUndefined();
+  });
+
+  test("refuses changes reported without a resource or output change, and the reverse", () => {
+    expect(destroyPlanMismatch(true, nothing, outputsKept)).toEqual({
+      summary:
+        "Terraform's destroy plan reports changes, but its JSON plan changes no resource or output",
       details: [],
       nextAction: RERUN,
     });
-    expect(destroyPlanMismatch(false, deleting)?.summary).toBe(
-      "Terraform's destroy plan reports no change, but its JSON plan changes resources",
+    expect(destroyPlanMismatch(true, [], [])?.summary).toBe(
+      "Terraform's destroy plan reports changes, but its JSON plan changes no resource or output",
     );
+    for (const [resources, outputs] of [
+      [deleting, []],
+      [deleting, outputsDeleted],
+      [[], outputsDeleted],
+    ] as const)
+      expect(destroyPlanMismatch(false, resources, outputs)?.summary).toBe(
+        "Terraform's destroy plan reports no change, but its JSON plan changes resources or outputs",
+      );
   });
 });
 

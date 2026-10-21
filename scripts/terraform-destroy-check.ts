@@ -4,25 +4,35 @@
  * destroy plans, not hand-written JSON.
  *
  * Each case plans the factory root in destroy mode from a synthesized state
- * (`terraform-state-fixture.ts`) of the example with one host or two, or from an empty state, as
- * teardown plans it: the recorded host keys read through the provisioner's `output`, factory.json
- * projected with `projectFactoryVariables` and those keys, `plan -destroy -detailed-exitcode
- * -out` with Terraform's state lock, and the saved plan read back through the provisioner's
- * `showPlan`. The plan must delete every managed resource the state holds and change nothing
- * else, and `destroyPlanRefusal` must pass it with EC2 listing the instances the state records,
- * and refuse it with EC2 listing none or another, and once any one change is tampered into
- * something other than a delete. An empty state's plan must change nothing, and pass. The plans
- * run with `-refresh=false`: the state is the fixture's, never AWS's. The removal check's tree,
- * state and session serve it (`RemovalCheckContext`).
+ * (`terraform-state-fixture.ts`) of the example with one host or two, from an empty state, or
+ * from a state that records root outputs but no resource (the one-host state stripped of its
+ * resources, as the PR #89 review reproduced it), as teardown plans it: the recorded host keys
+ * read through the provisioner's `output`, factory.json projected with `projectFactoryVariables`
+ * and those keys, `plan -destroy -detailed-exitcode -out` with Terraform's state lock, and the
+ * saved plan read back through the provisioner's `showPlan`. The plan must delete every managed resource and
+ * every root output the state holds and change nothing else, its exit code agreeing
+ * (`destroyPlanMismatch`), and `destroyPlanRefusal` must pass it with EC2 listing the instances
+ * the state records, and refuse it with EC2 listing none or another, and once any one resource
+ * change is tampered into something other than a delete, or any one output change into
+ * something other than a delete. An empty state's plan must change nothing, and pass; the
+ * outputs-only state's must exit 2 deleting only its outputs, and pass. The plans run with
+ * `-refresh=false`: the state is the fixture's, never AWS's. The removal check's tree, state and
+ * session serve it (`RemovalCheckContext`).
  */
 import { rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { projectFactoryVariables } from "../src/application/project-terraform-inputs";
 import type { FactoryInstance, HostKey } from "../src/domain/instance";
-import { changesSomething, type ResourceChange, resourceChanges } from "../src/domain/plan";
+import {
+  changesSomething,
+  type OutputChange,
+  outputChanges,
+  type ResourceChange,
+  resourceChanges,
+} from "../src/domain/plan";
 import { recordedHostKeys } from "../src/domain/stable-host-keys";
 import type { Machine } from "../src/domain/status";
-import { destroyPlanRefusal } from "../src/domain/teardown";
+import { destroyPlanMismatch, destroyPlanRefusal } from "../src/domain/teardown";
 import {
   fixtureDocument,
   parsed,
@@ -41,17 +51,30 @@ const MINUTES = 60 * 1000;
 const ANOTHER_INSTANCE = "i-0fedcba9876543210";
 /** What a tampered change does instead of deleting its resource. */
 const TAMPERED: readonly (readonly string[])[] = [["update"], ["delete", "create"], ["forget"]];
+/** What a tampered root output change does instead of deleting the output. */
+const TAMPERED_OUTPUTS: readonly (readonly string[])[] = [["update"], ["create"]];
 
 interface DestroyCase {
   readonly title: string;
+  /** Names the case's input and plan files. */
+  readonly label: string;
   /** The host keys of the example's fixture to keep; none for an empty state. */
   readonly hosts: readonly HostKey[];
+  /** The state holds the root outputs, as with `ONE_HOST`, and no resource. */
+  readonly outputsOnly?: true;
 }
 
+const ONE_HOST = ["builder-1" as HostKey];
+
 const CASES: readonly DestroyCase[] = [
-  { title: "one host", hosts: ["builder-1" as HostKey] },
-  { title: "two hosts", hosts: ["builder-1" as HostKey, "builder-2" as HostKey] },
-  { title: "an empty state", hosts: [] },
+  { title: "one host", label: "1-hosts", hosts: ONE_HOST },
+  {
+    title: "two hosts",
+    label: "2-hosts",
+    hosts: ["builder-1" as HostKey, "builder-2" as HostKey],
+  },
+  { title: "an empty state", label: "empty", hosts: [] },
+  { title: "a state with only root outputs", label: "outputs-only", hosts: [], outputsOnly: true },
 ];
 
 /** The fixture's factory.json, the removal check's several hosts but only `hosts`. */
@@ -74,10 +97,50 @@ function managedAddresses(module: unknown): string[] {
   return [...own, ...list(module.child_modules).flatMap(managedAddresses)];
 }
 
+/** A JSON plan's prior state values, when it has a prior state. */
+function priorValues(plan: unknown): Json | undefined {
+  const prior = isJson(plan) && isJson(plan.prior_state) ? plan.prior_state.values : undefined;
+  return isJson(prior) ? prior : undefined;
+}
+
 /** Every managed resource a JSON plan's prior state holds, by address, sorted. */
 function priorResources(plan: unknown): string[] {
-  const prior = isJson(plan) && isJson(plan.prior_state) ? plan.prior_state.values : undefined;
-  return managedAddresses(isJson(prior) ? prior.root_module : undefined).sort();
+  return managedAddresses(priorValues(plan)?.root_module).sort();
+}
+
+/** Every root output a JSON plan's prior state holds, by name, sorted. */
+function priorOutputs(plan: unknown): string[] {
+  const outputs = priorValues(plan)?.outputs;
+  return isJson(outputs) ? Object.keys(outputs).sort() : [];
+}
+
+/**
+ * `state` stripped of its resources: a state that records root outputs but no resource, the
+ * outputs as they would be with no host, no host key among them.
+ */
+function outputsOnlyState(state: string): string {
+  const document = JSON.parse(state) as Json;
+  const outputs = isJson(document.outputs) ? document.outputs : {};
+  if (!isJson(outputs.host_keys) || !isJson(outputs.hosts))
+    throw new Error(
+      "The outputs-only destroy fixture's state records no host_keys or hosts output",
+    );
+  const hostsType = outputs.hosts.type;
+  return JSON.stringify({
+    ...document,
+    serial: Number(document.serial) + 1,
+    outputs: {
+      ...outputs,
+      host_keys: { ...outputs.host_keys, value: [] },
+      // An object with an attribute per host, as `module.hosts.hosts` is, holds none.
+      hosts: {
+        ...outputs.hosts,
+        value: {},
+        type: Array.isArray(hostsType) && hostsType[0] === "object" ? ["object", {}] : hostsType,
+      },
+    },
+    resources: [],
+  });
 }
 
 /** The plan of the state as teardown makes and reads it: in destroy mode, of today's projection. */
@@ -119,6 +182,27 @@ function tampered(plan: unknown, index: number, actions: readonly string[]): unk
   return copy;
 }
 
+/** The plan with its root output `name`'s change's actions replaced by `actions`. */
+function tamperedOutput(plan: unknown, name: string, actions: readonly string[]): unknown {
+  const copy = structuredClone(plan) as Json;
+  const changes = copy.output_changes as Json;
+  changes[name] = { ...(changes[name] as Json), actions: [...actions] };
+  return copy;
+}
+
+/** Which tampered copies of `shown`, each with one root output change made other than a delete, pass. */
+function outputTamperingProblems(
+  shown: unknown,
+  outputs: readonly OutputChange[],
+  listed: readonly Machine[],
+): string[] {
+  return outputs.flatMap(({ name }) =>
+    TAMPERED_OUTPUTS.filter(
+      (actions) => destroyPlanRefusal(tamperedOutput(shown, name, actions), listed) === undefined,
+    ).map((actions) => `allowed with output ${name} tampered into ${actions.join(", ")}`),
+  );
+}
+
 /** Which tampered copies of `shown`, each with one change made other than a delete, pass. */
 function tamperingProblems(shown: unknown, listed: readonly Machine[]): string[] {
   const count = isJson(shown) ? list(shown.resource_changes).length : 0;
@@ -146,44 +230,71 @@ function verdictProblems(shown: unknown, listed: readonly Machine[]): string[] {
 }
 
 /**
- * What is wrong with the plan's changes: anything but a delete of every resource the state
- * holds, or an exit code that disagrees with them.
+ * What is wrong with the changes to one kind of thing (`what`, resources or root outputs), each
+ * named by `name`: anything but a delete of every one the prior state holds (`prior`).
  */
-function changeProblems(
-  shown: unknown,
-  changing: readonly ResourceChange[],
-  changes: boolean,
-  hosts: readonly HostKey[],
+function deletionProblems(
+  what: string,
+  changes: readonly { readonly name: string; readonly actions: readonly string[] }[],
+  prior: readonly string[],
 ): string[] {
-  const deleted = changing
+  const deleted = changes
     .filter(({ actions }) => actions.join() === "delete")
-    .map(({ address }) => address)
+    .map(({ name }) => name)
     .sort();
-  const prior = priorResources(shown);
   const problems: string[] = [];
-  if (changes !== changing.length > 0)
-    problems.push(`plan -detailed-exitcode reported ${changes ? "" : "no "}change`);
-  if (hosts.length > 0 && prior.length === 0)
-    problems.push("the fixture's state holds no resource");
   if (deleted.join("\n") !== prior.join("\n"))
-    problems.push(`deletes [${deleted.join("; ")}], not every resource [${prior.join("; ")}]`);
-  if (changing.length !== deleted.length)
+    problems.push(`deletes ${what} [${deleted.join("; ")}], not every one [${prior.join("; ")}]`);
+  if (changes.length !== deleted.length)
     problems.push(
-      `changes [${changing.map(({ address }) => address).join("; ")}] other than deletes`,
+      `changes ${what} [${changes.map(({ name, actions }) => `${name} (${actions.join(", ")})`).join("; ")}] other than deletes`,
     );
   return problems;
 }
 
+/**
+ * What is wrong with the plan's changes: anything but a delete of every resource and every root
+ * output the state holds, or an exit code that disagrees with them (`destroyPlanMismatch`) or
+ * with the case: changes for any state but an empty one.
+ */
+function changeProblems(
+  shown: unknown,
+  changing: readonly ResourceChange[],
+  outputs: readonly OutputChange[],
+  changes: boolean,
+  destroyCase: DestroyCase,
+): string[] {
+  const { hosts, outputsOnly } = destroyCase;
+  const prior = priorResources(shown);
+  const recordedOutputs = priorOutputs(shown);
+  const problems: string[] = [];
+  const mismatch = destroyPlanMismatch(changes, changing, outputs);
+  if (mismatch !== undefined) problems.push(`the exit code check refuses it: ${mismatch.summary}`);
+  if (changes !== (hosts.length > 0 || outputsOnly === true))
+    problems.push(`plan -detailed-exitcode reported ${changes ? "" : "no "}change`);
+  if (hosts.length > 0 && prior.length === 0)
+    problems.push("the fixture's state holds no resource");
+  if (outputsOnly && (prior.length > 0 || recordedOutputs.length === 0))
+    problems.push("the fixture's state does not hold only root outputs");
+  const resources = changing.map(({ address, actions }) => ({ name: address, actions }));
+  return [
+    ...problems,
+    ...deletionProblems("resources", resources, prior),
+    ...deletionProblems("outputs", outputs, recordedOutputs),
+  ];
+}
+
 /** The case's report lines and problems, its state already in place. */
 async function checkCase(context: RemovalCheckContext, destroyCase: DestroyCase) {
-  const { hosts, title } = destroyCase;
+  const { hosts, title, label } = destroyCase;
   const instance = fixtureInstance(context, hosts);
-  const label = hosts.length === 0 ? "empty" : `${hosts.length}-hosts`;
   const { shown, changes, recorded, outputs } = await destroyPlan(context, label, instance);
   const readable = resourceChanges(shown);
-  if (readable === undefined) return { report: [], problems: ["fffactory cannot read the plan"] };
+  const outputChanging = outputChanges(shown);
+  if (readable === undefined || outputChanging === undefined)
+    return { report: [], problems: [`${title}: fffactory cannot read the plan`] };
   const changing = readable.filter(changesSomething);
-  const problems = changeProblems(shown, changing, changes, hosts);
+  const problems = changeProblems(shown, changing, outputChanging, changes, destroyCase);
   if (recorded.join() !== hosts.join())
     problems.push(`the state records [${recorded.join(", ")}], not [${hosts.join(", ")}]`);
   const listed: Machine[] = recorded.map((key) => ({
@@ -192,14 +303,41 @@ async function checkCase(context: RemovalCheckContext, destroyCase: DestroyCase)
     hostKey: key,
   }));
   problems.push(...verdictProblems(shown, listed));
+  problems.push(...outputTamperingProblems(shown, outputChanging, listed));
+  const deletedOutputs = outputChanging.filter(changesSomething).length;
   const what =
-    changing.length === 0
+    changing.length === 0 && deletedOutputs === 0
       ? "no change; destroyPlanRefusal allows it"
-      : `deletes all ${changing.length} resources; destroyPlanRefusal allows it and refuses every tampered copy`;
+      : changing.length === 0
+        ? `deletes only its ${deletedOutputs} root outputs, exit 2; destroyPlanRefusal and the exit code check allow it, destroyPlanRefusal refusing every tampered copy`
+        : `deletes all ${changing.length} resources and ${deletedOutputs} root outputs; destroyPlanRefusal allows it and refuses every tampered copy`;
   return {
     report: [`  ${title}: ${what}`],
     problems: problems.map((problem) => `${title}: ${problem}`),
   };
+}
+
+/**
+ * The case's state, in the removal check's state file: synthesized afresh, then stripped of its
+ * resources for the outputs-only case, or removed for an empty state.
+ */
+async function placeState(
+  context: RemovalCheckContext,
+  fixture: StateFixtureContext,
+  destroyCase: DestroyCase,
+): Promise<void> {
+  const { statePath } = context;
+  const synthesized = destroyCase.outputsOnly === true ? ONE_HOST : destroyCase.hosts;
+  if (synthesized.length === 0) {
+    await rm(statePath, { force: true });
+    return;
+  }
+  const projection = projectFactoryVariables(fixtureInstance(context, synthesized), []);
+  if (!projection.ok) throw new Error(`The ${destroyCase.title} destroy fixture does not project`);
+  const state = await synthesizedState(fixture, `destroy-fixture-${synthesized.length}`, {
+    ...projection.variables,
+  });
+  if (destroyCase.outputsOnly === true) await writeFile(statePath, outputsOnlyState(state));
 }
 
 /**
@@ -214,15 +352,7 @@ export async function destroyPlanProblems(
   const report: string[] = ["destroy plans: plan -destroy of the factory root"];
   const problems: string[] = [];
   for (const destroyCase of CASES) {
-    if (destroyCase.hosts.length === 0) await rm(statePath, { force: true });
-    else {
-      const projection = projectFactoryVariables(fixtureInstance(context, destroyCase.hosts), []);
-      if (!projection.ok)
-        throw new Error(`The ${destroyCase.title} destroy fixture does not project`);
-      await synthesizedState(fixture, `destroy-fixture-${destroyCase.hosts.length}`, {
-        ...projection.variables,
-      });
-    }
+    await placeState(context, fixture, destroyCase);
     const result = await checkCase(context, destroyCase);
     report.push(...result.report);
     problems.push(...result.problems);

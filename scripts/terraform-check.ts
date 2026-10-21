@@ -24,9 +24,10 @@
  *    from a local state for several hosts or one that `terraform-state-fixture.ts`
  *    synthesizes from Terraform's own plans, with no AWS account and no factory state;
  * 7. the destroy plan check (`terraform-destroy-check.ts`): teardown's guarded destroy plan
- *    rule, `destroyPlanRefusal`, judges Terraform's real `plan -destroy` of the factory root
- *    from synthesized states with one host and with two, and from an empty state, each plan
- *    deleting every resource the state holds and nothing else.
+ *    rule, `destroyPlanRefusal`, and its exit code check, `destroyPlanMismatch`, judge
+ *    Terraform's real `plan -destroy` of the factory root from synthesized states with one host
+ *    and with two, from an empty state, and from a state holding only the root outputs, each
+ *    plan deleting every resource and root output the state holds and nothing else.
  *
  * The plans run against no AWS account. An override file, added only to this script's copy
  * of the modules, keeps state local and gives the AWS provider documentation example keys,
@@ -358,7 +359,7 @@ async function stateChecks(
     return false;
   }
   console.log(
-    "destroy plans: Terraform's destroy plans delete every resource of the factory root and nothing else, and destroyPlanRefusal allows them and refuses every tampered one",
+    "destroy plans: Terraform's destroy plans delete every resource and root output of the factory root and nothing else, and destroyPlanRefusal and the exit code check allow them, destroyPlanRefusal refusing every tampered one",
   );
   return true;
 }

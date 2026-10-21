@@ -138,6 +138,29 @@ export function resourceChanges(plan: unknown): ResourceChange[] | undefined {
   return changes.every((change) => change !== undefined) ? changes : undefined;
 }
 
+/** A root output's planned change: its name and actions, as `output_changes` gives them. */
+export interface OutputChange {
+  readonly name: string;
+  readonly actions: readonly string[];
+}
+
+/**
+ * Every root output change in a Terraform JSON plan (`output_changes`, a map from output name
+ * to its change), in the plan's order, or undefined when the plan cannot be read: not an
+ * object, `output_changes` not an object, or an output without a printable name or a non-empty
+ * list of printable actions. A plan without `output_changes` changes no output.
+ */
+export function outputChanges(plan: unknown): OutputChange[] | undefined {
+  if (!isRecord(plan)) return undefined;
+  if (plan.output_changes === undefined) return [];
+  if (!isRecord(plan.output_changes)) return undefined;
+  const changes = Object.entries(plan.output_changes).map(([name, change]) => {
+    const actions = readActions(isRecord(change) ? change.actions : undefined);
+    return printable(name) && actions !== undefined ? { name, actions } : undefined;
+  });
+  return changes.every((change) => change !== undefined) ? changes : undefined;
+}
+
 /**
  * The object a JSON plan's change (one entry of `resource_changes`, as Terraform gives it)
  * destroys, by the `id` its `before` names; undefined if it names none.
@@ -151,8 +174,8 @@ export function destroyedInstance(raw: unknown): string | undefined {
 /** Actions that change nothing: reading a data source, or leaving a resource as it is. */
 const UNCHANGED = new Set(["no-op", "read"]);
 
-/** Whether a planned resource change changes anything: not only reads and no-ops. */
-export function changesSomething({ actions }: ResourceChange): boolean {
+/** Whether a planned resource or output change changes anything: not only reads and no-ops. */
+export function changesSomething({ actions }: Pick<ResourceChange, "actions">): boolean {
   return !actions.every((action) => UNCHANGED.has(action));
 }
 

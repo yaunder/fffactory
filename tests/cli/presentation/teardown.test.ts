@@ -298,7 +298,7 @@ describe("a finished teardown (teardown §Report)", () => {
     expect(lines.slice(1)).toEqual([
       "",
       rule("Result"),
-      "  Infrastructure    already absent: the destroy plan found nothing",
+      "  Infrastructure    already absent: the destroy plan destroyed no resource",
       "  Tailnet devices   none found",
       "  Owned secrets     none found",
       `  Already absent    ${OWNED.map(arn).join(", ")}`,

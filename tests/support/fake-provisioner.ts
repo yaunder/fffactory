@@ -112,6 +112,8 @@ function secretArnsOf(variables: Readonly<Record<string, unknown>>): string[] {
 const sameSet = (a: readonly string[], b: readonly string[]) =>
   a.length === b.length && a.every((arn) => b.includes(arn));
 export const hostAddress = (key: string) => `module.hosts.aws_instance.host["${key}"]`;
+/** The root outputs the world's state records once applied, as the factory root declares them. */
+export const ROOT_OUTPUTS = ["host_keys", "hosts", "network"] as const;
 export const STATE_BUCKET_ADDRESS = "module.state_bucket.aws_s3_bucket.state";
 
 /**
@@ -127,9 +129,17 @@ export const STATE_BUCKET_ADDRESS = "module.state_bucket.aws_s3_bucket.state";
  * policy's in-place update whenever the projected secrets differ, as Terraform renders it. Applying a saved plan applies its
  * changes one at a time, each written to the state (a new revision in `store`), and runs
  * `beforeChange` before each: a test can stop the apply part way through by throwing there,
- * as an interrupted Terraform does. A destroy plan (`PlanRequest.destroy`) deletes every host
- * machine and the network the state holds, and nothing else; its network exists from the
- * start when `network` says so, as an empty factory's does once applied.
+ * as an interrupted Terraform does. A destroy plan (`PlanRequest.destroy`) deletes the root
+ * outputs the state records (`ROOT_OUTPUTS`, in `output_changes`) and every host machine and
+ * the network it holds; its network exists from the start when `network` says so, as an empty
+ * factory's does once applied. Its apply deletes the outputs first, before any resource, as
+ * Terraform 1.16.4 does: stopped part way, it leaves resources and no output, never outputs
+ * alone; failing before its first change (`beforeChange(0)` throwing), it leaves the outputs
+ * and resources as they were, as Terraform does when it fails before it begins. The state records its root outputs from the start when `rootOutputs` says so (by
+ * default, once the network exists), once a change other than a destroy's is applied, and no
+ * longer once a destroy deleted them. A test makes a state that records outputs but no resource
+ * directly, by clearing `hosts` and `network` and leaving `rootOutputs`: its destroy plan
+ * deletes only those outputs.
  */
 export function fakeFactoryWorld(options: {
   readonly store: { readonly buckets: Set<string>; readonly states: Map<string, string> };
@@ -141,9 +151,14 @@ export function fakeFactoryWorld(options: {
   readonly secretArns?: readonly string[];
   /** Whether the network exists; by default, once there are hosts. */
   readonly network?: boolean;
+  /** Whether the state records the root outputs; by default, once the network exists. */
+  readonly rootOutputs?: boolean;
 }) {
+  const hasNetwork = options.network ?? (options.hosts ?? []).length > 0;
   const world = {
-    network: options.network ?? (options.hosts ?? []).length > 0,
+    network: hasNetwork,
+    /** Whether the state records the root outputs (`ROOT_OUTPUTS`). */
+    rootOutputs: options.rootOutputs ?? hasNetwork,
     hosts: new Set(options.hosts ?? []),
     /** The instance the state holds for a host key; `i-<key>` unless set. */
     instanceIds: new Map(Object.entries(options.instanceIds ?? {})),
@@ -162,9 +177,13 @@ export function fakeFactoryWorld(options: {
     failNext: undefined as keyof Provisioner | undefined,
   };
   const plans = new Map<string, readonly WorldChange[]>();
+  /** The root outputs each saved destroy plan deletes, by plan file; no other plan is here. */
+  const destroyPlans = new Map<string, readonly string[]>();
   const calls: ProvisionerCall[] = [];
 
-  function write(change: () => void) {
+  /** Writes `change` to the state, which records the root outputs after any but a destroy's. */
+  function write(change: () => void, destroying: boolean) {
+    if (!destroying) world.rootOutputs = true;
     change();
     world.revisions += 1;
     options.store.states.set(options.bucket, `revision-${world.revisions}`);
@@ -284,12 +303,47 @@ export function fakeFactoryWorld(options: {
     ];
   }
 
+  /**
+   * Saves `changes` as the plan at `planFile`, a destroy's (`destroying`) also deleting the root
+   * outputs the state records. Whether it changes anything, as -detailed-exitcode reports it: a
+   * root output change is a change too.
+   */
+  function save(planFile: string, changes: readonly WorldChange[], destroying: boolean): boolean {
+    const outputs = destroying && world.rootOutputs ? ROOT_OUTPUTS : [];
+    plans.set(planFile, changes);
+    if (destroying) destroyPlans.set(planFile, outputs);
+    else destroyPlans.delete(planFile);
+    return changes.length > 0 || outputs.length > 0;
+  }
+
+  /**
+   * The saved plan at `planFile`, taken to be applied: its state writes in order, a destroy's
+   * root outputs deleted first, as Terraform deletes them before any resource, then its changes.
+   */
+  function take(planFile: string) {
+    const changes = plans.get(planFile);
+    if (changes === undefined) throw new Error(`no saved plan at ${planFile}`);
+    const outputs = destroyPlans.get(planFile);
+    plans.delete(planFile);
+    destroyPlans.delete(planFile);
+    const deleteOutputs = () => {
+      world.rootOutputs = false;
+    };
+    return {
+      writes: [
+        ...((outputs ?? []).length > 0 ? [deleteOutputs] : []),
+        ...changes.map((change) => change.apply),
+      ],
+      destroying: outputs !== undefined,
+    };
+  }
+
   const provisioner: Provisioner = {
     output: async (request) => {
       calls.push({ call: "output", request });
       failing("output");
       if (world.outputs !== undefined) return world.outputs;
-      if (world.revisions === 0 && !world.network) return {};
+      if (!world.rootOutputs) return {};
       return { host_keys: [...world.hosts].sort(), hosts: {} };
     },
     plan: async (request) => {
@@ -302,13 +356,14 @@ export function fakeFactoryWorld(options: {
           : request.destroy === true
             ? destroyChanges()
             : factoryChanges(declared, request.variables);
-      plans.set(request.planFile, changes);
-      return { changes: changes.length > 0 };
+      const destroying = request.configuration.root === "factory" && request.destroy === true;
+      return { changes: save(request.planFile, changes, destroying) };
     },
     showPlan: async (request) => {
       calls.push({ call: "showPlan", request });
       failing("showPlan");
       if (world.shown !== undefined) return world.shown;
+      const outputs = destroyPlans.get(request.planFile) ?? [];
       return {
         format_version: "1.2",
         resource_changes: (plans.get(request.planFile) ?? []).map((change) => ({
@@ -316,19 +371,27 @@ export function fakeFactoryWorld(options: {
           type: change.type,
           change: { actions: change.actions, ...shownAttributes(change), after_unknown: {} },
         })),
+        ...(outputs.length === 0
+          ? {}
+          : {
+              output_changes: Object.fromEntries(
+                outputs.map((name) => [
+                  name,
+                  { actions: ["delete"], before: {}, after: null, after_unknown: false },
+                ]),
+              ),
+            }),
       };
     },
     applyPlan: async (request) => {
       calls.push({ call: "applyPlan", request });
       failing("applyPlan");
-      const changes = plans.get(request.planFile);
-      if (changes === undefined) throw new Error(`no saved plan at ${request.planFile}`);
-      plans.delete(request.planFile);
+      const { writes, destroying } = take(request.planFile);
       let applied = 0;
-      for (const change of changes) {
+      for (const apply of writes) {
         world.beforeChange?.(applied);
-        if (request.configuration.root === "backend") change.apply();
-        else write(change.apply);
+        if (request.configuration.root === "backend") apply();
+        else write(apply, destroying);
         applied += 1;
       }
     },

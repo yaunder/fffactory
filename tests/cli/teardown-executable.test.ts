@@ -332,7 +332,7 @@ describe("fffactory teardown executable", () => {
     expect(rerun.stderr).toBe("");
     expect(rerun.code).toBe(0);
     expect(rerun.stdout).toContain(
-      "  Infrastructure    already absent: the destroy plan found nothing",
+      "  Infrastructure    already absent: the destroy plan destroyed no resource",
     );
     expectNothingOwned(world);
     await expectNoSecretMaterial(world, partial, rerun);

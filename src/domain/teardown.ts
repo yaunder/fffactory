@@ -13,6 +13,8 @@ import {
   destroyedInstance,
   hostMachineAddress,
   isHostMachine,
+  type OutputChange,
+  outputChanges,
   type PlanTarget,
   type ResourceChange,
   resourceChanges,
@@ -58,9 +60,20 @@ export type VpcInventory =
  */
 const DESTROYS = new Set(["delete", "no-op", "read"]);
 
+/**
+ * What a destroy plan may do to a root output, each a whole action list: delete it, or leave
+ * it. An output has no side effect, but a destroy that creates or updates one is not a destroy.
+ */
+const DELETES_OUTPUT = new Set(["delete", "no-op"]);
+
 /** A change as the refusal lists it: `ADDRESS (ACTIONS)`. */
 function described({ address, actions }: ResourceChange): string {
   return `${address} (${actions.join(", ")})`;
+}
+
+/** A root output's change as the refusal lists it, by its address: `output.NAME (ACTIONS)`. */
+function describedOutput({ name, actions }: OutputChange): string {
+  return described({ address: `output.${name}`, actions });
 }
 
 /**
@@ -91,25 +104,31 @@ function wrongInstance(
 
 /**
  * The guarded destroy plan's rule (D13), over Terraform's JSON plan of `plan -destroy`: every
- * resource change deletes, reads or leaves its resource, and every instance it deletes is one
- * EC2 lists for the factory (`listed`, the factory-ID-tagged instances) at its host's address.
- * A plan that cannot be read is refused, and so is anything else, each offending change listed
- * as `ADDRESS (ACTIONS)`. A plan with no change, an empty state's, passes: the factory's root
- * is already absent. Undefined when the plan may be applied.
+ * resource change deletes, reads or leaves its resource, every root output change deletes or
+ * leaves its output, and every instance it deletes is one EC2 lists for the factory (`listed`,
+ * the factory-ID-tagged instances) at its host's address. A plan that cannot be read is
+ * refused, and so is anything else, each offending change listed as `ADDRESS (ACTIONS)`, the
+ * resources' then the outputs' (`output.NAME`). A plan with no change, an empty state's,
+ * passes: the factory's root is already absent; so does one deleting only outputs, of a state
+ * that records root outputs but no resource. Undefined when the plan may be applied.
  */
 export function destroyPlanRefusal(plan: unknown, listed: readonly Machine[]): Refusal | undefined {
   const changes = resourceChanges(plan);
-  if (changes === undefined)
+  const outputs = outputChanges(plan);
+  if (changes === undefined || outputs === undefined)
     return {
       summary: "Terraform's destroy plan could not be read",
       details: [],
       nextAction: `Rerun ${TEARDOWN}.`,
     };
-  const others = changes.filter(({ actions }) => !DESTROYS.has(actions.join()));
+  const others = [
+    ...changes.filter(({ actions }) => !DESTROYS.has(actions.join())).map(described),
+    ...outputs.filter(({ actions }) => !DELETES_OUTPUT.has(actions.join())).map(describedOutput),
+  ];
   if (others.length > 0)
     return {
       summary: "Terraform's destroy plan does more than destroy the factory's resources",
-      details: others.map(described),
+      details: others,
       nextAction: `Check the factory's Terraform state with \`fffactory plan\`, then rerun ${TEARDOWN}.`,
     };
   const raws = isRecord(plan) && Array.isArray(plan.resource_changes) ? plan.resource_changes : [];
@@ -128,24 +147,27 @@ export function destroyPlanRefusal(plan: unknown, listed: readonly Machine[]): R
 }
 
 /**
- * Terraform's `-detailed-exitcode` and its JSON plan must agree (defence in depth): changes
- * reported with no resource change, or resource changes with none reported, refuse the plan.
- * Undefined when they agree.
+ * Terraform's `-detailed-exitcode` and its JSON plan must agree (defence in depth). Terraform
+ * counts a root output change as a change, so changes reported with no resource or output
+ * change (`changes`, `outputs`), or either changed with none reported, refuse the plan; a plan
+ * deleting only outputs, of a state that records no resource, agrees with exit 2. Undefined
+ * when they agree.
  */
 export function destroyPlanMismatch(
   reportsChanges: boolean,
   changes: readonly ResourceChange[],
+  outputs: readonly OutputChange[],
 ): Refusal | undefined {
-  const changing = changes.some(changesSomething);
+  const changing = changes.some(changesSomething) || outputs.some(changesSomething);
   if (reportsChanges === changing) return undefined;
   const nextAction = `Check the factory's Terraform state with \`fffactory plan\`, then rerun ${TEARDOWN}.`;
   return reportsChanges
     ? refusal(
-        "Terraform's destroy plan reports changes, but its JSON plan changes no resource",
+        "Terraform's destroy plan reports changes, but its JSON plan changes no resource or output",
         nextAction,
       )
     : refusal(
-        "Terraform's destroy plan reports no change, but its JSON plan changes resources",
+        "Terraform's destroy plan reports no change, but its JSON plan changes resources or outputs",
         nextAction,
       );
 }
@@ -844,10 +866,10 @@ export interface TeardownBucket {
 
 /**
  * What teardown removed (D6), and what it kept and listed (D7, D9). `infrastructure` is
- * `absent` when the destroy plan found nothing to destroy, as when the root was already gone;
- * `not_found_by_ec2` without a state bucket, when no destroy plan was made: EC2 listed no
- * instance or VPC tagged with the factory ID, and nothing outside EC2 was looked for
- * (`checkOutsideEc2`).
+ * `absent` when the destroy plan destroyed no resource (it changed nothing, or deleted only
+ * root outputs), the root already gone; `not_found_by_ec2` without a state bucket, when no
+ * destroy plan was made: EC2 listed no instance or VPC tagged with the factory ID, and nothing
+ * outside EC2 was looked for (`checkOutsideEc2`).
  */
 export interface TeardownReport {
   readonly infrastructure: "destroyed" | "absent" | "not_found_by_ec2";

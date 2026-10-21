@@ -52,6 +52,7 @@ import {
 import {
   changesSomething,
   newPlanId,
+  outputChanges,
   type PlanTarget,
   pinRefusal,
   type ResourceChange,
@@ -957,8 +958,13 @@ type DestroyPlanning =
       readonly kind: "planned";
       /** The resource changes the plan makes, as shown for approval. */
       readonly changes: readonly ResourceChange[];
-      /** Whether to apply it: Terraform reports changes. */
+      /**
+       * Whether to apply it: Terraform reports changes, to resources or only to root outputs, as
+       * a state that records root outputs but no resource plans.
+       */
       readonly applies: boolean;
+      /** Whether it changes a resource: the factory's root not already gone. */
+      readonly destroys: boolean;
       readonly saved: SavedPlanRequest;
       /** The host keys the state records. */
       readonly recorded: readonly string[];
@@ -976,8 +982,8 @@ type DestroyPlanning =
  * The guarded destroy plan (`docs/specs/provisioning.md` §Destroy plan): `plan -destroy` of the
  * factory root, under Terraform's state lock, with factory.json projected with the host keys
  * the state records, judged by `destroyPlanRefusal` over the instances EC2 lists, and refused
- * when Terraform's exit code and its JSON plan disagree. Once interrupted, it starts no further
- * Terraform command.
+ * when Terraform's exit code and its JSON plan's resource and root output changes disagree. Once
+ * interrupted, it starts no further Terraform command.
  */
 async function planDestroy(
   deps: TeardownDependencies,
@@ -1004,10 +1010,13 @@ async function planDestroy(
     });
     if (deps.interrupted()) return interrupted;
     const shown = await deps.provisioner.showPlan(saved);
-    const changes = resourceChanges(shown) ?? [];
-    const refusal = destroyPlanRefusal(shown, machines) ?? destroyPlanMismatch(applies, changes);
+    const changes = (resourceChanges(shown) ?? []).filter(changesSomething);
+    const outputs = outputChanges(shown) ?? [];
+    const refusal =
+      destroyPlanRefusal(shown, machines) ?? destroyPlanMismatch(applies, changes, outputs);
     if (refusal !== undefined) return { kind: "refused", refusal };
-    return { kind: "planned", changes: changes.filter(changesSomething), applies, saved, recorded };
+    const destroys = changes.length > 0;
+    return { kind: "planned", changes, applies, destroys, saved, recorded };
   } catch (error) {
     return {
       kind: "failed",
@@ -1033,7 +1042,7 @@ interface Removal extends Run {
   readonly shownDeleted: readonly string[];
   /** The destroy plan's changes: none without a state bucket. */
   readonly changes: readonly ResourceChange[];
-  /** Whether the destroy plan changes anything, the `factory` root not already gone. */
+  /** Whether the destroy plan changes a resource, the `factory` root not already gone. */
   readonly destroys: boolean;
   /** Why it runs without the lock, the state bucket missing (`ranWithoutLock`); undefined under it. */
   readonly withoutLock: string | undefined;
@@ -1066,7 +1075,7 @@ async function planned(
   const removal = reviewed(deps, teardown, run, {
     keys,
     changes: planning.changes,
-    destroys: planning.applies,
+    destroys: planning.destroys,
     withoutLock: undefined,
   });
   const ended = await unconfirmed(deps, teardown, log, run.progress);
@@ -1192,15 +1201,15 @@ async function unplanned(
 
 /**
  * Whether anything teardown removes before its devices remains: instances or VPCs tagged with
- * the factory ID, or resources its state holds. An earlier teardown deletes the admin client
- * only once none does; with the admin client gone while one does, the devices could not be
- * deleted after it, so the teardown is refused.
+ * the factory ID, or resources its state holds (root outputs alone are none). An earlier
+ * teardown deletes the admin client only once none does; with the admin client gone while one
+ * does, the devices could not be deleted after it, so the teardown is refused.
  */
 function remainsBeforeDevices(
   inventory: Inventory,
   planning: Extract<DestroyPlanning, { readonly kind: "planned" }>,
 ): boolean {
-  return inventory.machines.length > 0 || inventory.vpcIds.length > 0 || planning.applies;
+  return inventory.machines.length > 0 || inventory.vpcIds.length > 0 || planning.destroys;
 }
 
 /** What will be removed and kept, as shown before the confirmation. */
@@ -1441,9 +1450,13 @@ async function destroy(
 
 /**
  * Why the factory cannot be taken for destroyed (D12): EC2 still lists instances or VPCs tagged
- * with its ID, outside its Terraform state, or cannot list them; or, once the destroy applied,
- * the state still records host keys, or cannot be read. Undefined when nothing is left, and
- * once interrupted, which the caller checks first: no Terraform command starts after it.
+ * with its ID, outside its Terraform state, or cannot list them; or, once the destroy applied
+ * (an output-only plan too: `applies`, not `destroys`), the state still records host keys, or
+ * cannot be read. A state without the `host_keys` output, as a destroy leaves it, records none.
+ * Terraform deletes the root outputs before any resource, so against it the state check is a
+ * weak backstop, mainly for a Terraform or provider defect: EC2's listing is the primary check.
+ * Undefined when nothing is left, and once interrupted, which the caller checks first: no
+ * Terraform command starts after it.
  */
 async function leftovers(
   deps: TeardownDependencies,

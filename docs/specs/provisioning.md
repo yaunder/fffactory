@@ -822,11 +822,19 @@ over the factory's instances EC2 lists by the factory ID tag
 
 - A plan that cannot be read is refused: not a JSON object, `resource_changes`
   not a list, or a change without a printable address or a non-empty list of
-  printable actions ([plan and apply](plan-apply.md), `resourceChanges`).
+  printable actions ([plan and apply](plan-apply.md), `resourceChanges`); and
+  `output_changes`, when present, not an object, or a root output change
+  without a printable name or a non-empty list of printable actions
+  (`outputChanges` in `src/domain/plan.ts`), failing closed.
 - Every resource change's actions must be exactly `["delete"]`, `["no-op"]` or
   `["read"]`. Anything else is refused, `create`, `update`, a replacement
   (`["delete", "create"]` or `["create", "delete"]`), `forget` and any action
   fffactory does not know among them, and so is a list mixing the allowed ones.
+- Every root output change's actions must be exactly `["delete"]` or
+  `["no-op"]`. An output has no side effect, but a destroy plan that creates
+  or updates one is not a destroy: anything else, `read` among it, is refused
+  like a resource change, listed as `output.NAME (ACTIONS)` after the
+  resource changes.
 - Each `delete` of a managed `aws_instance` (by type and mode, or by address
   when the plan names neither, as [D11](plan-apply.md#refusals-until-lifecycle-work-lands-d11)
   judges one) must destroy the instance EC2 lists for that host: the `id` its
@@ -838,12 +846,28 @@ over the factory's instances EC2 lists by the factory ID tag
   made of every host. An empty inventory lists no instance, so every instance
   delete is refused.
 - A plan with no change, an empty state's, passes: the `factory` root is
-  already absent, as on a rerun after it was destroyed.
+  already absent, as on a rerun after it was destroyed. So does a plan that
+  deletes only root outputs, of a state that records root outputs but no
+  resource: it is applied, so the state records no output
+  ([teardown §Rerun](teardown.md#rerun)).
+
+Terraform's `-detailed-exitcode` and the JSON plan must agree, as defence in
+depth (`destroyPlanMismatch`, [teardown §Refusals](teardown.md#refusals)):
+exit 2 needs a resource change or a root output change that is not `no-op`
+or `read`, and exit 0 needs neither. Exit 2 is a "non-empty diff (changes
+present)", and root output changes are part of that diff: in the PR #89
+review, Terraform 1.16.4 exited 2 for a `-refresh=false` destroy plan of a
+state with no resource and only `host_keys = []`,
+`output_changes.host_keys.actions` `["delete"]` and no `resource_changes`.
+`just terraform-check` reproduces that behaviour with a state recording no
+resource and the root's three outputs (`host_keys = []`, `hosts = {}` and
+`network`), each deleted. Counting only resource changes would refuse that
+plan on every rerun.
 
 | Refused | Summary | Details | Next action |
 | --- | --- | --- | --- |
 | Unreadable | `Terraform's destroy plan could not be read` | None | ``Rerun `fffactory teardown`.`` |
-| A change other than a delete, no-op or read | `Terraform's destroy plan does more than destroy the factory's resources` | Each offending change, in the plan's order, as `ADDRESS (ACTIONS)`, such as `module.network.aws_vpc.this (update)` | ``Check the factory's Terraform state with `fffactory plan`, then rerun `fffactory teardown`.`` |
+| A change other than a delete, no-op or read, or a root output change other than a delete or no-op | `Terraform's destroy plan does more than destroy the factory's resources` | Each offending resource change, in the plan's order, as `ADDRESS (ACTIONS)`, such as `module.network.aws_vpc.this (update)`, then each offending output change, in the plan's order, as `output.NAME (ACTIONS)`, such as `output.hosts (update)` | ``Check the factory's Terraform state with `fffactory plan`, then rerun `fffactory teardown`.`` |
 | An instance delete EC2 does not back | `Terraform's destroy plan destroys an instance EC2 does not list for the factory` | Each such delete as `ADDRESS (delete): ` and why: `the plan does not name the instance it destroys`; `instance ID, which EC2 does not list with the factory's tags`; `instance ID, which EC2 lists without a well-formed host key tag`; `instance ID, which EC2 lists for host KEY` | ``Check the factory's instances in the EC2 console, then rerun `fffactory teardown`.`` |
 
 The first refusal that applies is the one given, in the table's order. A host
@@ -854,8 +878,11 @@ The rule relies on Terraform's documented JSON plan format and plan modes
 
 - `plan -destroy` "creates a plan whose goal is to destroy all remote objects
   that currently exist, leaving an empty Terraform state";
-  `-detailed-exitcode` exits 0 for "empty diff (no changes)" and 2 when
-  changes are present.
+  `-detailed-exitcode` exits 0 for "empty diff (no changes)" and 2 for a
+  "non-empty diff (changes present)"
+  (<https://developer.hashicorp.com/terraform/cli/commands/plan>). Root output
+  changes count among them: observed, not documented (Terraform 1.16.4, in the
+  PR #89 review and by `just terraform-check`, above).
 - `resource_changes` describes "the individual change actions that Terraform
   plans", each with `change.actions`, one of `["no-op"]`, `["create"]`,
   `["read"]`, `["update"]`, `["delete", "create"]`, `["create", "delete"]` and
@@ -865,20 +892,28 @@ The rule relies on Terraform's documented JSON plan format and plan modes
   block with `destroy = false` plans ("remove the resource from state without
   destroying the actual resource"), is not in that list; it is refused like any
   other action, and the modules hold no `removed` block ([Guardrails](#guardrails)).
+- `output_changes` "describes the planned changes to the output values of the
+  root module", each a change representation with the same `actions`
+  (<https://developer.hashicorp.com/terraform/internals/json-format>); a
+  destroy plan deletes every output the state records.
 - `resource_drift` reports what refreshing found, not what the plan does, and
   is not read.
 
 `just terraform-check` checks the rule against Terraform's own destroy plans
 ([Guardrails](#guardrails)): from local states synthesized from its plans of
-the example with one host and with two, and from an empty state, each planned
-with `-destroy`, as teardown plans it, and `-refresh=false`, since the offline
+the example with one host and with two, from an empty state, and from a state
+holding only the root outputs (the one-host state stripped of its resources,
+`host_keys` `[]` and `hosts` `{}`, `network` kept), each planned with
+`-destroy`, as teardown plans it, and `-refresh=false`, since the offline
 check has no AWS to refresh against (teardown refreshes). Each plan must delete
-every managed resource its prior state holds and change nothing else (the
-empty state's changes nothing, and `-detailed-exitcode` agrees);
-`destroyPlanRefusal` must pass it with EC2 listing the instances the state
-records, and refuse it with EC2 listing none, with another instance listed in
-place of one, and with any one change tampered into `update`, a replacement or
-`forget`.
+every managed resource and every root output its prior state holds and change
+nothing else (the empty state's changes nothing, the outputs-only state's
+deletes only its outputs and exits 2), and `destroyPlanMismatch` must agree
+with its exit code; `destroyPlanRefusal` must pass it with EC2 listing the
+instances the state records, and refuse it with EC2 listing none, with another
+instance listed in place of one, with any one resource change tampered into
+`update`, a replacement or `forget`, and with any one output change tampered
+into `update` or `create`.
 
 ### Tagged VPCs
 
@@ -1122,10 +1157,15 @@ plans, the empty factory's plan, the removal plans and the destroy plans
 Destroy plan: `tests/domain/teardown.test.ts` (hand-written plans: deletes,
 reads and no-ops passed; an update, a create, a replacement either way,
 `forget`, an unknown action and a mixed list refused, each as `ADDRESS
-(ACTIONS)` in the plan's order; an instance delete EC2 does not list, one
+(ACTIONS)` in the plan's order; root outputs deleted or left passed, a plan
+deleting only outputs passed, an output created, updated, read, replaced or
+changed by an unknown action refused as `output.NAME (ACTIONS)` after the
+resource changes, unreadable `output_changes` refused; an instance delete EC2 does not list, one
 listed for another host or without a well-formed host key tag (never echoed),
 one that names no instance, and every one with an empty inventory refused; an
-unreadable plan refused; an empty plan passed), and
+unreadable plan refused; an empty plan passed), `tests/domain/plan.test.ts`
+(`outputChanges`: by name in the plan's order, none without `output_changes`,
+an unreadable shape undefined), and
 `tests/infrastructure/ec2-inventory.test.ts` (the tagged VPC listing over
 stubbed calls: its filter, pages and session, none listed, a VPC without a
 well-formed ID, a failure by name and the deadline; and over the real SDK
