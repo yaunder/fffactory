@@ -3,6 +3,7 @@ import type { StateBucketReadiness } from "../domain/backend-bootstrap";
 import type { HeldLock, LockBreakEntry, LockRecord } from "../domain/factory-lock";
 import type { FactoryId } from "../domain/instance";
 import type { OperationRecord } from "../domain/operation";
+import type { BucketDeletion } from "../domain/state-bucket-deletion";
 
 /** The factory's state bucket, reached with the credentials the account check allowed. */
 export interface StateBucket {
@@ -22,8 +23,9 @@ export type LockCreation =
 /**
  * Port: the state bucket, as the factory's operations use it: its readiness, the
  * factory-wide lock (one object, `lockKey`) and its break log, the records of operations
- * that held the lock, and the revision of the factory's Terraform state. Every call
- * rejects, naming the AWS error but never quoting it, when it cannot complete.
+ * that held the lock, the revision of the factory's Terraform state, and, last of all, its
+ * deletion. Every call but `deleteBucket` rejects, naming the AWS error but never quoting it,
+ * when it cannot complete; `deleteBucket` resolves every failure the same way, as `remains`.
  */
 export interface LockStore {
   /**
@@ -48,4 +50,19 @@ export interface LockStore {
    * changes whenever the state is written; undefined when there is no state yet.
    */
   stateRevision(bucket: StateBucket): Promise<string | undefined>;
+  /**
+   * Deletes every object version and delete marker in the bucket, page by page as it is listed,
+   * the lock's last, only once every other is gone, oldest first and the current one alone and
+   * last of all (`deletionBatches`, `lockBatches`), then the bucket itself
+   * (`docs/specs/provisioning.md` §Deleting the state bucket). A bucket already gone is
+   * `absent`. Nothing else in the factory may run meanwhile: its caller holds the lock, and
+   * this deletes it. On `absent` the lock is gone with the bucket: the caller must neither
+   * release it nor write an operation record into the bucket. On `remains`, `lock` says
+   * whether it is still held: once its versions are being deleted the factory may be
+   * unlocked. Releasing it by its version while the bucket exists is harmless either way.
+   *
+   * TODO(re-evaluate when teardown handles interruption, #86): take `interrupted`, and start no
+   * further DeleteObjects call once it is set.
+   */
+  deleteBucket(bucket: StateBucket): Promise<BucketDeletion>;
 }

@@ -576,7 +576,8 @@ every later operation goes from the bucket and readiness checks straight to
 the lock. The backend root module keeps no state of its own (it has no
 backend block, and an operation's local state is removed with it): the
 bucket is created once and, with `prevent_destroy`, never destroyed by
-fffactory.
+Terraform. It is deleted only by removing the whole factory, with S3 calls
+([Deleting the state bucket](#deleting-the-state-bucket)).
 
 Bootstrap necessarily runs before the lock exists: the lock lives in the
 bucket, so nothing can be locked until the bucket is created. The lock is taken
@@ -790,6 +791,136 @@ state bucket failed: REASON`, where the reason is the S3 error code, `the
 credential provider failed (NAME)`, `network error (CODE)` or `timed out after
 N s`, never an AWS or SDK message.
 
+## Deleting the state bucket
+
+Removing a whole factory ([#56](https://github.com/yaunder/fffactory/issues/56))
+deletes its state bucket last (D6): the lock lives in it. No command calls
+this yet: the teardown use case and `fffactory teardown` follow, and decide
+when, and under which lock, it runs. Terraform never destroys the bucket
+(`prevent_destroy`); `LockStore.deleteBucket` empties and deletes it with S3
+calls, every one with `ExpectedBucketOwner` set to the factory's account:
+
+1. `ListObjectVersions`, 1000 per page, following `NextKeyMarker` and
+   `NextVersionIdMarker` while a page is truncated: every object version and
+   every delete marker of every key, the Terraform state and its lock file,
+   the operation records, the break log and the factory lock among them, each
+   with whether it is its key's current one (`IsLatest`) and when it was
+   written (`LastModified`). A version without an ID is the `null` version. A
+   truncated page that names no next key, or a listed version without a key or
+   without `LastModified`, fails the listing; none is looped on, skipped or
+   guessed.
+2. Each page is deleted before the next is listed: `DeleteObjects` in quiet
+   mode, each object named by its key and version ID, at most 1000 per call
+   (`DELETE_OBJECTS_LIMIT`), in listing order, every key but the lock's
+   (`<factory ID>-lock.json` exactly; the break log's keys, under
+   `<factory ID>-lock-log/`, are not the lock's). The lock's versions are set
+   aside (`deletionBatches`). Deleting by version ID removes that version, or
+   that delete marker, permanently, and writes no delete marker. The next page
+   is asked for from the markers the last named, though the versions they name
+   are gone by then: S3 resumes after the place they name. Were S3 ever to
+   refuse such a marker, the listing fails and the bucket remains; a rerun
+   lists from the start, the pages before already deleted.
+3. Once the last page is done, the lock's versions and delete markers, in
+   calls of their own (`lockBatches`): first every one no longer current,
+   oldest first by `LastModified`, then the current one (`IsLatest`) alone, in
+   the last call. The SDK returns a page's versions and its delete markers in
+   two lists, each newest first, so listing order alone does not say whether a
+   delete marker is older than a version; those written in the same instant go
+   in reverse listing order. Deleting one no longer current never changes
+   which is current. Deleting the current one makes the newest left current,
+   so deleting it while an older one is left would revive an earlier holder's
+   lock; and S3 promises no order within one call, so the current one never
+   shares a call. The lock key seldom holds more than the lock in place: each
+   release deletes its own version.
+4. The lock's versions are deleted only once every other version is gone.
+   When `DeleteObjects` reports a version it did not delete, the rest of the
+   pages are still listed and their other keys deleted, but not the lock's
+   versions, nor the bucket. The lock's calls stop at the first that reports a
+   version it did not delete, or fails: the current one is deleted only once
+   every other one of the lock's is gone.
+5. `DeleteBucket`.
+
+| S3 answers | Result | The lock (`lock`) |
+| --- | --- | --- |
+| `DeleteBucket` succeeds | `absent` | Gone with the bucket |
+| 404 (`NoSuchBucket`) to any call | `absent`: the bucket is already gone, as on a rerun after it was deleted | Gone with the bucket |
+| `DeleteObjects` reports versions it did not delete | `remains`: the listed versions not deleted, the lock's among them (those of its calls never made too), and S3's error code for them, each code once (`Unknown` for one that is not a plain name) | `held` for another key's version; `unknown` for one of the lock's |
+| A call fails: an S3 error such as `AccessDenied`, the credential provider, the network, its deadline | `remains`: the failure, `S3 OPERATION on the state bucket failed: REASON` ([S3 failures](#s3-failures)), and the listed versions not yet deleted, unknown until the listing reached its last page. A call past its deadline may still have reached S3, so what is left is at most the count | `held` before the lock's calls; `unknown` in them |
+| `DeleteBucket` refuses with `BucketNotEmpty` | `remains`, with the count unknown: a version was written since the listing | `deleted` |
+| `DeleteBucket` fails otherwise | `remains`, empty: no version left | `deleted` |
+
+A bucket another account owns answers 403 to the listing: it `remains`,
+nothing is deleted, and it is never taken for absent. A failed call stops the
+deletion at once; the next run lists again and resumes from what is left.
+Each listing page, each `DeleteObjects` call and `DeleteBucket` has a 30 s
+deadline of its own (`S3_TIMEOUT_MS`), so a bucket too large to list within
+one still loses a page of versions to every run.
+
+The caller holds the factory lock, and deleting the bucket deletes it:
+
+- `absent`: the lock is gone with the bucket. The caller neither releases it
+  nor writes an operation record into the bucket.
+- `remains` with `lock` `held`: it stopped before the lock's versions, so the
+  lock stays held, and the factory locked, until the caller releases it.
+- `remains` with `lock` `unknown`: a call for the lock's versions failed or
+  refused one, so the lock may still be held, or be gone. Never an earlier
+  version of it current: the current one is deleted alone, last, and only once
+  every other one of the lock's is gone.
+- `remains` with `lock` `deleted`: every version of the lock is gone, so the
+  factory is unlocked, and another operation may lock it (`DeleteBucket` then
+  refuses with `BucketNotEmpty`).
+
+Releasing the lock by its version while the bucket still exists is harmless in
+every case: it deletes that version only, and a version already gone is
+deleted again without error.
+
+Why, per the Amazon S3 API Reference and User Guide (checked 2026-10-21):
+
+- `DeleteBucket`: "All objects (including all object versions and delete
+  markers) in the bucket must be deleted before the bucket itself can be
+  deleted." S3 refuses a bucket that is not empty with `BucketNotEmpty`.
+- `DeleteObjects` takes "up to 1,000 keys" and, optionally, a version ID for
+  each, and answers 200 with each key's result, "success or failure": a
+  per-key failure is an `Error` entry with its `Code`, never a failed call.
+  In quiet mode "the response includes only keys where the delete operation
+  encountered an error". Naming a delete marker's version ID deletes the
+  marker. "If the object specified in the request isn't found, Amazon S3
+  confirms the deletion by returning the result as deleted", so a rerun
+  deleting versions already gone succeeds.
+- `ListObjectVersions` returns at most 1,000 entries per answer, versions as
+  `Version` and delete markers as `DeleteMarker`, each with `IsLatest`
+  (whether it is its key's current one) and `LastModified`, a key's newest
+  first; a truncated answer (`IsTruncated`) names where the next starts
+  (`NextKeyMarker`, `NextVersionIdMarker`). The SDK gathers them into two
+  lists, `Versions` and `DeleteMarkers`.
+- Deleting a key's current version, or its current delete marker, by version
+  ID makes the newest left current: a delete marker deleted that way brings
+  the version under it back. Deleting one no longer current changes nothing
+  else.
+- `ExpectedBucketOwner`: "If the account ID that you provide does not match
+  the actual owner of the bucket, the request fails with the HTTP status code
+  `403 Forbidden`."
+- Consistency: object writes, deletes and listings are strongly consistent, so
+  a version deleted is never listed again. "Bucket configurations have an
+  eventual consistency model": "if you delete a bucket and immediately list
+  all buckets, the deleted bucket might still appear". `DeleteBucket`'s success
+  is therefore the proof of absence, never a later `HeadBucket`, which may
+  still find the bucket for a while. A run in that window lists an empty
+  bucket and deletes it again, or finds it gone: `absent` either way.
+
+Backend bootstrap enables neither Object Lock nor MFA delete, so neither is
+handled. Incomplete multipart uploads are neither listed nor aborted:
+fffactory starts none. If anything else kept the bucket, `DeleteBucket` would
+fail and the bucket `remains`, never `absent`.
+
+The operator's credentials need, beyond the lock's:
+
+| Permission | Resource | For |
+| --- | --- | --- |
+| `s3:ListBucketVersions` | `arn:aws:s3:::BUCKET` | The listing. |
+| `s3:DeleteObject`, `s3:DeleteObjectVersion` | `arn:aws:s3:::BUCKET/*` | `DeleteObjects` by version ID. |
+| `s3:DeleteBucket` | `arn:aws:s3:::BUCKET` | The bucket. |
+
 ## Layer mapping
 
 | Layer | Module | Responsibility |
@@ -808,12 +939,13 @@ N s`, never an AWS or SDK message.
 | Infrastructure | `assets/terraform/` | The Terraform modules and their provider lockfiles. |
 | Domain | `src/domain/backend-bootstrap.ts` | The create-only rule (`bootstrapPlanVerdict`, each offending change as a `ResourceChange`) and `BootstrapContext`; the state bucket's readiness rule, its TLS-only policy and its check, and `UnreadyBucket` (where the bucket is, what S3 reports and each setting it lacks). Pure; no text layout. |
 | Domain | `src/domain/factory-lock.ts` | The lock record, its key and break-log key, parsing, staleness (`isStale`, `lockAge`, `formatDuration`), and the break confirmation rule (`confirmsBreak`). Pure; no text layout. |
+| Domain | `src/domain/state-bucket-deletion.ts` | `DELETE_OBJECTS_LIMIT`, the order the bucket is emptied in, page by page with the lock's versions set aside (`deletionBatches`), then the lock's, in batches of their own, those no longer current oldest first and the current one alone and last (`lockBatches`), and how deleting it ended (`BucketDeletion`, and what became of the lock, `LockAfterDeletion`). Pure. |
 | CLI adapter | `src/cli/presentation/lock.ts` | The holder lines (`describeHeldLock`) and the lock refusal: `lockRefusalReport` in blocks for plan, apply and upgrade, and the unstyled `lockRefusal` the worker commands still print. |
 | Application | `src/application/bootstrap-backend.ts` | `bootstrapBackend` and `beginFactoryOperation`: the bootstrap plan approved as a `PlanReview`, an unready bucket returned as its `UnreadyBucket`; and `applySavedBootstrap`, a saved bootstrap plan's exact apply, its review shown as the same `PlanReview`. |
 | CLI adapter | `src/cli/presentation/plan.ts` | The bootstrap plan as shown (`bootstrapSection`), and as `plan` saves it (`savedBootstrapPlanReport`), and the unready bucket's refusal (`planRefusalReport`): what it lacks, the AWS CLI commands that complete it, and the warning that `put-bucket-policy` replaces the whole policy. |
 | Application | `src/application/factory-lock.ts` | `stateBucketOf`, `lockHolder`, `acquireFactoryLock`, `releaseFactoryLock`, `settleFactoryLock`, `withFactoryLock`, `breakFactoryLock`. |
 | Application | `src/application/lock-store.ts`, `src/application/approval.ts`, `src/application/operator-prompt.ts` | The `LockStore`, `Approval` and `OperatorPrompt` ports. |
-| Infrastructure | `src/infrastructure/aws-s3-lock-store.ts` | `s3LockStore`: HeadBucket, the bucket's versioning, public access block, encryption and policy, conditional PutObject, GetObject and DeleteObject by version, PutObject of [operation records](plan-apply.md#operation-records) and HeadObject of the Terraform state, always with `ExpectedBucketOwner`. |
+| Infrastructure | `src/infrastructure/aws-s3-lock-store.ts` | `s3LockStore`: HeadBucket, the bucket's versioning, public access block, encryption and policy, conditional PutObject, GetObject and DeleteObject by version, PutObject of [operation records](plan-apply.md#operation-records) and HeadObject of the Terraform state; and the bucket's deletion, ListObjectVersions page by page, each page's DeleteObjects by version before the next, then the lock's, and DeleteBucket, each failure `remains` by name and a 404 `absent`; always with `ExpectedBucketOwner`. |
 | Infrastructure | `src/infrastructure/aws-session.ts` | One deadline per port call, and AWS failures described by name and code. |
 | Infrastructure | `src/infrastructure/terminal-prompt.ts` | `terminalPrompt`: echoed and hidden questions on standard error, standard input; at a terminal both are read in raw mode, so Ctrl-C cancels a question rather than interrupting `fffactory`, and an echoed answer is echoed by the prompt. |
 | CLI adapter | `src/cli/main.ts` | Wires `managedTerraform()` as doctor's probe and the provisioner's installer, `terraformProvisioner`, `s3LockStore()`, `terminalPrompt(process.stdin, process.stderr)`, the host name and the clock, and `interruptible` (`src/cli/interrupts.ts`): on interrupt, says so on standard error, marks the command interrupted and stops running tools, waits up to `RETURN_GRACE_MS` for a command that waits on an interrupt (`waitsOnInterrupt`) to return, and kills them on a second signal. |
@@ -879,7 +1011,12 @@ plans with each reason; the unready bucket's guidance, its commands in
 bootstrap's order and the whole-policy warning),
 `tests/domain/factory-lock.test.ts` (keys, record round trip, unreadable
 records, holder and breaker recorded in printable ASCII, age and staleness,
-confirmation by token only, the break entry), `tests/cli/presentation/lock.test.ts`
+confirmation by token only, the break entry),
+`tests/domain/state-bucket-deletion.test.ts` (a page's lock versions and
+delete markers set aside; the break log and another factory's lock not the
+lock; batches of at most 1000; the lock's versions and delete markers, listed
+apart, no longer current oldest first by when written, those written in the
+same instant in reverse listing order, then the current one alone, last), `tests/cli/presentation/lock.test.ts`
 (holder lines, a stale and an unreadable lock, the refusal), `tests/application/bootstrap-backend.test.ts` (an
 existing bucket skipped, a half-bootstrapped one refused before any plan or
 lock, a missing one planned, shown, approved and applied, a
@@ -899,7 +1036,24 @@ never-versioned and suspended buckets: HeadBucket by status, the readiness
 settings, conditional writes, reads, deletes by version, the break log, a
 never-versioned or suspended bucket refusing the lock and keeping nothing, a
 leftover `null`-version lock held and broken, error names, a missing profile, a deadline and a
-closed port), `tests/infrastructure/terminal-prompt.test.ts` and
+closed port; deleting the bucket: each page deleted before the next is listed, the lock's
+versions after every other's, oldest first and the current one alone and last, a current
+delete marker the SDK lists apart deleted after the version under it, then the bucket, a
+version S3 would not delete keeping the lock held and the bucket while every other page is
+still listed and deleted, the lock's own versions refused or their call failing (`unknown`),
+the lock's calls stopping at the first refusal, its current version and the bucket never sent,
+unprintable codes, a failed or timed-out call stopping at once, its count unknown before the
+last page, a failed listing on the first page or a later one, a markerless listing, a keyless
+version or one without `LastModified`, `BucketNotEmpty` and
+other `DeleteBucket` refusals (`deleted`), a 404 at each step, a deadline per page and per call;
+and against the stub a used bucket with records, a break log, state versions, delete markers
+and the lock emptied and deleted, `ExpectedBucketOwner` on every request, another account's
+bucket untouched, 1500 versions deleted page by page, the lock's versions oldest first and
+the current one alone and last, a lock released by a delete marker and taken again deleted
+in that order, a refused version leaving the lock held, a version written after the listing,
+and a bucket already gone; and the stub itself, as S3, resuming a listing after a deleted
+version, refusing a version marker it never gave, and making the version under a current
+delete marker current once that marker is deleted), `tests/infrastructure/terminal-prompt.test.ts` and
 `tests/cli/lock.test.ts` (confirmation by `--lock-id` or typed ID only, the
 log entry, a lock replaced while confirming, the account refusal before S3).
 
@@ -911,4 +1065,5 @@ user data by [#97](https://github.com/yaunder/factory/issues/97); first apply
 and the factory-wide lock by [#98](https://github.com/yaunder/factory/issues/98); the lock's
 interruption rule, operation records and the state revision by
 [#99](https://github.com/yaunder/factory/issues/99); the hosts' read of the
-credential references by [#68](https://github.com/yaunder/fffactory/issues/68).
+credential references by [#68](https://github.com/yaunder/fffactory/issues/68);
+deleting the state bucket by [#82](https://github.com/yaunder/fffactory/issues/82).

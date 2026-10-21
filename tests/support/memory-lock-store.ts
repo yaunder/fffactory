@@ -2,6 +2,7 @@ import type { LockCreation, LockStore, StateBucket } from "../../src/application
 import type { StateBucketReadiness } from "../../src/domain/backend-bootstrap";
 import type { HeldLock, LockBreakEntry, LockRecord } from "../../src/domain/factory-lock";
 import { type OperationRecord, operationKey } from "../../src/domain/operation";
+import type { BucketDeletion } from "../../src/domain/state-bucket-deletion";
 
 /** A state bucket as backend bootstrap leaves it. */
 export const READY_BUCKET: StateBucketReadiness = {
@@ -17,7 +18,9 @@ export const READY_BUCKET: StateBucketReadiness = {
  * the version it names. Buckets are keyed by name and record every call; each is ready as
  * backend bootstrap leaves it unless `readiness` says otherwise. Operation records are kept
  * by key, each write replacing the last, with every write in `operationWrites`; the
- * factory's Terraform state revision per bucket is `states`, absent before any apply.
+ * factory's Terraform state revision per bucket is `states`, absent before any apply. Break
+ * logs and operation records are kept by key, each remembering its bucket: deleting a bucket
+ * removes its own, then its lock, then the bucket.
  */
 export class MemoryLockStore implements LockStore {
   readonly calls: string[] = [];
@@ -34,8 +37,17 @@ export class MemoryLockStore implements LockStore {
   readonly operationWrites: OperationRecord[] = [];
   /** The factory's Terraform state revision per bucket; absent while there is no state. */
   readonly states = new Map<string, string>();
+  /** The bucket each break log entry and operation record was written to, by key. */
+  private readonly written = new Map<string, string>();
   /** Runs once, after `create` is refused and before the held lock is read. */
   beforeRead: (() => void) | undefined;
+  /**
+   * What `deleteBucket` answers once it has deleted everything but the lock, as a failure
+   * partway does; the bucket stays, and the lock with it unless the answer's `lock` is
+   * `deleted`, as when DeleteBucket fails after the lock's versions are gone. Undefined
+   * deletes the bucket.
+   */
+  deletionLeaves: Extract<BucketDeletion, { kind: "remains" }> | undefined;
 
   constructor(existing: readonly string[] = []) {
     for (const bucket of existing) this.buckets.add(bucket);
@@ -97,12 +109,14 @@ export class MemoryLockStore implements LockStore {
     this.requireBucket(bucket);
     if (this.logs.has(key)) throw new Error("S3 answered PreconditionFailed");
     this.logs.set(key, entry);
+    this.written.set(key, bucket.bucket);
   }
 
   async writeOperation(bucket: StateBucket, record: OperationRecord): Promise<void> {
     this.calls.push(`writeOperation ${bucket.bucket} ${record.stages.at(-1)?.status}`);
     this.requireBucket(bucket);
     this.operations.set(operationKey(record), record);
+    this.written.set(operationKey(record), bucket.bucket);
     this.operationWrites.push(record);
   }
 
@@ -110,5 +124,23 @@ export class MemoryLockStore implements LockStore {
     this.calls.push(`stateRevision ${bucket.bucket}`);
     this.requireBucket(bucket);
     return this.states.get(bucket.bucket);
+  }
+
+  async deleteBucket(bucket: StateBucket): Promise<BucketDeletion> {
+    this.calls.push(`deleteBucket ${bucket.bucket}`);
+    if (!this.buckets.has(bucket.bucket)) return { kind: "absent" };
+    for (const [key, written] of this.written)
+      if (written === bucket.bucket) {
+        this.logs.delete(key);
+        this.operations.delete(key);
+        this.written.delete(key);
+      }
+    this.states.delete(bucket.bucket);
+    const left = this.deletionLeaves;
+    if (left === undefined || left.lock === "deleted") this.locks.delete(bucket.bucket);
+    if (left) return left;
+    this.readiness.delete(bucket.bucket);
+    this.buckets.delete(bucket.bucket);
+    return { kind: "absent" };
   }
 }

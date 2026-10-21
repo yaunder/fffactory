@@ -26,7 +26,9 @@ and every AWS endpoint at a closed local port; `infrastructure/aws-isolation.tes
 proves it. A spawned `fffactory` gets an explicit environment built on
 `isolatedAwsEnvironment` from `support/aws-isolation.ts`, never the inherited one. Test
 AWS through a fake `CallerIdentity` or `VpcQuotaProbe` (`support/doctor-fakes.ts`), the
-versioned in-memory `support/memory-lock-store.ts` and `support/memory-plan-store.ts`,
+versioned in-memory `support/memory-lock-store.ts` (whose bucket deletion removes only that
+bucket's records and break log, and can stop before the lock, or after it with the bucket left,
+`deletionLeaves`) and `support/memory-plan-store.ts`,
 the fakes in `support/fake-secrets.ts` (Secrets Manager, whose listing, restore, deletion and
 looks answer as scripted and are recorded in `calls`, and the operator prompt) and
 `support/fake-provisioner.ts` (a scripted `fakeProvisioner`, and `fakeFactoryWorld`, a
@@ -36,8 +38,14 @@ way, which can replace a host or change its instance type in place (`resize`), a
 `support/factory-world.ts` builds the plan and apply fixtures on it), stubbed SDK calls,
 or the real SDK pointed at `support/stub-sts.ts`, `support/stub-vpc-quota.ts` (EC2 and
 Service Quotas), `support/stub-s3.ts` (a versioned, never-versioned or suspended bucket
-with conditional writes and bootstrap's settings, some of them lackable,
-`forcePathStyle`) or `support/stub-secrets-manager.ts` (which also answers `GetSecretValue`, and ListSecrets,
+with conditional writes and bootstrap's settings, some of them lackable, older versions and
+delete markers (`addVersions`), a current delete marker, written as a DeleteObject without a
+version ID writes one (`markDeleted`), whose deletion makes the version under it current again,
+ListObjectVersions with `IsLatest` and `LastModified`, in pages resumed after their markers even
+once those versions are deleted, and refusing with `InvalidArgument` a version marker it never
+gave, DeleteObjects with per-key
+failures (`undeletable`) recorded in `deleteBatches`, and DeleteBucket refused while
+anything is left, `forcePathStyle`) or `support/stub-secrets-manager.ts` (which also answers `GetSecretValue`, and ListSecrets,
 RestoreSecret, DeleteSecret and DescribeSecret as AWS documents them: tag filters by prefix,
 scheduled secrets, pages of `pageSize`, a forced deletion of a scheduled secret refused and one
 still described for `lingering` looks), with AWS's documentation example
