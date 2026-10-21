@@ -2378,6 +2378,51 @@ describe("fffactory teardown: an interrupt keeps the lock at every step (teardow
     });
   });
 
+  test.each(["restore", "remove"] as const)(
+    "interrupted during one secret's %s, it starts no Secrets Manager call for it or the next",
+    async (operation) => {
+      const [first, second] = OWNED;
+      if (first === undefined || second === undefined) throw new Error("two owned secrets");
+      const listing: SecretListing = {
+        kind: "listed",
+        secrets: [{ ...first, pendingDeletion: true }, second],
+      };
+      const w = world({ listing });
+      let interrupted = false;
+      const store = w.secrets.store;
+      const secrets = {
+        ...store,
+        restore: async (lookup: Parameters<typeof store.restore>[0]) => {
+          if (operation === "restore") interrupted = true;
+          return store.restore(lookup);
+        },
+        remove: async (lookup: Parameters<typeof store.remove>[0]) => {
+          if (operation === "remove") interrupted = true;
+          return store.remove(lookup);
+        },
+      };
+      const result = await teardownFactory(
+        { ...w.deps, secrets, interrupted: () => interrupted },
+        request(w),
+      );
+      expect(result).toMatchObject({
+        kind: "interrupted",
+        locked: true,
+        reached: "removing_secrets",
+        removing: true,
+        lock: "held",
+      });
+      const deleting = w.secrets.calls.filter((call) => /^(restore|remove|exists)/.test(call));
+      expect(deleting).toEqual(
+        operation === "restore"
+          ? [`restore ${first.arn}`]
+          : [`restore ${first.arn}`, `remove ${first.arn}`],
+      );
+      expect(w.secrets.secrets().map(({ arn }) => arn)).toContain(second.arn);
+      expect(w.lockStore.locks.size).toBe(1);
+    },
+  );
+
   test("an interrupt after dispatch was stopped names where it is stopped", async () => {
     const w = world({ workers: { "builder-1": "running" } });
     let interrupted = false;

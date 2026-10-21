@@ -498,7 +498,12 @@ factory's resources`, `checking that nothing tagged with the factory ID
 remains`, `deleting the tailnet devices`, `deleting the owned secrets`,
 `removing the local saved plans`, `deleting the state bucket`), then the
 devices listed but kept and `CHECK_LISTED_DEVICES`, when there are any.
-Deleting the bucket, interrupted,
+Deleting an owned secret, interrupted, starts no further Secrets Manager call,
+nor the next secret's deletion ([secrets §Deletion and
+absence](secrets.md#deletion-and-absence)): a secret whose deletion was refused
+may still be pending deletion, one pending deletion may be left restored, no
+longer pending, and one whose deletion was requested is not confirmed gone; a
+rerun inventories again and finishes them. Deleting the bucket, interrupted,
 starts no further S3 call ([provisioning §Deleting the state
 bucket](provisioning.md#deleting-the-state-bucket)): the lock is `held` until
 the call for its current version was made.
@@ -905,7 +910,8 @@ failure after dispatch was stopped naming it; a plan directory not removed
 never overwriting a refusal; an interrupt at each step, during each of the
 destroy plan's Terraform commands, during EC2's listing after the destroy,
 during a destroy that then succeeds (reaching no further step), past the
-devices step (naming the devices listed but kept), as the bucket is emptied
+devices step (naming the devices listed but kept), during one secret's restore
+or deletion (no further Secrets Manager call, for it or the next secret), as the bucket is emptied
 before and after its lock, during the bucket's last deletion, and during each
 final record write, keeping the lock; and without a state bucket (§No state
 bucket): a factory with only secrets cleaned up without a lock, saying so,

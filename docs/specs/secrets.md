@@ -296,13 +296,27 @@ The result is `absent`, or `remains` with a reason. Only the look's
 a call that fails, AccessDenied or any other error; a call past its 30 s
 deadline, which may have reached AWS; the secret still found at the deadline
 (`Secrets Manager still finds it 60 s after its deletion`); or an interrupt
-while waiting (`interrupted before its absence was confirmed`). Reasons are the
-AWS session's descriptions, the operation and the error name, never an AWS
-message: `Secrets Manager DeleteSecret failed: AccessDeniedException`,
+(below). Reasons are the AWS session's descriptions, the operation and the error
+name, never an AWS message: `Secrets Manager DeleteSecret failed: AccessDeniedException`,
 `Secrets Manager DescribeSecret failed: timed out after 30 s`. A restore that
 fails leaves the secret pending and undeleted; a deletion that fails after a
 restore leaves it restored, no longer pending. Either way a rerun lists it again
 and starts over.
+
+The interrupt is checked before every call, the first included, and after every
+sleep: once it is set, no further Secrets Manager call starts, even when the call
+in flight as it landed then succeeds (a call already started still answers, and a
+failure is `remains` with its own reason). The reason says how far it got:
+
+| Interrupted | Reason | The secret |
+| --- | --- | --- |
+| Before any call | `interrupted before its deletion started` | Untouched |
+| Once `DeleteSecret` answered `InvalidRequestException`, before the restore | `interrupted once its deletion was refused, before its restore: it may be pending deletion` | Not restored |
+| Once restored, before `DeleteSecret` | `interrupted once restored, before its deletion: no longer pending deletion` | Restored, its deletion not requested |
+| Once its deletion was requested, or a call did not find it, before or between looks | `interrupted before its absence was confirmed` | Deletion requested, or not found, absence unconfirmed |
+
+Teardown reports an interrupted run `interrupted`, not by these reasons, and
+deletes no further secret ([teardown §Interruption](teardown.md#interruption)).
 
 Why in this order, per the Secrets Manager API reference (checked 2026-10-21):
 
@@ -340,7 +354,7 @@ The operator's credentials need, beyond `secret set`'s:
 | --- | --- | --- |
 | Domain | `src/domain/secrets.ts` | `SecretMaterial`, reading material from a prompt or standard input, the names and their targets (the factory-wide ones under `tailscale` or `credentials`, a host's under its entry), setting a reference in factory.json, the secrets' tags, the Region a secret's ARN names (`secretRegion`); the ownership rule (`ownsSecret`), every reference factory.json holds (`secretReferences`), the classification of listed secrets and references (`classifySecrets`, which alone makes an `OwnedSecret`), and `SecretDeletion`. Pure. |
 | Application | `src/application/set-secret.ts` | `setSecret`: the order above. |
-| Application | `src/application/delete-owned-secret.ts` | `deleteOwnedSecret`: restore if pending, force-delete (restoring once and retrying once on `InvalidRequestException`), then look until absent, with an injected clock, sleep and interrupt and a deadline. |
+| Application | `src/application/delete-owned-secret.ts` | `deleteOwnedSecret`: restore if pending, force-delete (restoring once and retrying once on `InvalidRequestException`), then look until absent, with an injected clock, sleep and interrupt and a deadline; once interrupted, no further call starts. |
 | Application | `src/application/secret-store.ts`, `src/application/operator-prompt.ts` | The `SecretStore` (`write`, `read`, `list`, `restore`, `remove` with its `SecretRemoval`, `describe` with its `SecretDescription`, `exists`) and `OperatorPrompt` ports. |
 | Infrastructure | `src/infrastructure/aws-secrets-manager-store.ts` | `secretsManagerStore`: CreateSecret, then PutSecretValue for an existing secret; GetSecretValue for the admin client `worker terminate` and `teardown` use; ListSecrets with the tag filter, scheduled secrets and every page, RestoreSecret, DeleteSecret with `ForceDeleteWithoutRecovery` and DescribeSecret (whether it still finds the secret, or its name, ARN, tags and deleted date, one without a usable name or ARN `unusable`), each failure `failed` by name, `ResourceNotFoundException` `absent`, and DeleteSecret's `InvalidRequestException` `invalid`. |
 | Infrastructure | `src/infrastructure/aws-session.ts` | The deadline and failure descriptions shared with the lock store. |
@@ -357,7 +371,9 @@ trap, every factory.json reference, the classification, and a secret's Region),
 Region its ARN names, absent after several looks, pending then restored then
 deleted, already gone, scheduled after the listing then restored once and
 deleted again or refused again, AccessDenied on the restore, deletion or look,
-a deletion timed out, the deadline, a stalled clock, an interrupt),
+a deletion timed out, the deadline, a stalled clock, an interrupt while
+waiting, before the first call, and during each restore and deletion, the
+retry's included, starting no further call),
 `tests/application/set-secret.test.ts` (standard input and the hidden prompt, the admin client, a host's password, each API
 credential stored and rotated, `--host` refused for each, rotation, a
 replaced reference, the

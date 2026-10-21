@@ -4,7 +4,7 @@ import {
   SECRET_DELETION_DEADLINE_MS,
   SECRET_DELETION_POLL_MS,
 } from "../../src/application/delete-owned-secret";
-import type { SecretPresence } from "../../src/application/secret-store";
+import type { SecretLookup, SecretPresence, SecretStore } from "../../src/application/secret-store";
 import type { FactoryId, SecretReference } from "../../src/domain/instance";
 import { classifySecrets, type OwnedSecret } from "../../src/domain/secrets";
 import { fakeSecretStore } from "../support/fake-secrets";
@@ -49,6 +49,35 @@ function setup(options: Parameters<typeof fakeSecretStore>[0] = {}, interruptAft
     interrupted: () => interrupted,
   };
   return { deps, secrets, time };
+}
+
+/**
+ * `setup`, whose interrupt lands while the `nth` call of `operation` is in flight, as Ctrl-C
+ * during a Secrets Manager request: the call still completes and answers.
+ */
+function interruptedDuring(
+  options: Parameters<typeof fakeSecretStore>[0],
+  operation: "restore" | "remove",
+  nth = 1,
+) {
+  const { deps, secrets } = setup(options);
+  let interrupted = false;
+  let calls = 0;
+  const landing = (called: string) => {
+    if (called === operation && ++calls === nth) interrupted = true;
+  };
+  const store: SecretStore = {
+    ...secrets.store,
+    restore: async (lookup: SecretLookup) => {
+      landing("restore");
+      return secrets.store.restore(lookup);
+    },
+    remove: async (lookup: SecretLookup) => {
+      landing("remove");
+      return secrets.store.remove(lookup);
+    },
+  };
+  return { deps: { ...deps, secrets: store, interrupted: () => interrupted }, secrets };
 }
 
 const REQUEST = { credentials: { source: "chain" } } as const;
@@ -262,6 +291,101 @@ describe("deleteOwnedSecret (secrets §Deleting a factory's secrets)", () => {
     });
     expect(time.sleeps).toHaveLength(2);
     expect(secrets.calls.filter((call) => call.startsWith("exists"))).toHaveLength(2);
+  });
+
+  describe("an interrupt starts no further Secrets Manager call (teardown §Interruption)", () => {
+    const reason = "Secrets Manager DeleteSecret failed: InvalidRequestException";
+    const INVALID = { kind: "invalid", reason } as const;
+    const UNCONFIRMED = "interrupted before its absence was confirmed";
+    const RESTORED = "interrupted once restored, before its deletion: no longer pending deletion";
+
+    test.each([false, true])(
+      "interrupted before it starts (pending: %p), nothing is asked",
+      async (pending) => {
+        const { deps, secrets } = setup();
+        const result = await deleteOwnedSecret(
+          { ...deps, interrupted: () => true },
+          { ...REQUEST, secret: owned(pending) },
+        );
+        expect(result).toEqual({
+          kind: "remains",
+          reason: "interrupted before its deletion started",
+        });
+        expect(secrets.calls).toEqual([]);
+      },
+    );
+
+    test("during the restore of a pending secret: restored, never deleted", async () => {
+      const { deps, secrets } = interruptedDuring({}, "restore");
+      expect(await deleteOwnedSecret(deps, { ...REQUEST, secret: owned(true) })).toEqual({
+        kind: "remains",
+        reason: RESTORED,
+      });
+      expect(secrets.calls).toEqual([`restore ${ARN}`]);
+    });
+
+    test("during a restore that finds it gone: never looked for", async () => {
+      const { deps, secrets } = interruptedDuring({ restored: { kind: "absent" } }, "restore");
+      expect(await deleteOwnedSecret(deps, { ...REQUEST, secret: owned(true) })).toEqual({
+        kind: "remains",
+        reason: UNCONFIRMED,
+      });
+      expect(secrets.calls).toEqual([`restore ${ARN}`]);
+    });
+
+    test("during the deletion: never looked for", async () => {
+      const { deps, secrets } = interruptedDuring({}, "remove");
+      expect(await deleteOwnedSecret(deps, { ...REQUEST, secret: owned() })).toEqual({
+        kind: "remains",
+        reason: UNCONFIRMED,
+      });
+      expect(secrets.calls).toEqual([`remove ${ARN}`]);
+    });
+
+    test("during a deletion refused as invalid: never restored", async () => {
+      const { deps, secrets } = interruptedDuring({ removed: INVALID }, "remove");
+      expect(await deleteOwnedSecret(deps, { ...REQUEST, secret: owned() })).toEqual({
+        kind: "remains",
+        reason:
+          "interrupted once its deletion was refused, before its restore: it may be pending deletion",
+      });
+      expect(secrets.calls).toEqual([`remove ${ARN}`]);
+    });
+
+    test("during the restore before the retry: restored, never deleted again", async () => {
+      const { deps, secrets } = interruptedDuring({ removed: INVALID }, "restore");
+      expect(await deleteOwnedSecret(deps, { ...REQUEST, secret: owned() })).toEqual({
+        kind: "remains",
+        reason: RESTORED,
+      });
+      expect(secrets.calls).toEqual([`remove ${ARN}`, `restore ${ARN}`]);
+    });
+
+    test("during the retried deletion: never looked for", async () => {
+      const { deps, secrets } = interruptedDuring(
+        { removed: [INVALID, { kind: "done" }] },
+        "remove",
+        2,
+      );
+      expect(await deleteOwnedSecret(deps, { ...REQUEST, secret: owned() })).toEqual({
+        kind: "remains",
+        reason: UNCONFIRMED,
+      });
+      expect(secrets.calls).toEqual([`remove ${ARN}`, `restore ${ARN}`, `remove ${ARN}`]);
+    });
+
+    test("a call that fails as the interrupt lands remains by its failure", async () => {
+      const denied = "Secrets Manager DeleteSecret failed: AccessDeniedException";
+      const { deps, secrets } = interruptedDuring(
+        { removed: { kind: "failed", reason: denied } },
+        "remove",
+      );
+      expect(await deleteOwnedSecret(deps, { ...REQUEST, secret: owned() })).toEqual({
+        kind: "remains",
+        reason: denied,
+      });
+      expect(secrets.calls).toEqual([`remove ${ARN}`]);
+    });
   });
 
   test("the deadline and poll", () => {
