@@ -72,6 +72,20 @@ export async function basisOf(
   };
 }
 
+/**
+ * This release's Terraform tree, materialized from its assets in the cache, as `plan` and
+ * `apply` use it, for a command that runs Terraform only on some paths (`worker terminate`'s
+ * removal, `teardown`'s destroy).
+ */
+export async function terraformDirectory(context: CliContext): Promise<string> {
+  const assets = releaseAssetsDirectory(
+    cacheDirectoryPath(context.env, context.home),
+    context.release,
+  );
+  await context.assets.materialize(assets);
+  return join(assets, "terraform");
+}
+
 /** Prints a restyled report on `writer`, after the blank line that separates it from the header. */
 export function printReport(writer: Writer, report: Report): void {
   writer("");

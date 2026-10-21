@@ -3,8 +3,9 @@
 How `fffactory` lays out and styles what it prints for a person: when each
 output stream is colored, the style roles, and the layout blocks commands build
 their human output from. JSON documents are data and follow none of it. Commands
-adopt the blocks one by one (the plan review, apply and upgrade first; epic #18
-the rest), so a command not yet restyled still prints its own lines, unstyled.
+adopt the blocks one by one (the plan review, apply and upgrade first, and
+teardown from the start; epic #18 the rest), so a command not yet restyled
+still prints its own lines, unstyled.
 
 ## Color
 
@@ -97,7 +98,8 @@ the presentation layer lays out as inline code is a code span built with
 `fffactoryCommand`, so the instance path it repeats is never read for
 backticks either. Tested in
 `tests/cli/presentation/blocks.test.ts`, and for the data each lays out in the
-`plan`, `lock`, `instance-source`, `workers` and `apply` tests beside it.
+`plan`, `lock`, `instance-source`, `workers`, `apply` and `teardown` tests
+beside it.
 
 ### Text
 
@@ -246,6 +248,7 @@ apply only to human lines laid out by `src/cli/presentation/`.
 | CLI adapter | `src/cli/presentation/style.ts` | `Style` and its roles, `plainStyle`, `ansiStyle` (over `node:util` `styleText` with `validateStream: false`, so only [Color](#color) decides), the statuses and their glyphs, and `writer`, an output stream's line writer carrying its style. |
 | CLI adapter | `src/cli/presentation/blocks.ts` | The layout blocks, `verbatim` (data in a line, never read for inline code), `step` and `nextSteps` (a Next block's parts), `Report` (an outcome's blocks and at most one Next block), `render`, which lays blocks and at most one Next block out as lines in a style, measuring widths with `Bun.stringWidth`, `renderInSection`, blocks streamed into a section, and `renderNextParts`, a Next block's parts rendered under its rule, for a Next block on two streams; a rows block's fixed `labelWidth` and reserved `statusColumn`. |
 | CLI adapter | `src/cli/presentation/apply.ts` | A report on [two streams](#two-streams): apply's Result and Next block as lines, each for its stream (`StreamLine`), written by the command in order. |
+| CLI adapter | `src/cli/presentation/teardown.ts` | Teardown's review, its steps streamed under a section, and each outcome as one report on one stream ([teardown §Output and exit codes](teardown.md#output-and-exit-codes)); `withCommands`, the `fffactory` commands fffactory's own words name, as code spans built with `fffactoryCommand`. |
 | CLI adapter | `src/cli/presentation/command-line.ts` | `fffactoryCommand`: an `fffactory` command a Next block names, repeating the `--instance` and `--profile` the running command was given, each word quoted for a POSIX shell (`shellWord`) where needed. |
 | CLI adapter | `src/cli/context.ts` | `CliContext.out` and `err`, each a `Writer` carrying its stream's style. |
 | CLI adapter | `src/cli/descriptor-lines.ts` | `descriptorOutput`, both streams' raw line writers and shared queue ([Plain output](#plain-output)). |

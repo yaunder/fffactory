@@ -90,7 +90,14 @@ chain. Every such command first refuses unless the caller is in factory.json's
   profile and inline policy, and passing the role to EC2), S3 (creating and
   configuring the state bucket, and reading and writing its state, lock and
   operation objects), Secrets Manager (`CreateSecret`, `PutSecretValue`, with
-  tags) and Service Quotas (`GetServiceQuota`, `GetAWSDefaultServiceQuota`).
+  tags, and `GetSecretValue` for the admin client) and Service Quotas
+  (`GetServiceQuota`, `GetAWSDefaultServiceQuota`).
+  Removing workers and the factory also calls EC2 `TerminateInstances` and the
+  other deletes Terraform's destroy needs, IAM's deletes of the hosts' role,
+  policy and instance profile, Secrets Manager `ListSecrets`, `RestoreSecret`,
+  `DeleteSecret` and `DescribeSecret`, and S3 `ListBucketVersions`,
+  `DeleteObject`, `DeleteObjectVersion` and `DeleteBucket`
+  ([teardown §Permissions](docs/specs/teardown.md#permissions)).
   The Region needs room for one more VPC; `doctor` checks it. No
   least-privilege operator policy ships yet: use an identity whose policies
   allow those calls, such as an administrator of the account.
@@ -264,8 +271,9 @@ never put it in a file in a repository or in factory.json.
 
 Optionally, create the factory's **admin client**, a Tailscale OAuth client
 that only the operator's `fffactory` uses, never a worker. `fffactory worker
-terminate` deletes a terminated worker's Tailscale devices with it, and refuses
-without it, so create it before you need to replace or remove a worker. On the
+terminate` deletes a terminated worker's Tailscale devices with it, and
+`fffactory teardown` the whole factory's; both refuse without it, so create it
+before you need to replace or remove a worker, or remove the factory. On the
 admin console's **Trust credentials** page, create an OAuth credential with
 the **`devices:core`** scope (read and write) and only that scope, and select
 factory.json's tag as its tag. Copy its client secret (`tskey-client-…`):
@@ -311,9 +319,10 @@ without a terminal it is read from standard input, such as `fffactory secret
 set tailscale-auth-key < key.txt`.
 
 The admin client's value is its client secret alone, and factory.json is
-complete without it; only `fffactory worker terminate` reads it, with your
-credentials. Workers' IAM role cannot read it: fffactory never gives it to a
-worker ([secrets §The Tailscale admin client](docs/specs/secrets.md#the-tailscale-admin-client)).
+complete without it; only `fffactory worker terminate` and `fffactory
+teardown` read it, with your credentials. Workers' IAM role cannot read it:
+fffactory never gives it to a worker ([secrets §The Tailscale admin
+client](docs/specs/secrets.md#the-tailscale-admin-client)).
 
 The Paseo password is the one every Paseo client of that worker types in
 [step 10](#10-enroll-paseo-clients): choose a strong, unique one and keep it in
@@ -730,6 +739,53 @@ interrupted operation is dead, run `fffactory lock break` and confirm its lock
 ID; then rerun `fffactory apply`. Never break a lock to make progress past an
 operation that may still be running
 ([provisioning §`fffactory lock break`](docs/specs/provisioning.md#fffactory-lock-break)).
+
+### Remove the factory
+
+**Actor:** human (types the factory ID at a terminal), or an agent with
+`--confirm FACTORY_ID` once the operator approved removing that factory.
+Admin-tier: it needs the AWS permissions of
+[teardown §Permissions](docs/specs/teardown.md#permissions) and the Tailscale
+admin client ([step 5](#5-prepare-the-tailnet), stored in [step 6](#6-store-the-secrets)).
+
+```bash
+fffactory teardown --profile NAME                         # at a terminal: review, then type the ID
+fffactory teardown --confirm FACTORY_ID --profile NAME    # without one
+```
+
+It shows what it removes and keeps, then stops dispatch, destroys every
+worker, the network and IAM, and deletes the factory's Tailscale devices, the
+secrets it owns (permanently, their absence confirmed), the local saved plans
+and the state bucket. Push or finish work on the workers first: active agents,
+unpushed work or unresolved checkouts refuse it, naming the worker, and it has
+no `--force` (remove such a worker first with `fffactory worker terminate KEY
+--force`). A stopped worker is not inspected, and anything unpushed on its disk
+is destroyed.
+
+**Done when** it prints `✔ Removed factory ID: nothing it owns remains`,
+exiting 0. An interrupt during the state bucket's last deletion can print that
+and still exit 128 plus the signal's number: nothing of the factory remains
+([teardown §Interruption](docs/specs/teardown.md#interruption)).
+
+**Otherwise:**
+
+- Exit 1: refused or declined, nothing removed; do what its Next block says.
+  A refusal after dispatch was stopped leaves it stopped: `fffactory apply`
+  restarts it if you keep the factory.
+- Exit 2: it stopped part way and lists what remains; do its next action and
+  rerun `fffactory teardown`, which resumes from what actually remains.
+- Interrupted: it says what it left and what to do next. Under the lock the
+  factory usually stays locked, as after an interrupted apply ([An interrupted
+  operation](#an-interrupted-operation)); before the lock, without a state
+  bucket, or once the bucket's deletion reached the lock, it may not be
+  ([teardown §Interruption](docs/specs/teardown.md#interruption)).
+
+Afterwards factory.json is unchanged and still describes the factory (`fffactory
+apply` would create a new one): delete it once you no longer need it. Teardown
+revokes nothing it only refers to: revoke the Tailscale auth key and admin
+OAuth client, remove the factory's tag, grant and SSH rule from the tailnet
+policy, and revoke the API credentials it was given, once nothing else uses
+them ([teardown](docs/specs/teardown.md)).
 
 ### Not available yet
 

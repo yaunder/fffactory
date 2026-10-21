@@ -800,15 +800,24 @@ export interface TeardownReport {
   readonly withoutLock: string | undefined;
 }
 
-/** factory.json is left as it was (D11), and the report says so. */
+/**
+ * factory.json is left as it was (D11), and the report says so: it still describes the factory,
+ * which `fffactory apply` would create anew.
+ */
 export const FACTORY_JSON_KEPT =
-  "factory.json is left as it is: teardown never changes it. Remove it yourself once you no longer need it.";
+  "factory.json is left as it is: teardown never changes it. It still describes the factory, " +
+  "so `fffactory apply` would create a new one. Remove it yourself once you no longer need it.";
 
-/** The persistent sources a factory only refers to are the operator's to revoke. */
+/**
+ * The persistent sources a factory only refers to are the operator's to revoke: the Tailscale
+ * auth key and OAuth client, the tailnet policy entries made for it, and the API credentials
+ * kept, with what their providers granted them.
+ */
 export const REVOKE_SOURCES =
-  "Teardown revokes nothing it only refers to: revoke the Tailscale auth key and admin OAuth " +
-  `client (${TRUST_CREDENTIALS}) and the API credentials kept above at their providers, once ` +
-  "nothing else uses them.";
+  "Teardown revokes nothing it only refers to. Once nothing else uses them, revoke the " +
+  `Tailscale auth key and admin OAuth client (${TRUST_CREDENTIALS}), remove the tailnet policy ` +
+  "entries made for the factory (its tag, grant and SSH rule), and revoke the API credentials " +
+  "kept above, with any grants given to them, at their providers.";
 
 /** Devices listed but not deleted are the operator's to check. */
 export const CHECK_LISTED_DEVICES = `Check the devices listed but not deleted at ${ADMIN_CONSOLE}, and remove those that were this factory's yourself.`;

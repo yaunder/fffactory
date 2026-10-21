@@ -487,6 +487,23 @@ Terminate deletes it through the Tailscale API, as the factory's admin client
    without the tag is never deleted: any tailnet member can take a name. It is
    reported by its ID, never its tags.
 
+The API is `https://api.tailscale.com`. Only for tests, `fffactory` run from
+source reads `FFFACTORY_TAILSCALE_API` (`tailscaleApiBase`, read once by
+`src/cli/main.ts`), which points it at a local stand-in
+(`tests/cli/teardown-executable.test.ts`); the compiled release
+(`Bun.isStandaloneExecutable`) never reads it. The token exchange sends the
+admin client's secret itself to the host it names. Unlike
+`AWS_ENDPOINT_URL_*`, whose endpoints receive only a SigV4 signature and never
+the secret access key, a stand-in there would hold the secret, so it must be
+plain `http://` on a literal loopback address, `127.0.0.1` or `[::1]` (never a
+name such as `localhost`, which resolves through /etc/hosts or DNS), with no
+path, credentials, query or fragment; its origin is used. Anything else, such
+as HTTPS or another host, stops every command before it runs, with `fffactory:
+FFFACTORY_TAILSCALE_API names no local stand-in for Tailscale's API: it must be
+plain http:// on 127.0.0.1 or [::1], with no path`, exit 1: the
+variable is named, its value never printed, and Tailscale's API never used in
+its place. Unset or empty, it names nothing.
+
 Every request has a 15 s deadline (`TAILSCALE_API_TIMEOUT_MS`) and follows no
 redirect: a redirect fails the request as unreachable (`Tailscale could not be
 reached (UnexpectedRedirect)`), and its target receives nothing. A failure is
@@ -830,7 +847,7 @@ what status prints of a worker.
 | Application | `src/application/worker-lifecycle.ts` | `stopWorker`, `startWorker`, `terminateWorker`: the order above, under the lock and its record; terminate's inspection, admin session and device deletion are `inspectForRemoval`, `openTailnetAdmin` and `deleteDevices` (`src/application/worker-removal.ts`), shared with [teardown](teardown.md); the inspection reuses `inspectRepositories`, then reads the current work with `inspectWork` (`src/application/inspect-work.ts`); its removal plans and applies over `Provisioner` (the factory root, `planInfrastructure`'s target and projection), keeps its plan file in `PlanStore`, and writes factory.json through `InstanceStore`. |
 | Infrastructure | `src/infrastructure/ec2-machine-control.ts` | `ec2MachineControl` over `StopInstances`, `StartInstances`, `TerminateInstances` and `DescribeInstances` (AWS SDK for JavaScript v3, imported on first use), each call within 15 s (`EC2_CONTROL_TIMEOUT_MS`), failures by error name, a request past its deadline `unanswered`. |
 | Infrastructure | `src/infrastructure/aws-secrets-manager-store.ts` | `GetSecretValue` by ARN, within 30 s. |
-| Infrastructure | `src/infrastructure/tailscale-api-admin.ts` | `tailscaleApiAdmin`: the token exchange, the device list and deletion over HTTPS with `fetch`, each within 15 s, no redirects, failures by HTTP status or network code. |
+| Infrastructure | `src/infrastructure/tailscale-api-admin.ts` | `tailscaleApiAdmin`: the token exchange, the device list and deletion over HTTPS with `fetch` (plain HTTP only to a loopback stand-in run from source), each within 15 s, no redirects, failures by HTTP status or network code; `tailscaleApiBase`, the API, or the loopback stand-in `FFFACTORY_TAILSCALE_API` names, refusing anything else unechoed. |
 | CLI adapter | `src/cli/commands/worker.ts` | Arguments, progress, the removal plan (the `removal_plan` progress event carries its target, Terraform's changes and the worker, which `describeRemovalPlan` in `src/cli/presentation/plan.ts` lays out before the typed host key is asked for), the reports, Terraform's diagnostics path, the exit code; `waitsOnInterrupt`; this release's Terraform tree, materialized only when a removal runs. |
 
 Tests: `tests/domain/worker-lifecycle.test.ts` (the host key check, an argument
@@ -897,7 +914,9 @@ client ID, the listing and deletion, 404 as deleted, an unusable ID never in a
 URL, a non-client secret refused without a request, failures by status with no
 body, secret or token, the deadline, an expired token renewed once (only on
 HTTP 401) and the call retried, a redirect refused with its target never
-asked), the Secrets Manager read in
+asked; the API, or the loopback stand-in `FFFACTORY_TAILSCALE_API` names, and
+anything else refused unechoed; `tests/cli/main.test.ts` for the refusal before
+any command runs), the Secrets Manager read in
 `tests/infrastructure/aws-secrets-manager-store.test.ts`, and the terminate
 reports, exit 2, an unechoed `--confirm`, unpushed work refused with where it is and
 forced, an older activator's refusal and its next action, a worker's answer never printed, a machine already being terminated:

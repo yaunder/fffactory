@@ -802,9 +802,9 @@ Removing a whole factory ([#56](https://github.com/yaunder/fffactory/issues/56))
 destroys its `factory` root first (D6), with a destroy plan guarded before it
 is shown or confirmed (D13). The teardown use case plans it under the factory
 lock, after its inventory and before its confirmation, and applies exactly that
-plan once its gates pass ([teardown §Order](teardown.md#order)); the
-`fffactory teardown` command follows
-([#88](https://github.com/yaunder/fffactory/issues/88)). `plan` and `apply` keep the D11 refusals of host destroys
+plan once its gates pass ([teardown §Order](teardown.md#order)), as
+`fffactory teardown` runs it ([teardown §Command](teardown.md#command)). `plan`
+and `apply` keep the D11 refusals of host destroys
 ([plan and apply §Refusals](plan-apply.md#refusals-until-lifecycle-work-lands-d11)),
 and the state bucket, outside the `factory` root, is never Terraform's to
 destroy ([Deleting the state bucket](#deleting-the-state-bucket)).

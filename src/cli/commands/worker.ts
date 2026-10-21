@@ -1,8 +1,5 @@
-import { join } from "node:path";
 import { parseArgs } from "node:util";
 import type { OperationLocation } from "../../application/apply-factory";
-import { releaseAssetsDirectory } from "../../application/asset-bundle";
-import { cacheDirectoryPath } from "../../application/cache-directory";
 import {
   credentialSelection,
   PROFILE_ENVIRONMENT_VARIABLE,
@@ -37,6 +34,7 @@ import { sha256Text } from "../../infrastructure/release-tarball";
 import type { CliContext, Command } from "../context";
 import { printDiagnostics } from "../diagnostics";
 import { describeRemovalPlan } from "../presentation/plan";
+import { terraformDirectory } from "./planning";
 import { loadInstance, printAccountRefusal } from "./selected-instance";
 
 const USAGE = [
@@ -360,19 +358,6 @@ function report(
   }
 }
 
-/**
- * This release's Terraform tree, materialized from its assets in the cache, as `plan` and
- * `apply` use it: only a removal runs Terraform.
- */
-async function terraformDirectory(context: CliContext): Promise<string> {
-  const assets = releaseAssetsDirectory(
-    cacheDirectoryPath(context.env, context.home),
-    context.release,
-  );
-  await context.assets.materialize(assets);
-  return join(assets, "terraform");
-}
-
 function dependencies(context: CliContext): WorkerLifecycleDependencies {
   return {
     identity: context.identity,
@@ -388,6 +373,7 @@ function dependencies(context: CliContext): WorkerLifecycleDependencies {
     provisioner: context.provisioner,
     planStore: context.planStore,
     store: context.store,
+    // Only a removal runs Terraform.
     terraformDirectory: () => terraformDirectory(context),
     interrupted: context.interrupted,
     sleep: context.sleep,

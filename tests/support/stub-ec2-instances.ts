@@ -3,7 +3,7 @@
  * `StartInstances` and `TerminateInstances`, so tests exercise the real AWS SDK without reaching
  * AWS. Point a client at `endpoint`, or a spawned CLI at it with `AWS_ENDPOINT_URL_EC2`. A stop,
  * start or terminate changes nothing: its answer is empty. DescribeVpcs applies its `tag:`
- * filters, as EC2 does.
+ * filters, as EC2 does. Its answers may change between requests.
  */
 
 const EC2_NAMESPACE = "http://ec2.amazonaws.com/doc/2016-11-15/";
@@ -108,9 +108,12 @@ function describeInstances(answers: StubEc2InstancesAnswers, body: string): Resp
 /**
  * Starts a stub on a free local port answering DescribeInstances and DescribeVpcs with
  * `answers`, and stops, starts and terminations with an empty success, or every request with
- * `answers.error`.
+ * `answers.error`. Given a function, it asks it for the answers at every request, so a test can
+ * change what EC2 lists while a spawned CLI runs, as a destroy does.
  */
-export function stubEc2Instances(answers: StubEc2InstancesAnswers = {}): StubEc2Instances {
+export function stubEc2Instances(
+  given: StubEc2InstancesAnswers | (() => StubEc2InstancesAnswers) = {},
+): StubEc2Instances {
   const requests: string[] = [];
   const server = Bun.serve({
     hostname: "127.0.0.1",
@@ -118,6 +121,7 @@ export function stubEc2Instances(answers: StubEc2InstancesAnswers = {}): StubEc2
     fetch: async (request) => {
       const body = await request.text();
       requests.push(body);
+      const answers = typeof given === "function" ? given() : given;
       const action = new URLSearchParams(body).get("Action");
       if (answers.error) return errorResponse(answers.error);
       if (action === "DescribeVpcs") return describeVpcs(answers, body);

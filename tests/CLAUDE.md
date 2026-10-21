@@ -65,7 +65,15 @@ peer view, an SSH transport scripted per worker hostname, this machine as a work
 injected `ProcessRunner`, or stand-in scripts on a private `PATH` holding only the real
 tools they need (`cli/main.test.ts`, `cli/status-executable.test.ts`, which also points
 EC2 at `support/stub-ec2-instances.ts`, which also answers `StopInstances`,
-`StartInstances` and `TerminateInstances`, and `DescribeVpcs`, applying its tag filters). `worker stop|start|terminate` run against
+`StartInstances` and `TerminateInstances`, and `DescribeVpcs`, applying its tag filters, and
+whose answers a function may give afresh at each request). `cli/teardown-executable.test.ts`
+spawns `main.ts` against every stand-in at once: STS, S3, Secrets Manager, EC2 (listing the
+factory's instance and VPC until the stand-in Terraform, the managed one's cache hit, has
+applied), and Tailscale's API through `FFFACTORY_TAILSCALE_API`, with stand-in `tailscale` and
+`ssh` on its private PATH, and checks every endpoint it was given is on 127.0.0.1 before it
+runs, and that no secret value reaches Terraform's arguments or environment. Only `main.ts`
+run from source reads `FFFACTORY_TAILSCALE_API`, and only a loopback `http://` origin.
+`worker stop|start|terminate` run against
 `fake-workers.ts`'s `fakeMachineControl`, whose state reads follow a script and which
 records every call, so a test can assert EC2 was never asked to change anything
 (`mutations`), and terminate against its `fakeTailnetAdmin`, a tailnet of `tailnetDevice`s

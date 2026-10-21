@@ -59,7 +59,8 @@ one with `secret set NAME`, then `fffactory apply`
 OAuth client with the `devices:core` scope, with which `fffactory worker
 terminate` deletes a terminated worker's Tailscale devices from the operator's
 workstation ([worker lifecycle §Tailnet device
-removal](worker-lifecycle.md#tailnet-device-removal)). It is admin-tier:
+removal](worker-lifecycle.md#tailnet-device-removal)), and `fffactory teardown`
+the whole factory's ([teardown §Devices](teardown.md#devices)). It is admin-tier:
 `devices:core` can remove any device in the tailnet
 ([machine onboarding §5](../../MACHINE_ONBOARDING.md#5-prepare-the-tailnet)).
 Workers keep only their join-only auth key and never receive the admin client:
@@ -68,7 +69,7 @@ Workers keep only their join-only auth key and never receive the admin client:
 ([provisioning §Inputs](provisioning.md#terraform-inputs)), so the hosts' IAM policy
 never allows reading it. It is optional: factory.json is complete without it
 ([instance configuration §Completeness](instance-configuration.md#completeness)),
-and only `worker terminate` reads it, refusing without it. Terminate reads it
+and only `worker terminate` and `teardown` read it, each refusing without it. Terminate reads it
 by its ARN (`GetSecretValue`, within the same 30 s deadline) under the factory
 lock, and hands it, a `SecretMaterial`, to the Tailscale API adapter, which
 alone reveals it, for each token request (the first, and one renewal per call
@@ -193,8 +194,8 @@ Removing a whole factory ([#56](https://github.com/yaunder/fffactory/issues/56))
 deletes the secrets it owns, permanently, and confirms each is gone; it keeps
 every secret it only refers to. The teardown use case deletes them after the
 factory's devices, the admin client among them, and reports the kept ones
-([teardown §Report](teardown.md#report)); the `fffactory teardown` command
-follows ([#88](https://github.com/yaunder/fffactory/issues/88)).
+([teardown §Report](teardown.md#report)), as `fffactory teardown` runs it
+([teardown §Command](teardown.md#command)).
 
 ### Ownership
 
@@ -308,7 +309,7 @@ The operator's credentials need, beyond `secret set`'s:
 | Application | `src/application/set-secret.ts` | `setSecret`: the order above. |
 | Application | `src/application/delete-owned-secret.ts` | `deleteOwnedSecret`: restore if pending, force-delete (restoring once and retrying once on `InvalidRequestException`), then look until absent, with an injected clock, sleep and interrupt and a deadline. |
 | Application | `src/application/secret-store.ts`, `src/application/operator-prompt.ts` | The `SecretStore` (`write`, `read`, `list`, `restore`, `remove` with its `SecretRemoval`, `exists`) and `OperatorPrompt` ports. |
-| Infrastructure | `src/infrastructure/aws-secrets-manager-store.ts` | `secretsManagerStore`: CreateSecret, then PutSecretValue for an existing secret; GetSecretValue for `worker terminate`'s admin client; ListSecrets with the tag filter, scheduled secrets and every page, RestoreSecret, DeleteSecret with `ForceDeleteWithoutRecovery` and DescribeSecret, each failure `failed` by name, `ResourceNotFoundException` `absent`, and DeleteSecret's `InvalidRequestException` `invalid`. |
+| Infrastructure | `src/infrastructure/aws-secrets-manager-store.ts` | `secretsManagerStore`: CreateSecret, then PutSecretValue for an existing secret; GetSecretValue for the admin client `worker terminate` and `teardown` use; ListSecrets with the tag filter, scheduled secrets and every page, RestoreSecret, DeleteSecret with `ForceDeleteWithoutRecovery` and DescribeSecret, each failure `failed` by name, `ResourceNotFoundException` `absent`, and DeleteSecret's `InvalidRequestException` `invalid`. |
 | Infrastructure | `src/infrastructure/aws-session.ts` | The deadline and failure descriptions shared with the lock store. |
 | Infrastructure | `src/infrastructure/terminal-prompt.ts` | `terminalPrompt`: the hidden prompt in raw mode, and standard input with its limit. |
 | CLI adapter | `src/cli/commands/secret.ts` | `fffactory secret set`: arguments, output and exit codes. |

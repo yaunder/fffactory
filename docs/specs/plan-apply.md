@@ -83,6 +83,7 @@ completeness check. Moving the pin is [`fffactory upgrade`](#upgrade)'s.
 | `secret set` | Yes, before reaching AWS: `Refusing to store the secret: ...` | It writes Secrets Manager and factory.json ([secrets](secrets.md)). |
 | `upgrade` | By its own rules ([below](#upgrade)) | Moving the pin to the running release is what it does. |
 | `worker stop`, `worker start`, `worker terminate` | Yes, after the account check and before the lock: `Refusing to stop the worker: ...` | They change a worker's machine under the lock ([worker lifecycle](worker-lifecycle.md)). |
+| `teardown` | Yes, after the account check and before the state bucket is asked anything: `Refusing to remove the factory: ...` | It removes the whole factory ([teardown](teardown.md)). |
 | `init` | No | It changes no factory: it pins the running release in a new document and keeps an existing pin. |
 | `lock break` | No | It changes no factory state, and an upgrade interrupted before it moved the pin leaves a lock only its later release is at hand to break; confirming the lock ID guards it ([provisioning §Lock](provisioning.md#lock)). |
 | `doctor`, `status`, `validate`, `assets`, `host` | No | They read, or act only on this machine or worker: a mismatched CLI may still diagnose. |
@@ -1347,8 +1348,9 @@ second signal, at any point, kills the running tools and exits at once.
 
 Only a command that checks the interrupt, starts nothing more once it is set
 and reports what it left is waited for (`waitsOnInterrupt`): `apply`,
-`upgrade`, `doctor`, `status` and `worker`
-([worker lifecycle §Interruption](worker-lifecycle.md#interruption)). Any other, such as `host apply`, `secret
+`upgrade`, `doctor`, `status`, `worker`
+([worker lifecycle §Interruption](worker-lifecycle.md#interruption)) and
+`teardown` ([teardown §Interruption](teardown.md#interruption)). Any other, such as `host apply`, `secret
 set` or `lock break`, exits with 128 plus the signal's number as soon as its
 running tools have stopped, never waiting for it to return, so it does not go
 on with its work after the signal.
@@ -1693,7 +1695,7 @@ unchanged by where the plan was made.
 | CLI adapter | `src/cli/commands/plan.ts`, `src/cli/commands/apply.ts`, `src/cli/commands/upgrade.ts`, `src/cli/commands/planning.ts` | The commands, the approval at the terminal (`operatorApproval` shows the review), the `Applying` section as it streams (`applyingProgress`), the exit code of every outcome, writing each line on its stream (`reportApply`), and what they share: the header (`planningBasis`), `printReport` and `printPlanRefusal`, and an upgrade's pin state (`ApplyReporting.pin`). |
 | CLI adapter | `src/cli/diagnostics.ts`, `src/cli/run.ts` | The path of a failed Terraform command's diagnostics outside apply's Result, printed with the failure. |
 | CLI adapter | `src/cli/interrupts.ts` | `interruptible`: the interrupt notice and flag, the sleep an interrupt wakes, stopping running tools, then, for a command that waits on an interrupt, waiting `RETURN_GRACE_MS` at most for it to return, before exiting with 128 plus the signal's number; a second signal kills and exits at once. |
-| CLI adapter | `src/cli/run.ts`, `src/cli/context.ts` | `waitsOnInterrupt`: only `apply`, `upgrade`, `doctor`, `status` and `worker` (`Command.waitsOnInterrupt`) are waited for. |
+| CLI adapter | `src/cli/run.ts`, `src/cli/context.ts` | `waitsOnInterrupt`: only `apply`, `upgrade`, `doctor`, `status`, `worker` and `teardown` (`Command.waitsOnInterrupt`) are waited for. |
 | CLI adapter | `src/cli/main.ts` | Wires `terraformProvisioner`, `filesystemPlanStore`, and `interruptible` over the process, waiting on an interrupt as `waitsOnInterrupt` says for the command run. |
 
 Tests: `tests/domain/plan.test.ts` (plan IDs, the pin guard, change kinds and
@@ -1869,8 +1871,8 @@ only after naming the worker and the lock it keeps),
 before its tools stop, and at the grace's end at the latest; a command that
 does not wait exiting once its tools stop, without waiting for it; each
 signal's status; a second signal at once; sleeps woken),
-`tests/cli/run.test.ts` (only apply, upgrade, doctor, status and worker wait
-on an interrupt; `host`, `secret` and `lock` do not), `tests/cli/main.test.ts`
+`tests/cli/run.test.ts` (only apply, upgrade, doctor, status, worker and
+teardown wait on an interrupt; `host`, `secret` and `lock` do not), `tests/cli/main.test.ts`
 (doctor's interrupt notice, which offers no second interrupt; the spawned
 `plan`'s header plain on an ordinary pipe, colored there only by `FORCE_COLOR`,
 and plain again under `NO_COLOR`, `TERM=dumb` or `FORCE_COLOR=0`), and

@@ -11,6 +11,43 @@ import { isRecord } from "../domain/validation";
 
 /** Tailscale's API. */
 export const TAILSCALE_API = "https://api.tailscale.com";
+/**
+ * The variable naming a stand-in for Tailscale's API, for tests. The token exchange sends the
+ * admin client's secret itself, not a signature of it as AWS's SigV4 does through
+ * `AWS_ENDPOINT_URL_*`, so a stand-in must be plain HTTP on this machine's loopback, and only
+ * `fffactory` run from source reads it (`cli/main.ts`): the release never does.
+ */
+export const TAILSCALE_API_VARIABLE = "FFFACTORY_TAILSCALE_API";
+
+/** The hosts a stand-in may listen on: this machine's loopback, never the network. */
+const LOOPBACK_HOSTS: ReadonlySet<string> = new Set(["127.0.0.1", "[::1]"]);
+
+const NO_STAND_IN =
+  `${TAILSCALE_API_VARIABLE} names no local stand-in for Tailscale's API: ` +
+  "it must be plain http:// on 127.0.0.1 or [::1], with no path";
+
+/**
+ * Tailscale's API, unless `FFFACTORY_TAILSCALE_API` names a stand-in on the loopback, as its
+ * origin. Anything else is refused, naming the variable but never its value; it is never
+ * replaced by Tailscale's API.
+ */
+export function tailscaleApiBase(env: Readonly<Record<string, string | undefined>>): string {
+  const named = env[TAILSCALE_API_VARIABLE];
+  if (named === undefined || named === "") return TAILSCALE_API;
+  const url = URL.parse(named);
+  const standIn =
+    url !== null &&
+    url.protocol === "http:" &&
+    LOOPBACK_HOSTS.has(url.hostname) &&
+    url.username === "" &&
+    url.password === "" &&
+    url.pathname === "/" &&
+    url.search === "" &&
+    url.hash === "";
+  if (!standIn) throw new Error(NO_STAND_IN);
+  return url.origin;
+}
+
 /** The deadline of each request: the token exchange, the device list, one deletion. */
 export const TAILSCALE_API_TIMEOUT_MS = 15_000;
 

@@ -7,10 +7,9 @@ This spec covers the use case (`teardownFactory`,
 `src/application/teardown-factory.ts`): with a state bucket, its happy path,
 its refusals, a [partial failure](#partial-failure), the [rerun](#rerun) that
 finishes it and an [interruption](#interruption); and the cleanup without a
-lock when there is [no state bucket](#no-state-bucket). The
-`fffactory teardown [--confirm FACTORY_ID] [--instance PATH] [--profile NAME]`
-command, its output and exit codes follow in
-[#88](https://github.com/yaunder/fffactory/issues/88).
+lock when there is [no state bucket](#no-state-bucket); and the
+[command](#command) that runs it, its [output and exit
+codes](#output-and-exit-codes) and the [permissions](#permissions) it needs.
 
 | Removed | How |
 | --- | --- |
@@ -25,6 +24,38 @@ Kept: every secret factory.json only refers to (a harness `fffv/*` source, one
 made by hand), tagged secrets the factory does not own, tailnet devices that
 are not provably the factory's, the Tailscale OAuth client and auth key
 themselves, and factory.json, which teardown never writes (D11).
+
+## Command
+
+```text
+fffactory teardown [--confirm FACTORY_ID] [--instance PATH] [--profile NAME]
+```
+
+D1. A top-level command (`src/cli/commands/teardown.ts`), admin-tier
+([worker lifecycle §Tiers](worker-lifecycle.md#tiers)): it destroys every
+machine, the network and IAM, deletes the factory's secrets and state bucket,
+and uses the factory's Tailscale admin client, which can delete any device in
+the tailnet. Its credentials need what [Permissions](#permissions) lists.
+
+- `--confirm FACTORY_ID` confirms in advance ([Confirmation](#confirmation));
+  `--instance PATH` selects factory.json as every command does; `--profile
+  NAME` the AWS profile, otherwise `AWS_PROFILE`, or else the standard AWS
+  credential chain. An empty `--profile` is refused: `fffactory teardown:
+  --profile needs a profile name`.
+- Anything else is refused before anything is read, never echoed, since an
+  argument meant for `--confirm` could be a pasted secret: `fffactory teardown
+  takes only --confirm FACTORY_ID, --instance PATH and --profile NAME.` A
+  `--force` among them is told instead that ``fffactory teardown has no
+  --force: remove a worker it refuses with `fffactory worker terminate KEY
+  --force` first.`` (D4).
+- It is guarded by the [CLI/pin match guard](plan-apply.md#clipin-match-guard),
+  after the account check and before the state bucket is asked anything.
+- It checks its interrupt and reports what the interrupt left, so `fffactory`
+  waits for it to return (`waitsOnInterrupt`,
+  [plan and apply §Interruption](plan-apply.md#interruption)).
+- It has no `--json` yet: its result is human text. The marker
+  `TODO(re-evaluate when a caller must parse teardown's result)` in
+  `src/cli/commands/teardown.ts` records the gap.
 
 ## Order
 
@@ -421,7 +452,11 @@ its last record write (the pattern of [worker lifecycle
 [#38](https://github.com/yaunder/fffactory/issues/38) asks apply to adopt), so
 the outcome reported and the lock kept never disagree. Interrupted before the
 lock, nothing is locked. The one exception: once the bucket is gone, the lock
-went with it, and the teardown is done.
+went with it, and the teardown is done: it prints the `done` report. Its exit
+status is still the interrupt's, 128 plus the signal's number:
+`src/cli/interrupts.ts`, shared by every command, exits so once an interrupt
+landed, whatever the command returned. Nothing of the factory remains, and a
+rerun finds no state bucket ([No state bucket](#no-state-bucket)).
 
 The result says how far it got (`reached`, the last step started: one the
 interrupt landed before is never started, even when the call before it then
@@ -515,13 +550,144 @@ D11. A finished teardown reports (`TeardownReport`):
 With it, the advice teardown leaves the operator (`FACTORY_JSON_KEPT`,
 `REVOKE_SOURCES`, `CHECK_LISTED_DEVICES`, and `CHECK_UNCHECKED_DEVICES` when
 the devices were not checked, and `checkOutsideEc2` in the no-bucket mode):
-factory.json is left as it is;
+factory.json is left as it is, and still describes the factory, so `fffactory
+apply` would create a new one;
 teardown revokes nothing it only refers to (the Tailscale auth key and admin
-OAuth client, and the API credentials kept), which the operator revokes at
+OAuth client, the tailnet policy entries made for the factory, and the API
+credentials kept with any grants given to them), which the operator revokes at
 their providers once nothing else uses them; the devices listed but not
 deleted, or not checked, are the operator's to check; and without a state
 bucket, so are the factory's IAM role and instance profile, which teardown did
 not look for.
+
+## Output and exit codes
+
+D12. Teardown prints human text laid out with the blocks of
+[CLI output](cli-output.md) (`src/cli/presentation/teardown.ts`), from what the
+use case returns: only `ShownMachine`, `ShownDevice` and `ShownSecret`
+fields, the domain's words, and nothing it was given. Its header comes first,
+`fffactory teardown · release R` and the `Instance` line. Then, on standard
+output:
+
+1. **The review** (`review`), the `Teardown` section: the factory, its
+   account and Region and release, then one row per kind:
+   `Infrastructure` (`N to destroy` and each delete under it, `nothing to
+   destroy: the factory root is gone` when the plan changes nothing, `no
+   destroy plan: EC2 lists nothing tagged with the factory ID` without a state
+   bucket), `EC2 instances` (`ID (KEY, STATE)`, a host key tag that is not
+   well-formed only marked), `VPCs`, `Tailnet devices` (`delete ID (HOSTNAME),
+   ...`, `none to delete`, or `DEVICES_NOT_CHECKED` with
+   `CHECK_UNCHECKED_DEVICES` under it), `Owned secrets` (`delete NAME, ...,
+   each confirmed gone`, or `none to delete`), `Already absent`, `Not listed`
+   (references under the factory's names not listed, reported apart and never
+   as kept) and `State bucket` (`BUCKET, deleted last, with the lock`, or
+   `BUCKET: not found by this run, so not deleted by it`); without a state
+   bucket, `ranWithoutLock` under them. A `Kept` section follows when anything
+   is kept: the devices listed but not deleted (`Possibly its devices`, `Untagged look-alikes`), the
+   secrets tagged but not owned (`Tagged, not owned`, by name and ARN) and
+   those factory.json refers to outside its names (`Referenced`).
+2. **The question**, at a terminal without `--confirm`, on standard error
+   after a blank line ([Confirmation](#confirmation)).
+3. **Each step** as it starts, under a `Removing` section: `Stopping dispatch
+   on HOSTNAME.`, `HOSTNAME is stopped: it is not inspected, and unpushed work
+   on its disk is destroyed with it.`, `Destroying the factory's resources.
+   Terraform's output is not shown; this can take several minutes.`, `Deleting
+   the factory's tailnet devices.`, `Deleting the owned secrets, confirming
+   each is gone.` and `Deleting the state bucket BUCKET, the lock last.`
+4. **The outcome**, one report on one stream, ending with at most one Next
+   block:
+
+| Outcome | Stream | Shows | Exit |
+| --- | --- | --- | --- |
+| `done` | standard output | `✔ Removed factory ID: nothing it owns remains` (without a state bucket, `✔ Removed what was left of factory ID`); a `Result` section: `Infrastructure` (`destroyed: N resources` and each, `already absent: the destroy plan found nothing`, or `not found by EC2: no instance or VPC is tagged with the factory ID`), the instances, `Tailnet devices` (`deleted ID, ...`, `none found` or `DEVICES_NOT_CHECKED`), `Owned secrets` (`deleted NAME, ..., each confirmed gone`, or `none found`), `Already absent`, `Not listed`, `State bucket` (`BUCKET, deleted`, or not found by this run) and `ranWithoutLock`; the `Kept` section; then the Next block of the advice it leaves: `CHECK_UNCHECKED_DEVICES` when the devices were not checked, `CHECK_LISTED_DEVICES` when any were listed but kept, `checkOutsideEc2` without a state bucket, `REVOKE_SOURCES` (the Tailscale auth key and OAuth client, the tailnet policy entries, and the API credentials kept with their grants), and `FACTORY_JSON_KEPT`: factory.json is left as it is and still describes the factory, so `fffactory apply` would create a new one (D11) | 0; 128 + the signal's number when interrupted during the state bucket's last deletion ([Interruption](#interruption)) |
+| `refused` | standard error | `✖ Refusing to remove the factory: SUMMARY` and its details, for each refusal; where dispatch was left stopped (`dispatchLeftStopped`); the operation record; a Next block of each next action once | 1 |
+| no terminal, no `--confirm` | standard error | `✖` and `TEARDOWN_UNCONFIRMABLE` | 1 |
+| incomplete factory.json, another account, a pin mismatch, an unready bucket, a held lock | standard error | as `plan` words them, `Refusing to remove the factory: ...`; each missing field `PATH: is required to remove a factory` | 1 |
+| `declined` | standard error | `Not confirmed: nothing was removed.`, and the record | 1 |
+| `failed` (before the destroy) | standard error | `✖ Teardown failed: SUMMARY` and its details, where dispatch was left stopped, `Terraform's diagnostics: FILE` (the path only), the record; Next: its next action | 1 |
+| `partial` | standard error | `✖ Teardown stopped part way, at STEP: SUMMARY` (STEP: `the destroy`, `the check that nothing tagged remains`, `the tailnet devices`, `the owned secrets`, `the local saved plans`, `the state bucket`), its details with what remains of each kind ([Partial failure](#partial-failure)), the diagnostics file, the record; Next: its next action | 2 |
+| `interrupted` | standard error | `interruptedTeardown`'s summary and details, from the whole `TeardownInterruption` (with the lock or without a state bucket), and the record; Next: its next action. Before the lock: `✖ Interrupted before the factory was locked: it is not locked, and nothing was removed` | 128 + the signal's number (`src/cli/interrupts.ts`) |
+
+A `refused` result covers every refusal of [Refusals](#refusals) the use case
+words itself, a wrong `--confirm` among them, still never echoed. Every
+`fffactory` command a line of fffactory's own words names in backticks, such as
+a next action or the advice, is shown as inline code repeating the `--instance`
+and `--profile` given (`withCommands`, `fffactoryCommand`); the domain's
+summaries and details, which carry data such as secret names and device IDs,
+are shown verbatim. `fffactory lock break` is named only where
+`interruptedTeardown`'s words, or a held lock's refusal, name it.
+
+```text
+fffactory teardown · release 0.0.6
+Instance  ~/factory/.fffactory/factory.json (nearest .fffactory/factory.json)
+
+── Teardown ─────────────────────────────────────────
+  Factory   Test factory (fff-abcd1234)
+  Account   123456789012 · eu-west-2
+  Release   0.0.6
+
+  Infrastructure    2 to destroy
+    - module.hosts.aws_instance.host["builder-1"]
+    - module.network.aws_vpc.this
+  EC2 instances     i-0123456789abcdef0 (builder-1, stopped)
+  VPCs              vpc-0123456789abcdef0
+  Tailnet devices   delete nWorker1CNTRL (fff-abcd1234-builder-1)
+  Owned secrets     delete fff-abcd1234/tailscale-auth-key, fff-abcd1234/tailscale-admin-client, each confirmed gone
+  State bucket      fff-abcd1234-state, deleted last, with the lock
+
+── Kept ─────────────────────────────────────────────
+  Referenced   arn:aws:secretsmanager:eu-west-2:123456789012:secret:fffv/github-token-AbCdEf
+
+── Removing ─────────────────────────────────────────
+  fff-abcd1234-builder-1 is stopped: it is not inspected, and unpushed work on its disk is destroyed with it.
+  Destroying the factory's resources. Terraform's output is not shown; this can take several minutes.
+  Deleting the factory's tailnet devices.
+  Deleting the owned secrets, confirming each is gone.
+  Deleting the state bucket fff-abcd1234-state, the lock last.
+
+✔ Removed factory fff-abcd1234: nothing it owns remains
+
+── Result ───────────────────────────────────────────
+  Infrastructure    destroyed: 2 resources
+    - module.hosts.aws_instance.host["builder-1"]
+    - module.network.aws_vpc.this
+  EC2 instances     i-0123456789abcdef0 (builder-1, stopped)
+  Tailnet devices   deleted nWorker1CNTRL
+  Owned secrets     deleted fff-abcd1234/tailscale-auth-key, fff-abcd1234/tailscale-admin-client, each confirmed gone
+  State bucket      fff-abcd1234-state, deleted
+
+── Kept ─────────────────────────────────────────────
+  Referenced   arn:aws:secretsmanager:eu-west-2:123456789012:secret:fffv/github-token-AbCdEf
+
+── Next ─────────────────────────────────────────────
+  Teardown revokes nothing it only refers to. Once nothing else uses them, revoke the Tailscale auth key and admin OAuth client (https://login.tailscale.com/admin/settings/trust-credentials), remove the tailnet policy entries made for the factory (its tag, grant and SSH rule), and revoke the API credentials kept above, with any grants given to them, at their providers.
+  factory.json is left as it is: teardown never changes it. It still describes the factory, so `fffactory apply` would create a new one. Remove it yourself once you no longer need it.
+```
+
+## Permissions
+
+Teardown is admin-tier. fffactory provisions no IAM role or policy for it; the
+operator's credentials need, in the factory's account and Region:
+
+| Permission | Resource | For |
+| --- | --- | --- |
+| `sts:GetCallerIdentity` | `*` | The account check. |
+| `s3:ListBucket`, `s3:GetBucketVersioning`, `s3:GetBucketPublicAccessBlock`, `s3:GetEncryptionConfiguration`, `s3:GetBucketPolicy` | `arn:aws:s3:::BUCKET` | Whether the state bucket exists and is ready, as `plan` asks ([provisioning §Backend bootstrap](provisioning.md#backend-bootstrap)). |
+| `s3:PutObject`, `s3:GetObject`, `s3:DeleteObject`, `s3:DeleteObjectVersion` | `arn:aws:s3:::BUCKET/<factory ID>-lock.json`, and `s3:PutObject` on `arn:aws:s3:::BUCKET/<factory ID>-operations/*` | The lock and the operation record ([worker lifecycle §Tiers](worker-lifecycle.md#tiers)). |
+| `ec2:DescribeInstances`, `ec2:DescribeVpcs` | `*` (EC2 does not scope them to resources) | The inventory and the leftover check ([provisioning §Tagged VPCs](provisioning.md#tagged-vpcs)). |
+| `secretsmanager:GetSecretValue` | The secret `tailscale.admin_client_secret` refers to | The Tailscale admin client. |
+| `secretsmanager:ListSecrets`; `secretsmanager:RestoreSecret`, `secretsmanager:DeleteSecret`, `secretsmanager:DescribeSecret` | `*`; `arn:aws:secretsmanager:REGION:ACCOUNT:secret:<factory ID>/*` | Listing, deleting and confirming the absence of the owned secrets ([secrets §Permissions](secrets.md#permissions)); `DescribeSecret` also looks for the references already absent. |
+| What Terraform needs to destroy the `factory` root | The state object `factory/terraform.tfstate` and Terraform's lock beside it (`s3:GetObject`, `s3:PutObject`, `s3:DeleteObject`, `s3:ListBucket`); refreshing every resource the root holds, and the public Amazon Linux image parameter (`ssm:GetParameter`); deleting them: `ec2:TerminateInstances` on the factory's instances, `ec2:DeleteSecurityGroup`, `ec2:DisassociateRouteTable`, `ec2:DeleteRoute`, `ec2:DeleteRouteTable`, `ec2:DetachInternetGateway`, `ec2:DeleteInternetGateway`, `ec2:DeleteSubnet`, `ec2:DeleteVpc`, and `iam:RemoveRoleFromInstanceProfile`, `iam:DeleteInstanceProfile`, `iam:DeleteRolePolicy`, `iam:DeleteRole` on `<factory ID>-host` | The guarded destroy plan and its apply ([provisioning §Destroy plan](provisioning.md#destroy-plan)). |
+| `s3:ListBucketVersions`, `s3:DeleteObject`, `s3:DeleteObjectVersion`, `s3:DeleteBucket` | `arn:aws:s3:::BUCKET` and `arn:aws:s3:::BUCKET/*` | Emptying and deleting the state bucket ([provisioning §Deleting the state bucket](provisioning.md#deleting-the-state-bucket)). |
+
+It also needs the factory's Tailscale admin client, an OAuth client with the
+`devices:core` scope ([machine onboarding §5](../../MACHINE_ONBOARDING.md#5-prepare-the-tailnet)),
+to list and delete the tailnet's devices, and the operator's tailnet and
+Tailscale SSH as `fffactory-admin` to stop dispatch on and inspect each running
+worker, as `status` and `worker terminate` reach them; neither needs an AWS
+permission. A permission missing is found where it is used: a listing refused
+before anything is removed, or a deletion refused part way, named by its error
+and its next action ([Refusals](#refusals), [Partial failure](#partial-failure)).
 
 ## No state bucket
 
@@ -633,6 +799,7 @@ progress event, `bucketRemains`, `bucketUnreachable`, `taggedWithoutBucket`,
 `bucketAppeared` and `ranWithoutLock`), and the secret references it holds
 (validated ARNs, kept and listed). A
 `--confirm` value or typed answer that is not the factory ID is never echoed,
+nor any argument the command refuses ([Command](#command)),
 nor a device's tags, a device's reported hostname teardown did not derive, a
 secret's tags, or an EC2 host key tag that is not a well-formed key: the review
 and the report (`TeardownReview`, `TeardownReport`) do not carry them
@@ -655,6 +822,9 @@ names.
 | Application | `src/application/plan-store.ts` | `PlanStore.removeAll`. |
 | Application | `src/application/lock-store.ts`, `src/application/provisioner.ts`, `src/application/machine-inventory.ts` | `LockStore.deleteBucket` (and its `interrupted`), `StateBucketUnreachable`, `PlanRequest.destroy`, `MachineInventorySource.listVpcs`. |
 | Infrastructure | `src/infrastructure/plan-store.ts` | `removeAll`: the factory's plan directory, removed whole. |
+| Infrastructure | `src/infrastructure/tailscale-api-admin.ts` | `tailscaleApiBase`: Tailscale's API, or the loopback stand-in `FFFACTORY_TAILSCALE_API` names, read only run from source ([worker lifecycle §Tailnet device removal](worker-lifecycle.md#tailnet-device-removal)). |
+| CLI adapter | `src/cli/commands/teardown.ts` | `fffactory teardown`: its arguments, refused unechoed; the use case wired to the context; the review and each step streamed; the account check's refusal; the exit code (0 done, 2 partial, 1 otherwise; 128 + N by `src/cli/interrupts.ts`); `waitsOnInterrupt`. |
+| CLI adapter | `src/cli/presentation/teardown.ts` | The review (`teardownReviewBlocks`), each step (`teardownProgressLine`), and every outcome as one report on one stream (`teardownOutcome`), with `withCommands` for fffactory's words that name commands. |
 
 Tests: `tests/domain/teardown.test.ts` (device selection: known keys exactly
 and ignoring case, untagged look-alikes listed, a generated ID's other tagged
@@ -734,9 +904,36 @@ as returned, and a run interrupted at its end still `done`; only
 interrupted bucket deletion, the typed 403). terminate's own tests
 (`tests/application/worker-lifecycle.test.ts`) cover the shared helpers.
 
+`tests/cli/presentation/teardown.test.ts` (the review: the target, each
+kind, the kept apart, the references not listed apart from them, a malformed
+host key only marked, devices not checked with their advice, no state bucket
+without a destroy plan; each step; every outcome on its stream: a finished
+teardown with its advice, the devices listed but kept, without a state bucket
+not found by EC2 with `checkOutsideEc2`, a wrong `--confirm` unechoed, the
+refusals, dispatch left stopped, a decline, a failure with its diagnostics
+file, a partial with what remains, an interruption with the lock, before
+removing, without a state bucket and before the lock, `fffactory lock break`
+only in `interruptedTeardown`'s words; the commands named repeating the
+instance and profile), `tests/cli/teardown.test.ts` (in process over the use
+case's in-memory factory: `--confirm` without a terminal and the typed ID at a
+terminal, exit 0; a wrong `--confirm`, a typed answer, unknown arguments and
+`--force` refused, never echoed, before anything is read or asked; no terminal;
+another account; exit 2 part way and a rerun finishing it; an interrupt; help)
+and `tests/cli/teardown-executable.test.ts` (the spawned `main.ts` with the real
+AWS SDK and Tailscale adapter against `support/stub-sts.ts`, `stub-s3.ts`,
+`stub-secrets-manager.ts`, `stub-ec2-instances.ts` (its instances and VPC gone
+once the stand-in Terraform applied) and `stub-tailscale-api.ts`
+(`FFFACTORY_TAILSCALE_API`), the stand-in Terraform as the managed one, and a
+private PATH, HOME and cache: a full teardown exiting 0 with the secrets
+force-deleted and the source kept, a wrong `--confirm` reaching no stand-in,
+a device not deleted exiting 2 and a rerun finishing it, and no secret value in
+any output or Terraform argument).
+
 Partial failure, rerun and interruption by
 [#86](https://github.com/yaunder/fffactory/issues/86); the cleanup without a
-state bucket by [#87](https://github.com/yaunder/fffactory/issues/87). Introduced by
+state bucket by [#87](https://github.com/yaunder/fffactory/issues/87); the
+command, its output, exit codes and permissions by
+[#88](https://github.com/yaunder/fffactory/issues/88). Introduced by
 [#85](https://github.com/yaunder/fffactory/issues/85), on the
 building blocks of [#81](https://github.com/yaunder/fffactory/issues/81),
 [#82](https://github.com/yaunder/fffactory/issues/82),

@@ -951,8 +951,12 @@ describe("a factory without a state bucket (teardown §No state bucket)", () => 
 
 describe("teardown's advice (teardown §Report)", () => {
   test("leaves factory.json and every source it only refers to to the operator", () => {
-    expect(FACTORY_JSON_KEPT).toContain("factory.json is left as it is");
-    expect(REVOKE_SOURCES).toContain("revokes nothing it only refers to");
+    expect(FACTORY_JSON_KEPT).toBe(
+      "factory.json is left as it is: teardown never changes it. It still describes the factory, so `fffactory apply` would create a new one. Remove it yourself once you no longer need it.",
+    );
+    expect(REVOKE_SOURCES).toBe(
+      "Teardown revokes nothing it only refers to. Once nothing else uses them, revoke the Tailscale auth key and admin OAuth client (https://login.tailscale.com/admin/settings/trust-credentials), remove the tailnet policy entries made for the factory (its tag, grant and SSH rule), and revoke the API credentials kept above, with any grants given to them, at their providers.",
+    );
     expect(CHECK_LISTED_DEVICES).toContain("https://login.tailscale.com/admin/machines");
   });
 });
