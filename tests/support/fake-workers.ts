@@ -290,7 +290,8 @@ export function answers(document: HostInspection): HostCommandOutcome {
   return { kind: "completed", exitCode: 0, stdout: hostInspectionJson(document) };
 }
 
-function dispatchAnswer(dispatch: DispatchInspection): HostCommandOutcome {
+/** The activator's answer to `dispatch inspect` or `dispatch reconcile`, at its exit status. */
+export function dispatchAnswer(dispatch: DispatchInspection): HostCommandOutcome {
   const failed = dispatch.state === "failed" || dispatch.state === "unreadable";
   const pending = dispatch.state === "pending" || dispatch.state === "none";
   return {

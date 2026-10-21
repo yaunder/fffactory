@@ -97,7 +97,9 @@ places a repository and requests dispatch on the host, and `currentWorker` is a 
 already current for the plan. The control-plane and dispatch stages run against
 `support/fake-control-plane.ts`: a `ControlPlane` answering health and agent activity as
 given, and a `WorkflowQueue` that counts adoption checks and records every projection
-reconciled, so a test can assert a skipped worker was sent nothing. Nothing sleeps for
+reconciled, so a test can assert a skipped worker was sent nothing. Stopping dispatch runs
+the real `WorkflowQueue` adapter over `fakeTransport`, the worker answering with
+`dispatchAnswer`. Nothing sleeps for
 real: a new worker's first boot is waited out with `fakeTailnet`'s view changing read by
 read, and `fakeTime`'s clock, which moves only when the stage sleeps (or `workerFleet`'s
 recorded sleeps); the CLI harness's `sleep` returns at once. The one real sleep is

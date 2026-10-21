@@ -91,6 +91,57 @@ Only a deferred worker also bypasses the control-plane stage; a worker skipped
 for another reason that the tailnet still locates is reconciled there, which
 may fail it and the apply.
 
+## Stopping dispatch
+
+fffactory can stop dispatch on one running worker outside apply: `fffactory
+teardown` stops it on every running worker before it destroys anything
+(epic [#56](https://github.com/yaunder/fffactory/issues/56), D3). It
+reconciles that host's **not-requested** projection through the
+`WorkflowQueue`'s `dispatch reconcile`, the same activator operation and
+document apply sends a host factory.json requests no dispatch on
+(`notRequestedDispatchProjection`, `src/domain/dispatch-projection.ts`), so the
+reconciler removes the `factory-dispatch` schedule as a not-requested
+projection already does. Like any reconcile it is a live change: it never
+restarts Paseo or interrupts an active agent, and an agent dispatch already
+started keeps running. It reads no gate and no adoption, and sends the worker
+nothing else.
+
+The projection can only be built as not requested. The parser accepts no
+`active` projection without a request, and a requested inactive projection must
+name a blocker, which stopping is not: so it is `requested: false`,
+`active: false`, no blockers and no schedule, whatever factory.json requests.
+The CLI builds `tests/host/fixtures/dispatch-not-requested.json` byte for byte
+(`tests/host/protocol-contract.test.ts`); the worker's endpoint
+(`tests/host/dispatch.test.ts`) and the schedule reconciler
+(`test_dispatch_schedule.py`) take that very file and remove the schedule:
+
+```json
+{
+  "protocol_version": 1,
+  "hostname": "fff-aaaa1111-builder-1",
+  "requested": false,
+  "active": false,
+  "blockers": [],
+  "schedule": null
+}
+```
+
+Stopping one worker (`stopDispatch`, `src/application/stop-dispatch.ts`) ends
+in one of:
+
+| Result | When |
+| --- | --- |
+| `stopped` | The worker reports dispatch `not_requested` and changed something: it held another projection or a schedule. |
+| `already stopped` | The worker reports dispatch `not_requested` and changed nothing: it already held this projection and no schedule. |
+| `failed` | Reconciling did not complete (an unreachable worker, a schedule that did not reconcile, an answer that is not the protocol's), or the worker reported any state other than `not_requested`. Its reason is fffactory's short words, never Paseo's output; the schedule may be unchanged. |
+
+factory.json is not changed. `fffactory apply` reconciles dispatch from it as
+usual, so it restarts dispatch on a host that requests it once its gates pass;
+until then `status` reports that host's dispatch as not matching factory.json
+and names `fffactory apply`. Stopping is not a pause: no command but teardown
+uses it, and `worker stop` and `worker terminate` still leave the schedule as
+it is.
+
 ## The dispatch programs and skill
 
 The dispatch program (`factory-dispatch`), the Paseo schedule reconciler
@@ -203,12 +254,14 @@ configuration flag alone.
 | The gate matrix, requested-versus-active state, and the readiness progression | domain (pure) | `src/domain/dispatch-readiness.ts` |
 | The `WorkflowQueue` port | application | `src/application/workflow-queue.ts` |
 | The dispatch stage over the port | application | `src/application/apply-dispatch.ts` |
+| Stopping dispatch on one worker over the port | application | `src/application/stop-dispatch.ts` |
 | The end-to-end verification stage | application | `src/application/verify-factory.ts` |
 | The FFFlow/GitHub adapter over `HostTransport` | infrastructure | `src/infrastructure/ffflow-github-workflow-queue.ts` |
-| The versioned desired and observed dispatch documents | domain (pure) | `src/domain/dispatch-projection.ts` |
+| The versioned desired and observed dispatch documents, the not-requested projection that stops dispatch and how stopping ended (`DispatchStop`) | domain (pure) | `src/domain/dispatch-projection.ts` |
 | The root endpoint, asset installation, privilege drop and persisted observation | host | `src/host/dispatch.ts` |
 | The dispatch program, schedule reconciler and skill | release assets | `assets/steps/dispatch/` |
 
 Introduced by [#105](https://github.com/yaunder/factory/issues/105). Skipped
 workers: [#134](https://github.com/yaunder/factory/issues/134). A delivered
 GitHub token's next action: [#70](https://github.com/yaunder/fffactory/issues/70).
+Stopping dispatch: [#84](https://github.com/yaunder/fffactory/issues/84).

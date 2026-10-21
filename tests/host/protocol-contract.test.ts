@@ -1,6 +1,7 @@
 /**
  * The host protocol's contract: one set of fixtures, produced by the worker side and read by
- * the CLI side. A change that breaks either side against the fixtures breaks the protocol.
+ * the CLI side, and one, `dispatch-not-requested.json`, produced by the CLI side and read by
+ * the worker side. A change that breaks either side against the fixtures breaks the protocol.
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
@@ -8,6 +9,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { inspectWork } from "../../src/application/inspect-work";
 import { inspectWorker } from "../../src/application/inspect-worker";
+import {
+  dispatchProjectionJson,
+  notRequestedDispatchProjection,
+  parseDispatchProjection,
+} from "../../src/domain/dispatch-projection";
 import {
   HOST_PROTOCOL_VERSION,
   hostInspectionJson,
@@ -355,5 +361,23 @@ describe("host work inspect, both sides", () => {
         JSON.stringify({ ...document, protocol_version: HOST_PROTOCOL_VERSION + 1 }),
       ),
     ).toEqual({ ok: false, kind: "unsupported_version", version: HOST_PROTOCOL_VERSION + 1 });
+  });
+});
+
+describe("the not-requested dispatch projection, both sides", () => {
+  // The other direction: the CLI produces this document and the worker reads it. The worker's
+  // endpoint (`dispatch.test.ts`) and schedule reconciler
+  // (`assets/steps/dispatch/tests/test_dispatch_schedule.py`) take this very file.
+  test("the CLI produces dispatch-not-requested.json byte for byte to stop dispatch", async () => {
+    expect(dispatchProjectionJson(notRequestedDispatchProjection(WORKER_HOSTNAME))).toBe(
+      await fixture("dispatch-not-requested.json"),
+    );
+  });
+
+  test("the worker's parser reads it back without loss", async () => {
+    const text = await fixture("dispatch-not-requested.json");
+    const parsed = parseDispatchProjection(text);
+    if (!parsed.ok) throw new Error(`rejected: ${parsed.reason}`);
+    expect(dispatchProjectionJson(parsed.projection)).toBe(text);
   });
 });

@@ -6,6 +6,9 @@ temporary directories by `worker-scenarios.ts`, never the real `/`.
 - `fixtures/` (inspect, apply, verify and work documents) is the protocol's shared contract.
   `protocol-contract.test.ts` runs every fixture through both sides: the worker side must
   produce it byte for byte; the CLI side must parse it and serialize it back unchanged.
+  `dispatch-not-requested.json`, the projection that stops dispatch, goes the other way: the
+  CLI side builds it byte for byte, the worker side parses it unchanged, and `dispatch.test.ts`
+  and the reconciler's Python test (`assets/steps/dispatch/tests/`) remove the schedule for it.
   Change a document, its fixture and the CLI-side parser together.
 - Biome leaves `**/fixtures/**/*.json` alone: the fixtures are `JSON.stringify`'s output.
 - `apply.test.ts` runs `host apply` over fake steps: real bash scripts written into the

@@ -10,6 +10,10 @@ import tempfile
 import unittest
 
 SCRIPT = Path(__file__).resolve().parents[1] / "dispatch-schedule.sh"
+# The projection fffactory sends to stop dispatch on a worker, shared with the CLI side's
+# contract test (tests/host/protocol-contract.test.ts), which builds it byte for byte.
+STOP_PROJECTION = (Path(__file__).resolve().parents[4] / "tests" / "host" / "fixtures"
+                   / "dispatch-not-requested.json")
 
 MOCK_PASEO = r'''#!/usr/bin/env python3
 import json, os, sys
@@ -121,6 +125,25 @@ class DispatchScheduleTest(unittest.TestCase):
         self.assertIsNone(json.loads(self.state.read_text()))
         self.assertEqual(sum("schedule delete" in line for line in
                              self.calls.read_text().splitlines()), 1)
+
+    def test_stop_projection_removes_the_schedule(self):
+        self.requested = True
+        self.active = True
+        self.write_projection()
+        result = self.invoke("--apply")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIsNotNone(json.loads(self.state.read_text()))
+
+        self.projection.write_text(STOP_PROJECTION.read_text())
+        self.assertEqual(self.invoke("--check").returncode, 1)
+        result = self.invoke("--apply")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)["status"], "absent")
+        self.assertIsNone(json.loads(self.state.read_text()))
+        result = self.invoke("--apply")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        calls = self.calls.read_text().splitlines()
+        self.assertEqual(sum(line.startswith("schedule delete ") for line in calls), 1)
 
     def test_creates_bypass_schedule(self):
         self.requested = True

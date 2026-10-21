@@ -164,8 +164,10 @@ dispatcher in adoption-only mode against the placed-repository manifest; it
 does not launch work. `reconcile` reads the canonical desired dispatch
 projection from standard input. An active projection installs the stable
 dispatcher and skill; every projection drops to `factory` to reconcile the
-schedule, and persists the desired and observed documents. `inspect` reads that
-result and checks the real schedule, without changing it. Exit 2 means a
+schedule, and persists the desired and observed documents; a not-requested
+projection removes the schedule, which is also how fffactory stops dispatch
+outside apply ([dispatch §Stopping dispatch](dispatch.md#stopping-dispatch)).
+`inspect` reads that result and checks the real schedule, without changing it. Exit 2 means a
 genuine adoption/readiness pending state; malformed input or reconciliation
 failure exits 1. See [dispatch](dispatch.md).
 
@@ -863,7 +865,11 @@ verify` over worker filesystems with scripted tools the same way:
 `tests/host/fixtures/apply-{succeeded,failed,busy}.json` and
 `verify-pending.json` byte for byte on the worker side, and on the CLI side each
 read back without loss and each activator answer into the expected worker
-outcome. `tests/host/apply.test.ts` runs
+outcome. The other direction, a document the CLI sends, is
+`tests/host/fixtures/dispatch-not-requested.json`, the projection that stops
+dispatch ([dispatch §Stopping dispatch](dispatch.md#stopping-dispatch)): the
+CLI side builds it byte for byte, and the worker side parses it without loss.
+`tests/host/apply.test.ts` runs
 `host apply` over real bash stand-in steps in a temporary worker: the order in
 one process, each step's result recorded before the next, the logs streamed as
 steps run (a hanging step's output kept), the active release, a failing step
