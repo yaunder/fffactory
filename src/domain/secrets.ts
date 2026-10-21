@@ -320,7 +320,7 @@ export function secretReferences(instance: FactoryInstance): readonly SecretRefe
  * Whether a factory.json reference names the listed secret: its full ARN, or the partial ARN
  * without the six characters Secrets Manager adds after a hyphen.
  */
-function refersTo(reference: SecretReference, arn: SecretReference): boolean {
+export function refersTo(reference: SecretReference, arn: SecretReference): boolean {
   return (
     reference === arn || (arn.startsWith(`${reference}-`) && arn.length === reference.length + 7)
   );

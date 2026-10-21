@@ -75,6 +75,11 @@ provisioned key no longer declared,
 its `before` naming the instance the state holds (`instanceIds`), records it no longer once
 applied, and, given the secrets the hosts' policy allows (`secretArns`), plans that policy's
 in-place update as Terraform renders it) and writes factory.json to `MemoryInstanceStore`.
+Teardown (`application/teardown-factory.test.ts`) runs against the same world, whose destroy
+plan (`PlanRequest.destroy`) deletes every host machine and its network (`network`, also for a
+factory without hosts), an EC2 inventory the test derives from that world so instances and
+`NETWORK_VPC` vanish once it is destroyed, `fakeWorkflowQueue` and `fakeControlPlane` wrapped
+to order dispatch stops before inspections, and `MemoryPlanStore`'s `removeAll`.
 Tests never reach Tailscale's API: `infrastructure/tailscale-api-admin.test.ts` sends real
 HTTP to
 `support/stub-tailscale-api.ts`, a local stand-in for the token exchange, the device list

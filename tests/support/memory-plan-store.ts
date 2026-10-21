@@ -83,6 +83,14 @@ export class MemoryPlanStore implements PlanStore {
     this.saved.delete(key);
   }
 
+  async removeAll(factoryId: FactoryId): Promise<void> {
+    this.calls.push(`removeAll ${factoryId}`);
+    for (const key of this.directories)
+      if (key.startsWith(`${factoryId}/`)) this.directories.delete(key);
+    for (const key of this.saved.keys())
+      if (key.startsWith(`${factoryId}/`)) this.saved.delete(key);
+  }
+
   async prune(factoryId: FactoryId, now: Date): Promise<void> {
     this.calls.push(`prune ${factoryId}`);
     for (const [key, plan] of this.saved)

@@ -44,9 +44,16 @@ export const VERIFICATION_STAGE = "verification";
 export const PIN_STAGE = "pin";
 
 /**
+ * The operation teardown holds the factory lock as, and the name of its record's one stage
+ * (`docs/specs/teardown.md` §Operation record).
+ */
+export const TEARDOWN_OPERATION = "teardown";
+
+/**
  * How an operation ended; `running` until it does. An interrupted or killed operation stays
- * `running`, with its lock left in place. `partial`: it succeeded except for workers it
- * skipped, such as offline ones.
+ * `running`, with its lock left in place. `partial`: apply succeeded except for workers it
+ * skipped, such as offline ones; terminate left tailnet devices behind; teardown stopped after
+ * removing part of the factory, once its destroy was applied or as it was.
  */
 export type OperationStatus =
   | "running"
@@ -67,7 +74,13 @@ export type OperationStatus =
  * `unchanged`, `partial` (terminate left tailnet devices behind), `declined`, `refused` or
  * `failed`. Terminate removing the host goes `planning` after `authorizing`, then
  * `awaiting_approval`, `applying` (Terraform), `writing` (factory.json) and `removing_devices`,
- * and ends `removed` (`docs/specs/worker-lifecycle.md` §Operation record).
+ * and ends `removed` (`docs/specs/worker-lifecycle.md` §Operation record). Teardown's one stage,
+ * `teardown` (`TEARDOWN_OPERATION`), goes `authorizing`, `inventorying`, `planning`,
+ * `awaiting_approval`, `stopping_dispatch`, `inspecting`, `applying`, `verifying`,
+ * `removing_devices`, `removing_secrets`, `removing_plans` and `deleting_bucket`, and ends
+ * `refused`, `declined`, `failed` or `partial` (stopped after removing part of the factory);
+ * once the bucket is deleted the record goes with it, so a teardown that finished has none
+ * (`docs/specs/teardown.md` §Operation record).
  */
 export type StageStatus =
   | "pending"
@@ -96,6 +109,12 @@ export type StageStatus =
   | "terminating"
   | "terminated"
   | "removing_devices"
+  | "inventorying"
+  | "stopping_dispatch"
+  | "verifying"
+  | "removing_secrets"
+  | "removing_plans"
+  | "deleting_bucket"
   | "writing"
   | "removed"
   | "waiting"

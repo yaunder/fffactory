@@ -190,8 +190,10 @@ The write has a 30-second deadline (`SECRETS_MANAGER_TIMEOUT_MS`).
 
 Removing a whole factory ([#56](https://github.com/yaunder/fffactory/issues/56))
 deletes the secrets it owns, permanently, and confirms each is gone; it keeps
-every secret it only refers to. No command calls this yet: the teardown use case
-and `fffactory teardown` follow.
+every secret it only refers to. The teardown use case deletes them after the
+factory's devices, the admin client among them, and reports the kept ones
+([teardown §Report](teardown.md#report)); the `fffactory teardown` command
+follows ([#88](https://github.com/yaunder/fffactory/issues/88)).
 
 ### Ownership
 

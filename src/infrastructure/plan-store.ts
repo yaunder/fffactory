@@ -12,6 +12,8 @@
  * A record binds the one Terraform plan file its kind names: a factory plan `factory.tfplan`,
  * a bootstrap plan (`"kind": "bootstrap"`) `backend.tfplan`.
  *
+ * Teardown removes a factory's directory whole, every plan in it (`removeAll`).
+ *
  * A plan is short-lived: plans long expired, and directories without a record (never saved,
  * as an interrupted `plan` or `apply` leaves one, or spent, as an apply killed outright does)
  * long unchanged, are pruned (`PLAN_KEPT_MS`).
@@ -29,7 +31,7 @@ import {
 } from "node:fs/promises";
 import { join } from "node:path";
 import type { PlanFiles, PlanStore, StoredPlan } from "../application/plan-store";
-import type { FactoryId } from "../domain/instance";
+import { type FactoryId, parseFactoryId } from "../domain/instance";
 import {
   isPlanId,
   isPrunable,
@@ -171,6 +173,11 @@ export function filesystemPlanStore(directory: string): PlanStore {
 
     async remove(factoryId, planId) {
       await rm(planDirectory(factoryId, planId), { recursive: true, force: true });
+    },
+
+    async removeAll(factoryId) {
+      if (!parseFactoryId(factoryId).ok) throw new Error("Not a factory ID");
+      await rm(join(directory, factoryId), { recursive: true, force: true });
     },
 
     async prune(factoryId, now) {

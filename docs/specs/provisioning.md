@@ -800,9 +800,11 @@ N s`, never an AWS or SDK message.
 
 Removing a whole factory ([#56](https://github.com/yaunder/fffactory/issues/56))
 destroys its `factory` root first (D6), with a destroy plan guarded before it
-is shown or confirmed (D13). No command calls this yet: the teardown use case
-and `fffactory teardown` follow, and decide when, and under which lock, it is
-planned and applied. `plan` and `apply` keep the D11 refusals of host destroys
+is shown or confirmed (D13). The teardown use case plans it under the factory
+lock, after its inventory and before its confirmation, and applies exactly that
+plan once its gates pass ([teardown §Order](teardown.md#order)); the
+`fffactory teardown` command follows
+([#88](https://github.com/yaunder/fffactory/issues/88)). `plan` and `apply` keep the D11 refusals of host destroys
 ([plan and apply §Refusals](plan-apply.md#refusals-until-lifecycle-work-lands-d11)),
 and the state bucket, outside the `factory` root, is never Terraform's to
 destroy ([Deleting the state bucket](#deleting-the-state-bucket)).
@@ -869,7 +871,8 @@ The rule relies on Terraform's documented JSON plan format and plan modes
 `just terraform-check` checks the rule against Terraform's own destroy plans
 ([Guardrails](#guardrails)): from local states synthesized from its plans of
 the example with one host and with two, and from an empty state, each planned
-with `-destroy -refresh=false` as teardown plans it. Each plan must delete
+with `-destroy`, as teardown plans it, and `-refresh=false`, since the offline
+check has no AWS to refresh against (teardown refreshes). Each plan must delete
 every managed resource its prior state holds and change nothing else (the
 empty state's changes nothing, and `-detailed-exitcode` agrees);
 `destroyPlanRefusal` must pass it with EC2 listing the instances the state
@@ -881,8 +884,9 @@ place of one, and with any one change tampered into `update`, a replacement or
 
 Teardown also lists the VPCs carrying the factory ID tag: after the destroy,
 any left is a leftover outside Terraform state that stops the run before
-devices, secrets and the bucket (D12), and without a state bucket, any found
-refuses the cleanup (D10). `MachineInventorySource.listVpcs`
+devices, secrets and the bucket (D12, [teardown §Order](teardown.md#order)),
+and without a state bucket, any found refuses the cleanup (D10,
+[#87](https://github.com/yaunder/fffactory/issues/87)). `MachineInventorySource.listVpcs`
 (`ec2MachineInventory`) calls EC2 `DescribeVpcs` in the factory Region with
 the filter `tag:fffactory:factory-id` = the factory ID, 1000 per page,
 following `NextToken`, every page within one 15 s deadline
@@ -896,9 +900,10 @@ needs `ec2:DescribeVpcs`, which EC2 does not scope to resources.
 ## Deleting the state bucket
 
 Removing a whole factory ([#56](https://github.com/yaunder/fffactory/issues/56))
-deletes its state bucket last (D6): the lock lives in it. No command calls
-this yet: the teardown use case and `fffactory teardown` follow, and decide
-when, and under which lock, it runs. Terraform never destroys the bucket
+deletes its state bucket last (D6): the lock lives in it. The teardown use case
+runs this last, under the factory lock it deletes, and on `absent` neither
+releases the lock nor writes its record
+([teardown §Operation record](teardown.md#operation-record)). Terraform never destroys the bucket
 (`prevent_destroy`); `LockStore.deleteBucket` empties and deletes it with S3
 calls, every one with `ExpectedBucketOwner` set to the factory's account:
 
@@ -1041,7 +1046,7 @@ The operator's credentials need, beyond the lock's:
 | Infrastructure | `assets/terraform/` | The Terraform modules and their provider lockfiles. |
 | Domain | `src/domain/backend-bootstrap.ts` | The create-only rule (`bootstrapPlanVerdict`, each offending change as a `ResourceChange`) and `BootstrapContext`; the state bucket's readiness rule, its TLS-only policy and its check, and `UnreadyBucket` (where the bucket is, what S3 reports and each setting it lacks). Pure; no text layout. |
 | Domain | `src/domain/factory-lock.ts` | The lock record, its key and break-log key, parsing, staleness (`isStale`, `lockAge`, `formatDuration`), and the break confirmation rule (`confirmsBreak`). Pure; no text layout. |
-| Domain | `src/domain/teardown.ts` | The guarded destroy plan's rule (`destroyPlanRefusal`, each refusal a summary, details and next action) and `VpcInventory`. Pure. |
+| Domain | `src/domain/teardown.ts` | The guarded destroy plan's rule (`destroyPlanRefusal`, each refusal a summary, details and next action) and `VpcInventory`; the rest of teardown's rules are [teardown](teardown.md)'s. Pure. |
 | Infrastructure | `src/infrastructure/ec2-inventory.ts` | `ec2MachineInventory`'s `listVpcs`: the factory's tagged VPCs from `DescribeVpcs`, paged, within one deadline, a VPC without a well-formed ID or a failure `unavailable`. |
 | Domain | `src/domain/state-bucket-deletion.ts` | `DELETE_OBJECTS_LIMIT`, the order the bucket is emptied in, page by page with the lock's versions set aside (`deletionBatches`), then the lock's, in batches of their own, those no longer current oldest first and the current one alone and last (`lockBatches`), and how deleting it ended (`BucketDeletion`, and what became of the lock, `LockAfterDeletion`). Pure. |
 | CLI adapter | `src/cli/presentation/lock.ts` | The holder lines (`describeHeldLock`) and the lock refusal: `lockRefusalReport` in blocks for plan, apply and upgrade, and the unstyled `lockRefusal` the worker commands still print. |

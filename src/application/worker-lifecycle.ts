@@ -69,7 +69,6 @@ import {
   type ResourceChange,
   resourceChanges,
 } from "../domain/plan";
-import type { SecretMaterial } from "../domain/secrets";
 import { placedRepositories } from "../domain/repository-placement";
 import { hostName } from "../domain/resource-naming";
 import { recordedHostKeys } from "../domain/stable-host-keys";
@@ -126,8 +125,6 @@ import {
 } from "./factory-lock";
 import type { HostTransport } from "./host-transport";
 import type { InstanceStore } from "./instance-store";
-import { inspectRepositories } from "./inspect-repositories";
-import { inspectWork } from "./inspect-work";
 import { inspectWorker } from "./inspect-worker";
 import type { LockStore, StateBucket } from "./lock-store";
 import type { MachineControl, MachineRequest, MachineTarget } from "./machine-control";
@@ -141,6 +138,7 @@ import { type AccountRequirement, requireExpectedAccount } from "./require-expec
 import type { SecretStore } from "./secret-store";
 import type { TailnetAdmin, TailnetAdminSession } from "./tailnet-admin";
 import type { TailnetPeers } from "./tailnet-peers";
+import { deleteDevices, inspectForRemoval, openTailnetAdmin } from "./worker-removal";
 
 export interface WorkerLifecycleDependencies {
   readonly identity: CallerIdentity;
@@ -704,9 +702,9 @@ async function awaitUnderWay(
 }
 
 /**
- * Terminate's tailnet admin session, opened before EC2 is asked anything so a client that
- * cannot delete the worker's devices refuses the terminate instead of leaving them behind.
- * The client secret is read here, given to the admin client, and kept nowhere.
+ * Terminate's tailnet admin session (`openTailnetAdmin`), opened before EC2 is asked anything so
+ * a client that cannot delete the worker's devices refuses the terminate instead of leaving them
+ * behind.
  */
 async function adminFor(
   deps: WorkerLifecycleDependencies,
@@ -720,27 +718,20 @@ async function adminFor(
     return { kind: "open", session: undefined };
   await log.stage("authorizing");
   const { key } = power.worker;
-  let secret: SecretMaterial;
-  try {
-    secret = await deps.secrets.read({
-      reference: power.adminClient,
-      region: power.region,
-      credentials: power.request.credentials,
-    });
-  } catch (error) {
-    return {
-      kind: "refused",
-      refusal: adminSecretUnreadable(power.command as TerminateCommand, key, reasonOf(error)),
-    };
+  const command = power.command as TerminateCommand;
+  const opening = await openTailnetAdmin(deps, {
+    reference: power.adminClient,
+    region: power.region,
+    credentials: power.request.credentials,
+  });
+  switch (opening.kind) {
+    case "unreadable":
+      return { kind: "refused", refusal: adminSecretUnreadable(command, key, opening.reason) };
+    case "unusable":
+      return { kind: "refused", refusal: adminClientUnusable(command, key, opening.reason) };
+    case "open":
+      return opening;
   }
-  if (deps.interrupted()) return { kind: "open", session: undefined };
-  const opening = await deps.tailnetAdmin.open(secret);
-  if (opening.kind === "failed")
-    return {
-      kind: "refused",
-      refusal: adminClientUnusable(power.command as TerminateCommand, key, opening.reason),
-    };
-  return { kind: "open", session: opening.session };
 }
 
 /** The gates of stop and terminate, for a machine `act` found in `state`. */
@@ -912,34 +903,17 @@ async function terminateGates(
   return terminateGate(inspection, power.worker, power.command as TerminateCommand);
 }
 
-/**
- * The running worker's agent activity and last repository result, then its current work: only
- * once the activity is read, since both go through the activator, which runs one operation at a
- * time, and only when the activity does not already refuse, which would leave the activator
- * held for nothing (`INSPECT_WORK_TIMEOUT_MS`). Undefined once interrupted, which asks the
- * worker nothing more.
- */
-async function terminateInspection(
+/** The running worker's fresh inspection (`inspectForRemoval`); undefined once interrupted. */
+function terminateInspection(
   deps: WorkerLifecycleDependencies,
   power: Power,
 ): Promise<TerminateInspection | undefined> {
-  const then = thenRerunWorker(power.command, power.worker.key);
-  const location = locateWorker(await deps.peers.view(), power.worker, power.tag, then);
-  if (location.kind === "blocked") return { kind: "unlocated", verdict: location.verdict };
-  const [activity, repositories] = await Promise.all([
-    deps.controlPlane === undefined
-      ? {
-          kind: "unknown" as const,
-          reason: "this fffactory cannot reach the worker's control plane",
-        }
-      : deps.controlPlane.activeAgents(location.worker),
-    inspectRepositories(deps.transport, location.worker),
-  ]);
-  if (deps.interrupted()) return undefined;
-  if (activity.kind !== "idle") return { kind: "activity", activity };
-  const work = await inspectWork(deps.transport, location.worker);
   const placed = placedRepositories(power.request.instance.repositories ?? [], power.host);
-  return { kind: "inspected", repositories, work, placed: placed.map(({ path }) => path) };
+  return inspectForRemoval(
+    deps,
+    { worker: power.worker, tag: power.tag, placed: placed.map(({ path }) => path) },
+    thenRerunWorker(power.command, power.worker.key),
+  );
 }
 
 /**
@@ -1178,14 +1152,7 @@ async function removeDevices(
     power.worker.hostname,
     power.tag,
   );
-  const removed: string[] = [];
-  const failed: { readonly id: string; readonly reason: string }[] = [];
-  for (const device of tagged) {
-    if (deps.interrupted()) break;
-    const deletion = await admin.remove(device.id);
-    if (deletion.kind === "removed") removed.push(device.id);
-    else failed.push({ id: device.id, reason: deletion.reason });
-  }
+  const { removed, failed } = await deleteDevices(admin, tagged, deps.interrupted);
   return { kind: "listed", removed, failed, untagged: untagged.map((device) => device.id) };
 }
 

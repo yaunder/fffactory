@@ -70,6 +70,8 @@ function shownAttributes({ actions, before, after }: WorldChange) {
 }
 
 export const NETWORK = "module.network.aws_vpc.this";
+/** The VPC the world's network is, as EC2 lists it by the factory ID tag. */
+export const NETWORK_VPC = "vpc-0123456789abcdef0";
 export const SECRETS_POLICY = "module.host_identity.aws_iam_role_policy.read_secrets";
 
 /**
@@ -125,7 +127,9 @@ export const STATE_BUCKET_ADDRESS = "module.state_bucket.aws_s3_bucket.state";
  * policy's in-place update whenever the projected secrets differ, as Terraform renders it. Applying a saved plan applies its
  * changes one at a time, each written to the state (a new revision in `store`), and runs
  * `beforeChange` before each: a test can stop the apply part way through by throwing there,
- * as an interrupted Terraform does.
+ * as an interrupted Terraform does. A destroy plan (`PlanRequest.destroy`) deletes every host
+ * machine and the network the state holds, and nothing else; its network exists from the
+ * start when `network` says so, as an empty factory's does once applied.
  */
 export function fakeFactoryWorld(options: {
   readonly store: { readonly buckets: Set<string>; readonly states: Map<string, string> };
@@ -135,9 +139,11 @@ export function fakeFactoryWorld(options: {
   readonly instanceIds?: Readonly<Record<string, string>>;
   /** The secrets the state's secret-reading policy allows; the policy is not modeled unless set. */
   readonly secretArns?: readonly string[];
+  /** Whether the network exists; by default, once there are hosts. */
+  readonly network?: boolean;
 }) {
   const world = {
-    network: (options.hosts ?? []).length > 0,
+    network: options.network ?? (options.hosts ?? []).length > 0,
     hosts: new Set(options.hosts ?? []),
     /** The instance the state holds for a host key; `i-<key>` unless set. */
     instanceIds: new Map(Object.entries(options.instanceIds ?? {})),
@@ -246,6 +252,27 @@ export function fakeFactoryWorld(options: {
     ];
   }
 
+  /** `plan -destroy`: every host machine and the network the state holds, deleted. */
+  function destroyChanges(): WorldChange[] {
+    const hosts = [...world.hosts].map((key) => ({
+      address: hostAddress(key),
+      type: "aws_instance",
+      actions: ["delete"],
+      before: { id: world.instanceIds.get(key) ?? `i-${key}`, instance_type: "t3.large" },
+      apply: () => world.hosts.delete(key),
+    }));
+    const network = {
+      address: NETWORK,
+      type: "aws_vpc",
+      actions: ["delete"],
+      before: { id: NETWORK_VPC },
+      apply: () => {
+        world.network = false;
+      },
+    };
+    return [...hosts, ...(world.network ? [network] : [])];
+  }
+
   function backendChanges(): WorldChange[] {
     return [
       {
@@ -272,7 +299,9 @@ export function fakeFactoryWorld(options: {
       const changes =
         request.configuration.root === "backend"
           ? backendChanges()
-          : factoryChanges(declared, request.variables);
+          : request.destroy === true
+            ? destroyChanges()
+            : factoryChanges(declared, request.variables);
       plans.set(request.planFile, changes);
       return { changes: changes.length > 0 };
     },
