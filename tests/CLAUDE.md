@@ -27,7 +27,8 @@ proves it. A spawned `fffactory` gets an explicit environment built on
 `isolatedAwsEnvironment` from `support/aws-isolation.ts`, never the inherited one. Test
 AWS through a fake `CallerIdentity` or `VpcQuotaProbe` (`support/doctor-fakes.ts`), the
 versioned in-memory `support/memory-lock-store.ts` and `support/memory-plan-store.ts`,
-the fakes in `support/fake-secrets.ts` (Secrets Manager and the operator prompt) and
+the fakes in `support/fake-secrets.ts` (Secrets Manager, whose listing, restore, deletion and
+looks answer as scripted and are recorded in `calls`, and the operator prompt) and
 `support/fake-provisioner.ts` (a scripted `fakeProvisioner`, and `fakeFactoryWorld`, a
 factory whose Terraform state changes as plans apply and whose apply can be stopped part
 way, which can replace a host or change its instance type in place (`resize`), and whose
@@ -36,7 +37,10 @@ way, which can replace a host or change its instance type in place (`resize`), a
 or the real SDK pointed at `support/stub-sts.ts`, `support/stub-vpc-quota.ts` (EC2 and
 Service Quotas), `support/stub-s3.ts` (a versioned, never-versioned or suspended bucket
 with conditional writes and bootstrap's settings, some of them lackable,
-`forcePathStyle`) or `support/stub-secrets-manager.ts` (which also answers `GetSecretValue`), with AWS's documentation example
+`forcePathStyle`) or `support/stub-secrets-manager.ts` (which also answers `GetSecretValue`, and ListSecrets,
+RestoreSecret, DeleteSecret and DescribeSecret as AWS documents them: tag filters by prefix,
+scheduled secrets, pages of `pageSize`, a forced deletion of a scheduled secret refused and one
+still described for `lingering` looks), with AWS's documentation example
 keys and account `123456789012`. The terminal prompt runs over a `PassThrough` stand-in
 terminal, never the test's own. A secret-handling test searches every output line, file
 and argument for the value it used. Spawn a CLI that talks to a stub in the test process

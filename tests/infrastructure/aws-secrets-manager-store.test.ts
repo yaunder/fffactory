@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import type { SecretWrite } from "../../src/application/secret-store";
-import type { SecretReference } from "../../src/domain/instance";
+import type { FactoryId, SecretReference } from "../../src/domain/instance";
 import { SecretMaterial } from "../../src/domain/secrets";
 import {
   SECRETS_MANAGER_TIMEOUT_MS,
@@ -12,6 +12,7 @@ import type { AwsSession } from "../../src/infrastructure/aws-session";
 import {
   type StubSecretsManager,
   type StubSecretsManagerOptions,
+  stubArn,
   stubSecretsManager,
 } from "../support/stub-secrets-manager";
 import { EXAMPLE_CREDENTIALS } from "../support/stub-sts";
@@ -51,6 +52,22 @@ function stubbed(script: Partial<SecretsManagerCalls> = {}) {
       getSecretValue: async (input) => {
         calls.push(`GetSecretValue ${input.SecretId}`);
         return { ARN, SecretString: VALUE };
+      },
+      listSecrets: async (input) => {
+        calls.push(`ListSecrets ${input.NextToken ?? "-"}`);
+        return { SecretList: [] };
+      },
+      restoreSecret: async (input) => {
+        calls.push(`RestoreSecret ${input.SecretId}`);
+        return {};
+      },
+      deleteSecret: async (input) => {
+        calls.push(`DeleteSecret ${input.SecretId} ${input.ForceDeleteWithoutRecovery}`);
+        return {};
+      },
+      describeSecret: async (input) => {
+        calls.push(`DescribeSecret ${input.SecretId}`);
+        return {};
       },
       ...script,
       close: () => calls.push("close"),
@@ -211,5 +228,297 @@ describe("Secrets Manager store with the real SDK against a local stub", () => {
   test("a stub that never answers times out", async () => {
     const store = againstStub({ hang: true }, 300);
     await expect(store.write(WRITE)).rejects.toThrow("timed out after 0.3 s");
+  });
+});
+
+const FACTORY_ID = "fff-abcd1234" as FactoryId;
+const TAGS = { "fffactory:factory-id": "fff-abcd1234", "fffactory:managed-by": "fffactory" };
+const LOOKUP = {
+  reference: ARN,
+  region: "eu-west-2",
+  credentials: { source: "chain" },
+} as const;
+const LIST = {
+  factoryId: FACTORY_ID,
+  region: "eu-west-2",
+  credentials: { source: "chain" },
+} as const;
+
+describe("deleting a factory's secrets over stubbed calls (secrets §Deleting a factory's secrets)", () => {
+  test("lists by the factory-ID tag, scheduled secrets included, every page", async () => {
+    const inputs: unknown[] = [];
+    const pages = [
+      {
+        SecretList: [
+          {
+            ARN,
+            Name: NAME,
+            Tags: [
+              { Key: "fffactory:factory-id", Value: "fff-abcd1234" },
+              { Key: "fffactory:managed-by", Value: "fffactory" },
+            ],
+          },
+        ],
+        NextToken: "page-2",
+      },
+      { SecretList: [], NextToken: "page-3" },
+      {
+        SecretList: [
+          {
+            ARN: stubArn("fffv/github-token"),
+            Name: "fffv/github-token",
+            Tags: [{ Key: "fffactory:factory-id" }],
+            DeletedDate: new Date("2026-10-20T00:00:00Z"),
+          },
+        ],
+      },
+    ];
+    const stub = stubbed({
+      listSecrets: async (input) => {
+        inputs.push(input);
+        return pages[inputs.length - 1] ?? {};
+      },
+    });
+    const listing = await secretsManagerStore(stub.open).list(LIST);
+    expect(listing).toEqual({
+      kind: "listed",
+      secrets: [
+        { name: NAME, arn: ARN, tags: TAGS, pendingDeletion: false },
+        {
+          name: "fffv/github-token",
+          arn: stubArn("fffv/github-token") as SecretReference,
+          tags: { "fffactory:factory-id": "" },
+          pendingDeletion: true,
+        },
+      ],
+    });
+    const filters = [
+      { Key: "tag-key", Values: ["fffactory:factory-id"] },
+      { Key: "tag-value", Values: ["fff-abcd1234"] },
+    ];
+    expect(inputs).toEqual([
+      { Filters: filters, IncludePlannedDeletion: true, MaxResults: 100, NextToken: undefined },
+      { Filters: filters, IncludePlannedDeletion: true, MaxResults: 100, NextToken: "page-2" },
+      { Filters: filters, IncludePlannedDeletion: true, MaxResults: 100, NextToken: "page-3" },
+    ]);
+    expect(stub.calls).toEqual(["close"]);
+  });
+
+  test("a listed secret without a usable name or ARN fails the listing", async () => {
+    const stub = stubbed({
+      listSecrets: async () => ({ SecretList: [{ ARN: "not-an-arn", Name: NAME }] }),
+    });
+    expect(await secretsManagerStore(stub.open).list(LIST)).toEqual({
+      kind: "failed",
+      reason: "Secrets Manager listed a secret without a usable name or ARN",
+    });
+  });
+
+  test("a listing that fails is named, never quoted", async () => {
+    const stub = stubbed({
+      listSecrets: async () => {
+        throw sdkError("AccessDeniedException");
+      },
+    });
+    expect(await secretsManagerStore(stub.open).list(LIST)).toEqual({
+      kind: "failed",
+      reason: "Secrets Manager ListSecrets failed: AccessDeniedException",
+    });
+  });
+
+  test("restores and deletes by ARN, the deletion without a recovery window", async () => {
+    const stub = stubbed();
+    const store = secretsManagerStore(stub.open);
+    expect(await store.restore(LOOKUP)).toEqual({ kind: "done" });
+    expect(await store.remove(LOOKUP)).toEqual({ kind: "done" });
+    expect(stub.calls).toEqual([
+      `RestoreSecret ${ARN}`,
+      "close",
+      `DeleteSecret ${ARN} true`,
+      "close",
+    ]);
+  });
+
+  test("DescribeSecret's answer is present; ResourceNotFoundException is absent", async () => {
+    const stub = stubbed();
+    expect(await secretsManagerStore(stub.open).exists(LOOKUP)).toEqual({ kind: "present" });
+    const gone = stubbed({
+      describeSecret: async () => {
+        throw sdkError("ResourceNotFoundException");
+      },
+      restoreSecret: async () => {
+        throw sdkError("ResourceNotFoundException");
+      },
+      deleteSecret: async () => {
+        throw sdkError("ResourceNotFoundException");
+      },
+    });
+    const store = secretsManagerStore(gone.open);
+    expect(await store.exists(LOOKUP)).toEqual({ kind: "absent" });
+    expect(await store.restore(LOOKUP)).toEqual({ kind: "absent" });
+    expect(await store.remove(LOOKUP)).toEqual({ kind: "absent" });
+  });
+
+  test("every other failure is failed, by its name, never quoting AWS", async () => {
+    const denied = async () => {
+      throw sdkError("AccessDeniedException");
+    };
+    const stub = stubbed({ restoreSecret: denied, deleteSecret: denied, describeSecret: denied });
+    const store = secretsManagerStore(stub.open);
+    const results = [
+      await store.restore(LOOKUP),
+      await store.remove(LOOKUP),
+      await store.exists(LOOKUP),
+    ];
+    expect(results).toEqual([
+      { kind: "failed", reason: "Secrets Manager RestoreSecret failed: AccessDeniedException" },
+      { kind: "failed", reason: "Secrets Manager DeleteSecret failed: AccessDeniedException" },
+      { kind: "failed", reason: "Secrets Manager DescribeSecret failed: AccessDeniedException" },
+    ]);
+    expect(JSON.stringify(results)).not.toContain(VALUE);
+  });
+
+  test("InvalidRequestException on a deletion is invalid, by its name; on any other call failed", async () => {
+    const invalid = async () => {
+      throw sdkError("InvalidRequestException");
+    };
+    const stub = stubbed({
+      restoreSecret: invalid,
+      deleteSecret: invalid,
+      describeSecret: invalid,
+    });
+    const store = secretsManagerStore(stub.open);
+    const results = [
+      await store.remove(LOOKUP),
+      await store.restore(LOOKUP),
+      await store.exists(LOOKUP),
+    ];
+    expect(results).toEqual([
+      { kind: "invalid", reason: "Secrets Manager DeleteSecret failed: InvalidRequestException" },
+      { kind: "failed", reason: "Secrets Manager RestoreSecret failed: InvalidRequestException" },
+      { kind: "failed", reason: "Secrets Manager DescribeSecret failed: InvalidRequestException" },
+    ]);
+    expect(JSON.stringify(results)).not.toContain(VALUE);
+  });
+
+  test("a call past its deadline is failed: it is no proof of deletion", async () => {
+    const stub = stubbed({ deleteSecret: () => new Promise(() => {}) });
+    expect(await secretsManagerStore(stub.open, 20).remove(LOOKUP)).toEqual({
+      kind: "failed",
+      reason: "Secrets Manager DeleteSecret failed: timed out after 0.02 s",
+    });
+  });
+});
+
+describe("deleting a factory's secrets with the real SDK against a local stub", () => {
+  let stub: StubSecretsManager | undefined;
+
+  afterEach(() => {
+    stub?.stop();
+    stub = undefined;
+  });
+
+  function againstStub(options: StubSecretsManagerOptions = {}, timeoutMs?: number) {
+    stub = stubSecretsManager(options);
+    const config = { endpoint: stub.endpoint, credentials: EXAMPLE_CREDENTIALS };
+    return { store: secretsManagerStore(sdkSecretsManagerCalls(config), timeoutMs), stub };
+  }
+
+  test("lists the tagged secrets across pages, scheduled ones included, with their tags", async () => {
+    const { store, stub } = againstStub({ pageSize: 2 });
+    stub.add(NAME, TAGS);
+    stub.add("fff-abcd1234/github-token", TAGS, true);
+    stub.add("other/github-token", { "fffactory:factory-id": "other" });
+    stub.add("fffv/anthropic-api-key", { "fffactory:factory-id": "fff-abcd1234" });
+    stub.add("fff-abcd1234-lab/github-token", {
+      ...TAGS,
+      "fffactory:factory-id": "fff-abcd1234-lab",
+    });
+    stub.add("untagged", {});
+    const listing = await store.list(LIST);
+    expect(listing).toEqual({
+      kind: "listed",
+      secrets: [
+        { name: NAME, arn: ARN, tags: TAGS, pendingDeletion: false },
+        {
+          name: "fff-abcd1234/github-token",
+          arn: stubArn("fff-abcd1234/github-token") as SecretReference,
+          tags: TAGS,
+          pendingDeletion: true,
+        },
+        {
+          name: "fffv/anthropic-api-key",
+          arn: stubArn("fffv/anthropic-api-key") as SecretReference,
+          tags: { "fffactory:factory-id": "fff-abcd1234" },
+          pendingDeletion: false,
+        },
+        {
+          name: "fff-abcd1234-lab/github-token",
+          arn: stubArn("fff-abcd1234-lab/github-token") as SecretReference,
+          tags: { ...TAGS, "fffactory:factory-id": "fff-abcd1234-lab" },
+          pendingDeletion: false,
+        },
+      ],
+    });
+    const lists = stub.requests.filter(({ operation }) => operation === "ListSecrets");
+    expect(lists.map(({ body }) => body.NextToken)).toEqual([undefined, "2"]);
+    expect(lists[0]?.body).toMatchObject({ IncludePlannedDeletion: true, MaxResults: 100 });
+  });
+
+  test("a secret scheduled for deletion cannot be force-deleted until it is restored", async () => {
+    const { store, stub } = againstStub();
+    stub.add(NAME, TAGS, true);
+    expect(await store.remove(LOOKUP)).toEqual({
+      kind: "invalid",
+      reason: "Secrets Manager DeleteSecret failed: InvalidRequestException",
+    });
+    expect(await store.exists(LOOKUP)).toEqual({ kind: "present" });
+    expect(await store.restore(LOOKUP)).toEqual({ kind: "done" });
+    expect(await store.remove(LOOKUP)).toEqual({ kind: "done" });
+    expect(await store.exists(LOOKUP)).toEqual({ kind: "absent" });
+    expect(stub.requests.at(-2)).toEqual({
+      operation: "DeleteSecret",
+      body: { SecretId: ARN, ForceDeleteWithoutRecovery: true },
+    });
+    expect(stub.requests.at(-1)).toEqual({ operation: "DescribeSecret", body: { SecretId: ARN } });
+  });
+
+  test("a forced deletion is described until Secrets Manager finishes it", async () => {
+    const { store, stub } = againstStub({ lingering: 2 });
+    stub.add(NAME, TAGS);
+    expect(await store.remove(LOOKUP)).toEqual({ kind: "done" });
+    expect(await store.exists(LOOKUP)).toEqual({ kind: "present" });
+    expect(await store.exists(LOOKUP)).toEqual({ kind: "present" });
+    expect(await store.exists(LOOKUP)).toEqual({ kind: "absent" });
+    expect(await store.restore(LOOKUP)).toEqual({ kind: "absent" });
+  });
+
+  test("a forced deletion of a secret already gone succeeds, so only the look proves absence", async () => {
+    const { store } = againstStub();
+    expect(await store.remove(LOOKUP)).toEqual({ kind: "done" });
+    expect(await store.exists(LOOKUP)).toEqual({ kind: "absent" });
+  });
+
+  test("AccessDenied is failed, by its name", async () => {
+    const { store, stub } = againstStub({
+      failing: { ListSecrets: "AccessDeniedException", DescribeSecret: "AccessDeniedException" },
+    });
+    stub.add(NAME, TAGS);
+    expect(await store.list(LIST)).toEqual({
+      kind: "failed",
+      reason: "Secrets Manager ListSecrets failed: AccessDeniedException",
+    });
+    expect(await store.exists(LOOKUP)).toEqual({
+      kind: "failed",
+      reason: "Secrets Manager DescribeSecret failed: AccessDeniedException",
+    });
+  });
+
+  test("a stub that never answers is failed at the deadline", async () => {
+    const { store } = againstStub({ hang: true }, 300);
+    expect(await store.exists(LOOKUP)).toEqual({
+      kind: "failed",
+      reason: "Secrets Manager DescribeSecret failed: timed out after 0.3 s",
+    });
   });
 });

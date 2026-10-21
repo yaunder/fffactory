@@ -1,6 +1,6 @@
 import type { CredentialSelection } from "../domain/aws-account";
-import type { SecretReference } from "../domain/instance";
-import type { SecretMaterial } from "../domain/secrets";
+import type { FactoryId, SecretReference } from "../domain/instance";
+import type { ListedSecret, SecretMaterial } from "../domain/secrets";
 
 export interface SecretWrite {
   /** The secret's Secrets Manager name. */
@@ -12,7 +12,7 @@ export interface SecretWrite {
   readonly credentials: CredentialSelection;
 }
 
-/** Where to read one secret factory.json refers to. */
+/** Where to read, restore, delete or look for one secret, by its ARN. */
 export interface SecretLookup {
   readonly reference: SecretReference;
   readonly region: string;
@@ -25,14 +25,60 @@ export interface StoredSecret {
   readonly created: boolean;
 }
 
+/** The secrets carrying a factory's ID tag, in the factory Region. */
+export interface SecretListRequest {
+  readonly factoryId: FactoryId;
+  readonly region: string;
+  readonly credentials: CredentialSelection;
+}
+
+/** `reason` in every failure below is the AWS session's description: an error name, never a message. */
+export type SecretListing =
+  | { readonly kind: "listed"; readonly secrets: readonly ListedSecret[] }
+  | { readonly kind: "failed"; readonly reason: string };
+
+/** How restoring or deleting one secret ended. */
+export type SecretChange =
+  | { readonly kind: "done" }
+  /** Secrets Manager does not find the secret (`ResourceNotFoundException`). */
+  | { readonly kind: "absent" }
+  | { readonly kind: "failed"; readonly reason: string };
+
+/**
+ * How deleting one secret ended: a `SecretChange`, or `invalid` when Secrets Manager refused it
+ * for the secret's state (`InvalidRequestException`), as it refuses to force-delete a secret
+ * scheduled for deletion.
+ */
+export type SecretRemoval = SecretChange | { readonly kind: "invalid"; readonly reason: string };
+
+/** Whether Secrets Manager still finds one secret, pending deletion or not. */
+export type SecretPresence =
+  | { readonly kind: "present" }
+  | { readonly kind: "absent" }
+  | { readonly kind: "failed"; readonly reason: string };
+
 /**
  * Port: Secrets Manager. Material written goes to AWS and nowhere else, and material read
  * leaves the adapter only as `SecretMaterial`: never into a log, an error message or a
- * command argument. Rejects, naming the AWS error but never quoting it, when a call fails.
+ * command argument. `write` and `read` reject, naming the AWS error but never quoting it, when
+ * a call fails; `list`, `restore`, `remove` and `exists` resolve every AWS failure the same
+ * way, as `failed`, but `remove`'s `invalid` (`docs/specs/secrets.md` §Deleting a factory's
+ * secrets).
  */
 export interface SecretStore {
   /** Creates the secret named `name`, or stores a new value in it when it already exists. */
   write(request: SecretWrite): Promise<StoredSecret>;
   /** The secret's current value, which leaves the adapter only as `SecretMaterial`. */
   read(request: SecretLookup): Promise<SecretMaterial>;
+  /**
+   * Every secret whose tags match the factory-ID tag and the factory ID, scheduled for deletion
+   * or not. AWS matches tags by prefix, so another factory's may be among them.
+   */
+  list(request: SecretListRequest): Promise<SecretListing>;
+  /** Cancels the secret's scheduled deletion (RestoreSecret). */
+  restore(request: SecretLookup): Promise<SecretChange>;
+  /** Deletes the secret without a recovery window (DeleteSecret, ForceDeleteWithoutRecovery). */
+  remove(request: SecretLookup): Promise<SecretRemoval>;
+  /** Whether Secrets Manager still finds the secret (DescribeSecret). */
+  exists(request: SecretLookup): Promise<SecretPresence>;
 }

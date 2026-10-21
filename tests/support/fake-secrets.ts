@@ -1,5 +1,14 @@
 import type { OperatorPrompt } from "../../src/application/operator-prompt";
-import type { SecretLookup, SecretStore, SecretWrite } from "../../src/application/secret-store";
+import type {
+  SecretChange,
+  SecretListing,
+  SecretListRequest,
+  SecretLookup,
+  SecretPresence,
+  SecretRemoval,
+  SecretStore,
+  SecretWrite,
+} from "../../src/application/secret-store";
 import type { SecretReference } from "../../src/domain/instance";
 import { SecretMaterial } from "../../src/domain/secrets";
 
@@ -8,19 +17,57 @@ import { SecretMaterial } from "../../src/domain/secrets";
  * creates the secret and its ARN, later writes add a value to it. Records each write with
  * the revealed value, so tests can prove the material reached the store and nowhere else.
  * `read` answers a reference with its value in `values`, and rejects for any other, or with
- * `readFailsWith`; each read is recorded.
+ * `readFailsWith`; each read is recorded. `list` answers `listing` (none by default), `restore`
+ * answers `restored` (`done` by default), and `remove` and `exists` answer `removed` and
+ * `presence` in order, the last answer repeating (`done` and `absent` by default); each of
+ * these calls is recorded in `calls`, as `OPERATION ARN-or-factory-ID`.
  */
 export function fakeSecretStore(
   options: {
     failWith?: Error;
     values?: Readonly<Record<string, string>>;
     readFailsWith?: Error;
+    listing?: SecretListing;
+    restored?: SecretChange;
+    removed?: SecretRemoval | readonly SecretRemoval[];
+    presence?: readonly SecretPresence[];
   } = {},
 ) {
   const writes: (Omit<SecretWrite, "material"> & { value: string })[] = [];
   const reads: SecretLookup[] = [];
+  const calls: string[] = [];
+  const lookups: (SecretLookup | SecretListRequest)[] = [];
   const arns = new Map<string, SecretReference>();
+  const presence = [...(options.presence ?? [{ kind: "absent" }])];
+  const removals: SecretRemoval[] =
+    options.removed === undefined
+      ? [{ kind: "done" }]
+      : "kind" in options.removed
+        ? [options.removed]
+        : [...options.removed];
+  const next = <T>(answers: T[]): T | undefined =>
+    answers.length > 1 ? answers.shift() : answers[0];
+  const record = (operation: string, request: SecretLookup | SecretListRequest) => {
+    calls.push(`${operation} ${"reference" in request ? request.reference : request.factoryId}`);
+    lookups.push(request);
+  };
   const store: SecretStore = {
+    list: async (request) => {
+      record("list", request);
+      return options.listing ?? { kind: "listed", secrets: [] };
+    },
+    restore: async (request) => {
+      record("restore", request);
+      return options.restored ?? { kind: "done" };
+    },
+    remove: async (request) => {
+      record("remove", request);
+      return next(removals) ?? { kind: "done" };
+    },
+    exists: async (request) => {
+      record("exists", request);
+      return next(presence) ?? { kind: "absent" };
+    },
     read: async (request) => {
       reads.push(request);
       if (options.readFailsWith) throw options.readFailsWith;
@@ -42,7 +89,7 @@ export function fakeSecretStore(
       return { arn, created: true };
     },
   };
-  return { store, writes, reads, arns };
+  return { store, writes, reads, arns, calls, lookups };
 }
 
 /**
