@@ -61,6 +61,11 @@ export interface PlanStore {
   /** Removes plan `planId`'s directory, saved or not. */
   remove(factoryId: FactoryId, planId: string): Promise<void>;
   /**
+   * Removes every plan of the factory, saved or not, with the factory's own directory
+   * (`<cache>/plans/<factory ID>/`): teardown's, once the factory is gone. None is no failure.
+   */
+  removeAll(factoryId: FactoryId): Promise<void>;
+  /**
    * Removes the factory's plans long expired, and directories without a record (never saved,
    * or spent) long unchanged (`PLAN_KEPT_MS`).
    */

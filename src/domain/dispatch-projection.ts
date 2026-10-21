@@ -112,6 +112,27 @@ export function dispatchProjection(
   };
 }
 
+/**
+ * The projection that stops dispatch on one host outside apply (`docs/specs/dispatch.md`
+ * §Stopping dispatch): not requested, so the activator's `dispatch reconcile` removes the
+ * factory's schedule. It is the very document apply sends a host factory.json requests no
+ * dispatch on. It can be nothing else: the parser accepts no `active` without a request, and
+ * an inactive requested projection needs a blocker.
+ */
+export function notRequestedDispatchProjection(hostname: string): DispatchProjection {
+  return dispatchProjection(hostname, undefined, false, []);
+}
+
+/**
+ * How stopping dispatch on one worker ended. `already_stopped`: the worker already held that
+ * projection and no schedule, so nothing changed. A failure carries a short reason, never
+ * Paseo's output, and the schedule may be unchanged.
+ */
+export type DispatchStop =
+  | { readonly kind: "stopped" }
+  | { readonly kind: "already_stopped" }
+  | { readonly kind: "failed"; readonly reason: string };
+
 export function dispatchProjectionJson(projection: DispatchProjection): string {
   return `${JSON.stringify(projection, null, 2)}\n`;
 }

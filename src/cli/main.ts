@@ -30,7 +30,7 @@ import { filesystemPlanStore } from "../infrastructure/plan-store";
 import { sshTransport } from "../infrastructure/ssh-transport";
 import { paseoControlPlane } from "../infrastructure/paseo-control-plane";
 import { ffflowGithubWorkflowQueue } from "../infrastructure/ffflow-github-workflow-queue";
-import { tailscaleApiAdmin } from "../infrastructure/tailscale-api-admin";
+import { tailscaleApiAdmin, tailscaleApiBase } from "../infrastructure/tailscale-api-admin";
 import { tailscalePeers } from "../infrastructure/tailscale-peers";
 import { terminalPrompt } from "../infrastructure/terminal-prompt";
 import { managedTerraform } from "../infrastructure/terraform/installer";
@@ -73,6 +73,25 @@ const assets = releaseAssetBundle(
     ? embeddedReleaseBundle(RELEASE)
     : checkoutReleaseBundle(resolve(import.meta.dir, "../../assets"), RELEASE),
 );
+
+/**
+ * Where the Tailscale admin client sends its secret. Only a run from source reads
+ * `FFFACTORY_TAILSCALE_API`, for tests' loopback stand-ins; the compiled executable never does,
+ * so its secret goes only to Tailscale. A stand-in it refuses stops every command before it runs.
+ */
+function tailscaleApi(): string | undefined {
+  try {
+    return tailscaleApiBase(Bun.isStandaloneExecutable ? {} : process.env);
+  } catch (error) {
+    stderrLines(`fffactory: ${error instanceof Error ? error.message : String(error)}`);
+    return undefined;
+  }
+}
+const tailscaleApiUrl = tailscaleApi();
+if (tailscaleApiUrl === undefined) {
+  await output.flush();
+  process.exit(1);
+}
 
 const cacheDirectory = cacheDirectoryPath(process.env, homedir());
 const terraform = managedTerraform();
@@ -119,7 +138,7 @@ await interrupts.run(
       machines: ec2MachineInventory(),
       machineControl: ec2MachineControl(),
       tailnet: tailscalePeers(),
-      tailnetAdmin: tailscaleApiAdmin(),
+      tailnetAdmin: tailscaleApiAdmin({ baseUrl: tailscaleApiUrl }),
       transport,
       controlPlane: paseoControlPlane(transport),
       workflowQueue: ffflowGithubWorkflowQueue(transport),

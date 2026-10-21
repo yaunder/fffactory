@@ -26,8 +26,18 @@ and every AWS endpoint at a closed local port; `infrastructure/aws-isolation.tes
 proves it. A spawned `fffactory` gets an explicit environment built on
 `isolatedAwsEnvironment` from `support/aws-isolation.ts`, never the inherited one. Test
 AWS through a fake `CallerIdentity` or `VpcQuotaProbe` (`support/doctor-fakes.ts`), the
-versioned in-memory `support/memory-lock-store.ts` and `support/memory-plan-store.ts`,
-the fakes in `support/fake-secrets.ts` (Secrets Manager and the operator prompt) and
+versioned in-memory `support/memory-lock-store.ts` (whose bucket deletion removes only that
+bucket's records and break log, and can stop before the lock, or after it with the bucket left,
+`deletionLeaves`, or at an interrupt set by `beforeLock`, and whose `unreachable` buckets answer
+`bucketExists` with S3's 403, and which reads back its operation records, with any text `store` put
+under their prefix, through `readOperations`) and `support/memory-plan-store.ts`,
+the fakes in `support/fake-secrets.ts` (Secrets Manager, whose listing, restore, deletion,
+descriptions and looks answer as scripted and are recorded in `calls`; `fakeSecretsManager`, a
+world of secrets those calls change, so a rerun sees what the run before deleted, with failures
+a test sets and clears between runs, secrets the listing leaves out though they are there
+(`unlisted`, as ListSecrets lags), deletions left lingering until `finishDeletion`, and
+descriptions and looks (`describe`, `exists`) that find a secret by its full or partial ARN,
+only in the Region its ARN names; and the operator prompt) and
 `support/fake-provisioner.ts` (a scripted `fakeProvisioner`, and `fakeFactoryWorld`, a
 factory whose Terraform state changes as plans apply and whose apply can be stopped part
 way, which can replace a host or change its instance type in place (`resize`), and whose
@@ -35,8 +45,17 @@ way, which can replace a host or change its instance type in place (`resize`), a
 `support/factory-world.ts` builds the plan and apply fixtures on it), stubbed SDK calls,
 or the real SDK pointed at `support/stub-sts.ts`, `support/stub-vpc-quota.ts` (EC2 and
 Service Quotas), `support/stub-s3.ts` (a versioned, never-versioned or suspended bucket
-with conditional writes and bootstrap's settings, some of them lackable,
-`forcePathStyle`) or `support/stub-secrets-manager.ts` (which also answers `GetSecretValue`), with AWS's documentation example
+with conditional writes and bootstrap's settings, some of them lackable, older versions and
+delete markers (`addVersions`), a current delete marker, written as a DeleteObject without a
+version ID writes one (`markDeleted`), whose deletion makes the version under it current again,
+ListObjectVersions with `IsLatest` and `LastModified`, in pages resumed after their markers even
+once those versions are deleted, and refusing with `InvalidArgument` a version marker it never
+gave, DeleteObjects with per-key
+failures (`undeletable`) recorded in `deleteBatches`, DeleteBucket refused while
+anything is left, and ListObjectsV2 under a prefix in pages of `listPageSize`, `forcePathStyle`) or `support/stub-secrets-manager.ts` (which also answers `GetSecretValue`, and ListSecrets,
+RestoreSecret, DeleteSecret and DescribeSecret (name, ARN, tags and deleted date) as AWS documents them: tag filters by prefix,
+scheduled secrets, pages of `pageSize`, a forced deletion of a scheduled secret refused and one
+still described for `lingering` looks), with AWS's documentation example
 keys and account `123456789012`. The terminal prompt runs over a `PassThrough` stand-in
 terminal, never the test's own. A secret-handling test searches every output line, file
 and argument for the value it used. Spawn a CLI that talks to a stub in the test process
@@ -44,12 +63,20 @@ with the asynchronous `support/spawn-cli.ts`, which can also feed its standard i
 synchronous spawn blocks the stub.
 
 Tests never run the host's `ssh` or `tailscale`, or reach a worker or tailnet: use the
-fakes in `support/doctor-fakes.ts` and `support/fake-workers.ts` (the EC2 inventory, the
+fakes in `support/doctor-fakes.ts` and `support/fake-workers.ts` (the EC2 inventory and its tagged VPCs, the
 peer view, an SSH transport scripted per worker hostname, this machine as a worker), an
 injected `ProcessRunner`, or stand-in scripts on a private `PATH` holding only the real
 tools they need (`cli/main.test.ts`, `cli/status-executable.test.ts`, which also points
 EC2 at `support/stub-ec2-instances.ts`, which also answers `StopInstances`,
-`StartInstances` and `TerminateInstances`). `worker stop|start|terminate` run against
+`StartInstances` and `TerminateInstances`, and `DescribeVpcs`, applying its tag filters, and
+whose answers a function may give afresh at each request). `cli/teardown-executable.test.ts`
+spawns `main.ts` against every stand-in at once: STS, S3, Secrets Manager, EC2 (listing the
+factory's instance and VPC until the stand-in Terraform, the managed one's cache hit, has
+applied), and Tailscale's API through `FFFACTORY_TAILSCALE_API`, with stand-in `tailscale` and
+`ssh` on its private PATH, and checks every endpoint it was given is on 127.0.0.1 before it
+runs, and that no secret value reaches Terraform's arguments or environment. Only `main.ts`
+run from source reads `FFFACTORY_TAILSCALE_API`, and only a loopback `http://` origin.
+`worker stop|start|terminate` run against
 `fake-workers.ts`'s `fakeMachineControl`, whose state reads follow a script and which
 records every call, so a test can assert EC2 was never asked to change anything
 (`mutations`), and terminate against its `fakeTailnetAdmin`, a tailnet of `tailnetDevice`s
@@ -63,6 +90,18 @@ provisioned key no longer declared,
 its `before` naming the instance the state holds (`instanceIds`), records it no longer once
 applied, and, given the secrets the hosts' policy allows (`secretArns`), plans that policy's
 in-place update as Terraform renders it) and writes factory.json to `MemoryInstanceStore`.
+Teardown (`application/teardown-factory.test.ts`) runs against the same world, whose destroy
+plan (`PlanRequest.destroy`) deletes the root outputs its state records (`rootOutputs`, in
+`output_changes`, counted as changes as `-detailed-exitcode` counts them) and every host machine
+and its network (`network`, also for a factory without hosts), applying the outputs' deletion
+first, as Terraform does, so a destroy stopped part way leaves resources and no output, and one
+failing before its first change (`beforeChange(0)` throwing) leaves outputs and resources as
+they were, as Terraform does when it fails before it begins; a test
+makes a state recording outputs and no resource by clearing `hosts` and `network`, and its plan
+deletes only the outputs; an EC2 inventory the test derives from that world so instances and
+`NETWORK_VPC` vanish once it is destroyed, `fakeWorkflowQueue` and `fakeControlPlane` wrapped
+to order dispatch stops before inspections, `fakeSecretsManager`, and `MemoryPlanStore`'s
+`removeAll`; a rerun runs teardown again over the same world.
 Tests never reach Tailscale's API: `infrastructure/tailscale-api-admin.test.ts` sends real
 HTTP to
 `support/stub-tailscale-api.ts`, a local stand-in for the token exchange, the device list
@@ -85,7 +124,9 @@ places a repository and requests dispatch on the host, and `currentWorker` is a 
 already current for the plan. The control-plane and dispatch stages run against
 `support/fake-control-plane.ts`: a `ControlPlane` answering health and agent activity as
 given, and a `WorkflowQueue` that counts adoption checks and records every projection
-reconciled, so a test can assert a skipped worker was sent nothing. Nothing sleeps for
+reconciled, so a test can assert a skipped worker was sent nothing. Stopping dispatch runs
+the real `WorkflowQueue` adapter over `fakeTransport`, the worker answering with
+`dispatchAnswer`. Nothing sleeps for
 real: a new worker's first boot is waited out with `fakeTailnet`'s view changing read by
 read, and `fakeTime`'s clock, which moves only when the stage sleeps (or `workerFleet`'s
 recorded sleeps); the CLI harness's `sleep` returns at once. The one real sleep is

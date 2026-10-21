@@ -53,7 +53,7 @@ smoke:
     bun scripts/build.ts linux-x64
     ./scripts/smoke-test.sh dist/fffactory-linux-x64
 
-# Check the Terraform modules with the managed Terraform: fmt, validate, namespacing, empty factory and removal plans (downloads Terraform and the AWS provider)
+# Check the Terraform modules with the managed Terraform: fmt, validate, namespacing, empty factory, removal and destroy plans (downloads Terraform and the AWS provider)
 terraform-check:
     bun scripts/terraform-check.ts
 

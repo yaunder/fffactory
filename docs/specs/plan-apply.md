@@ -83,6 +83,7 @@ completeness check. Moving the pin is [`fffactory upgrade`](#upgrade)'s.
 | `secret set` | Yes, before reaching AWS: `Refusing to store the secret: ...` | It writes Secrets Manager and factory.json ([secrets](secrets.md)). |
 | `upgrade` | By its own rules ([below](#upgrade)) | Moving the pin to the running release is what it does. |
 | `worker stop`, `worker start`, `worker terminate` | Yes, after the account check and before the lock: `Refusing to stop the worker: ...` | They change a worker's machine under the lock ([worker lifecycle](worker-lifecycle.md)). |
+| `teardown` | Yes, after the account check and before the state bucket is asked anything: `Refusing to remove the factory: ...` | It removes the whole factory ([teardown](teardown.md)). |
 | `init` | No | It changes no factory: it pins the running release in a new document and keeps an existing pin. |
 | `lock break` | No | It changes no factory state, and an upgrade interrupted before it moved the pin leaves a lock only its later release is at hand to break; confirming the lock ID guards it ([provisioning §Lock](provisioning.md#lock)). |
 | `doctor`, `status`, `validate`, `assets`, `host` | No | They read, or act only on this machine or worker: a mismatched CLI may still diagnose. |
@@ -615,8 +616,10 @@ again under the lock.
 ### Refusals until lifecycle work lands (D11)
 
 A host is removed only by `fffactory worker terminate KEY`, whose scoped
-removal plan is the only plan allowed to destroy a host machine
-([worker lifecycle §Terminate (remove)](worker-lifecycle.md#terminate-remove)).
+removal plan is the only plan allowed to destroy one host machine
+([worker lifecycle §Terminate (remove)](worker-lifecycle.md#terminate-remove));
+only teardown's guarded destroy plan, which destroys the whole factory, may
+destroy them all ([provisioning §Destroy plan](provisioning.md#destroy-plan)).
 Until host replacement lands in milestone M3, `plan` and `apply` refuse,
 naming the capability the change needs, and nothing is saved or applied:
 
@@ -1299,7 +1302,14 @@ of a skip, failure or stop. The operation's `status` is `running` until it ends
 `succeeded`, `partial` (a worker was skipped; a stopped one is not),
 `declined`, `refused` or `failed`, with `failure` naming why (for a worker,
 `worker KEY: SUMMARY`). Records are history: nothing reads them to decide
-anything. A final record that cannot be written after a successful apply does
+anything, but for the host keys a teardown remembers in its own record
+(`host_keys`), which a later teardown reads back
+([teardown §Devices](teardown.md#devices)), passing over those of a teardown
+that started before, or in the same millisecond as, an apply's or upgrade's
+record whose infrastructure stage is `applying`, `applied` or `failed`, by the
+start time each key names; apply's
+and the worker operations' records carry no such field and are written as
+they always were. A final record that cannot be written after a successful apply does
 not fail it: `✖ The operation record could not be finished: REASON`, on
 standard error, last in the Result (only the muted Paseo clients note follows
 it, when there is no Next block) and before the Next block, which stays on
@@ -1345,8 +1355,9 @@ second signal, at any point, kills the running tools and exits at once.
 
 Only a command that checks the interrupt, starts nothing more once it is set
 and reports what it left is waited for (`waitsOnInterrupt`): `apply`,
-`upgrade`, `doctor`, `status` and `worker`
-([worker lifecycle §Interruption](worker-lifecycle.md#interruption)). Any other, such as `host apply`, `secret
+`upgrade`, `doctor`, `status`, `worker`
+([worker lifecycle §Interruption](worker-lifecycle.md#interruption)) and
+`teardown` ([teardown §Interruption](teardown.md#interruption)). Any other, such as `host apply`, `secret
 set` or `lock break`, exits with 128 plus the signal's number as soon as its
 running tools have stopped, never waiting for it to return, so it does not go
 on with its work after the signal.
@@ -1677,11 +1688,11 @@ unchanged by where the plan was made.
 | Application | `src/application/upgrade.ts` | `upgradeFactory`: the refusals, then apply's operation with the pin move shown in the review and written under the lock once approved. |
 | Application | `src/application/set-secret.ts` | The CLI/pin match guard on `secret set`. |
 | Domain | `src/domain/rollout.ts` | A worker's outcome (`stoppedOutcome` too), the rollout rule, and the first boot wait's rules: its deadline, poll and report intervals, which tailnet states are still joining, a bootstrap refusal to wait for, and the timed-out failure. Pure. |
-| Application | `src/application/plan-store.ts` | The `PlanStore` port, which binds a record to the Terraform plan file its kind names, with `digest` for the check under the lock, `spend` (its record durably removed, its Terraform plan kept), and `planStoreDirectory`. |
+| Application | `src/application/plan-store.ts` | The `PlanStore` port, which binds a record to the Terraform plan file its kind names, with `digest` for the check under the lock, `spend` (its record durably removed, its Terraform plan kept), `removeAll` (every plan of a factory, [teardown](teardown.md)'s), and `planStoreDirectory`. |
 | Application | `src/application/factory-lock.ts` | `Interrupted` and `settleFactoryLock`: an interrupted operation keeps its lock. |
-| Application | `src/application/lock-store.ts` | `writeOperation` and `stateRevision` on the state bucket port. |
-| Infrastructure | `src/infrastructure/plan-store.ts` | `filesystemPlanStore`: private plan directories, the bound plan file's digest (`factory.tfplan` or `backend.tfplan`), spending a plan (unlinking `plan.json`, then fsyncing its directory), pruning either kind and spent leftovers. |
-| Infrastructure | `src/infrastructure/aws-s3-lock-store.ts` | PutObject of operation records; HeadObject of the state object. |
+| Application | `src/application/lock-store.ts` | `writeOperation` and `stateRevision` on the state bucket port; `readOperations`, teardown's alone. |
+| Infrastructure | `src/infrastructure/plan-store.ts` | `filesystemPlanStore`: private plan directories, the bound plan file's digest (`factory.tfplan` or `backend.tfplan`), spending a plan (unlinking `plan.json`, then fsyncing its directory), pruning either kind and spent leftovers, and removing a factory's directory whole. |
+| Infrastructure | `src/infrastructure/aws-s3-lock-store.ts` | PutObject of operation records, and their ListObjectsV2 and GetObject for teardown; HeadObject of the state object. |
 | CLI adapter | `src/cli/presentation/plan.ts` | Every plan review and refusal in blocks: `planSection` (the target rows and an upgrade's pin move, the infrastructure tally and changes with Terraform's symbols, then each stage's row with each worker's change), `bootstrapSection`, `reviewBlocks`, `savedPlanReport` and `savedBootstrapPlanReport` (`plan`'s saved plan and Next block), `planRefusalReport` (each `PlanRefusal`), `d11Report`, `staleReport`, `unknownPlanReport` and `damagedPlanReport`, with `describeStaleReason` and `describeUnexpectedPlan`, and the unready bucket's AWS CLI commands; `describeRemovalPlan`, still unstyled. |
 | CLI adapter | `src/cli/presentation/command-line.ts` | `fffactoryCommand`: a command a Next block names, with the `--instance` and `--profile` given, quoted for a POSIX shell (`shellWord`). |
 | CLI adapter | `src/cli/presentation/instance-source.ts` | `instanceHeader`: the command, its release, and the instance (`displayPath`, `describeSource`'s words). |
@@ -1691,7 +1702,7 @@ unchanged by where the plan was made.
 | CLI adapter | `src/cli/commands/plan.ts`, `src/cli/commands/apply.ts`, `src/cli/commands/upgrade.ts`, `src/cli/commands/planning.ts` | The commands, the approval at the terminal (`operatorApproval` shows the review), the `Applying` section as it streams (`applyingProgress`), the exit code of every outcome, writing each line on its stream (`reportApply`), and what they share: the header (`planningBasis`), `printReport` and `printPlanRefusal`, and an upgrade's pin state (`ApplyReporting.pin`). |
 | CLI adapter | `src/cli/diagnostics.ts`, `src/cli/run.ts` | The path of a failed Terraform command's diagnostics outside apply's Result, printed with the failure. |
 | CLI adapter | `src/cli/interrupts.ts` | `interruptible`: the interrupt notice and flag, the sleep an interrupt wakes, stopping running tools, then, for a command that waits on an interrupt, waiting `RETURN_GRACE_MS` at most for it to return, before exiting with 128 plus the signal's number; a second signal kills and exits at once. |
-| CLI adapter | `src/cli/run.ts`, `src/cli/context.ts` | `waitsOnInterrupt`: only `apply`, `upgrade`, `doctor`, `status` and `worker` (`Command.waitsOnInterrupt`) are waited for. |
+| CLI adapter | `src/cli/run.ts`, `src/cli/context.ts` | `waitsOnInterrupt`: only `apply`, `upgrade`, `doctor`, `status`, `worker` and `teardown` (`Command.waitsOnInterrupt`) are waited for. |
 | CLI adapter | `src/cli/main.ts` | Wires `terraformProvisioner`, `filesystemPlanStore`, and `interruptible` over the process, waiting on an interrupt as `waitsOnInterrupt` says for the command run. |
 
 Tests: `tests/domain/plan.test.ts` (plan IDs, the pin guard, change kinds and
@@ -1867,8 +1878,8 @@ only after naming the worker and the lock it keeps),
 before its tools stop, and at the grace's end at the latest; a command that
 does not wait exiting once its tools stop, without waiting for it; each
 signal's status; a second signal at once; sleeps woken),
-`tests/cli/run.test.ts` (only apply, upgrade, doctor, status and worker wait
-on an interrupt; `host`, `secret` and `lock` do not), `tests/cli/main.test.ts`
+`tests/cli/run.test.ts` (only apply, upgrade, doctor, status, worker and
+teardown wait on an interrupt; `host`, `secret` and `lock` do not), `tests/cli/main.test.ts`
 (doctor's interrupt notice, which offers no second interrupt; the spawned
 `plan`'s header plain on an ordinary pipe, colored there only by `FORCE_COLOR`,
 and plain again under `NO_COLOR`, `TERM=dumb` or `FORCE_COLOR=0`), and

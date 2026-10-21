@@ -41,10 +41,12 @@ const WORKER_PATH = [
   "src/infrastructure/paseo-control-plane.ts",
   "src/domain/change-classification.ts",
   "src/application/apply-dispatch.ts",
+  "src/application/stop-dispatch.ts",
   "src/application/verify-factory.ts",
   "src/application/workflow-queue.ts",
   "src/infrastructure/ffflow-github-workflow-queue.ts",
   "src/domain/dispatch-readiness.ts",
+  "src/domain/dispatch-projection.ts",
   ...code(await readdir(join(ROOT, "src/host"))).map((name) => `src/host/${name}`),
   // The steps directory, including the wrapped repository scripts in `repositories/`.
   ...(await readdir(STEPS, { recursive: true }))

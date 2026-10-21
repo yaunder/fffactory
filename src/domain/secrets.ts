@@ -256,3 +256,111 @@ export function withSecretReference(
 export function secretTags(factoryId: FactoryId): Readonly<Record<string, string>> {
   return { [FACTORY_ID_TAG]: factoryId, [MANAGED_BY_TAG]: "fffactory" };
 }
+
+/**
+ * The Region a secret's ARN names: the only one where Secrets Manager finds it, so the only
+ * one to ask about it. Any other answers `ResourceNotFoundException`, which is no proof of
+ * absence.
+ */
+export function secretRegion(arn: SecretReference): string {
+  const [, , , region = ""] = arn.split(":");
+  return region;
+}
+
+/** A secret as Secrets Manager lists or describes it: what its ownership is judged on. */
+export interface ListedSecret {
+  readonly name: string;
+  readonly arn: SecretReference;
+  readonly tags: Readonly<Record<string, string>>;
+  /** Scheduled for deletion: Secrets Manager reports a deleted date. */
+  readonly pendingDeletion: boolean;
+}
+
+declare const ownedBrand: unique symbol;
+
+/**
+ * A listed or described secret the factory owns. Only `classifySecrets` makes one, so nothing
+ * deletes a secret the ownership rule did not pass.
+ */
+export type OwnedSecret = ListedSecret & { readonly [ownedBrand]: "OwnedSecret" };
+
+/**
+ * Whether factory `factoryId` owns the secret (D7): its name starts with `<factory ID>/` and
+ * goes on, and it carries both `fffactory:factory-id = <factory ID>` and
+ * `fffactory:managed-by = fffactory`, exactly. A tag alone, or a name alone, is never enough.
+ */
+export function ownsSecret(
+  factoryId: FactoryId,
+  secret: Pick<ListedSecret, "name" | "tags">,
+): boolean {
+  const prefix = `${factoryId}/`;
+  const tags = secretTags(factoryId);
+  return (
+    secret.name.startsWith(prefix) &&
+    secret.name.length > prefix.length &&
+    Object.entries(tags).every(([key, value]) => secret.tags[key] === value)
+  );
+}
+
+/** Every secret reference factory.json holds, in field order, each once. */
+export function secretReferences(instance: FactoryInstance): readonly SecretReference[] {
+  const factoryWide = Object.values(FACTORY_SECRETS).map((target) =>
+    target.section === "tailscale"
+      ? instance.tailscale?.[target.field]
+      : instance.credentials?.[target.field],
+  );
+  const hosts = (instance.hosts ?? []).map((host) => host.paseo_password_secret);
+  const references = [...factoryWide, ...hosts].filter(
+    (reference): reference is SecretReference => reference !== undefined,
+  );
+  return [...new Set(references)];
+}
+
+/**
+ * Whether a factory.json reference names the listed secret: its full ARN, or the partial ARN
+ * without the six characters Secrets Manager adds after a hyphen.
+ */
+export function refersTo(reference: SecretReference, arn: SecretReference): boolean {
+  return (
+    reference === arn || (arn.startsWith(`${reference}-`) && arn.length === reference.length + 7)
+  );
+}
+
+/** A factory's secrets as teardown sees them (D7). */
+export interface SecretInventory {
+  /** Owned: deleted permanently. */
+  readonly owned: readonly OwnedSecret[];
+  /** Tagged with the factory ID but not owned, by name or managed-by tag: kept. */
+  readonly taggedNotOwned: readonly ListedSecret[];
+  /** factory.json references that are no owned secret, such as a `fffv/*` source: kept. */
+  readonly referencedNotOwned: readonly SecretReference[];
+}
+
+/**
+ * Sorts the secrets listed by the factory-ID tag, or described by a reference the listing left
+ * out, and factory.json's references, by ownership. A secret whose factory-ID tag is not exactly
+ * this factory's (the listing filters by prefix) is another factory's, and is in no group.
+ */
+export function classifySecrets(
+  factoryId: FactoryId,
+  listed: readonly ListedSecret[],
+  references: readonly SecretReference[],
+): SecretInventory {
+  const tagged = listed.filter((secret) => secret.tags[FACTORY_ID_TAG] === factoryId);
+  const owned = tagged.filter((secret) => ownsSecret(factoryId, secret)) as OwnedSecret[];
+  return {
+    owned,
+    taggedNotOwned: tagged.filter((secret) => !ownsSecret(factoryId, secret)),
+    referencedNotOwned: [...new Set(references)].filter(
+      (reference) => !owned.some((secret) => refersTo(reference, secret.arn)),
+    ),
+  };
+}
+
+/**
+ * How deleting one owned secret ended (D8): `absent` only once Secrets Manager no longer
+ * finds it. `reason` is fffactory's words or an AWS error name, never an AWS message.
+ */
+export type SecretDeletion =
+  | { readonly kind: "absent" }
+  | { readonly kind: "remains"; readonly reason: string };

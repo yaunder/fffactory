@@ -26,6 +26,8 @@ Spec: [docs/specs/dispatch.md](../../../docs/specs/dispatch.md).
   tests of the program and the reconciler, run in CI
   (`.github/workflows/repository-checks.yml`), never by `bun test`. Keep them green from
   here; they resolve the program and reconciler one directory up and the
-  repository scripts in the sibling `repositories/`.
+  repository scripts in the sibling `repositories/`. `test_dispatch_schedule.py` also reads
+  the checkout's `tests/host/fixtures/dispatch-not-requested.json`, the projection the CLI
+  sends to stop dispatch, so it runs only from a checkout.
 - A program is ported to TypeScript only when it is changed for another reason
   (D3). Until then, change a program and its test together.

@@ -27,6 +27,14 @@
   its JSON judged by `removalPlanRefusal`. Its provisioner calls (`showPlan`, `output`) run in the
   FFFactory cache, as fffactory's do. Add a case there whenever the rule or the modules
   change what a removal plans.
+- `terraform-check.ts` then checks teardown's guarded destroy plan rule against real
+  `plan -destroy` plans (`terraform-destroy-check.ts`), in the removal check's tree and state
+  file: states with one host and with two, synthesized the same way, an empty state, and the
+  one-host state stripped to its root outputs, each plan deleting every managed resource and
+  root output of its prior state and nothing else, its exit code agreeing (`destroyPlanMismatch`),
+  passed by `destroyPlanRefusal` with the state's instances listed and refused with none,
+  another, or any one resource or output change tampered into a non-delete
+  ([docs/specs/provisioning.md](../docs/specs/provisioning.md) §Destroy plan).
 - `repository-skills.sh` (`just repository-skills`, part of `check-all`, and CI's
   "Factory code validation" job in `.github/workflows/repository-checks.yml`) checks the
   absence of checkout-local repository skills, AGENTS.md's capability routing and the

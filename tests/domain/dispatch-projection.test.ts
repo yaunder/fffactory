@@ -4,6 +4,7 @@ import {
   dispatchInspectionExitCode,
   dispatchProjection,
   dispatchProjectionJson,
+  notRequestedDispatchProjection,
   parseDispatchAdoption,
   parseDispatchInspection,
   parseDispatchProjection,
@@ -46,6 +47,27 @@ describe("the versioned dispatch host protocol", () => {
       schedule: null,
     });
     expect(parseDispatchProjection(dispatchProjectionJson(projection)).ok).toBe(true);
+  });
+
+  test("stops dispatch on one host with the not-requested projection the parser accepts", () => {
+    const projection = notRequestedDispatchProjection(HOSTNAME);
+    expect(projection).toEqual({
+      protocol_version: 1,
+      hostname: HOSTNAME,
+      requested: false,
+      active: false,
+      blockers: [],
+      schedule: null,
+    });
+    expect(parseDispatchProjection(dispatchProjectionJson(projection))).toEqual({
+      ok: true,
+      projection,
+    });
+    // The very document apply sends a host factory.json requests no dispatch on, so a host
+    // already reconciled that way finds it unchanged.
+    expect(dispatchProjectionJson(projection)).toBe(
+      dispatchProjectionJson(dispatchProjection(HOSTNAME, undefined, false, [])),
+    );
   });
 
   test("refuses incomplete, contradictory, and noncanonical desired state", () => {

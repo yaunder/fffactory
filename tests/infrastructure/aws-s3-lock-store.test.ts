@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { breakFactoryLock } from "../../src/application/factory-lock";
-import type { StateBucket } from "../../src/application/lock-store";
+import { type StateBucket, StateBucketUnreachable } from "../../src/application/lock-store";
 import { tlsOnlyPolicy } from "../../src/domain/backend-bootstrap";
 import {
   lockBreakKey,
@@ -8,8 +8,15 @@ import {
   newLockRecord,
   serializeLock,
 } from "../../src/domain/factory-lock";
-import { operationKey, startOperation, withStage } from "../../src/domain/operation";
+import {
+  operationKey,
+  operationsPrefix,
+  serializeOperation,
+  startOperation,
+  withStage,
+} from "../../src/domain/operation";
 import { FACTORY_STATE_KEY } from "../../src/domain/plan";
+import { DELETION_INTERRUPTED } from "../../src/domain/state-bucket-deletion";
 import type { FactoryId, Release } from "../../src/domain/instance";
 import {
   S3_TIMEOUT_MS,
@@ -31,6 +38,8 @@ const BUCKET: StateBucket = {
   credentials: { source: "chain" },
 };
 const KEY = "fff-abcd1234-lock.json";
+/** No interrupt: deleting the bucket goes on to the end. */
+const NOT_INTERRUPTED = () => false;
 const RELEASE = "0.3.0" as Release;
 const HOLDER = { principal: "arn:aws:sts::123456789012:assumed-role/Admin/op", host: "laptop" };
 const RECORD = newLockRecord({
@@ -69,9 +78,13 @@ function stubbed(script: Partial<S3Calls> = {}) {
       bucketPolicy: async () => tlsOnlyPolicy(BUCKET.bucket),
       putNewObject: async () => ({ VersionId: "v1" }),
       getObject: async () => ({ VersionId: "v1", body: JSON.stringify(RECORD) }),
+      listObjects: async () => ({ IsTruncated: false }),
       deleteObjectVersion: async () => {},
       putObject: async () => {},
       headObject: async () => ({ VersionId: "v1", ETag: '"etag-1"' }),
+      listObjectVersions: async () => ({ IsTruncated: false }),
+      deleteObjects: async () => [],
+      deleteBucket: async () => {},
       ...script,
       close: () => {
         closed += 1;
@@ -116,6 +129,10 @@ describe("S3 lock store over stubbed calls", () => {
     await expect(headFailing(403).bucketExists(BUCKET)).rejects.toThrow(
       "The state bucket fff-abcd1234-state is not accessible in account 123456789012: it " +
         "belongs to another account, or these credentials may not reach it (S3 answered 403)",
+    );
+    // Typed, so teardown can tell it from any other failure (teardown §Rerun).
+    await expect(headFailing(403).bucketExists(BUCKET)).rejects.toBeInstanceOf(
+      StateBucketUnreachable,
     );
   });
 
@@ -294,6 +311,85 @@ describe("S3 lock store over stubbed calls", () => {
     expect(writes).toEqual([
       [BUCKET.bucket, OWNER, operationKey(record), `${JSON.stringify(record, null, 2)}\n`],
     ]);
+  });
+
+  test("reads every object under the operation records' prefix, page by page, each by its key", async () => {
+    const listed: (string | undefined)[][] = [];
+    const reads: string[][] = [];
+    const prefix = operationsPrefix(FACTORY);
+    const pages: Record<string, { Contents: { Key: string }[]; next?: string }> = {
+      first: { Contents: [{ Key: `${prefix}a.json` }, { Key: `${prefix}b.json` }], next: "t1" },
+      t1: { Contents: [{ Key: `${prefix}c.json` }] },
+    };
+    const store = s3LockStore(
+      stubbed({
+        listObjects: async (...call) => {
+          listed.push(call);
+          const page = pages[call[3] ?? "first"];
+          return {
+            Contents: page?.Contents,
+            IsTruncated: page?.next !== undefined,
+            NextContinuationToken: page?.next,
+          };
+        },
+        getObject: async (...call) => {
+          reads.push(call);
+          return { VersionId: "v1", body: `text of ${call[2]}` };
+        },
+      }).open,
+    );
+    expect(await store.readOperations(BUCKET)).toEqual(
+      ["a", "b", "c"].map((name) => ({
+        key: `${prefix}${name}.json`,
+        text: `text of ${prefix}${name}.json`,
+      })),
+    );
+    expect(listed).toEqual([
+      [BUCKET.bucket, OWNER, prefix, undefined],
+      [BUCKET.bucket, OWNER, prefix, "t1"],
+    ]);
+    expect(reads.map((call) => call.slice(0, 2))).toEqual([
+      [BUCKET.bucket, OWNER],
+      [BUCKET.bucket, OWNER],
+      [BUCKET.bucket, OWNER],
+    ]);
+  });
+
+  test("reading the operation records refuses an unreadable listing and names failures", async () => {
+    const untold = s3LockStore(
+      stubbed({ listObjects: async () => ({ Contents: [], IsTruncated: true }) }).open,
+    );
+    await expect(untold.readOperations(BUCKET)).rejects.toThrow(
+      "S3 listed the operation records in the state bucket fff-abcd1234-state without saying where the next page starts",
+    );
+    const keyless = s3LockStore(
+      stubbed({ listObjects: async () => ({ Contents: [{}], IsTruncated: false }) }).open,
+    );
+    await expect(keyless.readOperations(BUCKET)).rejects.toThrow(
+      "S3 listed an operation record in the state bucket fff-abcd1234-state without its key",
+    );
+    const denied = s3LockStore(
+      stubbed({
+        listObjects: async () => {
+          throw sdkError("AccessDenied");
+        },
+      }).open,
+    );
+    const error = await denied.readOperations(BUCKET).catch((caught: Error) => caught);
+    expect((error as Error).message).toBe(
+      "S3 ListObjectsV2 on the state bucket failed: AccessDenied",
+    );
+    const unread = s3LockStore(
+      stubbed({
+        listObjects: async () => ({ Contents: [{ Key: `${operationsPrefix(FACTORY)}a.json` }] }),
+        getObject: async () => {
+          throw sdkError("AccessDenied");
+        },
+      }).open,
+    );
+    await expect(unread.readOperations(BUCKET)).rejects.toThrow(
+      "S3 GetObject on the state bucket failed: AccessDenied",
+    );
   });
 
   test("the Terraform state's revision is its version and entity tag", async () => {
@@ -488,6 +584,34 @@ describe("S3 lock store with the real SDK against a local stub", () => {
     expect(stub?.requests.at(-1)).toBe(`PUT /${key} owner=${OWNER}`);
   });
 
+  test("reads back every operation record under the factory's prefix, page by page", async () => {
+    const store = againstStub({ ...withBucket, listPageSize: 2 });
+    const records = ["aaaaaaaa", "bbbbbbbb", "cccccccc"].map((lock_id) =>
+      startOperation({ ...RECORD, lock_id }, undefined),
+    );
+    for (const record of records) await store.writeOperation(BUCKET, record);
+    await store.create(BUCKET, RECORD);
+    // Another factory's records, and a deleted one, are not read.
+    stub?.objects.set(`${BUCKET.bucket}/fff-zzzz9999-operations/x.json`, {
+      version: "o1",
+      body: "{}",
+      etag: "e1",
+    });
+    const gone = `${operationsPrefix(FACTORY)}gone.json`;
+    stub?.objects.set(`${BUCKET.bucket}/${gone}`, { version: "o2", body: "{}", etag: "e2" });
+    stub?.markDeleted(BUCKET.bucket, gone);
+    expect(await store.readOperations(BUCKET)).toEqual(
+      records.map((record) => ({ key: operationKey(record), text: serializeOperation(record) })),
+    );
+    const listings = stub?.requests.filter((line) =>
+      line.startsWith(`GET /${BUCKET.bucket}?list-type`),
+    );
+    expect(listings).toEqual([
+      `GET /${BUCKET.bucket}?list-type owner=${OWNER}`,
+      `GET /${BUCKET.bucket}?list-type owner=${OWNER}`,
+    ]);
+  });
+
   test("reads the Terraform state's revision, which every write changes", async () => {
     const store = againstStub(withBucket);
     expect(await store.stateRevision(BUCKET)).toBeUndefined();
@@ -605,5 +729,674 @@ describe("S3 lock store with the real SDK against a local stub", () => {
     await expect(s3LockStore(sdkS3Calls(config)).read(BUCKET)).rejects.toThrow(
       "network error (ECONNREFUSED)",
     );
+  });
+});
+
+describe("deleting the state bucket over stubbed calls", () => {
+  /** When a listed version was written: `second` seconds after the first. */
+  const at = (second: number) => new Date(Date.UTC(2026, 8, 30, 10, 0, second));
+  const STATE = { Key: FACTORY_STATE_KEY, VersionId: "s1", LastModified: at(1) };
+  const RECORDS = {
+    Key: `${FACTORY}-operations/2026-09-30T10:00:00.000Z-aaaaaaaa.json`,
+    IsLatest: true,
+    LastModified: at(0),
+  };
+  const LOCK_VERSION = { Key: KEY, VersionId: "l2", IsLatest: true, LastModified: at(2) };
+  const LOCK_MARKER = { Key: KEY, VersionId: "l1", LastModified: at(1) };
+
+  /** Stubbed calls that record each call as a line, with `script` overriding any of them. */
+  function recording(script: Partial<S3Calls> = {}, timeoutMs = S3_TIMEOUT_MS) {
+    const calls: string[] = [];
+    const stub = stubbed({
+      listObjectVersions: async (_, __, marker) => {
+        calls.push(`list ${marker ? `${marker.key} ${marker.version}` : "from the start"}`);
+        if (marker)
+          return { IsTruncated: false, Versions: [LOCK_VERSION], DeleteMarkers: [LOCK_MARKER] };
+        return {
+          IsTruncated: true,
+          NextKeyMarker: "page-2",
+          NextVersionIdMarker: "p2",
+          Versions: [STATE, RECORDS],
+          DeleteMarkers: [
+            { Key: FACTORY_STATE_KEY, VersionId: "s2", IsLatest: true, LastModified: at(2) },
+          ],
+        };
+      },
+      deleteObjects: async (_, __, versions) => {
+        calls.push(`delete ${versions.map(({ key, version }) => `${key}@${version}`).join(" ")}`);
+        return [];
+      },
+      deleteBucket: async () => {
+        calls.push("delete bucket");
+      },
+      ...script,
+    });
+    return { store: s3LockStore(stub.open, timeoutMs), calls, stub };
+  }
+
+  /** Pages of other keys' versions: `sizes[i]` versions on page `i`, the lock on the last. */
+  function pages(...sizes: number[]): S3Calls["listObjectVersions"] {
+    return async (_, __, marker) => {
+      const page = marker ? Number(marker.key) : 0;
+      const last = page === sizes.length - 1;
+      const versions = Array.from({ length: sizes[page] ?? 0 }, (_, index) => ({
+        Key: `p${page}-k${index}`,
+        VersionId: "v",
+        IsLatest: true,
+        LastModified: at(0),
+      }));
+      return {
+        IsTruncated: !last,
+        ...(last ? {} : { NextKeyMarker: String(page + 1) }),
+        Versions: last ? [...versions, LOCK_VERSION] : versions,
+      };
+    };
+  }
+
+  test("deletes each page as it is listed, then the lock's, the current one alone and last, then the bucket", async () => {
+    const { store, calls, stub } = recording();
+    expect(await store.deleteBucket(BUCKET, NOT_INTERRUPTED)).toEqual({ kind: "absent" });
+    expect(calls).toEqual([
+      "list from the start",
+      `delete ${FACTORY_STATE_KEY}@s1 ${RECORDS.Key}@null ${FACTORY_STATE_KEY}@s2`,
+      "list page-2 p2",
+      `delete ${KEY}@l1`,
+      `delete ${KEY}@l2`,
+      "delete bucket",
+    ]);
+    expect(stub.closed()).toBe(6);
+  });
+
+  test("a current delete marker on the lock, which S3 lists apart, goes after the version under it", async () => {
+    const { store, calls } = recording({
+      listObjectVersions: async () => ({
+        IsTruncated: false,
+        Versions: [STATE, { Key: KEY, VersionId: "l1", LastModified: at(1) }],
+        DeleteMarkers: [{ Key: KEY, VersionId: "m2", IsLatest: true, LastModified: at(2) }],
+      }),
+    });
+    expect(await store.deleteBucket(BUCKET, NOT_INTERRUPTED)).toEqual({ kind: "absent" });
+    expect(calls).toEqual([
+      `delete ${FACTORY_STATE_KEY}@s1`,
+      `delete ${KEY}@l1`,
+      `delete ${KEY}@m2`,
+      "delete bucket",
+    ]);
+  });
+
+  test("a version S3 would not delete keeps the lock and the bucket", async () => {
+    const { store, calls } = recording({
+      deleteObjects: async (_, __, versions) => {
+        calls.push(`delete ${versions.length}`);
+        return [
+          { Key: FACTORY_STATE_KEY, VersionId: "s1", Code: "AccessDenied" },
+          { Key: FACTORY_STATE_KEY, VersionId: "s2", Code: "AccessDenied" },
+          { Key: RECORDS.Key, Code: "InternalError" },
+        ];
+      },
+    });
+    expect(await store.deleteBucket(BUCKET, NOT_INTERRUPTED)).toEqual({
+      kind: "remains",
+      versions: 5,
+      codes: ["AccessDenied", "InternalError"],
+      failure: undefined,
+      lock: "held",
+    });
+    expect(calls).toEqual(["list from the start", "delete 3", "list page-2 p2"]);
+  });
+
+  test("every page of other keys is listed and deleted before the lock is kept", async () => {
+    const { store, calls } = recording({
+      listObjectVersions: pages(1000, 500),
+      deleteObjects: async (_, __, versions) => {
+        calls.push(`delete ${versions.length}`);
+        return versions.length === 1000 ? [{ Key: "p0-k0", VersionId: "v", Code: "SlowDown" }] : [];
+      },
+    });
+    expect(await store.deleteBucket(BUCKET, NOT_INTERRUPTED)).toEqual({
+      kind: "remains",
+      versions: 2,
+      codes: ["SlowDown"],
+      failure: undefined,
+      lock: "held",
+    });
+    expect(calls).toEqual(["delete 1000", "delete 500"]);
+  });
+
+  test("a version of the lock S3 would not delete keeps the current one, and the bucket", async () => {
+    const { store, calls } = recording({
+      deleteObjects: async (_, __, versions) => {
+        calls.push(`delete ${versions.length}`);
+        return versions[0]?.key === KEY
+          ? [{ Key: KEY, VersionId: "l1", Code: "AccessDenied" }]
+          : [];
+      },
+    });
+    expect(await store.deleteBucket(BUCKET, NOT_INTERRUPTED)).toEqual({
+      kind: "remains",
+      versions: 2,
+      codes: ["AccessDenied"],
+      failure: undefined,
+      lock: "unknown",
+    });
+    expect(calls).toEqual(["list from the start", "delete 3", "list page-2 p2", "delete 1"]);
+  });
+
+  test("the lock's calls stop at the first that reports a refusal", async () => {
+    const lock = Array.from({ length: 1001 }, (_, index) => ({
+      Key: KEY,
+      VersionId: `l${1000 - index}`,
+      IsLatest: index === 0,
+      LastModified: at(1000 - index),
+    }));
+    const { store, calls } = recording({
+      listObjectVersions: async () => ({ IsTruncated: false, Versions: lock }),
+      deleteObjects: async (_, __, versions) => {
+        calls.push(`delete ${versions.length} from ${versions[0]?.version}`);
+        return [{ Key: KEY, VersionId: "l0", Code: "AccessDenied" }];
+      },
+    });
+    expect(await store.deleteBucket(BUCKET, NOT_INTERRUPTED)).toEqual({
+      kind: "remains",
+      versions: 2,
+      codes: ["AccessDenied"],
+      failure: undefined,
+      lock: "unknown",
+    });
+    expect(calls).toEqual(["delete 1000 from l0"]);
+  });
+
+  test("an error code that is no plain name is shown as Unknown", async () => {
+    const { store } = recording({
+      deleteObjects: async () => [{ Key: KEY, Code: "\u001b[31mred" }, { Key: KEY }],
+    });
+    expect(await store.deleteBucket(BUCKET, NOT_INTERRUPTED)).toMatchObject({ codes: ["Unknown"] });
+  });
+
+  test("a failed DeleteObjects call stops at once, the rest unlisted and the lock held", async () => {
+    const { store, calls } = recording({
+      deleteObjects: async () => {
+        calls.push("delete");
+        throw sdkError("AccessDenied");
+      },
+    });
+    expect(await store.deleteBucket(BUCKET, NOT_INTERRUPTED)).toEqual({
+      kind: "remains",
+      versions: undefined,
+      codes: [],
+      failure: "S3 DeleteObjects on the state bucket failed: AccessDenied",
+      lock: "held",
+    });
+    expect(calls).toEqual(["list from the start", "delete"]);
+  });
+
+  test("a failed DeleteObjects call on the last page leaves a known count", async () => {
+    const { store } = recording({
+      listObjectVersions: pages(2),
+      deleteObjects: async () => {
+        throw sdkError("AccessDenied");
+      },
+    });
+    expect(await store.deleteBucket(BUCKET, NOT_INTERRUPTED)).toEqual({
+      kind: "remains",
+      versions: 3,
+      codes: [],
+      failure: "S3 DeleteObjects on the state bucket failed: AccessDenied",
+      lock: "held",
+    });
+  });
+
+  test("a failed call deleting the lock's versions may have left the factory unlocked", async () => {
+    const { store } = recording({
+      deleteObjects: async (_, __, versions) => {
+        if (versions[0]?.key === KEY) throw sdkError("InternalError", { $fault: "server" });
+        return [];
+      },
+    });
+    expect(await store.deleteBucket(BUCKET, NOT_INTERRUPTED)).toEqual({
+      kind: "remains",
+      versions: 2,
+      codes: [],
+      failure: "S3 DeleteObjects on the state bucket failed: InternalError",
+      lock: "unknown",
+    });
+  });
+
+  test("a listing that fails leaves an unknown count", async () => {
+    const { store } = recording({
+      listObjectVersions: async () => {
+        throw sdkError("AccessDenied", { $fault: "client", $metadata: { httpStatusCode: 403 } });
+      },
+    });
+    expect(await store.deleteBucket(BUCKET, NOT_INTERRUPTED)).toEqual({
+      kind: "remains",
+      versions: undefined,
+      codes: [],
+      failure: "S3 ListObjectVersions on the state bucket failed: AccessDenied",
+      lock: "held",
+    });
+  });
+
+  test("a listing that fails on a later page keeps what the earlier pages deleted", async () => {
+    const list = pages(1000, 1000, 1);
+    const { store, calls } = recording({
+      listObjectVersions: async (bucket, owner, marker) => {
+        calls.push(`list ${marker?.key ?? 0}`);
+        if (marker?.key === "2") throw sdkError("InternalError", { $fault: "server" });
+        return list(bucket, owner, marker);
+      },
+      deleteObjects: async (_, __, versions) => {
+        calls.push(`delete ${versions.length}`);
+        return [];
+      },
+    });
+    expect(await store.deleteBucket(BUCKET, NOT_INTERRUPTED)).toEqual({
+      kind: "remains",
+      versions: undefined,
+      codes: [],
+      failure: "S3 ListObjectVersions on the state bucket failed: InternalError",
+      lock: "held",
+    });
+    expect(calls).toEqual(["list 0", "delete 1000", "list 1", "delete 1000", "list 2"]);
+  });
+
+  test("a truncated listing with nothing to go on from is refused, never looped on", async () => {
+    const { store } = recording({ listObjectVersions: async () => ({ IsTruncated: true }) });
+    expect(await store.deleteBucket(BUCKET, NOT_INTERRUPTED)).toMatchObject({
+      kind: "remains",
+      versions: undefined,
+      failure:
+        "S3 listed the versions in the state bucket fff-abcd1234-state without saying where " +
+        "the next page starts",
+    });
+  });
+
+  test("a listed version without a key is refused", async () => {
+    const { store } = recording({
+      listObjectVersions: async () => ({ Versions: [{ VersionId: "v1", LastModified: at(0) }] }),
+    });
+    expect(await store.deleteBucket(BUCKET, NOT_INTERRUPTED)).toMatchObject({
+      kind: "remains",
+      failure: "S3 listed a version in the state bucket fff-abcd1234-state without its key",
+    });
+  });
+
+  test("a listed version without when it was written is refused, never guessed", async () => {
+    const { store, calls } = recording({
+      listObjectVersions: async () => ({
+        DeleteMarkers: [{ Key: KEY, VersionId: "m1", IsLatest: true }],
+      }),
+    });
+    expect(await store.deleteBucket(BUCKET, NOT_INTERRUPTED)).toEqual({
+      kind: "remains",
+      versions: undefined,
+      codes: [],
+      failure:
+        "S3 listed a version of fff-abcd1234-lock.json in the state bucket fff-abcd1234-state " +
+        "without when it was written",
+      lock: "held",
+    });
+    expect(calls).toEqual([]);
+  });
+
+  test("DeleteBucket refused for versions written since leaves an unknown count", async () => {
+    const { store } = recording({
+      deleteBucket: async () => {
+        throw sdkError("BucketNotEmpty");
+      },
+    });
+    expect(await store.deleteBucket(BUCKET, NOT_INTERRUPTED)).toEqual({
+      kind: "remains",
+      versions: undefined,
+      codes: [],
+      failure: "S3 DeleteBucket on the state bucket failed: BucketNotEmpty",
+      lock: "deleted",
+    });
+  });
+
+  test("DeleteBucket refused otherwise leaves the bucket empty and the factory unlocked", async () => {
+    const { store } = recording({
+      deleteBucket: async () => {
+        throw sdkError("AccessDenied");
+      },
+    });
+    expect(await store.deleteBucket(BUCKET, NOT_INTERRUPTED)).toEqual({
+      kind: "remains",
+      versions: 0,
+      codes: [],
+      failure: "S3 DeleteBucket on the state bucket failed: AccessDenied",
+      lock: "deleted",
+    });
+  });
+
+  const notFound = () => {
+    throw sdkError("NoSuchBucket", { $fault: "client", $metadata: { httpStatusCode: 404 } });
+  };
+
+  test.each<[string, Partial<S3Calls>]>([
+    ["listing", { listObjectVersions: async () => notFound() }],
+    ["deleting versions", { deleteObjects: async () => notFound() }],
+    ["deleting the bucket", { deleteBucket: async () => notFound() }],
+  ])("a bucket S3 answers 404 for while %s is absent", async (_, script) => {
+    expect(await recording(script).store.deleteBucket(BUCKET, NOT_INTERRUPTED)).toEqual({
+      kind: "absent",
+    });
+  });
+
+  test("a call past its deadline is aborted, and the bucket remains", async () => {
+    const open = async (session: AwsSession): Promise<S3Calls> => ({
+      ...(await stubbed().open(session)),
+      listObjectVersions: async () => ({ Versions: [STATE] }),
+      deleteObjects: () =>
+        new Promise((_, reject) =>
+          session.abortSignal.addEventListener("abort", () => reject(new Error("aborted"))),
+        ),
+    });
+    expect(await s3LockStore(open, 50).deleteBucket(BUCKET, NOT_INTERRUPTED)).toEqual({
+      kind: "remains",
+      versions: 1,
+      codes: [],
+      failure: "S3 DeleteObjects on the state bucket failed: timed out after 0.05 s",
+      lock: "held",
+    });
+  });
+
+  test("an interrupt starts no further call: the pages left unlisted, the lock held", async () => {
+    let interrupted = false;
+    const { store, calls } = recording({
+      deleteObjects: async () => {
+        calls.push("delete");
+        interrupted = true;
+        return [];
+      },
+    });
+    expect(await store.deleteBucket(BUCKET, () => interrupted)).toEqual({
+      kind: "remains",
+      versions: undefined,
+      codes: [],
+      failure: DELETION_INTERRUPTED,
+      lock: "held",
+    });
+    expect(calls).toEqual(["list from the start", "delete"]);
+  });
+
+  test("an interrupt before the current lock's call leaves it held, and the bucket", async () => {
+    let interrupted = false;
+    const { store, calls } = recording({
+      deleteObjects: async (_, __, versions) => {
+        calls.push(`delete ${versions.map(({ version }) => version).join(" ")}`);
+        if (versions[0]?.key === KEY) interrupted = true;
+        return [];
+      },
+    });
+    expect(await store.deleteBucket(BUCKET, () => interrupted)).toEqual({
+      kind: "remains",
+      versions: 1,
+      codes: [],
+      failure: DELETION_INTERRUPTED,
+      lock: "held",
+    });
+    expect(calls).toEqual([
+      "list from the start",
+      "delete s1 null s2",
+      "list page-2 p2",
+      "delete l1",
+    ]);
+  });
+
+  test("an interrupt once the lock's versions are gone leaves the bucket, the factory unlocked", async () => {
+    let interrupted = false;
+    const { store, calls } = recording({
+      deleteObjects: async (_, __, versions) => {
+        calls.push(`delete ${versions.map(({ version }) => version).join(" ")}`);
+        if (versions.some(({ version }) => version === "l2")) interrupted = true;
+        return [];
+      },
+    });
+    expect(await store.deleteBucket(BUCKET, () => interrupted)).toEqual({
+      kind: "remains",
+      versions: 0,
+      codes: [],
+      failure: DELETION_INTERRUPTED,
+      lock: "deleted",
+    });
+    expect(calls).not.toContain("delete bucket");
+  });
+
+  test("interrupted before it starts, nothing is asked of S3", async () => {
+    const { store, calls } = recording();
+    expect(await store.deleteBucket(BUCKET, () => true)).toMatchObject({
+      kind: "remains",
+      failure: DELETION_INTERRUPTED,
+      lock: "held",
+    });
+    expect(calls).toEqual([]);
+  });
+
+  test("each page and each batch has a deadline of its own", async () => {
+    const list = pages(1, 1, 1, 1);
+    const slowly = <T>(answer: Promise<T>) =>
+      new Promise<T>((resolve) => setTimeout(() => resolve(answer), 30));
+    const { store } = recording(
+      {
+        listObjectVersions: (bucket, owner, marker) => slowly(list(bucket, owner, marker)),
+        deleteObjects: () => slowly(Promise.resolve([])),
+      },
+      100,
+    );
+    expect(await store.deleteBucket(BUCKET, NOT_INTERRUPTED)).toEqual({ kind: "absent" });
+  });
+});
+
+describe("deleting the state bucket with the real SDK against a local stub", () => {
+  let stub: StubS3 | undefined;
+
+  afterEach(() => {
+    stub?.stop();
+    stub = undefined;
+  });
+
+  function againstStub(options: StubS3Options = {}) {
+    stub = stubS3({ buckets: { [BUCKET.bucket]: { owner: OWNER } }, ...options });
+    const config = {
+      endpoint: stub.endpoint,
+      forcePathStyle: true,
+      credentials: EXAMPLE_CREDENTIALS,
+    };
+    return s3LockStore(sdkS3Calls(config));
+  }
+
+  /** A bucket as a factory leaves it: state, records, a broken lock's log, and the lock. */
+  async function usedBucket(store: ReturnType<typeof againstStub>) {
+    const record = startOperation(RECORD, undefined);
+    await store.writeOperation(BUCKET, record);
+    await store.writeOperation(BUCKET, withStage(record, "infrastructure", "applying", new Date()));
+    const now = new Date("2026-09-30T12:00:00.000Z");
+    const entry = newLockBreakEntry({ version: "v0", record: RECORD }, HOLDER, now, RELEASE);
+    await store.logBreak(BUCKET, lockBreakKey(FACTORY, now, RECORD.lock_id), entry);
+    stub?.addVersions(BUCKET.bucket, FACTORY_STATE_KEY, 3);
+    stub?.addVersions(BUCKET.bucket, FACTORY_STATE_KEY, 1, true);
+    stub?.addVersions(BUCKET.bucket, `${FACTORY_STATE_KEY}.tflock`, 1, true);
+    stub?.addVersions(BUCKET.bucket, KEY, 1, true);
+    const created = await store.create(BUCKET, RECORD);
+    if (!created.created) throw new Error("the lock was not created");
+    return created.version;
+  }
+
+  test("empties a versioned bucket, the lock last, and deletes it", async () => {
+    const store = againstStub();
+    const held = await usedBucket(store);
+    expect(stub?.stored(BUCKET.bucket)).toBe(10);
+    expect(await store.deleteBucket(BUCKET, NOT_INTERRUPTED)).toEqual({ kind: "absent" });
+    expect(stub?.stored(BUCKET.bucket)).toBe(0);
+    expect(await store.bucketExists(BUCKET)).toBe(false);
+    const [others, older, current, ...more] = stub?.deleteBatches ?? [];
+    expect(more).toEqual([]);
+    expect(others).toHaveLength(8);
+    expect(others?.some((entry) => entry.startsWith(`${KEY} `))).toBe(false);
+    expect(older?.map((entry) => entry.split(" ")[0])).toEqual([KEY]);
+    expect(current).toEqual([`${KEY} ${held}`]);
+    const sent = stub?.requests.slice(
+      stub.requests.findIndex((line) => line.includes("?versions")),
+    );
+    expect(sent?.map((line) => line.split(" ")[0])).toEqual([
+      "GET",
+      "POST",
+      "POST",
+      "POST",
+      "DELETE",
+      "HEAD",
+    ]);
+    expect(sent?.at(-2)).toBe(`DELETE /${BUCKET.bucket} owner=${OWNER}`);
+  });
+
+  test("every request carries the factory's account as the expected owner", async () => {
+    const store = againstStub();
+    await usedBucket(store);
+    await store.deleteBucket(BUCKET, NOT_INTERRUPTED);
+    expect(stub?.requests.every((line) => line.endsWith(`owner=${OWNER}`))).toBe(true);
+  });
+
+  test("a bucket owned by another account is never emptied, and remains", async () => {
+    const store = againstStub();
+    await usedBucket(store);
+    expect(
+      await store.deleteBucket({ ...BUCKET, accountId: "210987654321" }, NOT_INTERRUPTED),
+    ).toEqual({
+      kind: "remains",
+      versions: undefined,
+      codes: [],
+      failure: "S3 ListObjectVersions on the state bucket failed: AccessDenied",
+      lock: "held",
+    });
+    expect(stub?.stored(BUCKET.bucket)).toBe(10);
+  });
+
+  test("more than 1000 versions are deleted page by page as they are listed", async () => {
+    const store = againstStub();
+    stub?.addVersions(BUCKET.bucket, FACTORY_STATE_KEY, 1500);
+    expect(await store.create(BUCKET, RECORD)).toMatchObject({ created: true });
+    expect(await store.deleteBucket(BUCKET, NOT_INTERRUPTED)).toEqual({ kind: "absent" });
+    expect(stub?.deleteBatches.map((batch) => batch.length)).toEqual([1000, 500, 1]);
+    const sent = stub?.requests.slice(
+      stub.requests.findIndex((line) => line.includes("?versions")),
+    );
+    expect(sent?.map((line) => line.split(" ").slice(0, 2).join(" "))).toEqual([
+      `GET /${BUCKET.bucket}?versions`,
+      `POST /${BUCKET.bucket}?delete`,
+      `GET /${BUCKET.bucket}?versions`,
+      `POST /${BUCKET.bucket}?delete`,
+      `POST /${BUCKET.bucket}?delete`,
+      `DELETE /${BUCKET.bucket}`,
+    ]);
+  });
+
+  test("the lock's versions are deleted oldest first, the current one alone and last", async () => {
+    const store = againstStub();
+    const [newer, older] = stub?.addVersions(BUCKET.bucket, KEY, 2) ?? [];
+    const created = await store.create(BUCKET, RECORD);
+    expect(created).toMatchObject({ created: true });
+    expect(await store.deleteBucket(BUCKET, NOT_INTERRUPTED)).toEqual({ kind: "absent" });
+    const current = created.created ? created.version : "";
+    expect(stub?.deleteBatches).toEqual([
+      [`${KEY} ${older}`, `${KEY} ${newer}`],
+      [`${KEY} ${current}`],
+    ]);
+  });
+
+  test("a delete marker on the lock, newer than a version under it, is deleted after it", async () => {
+    const store = againstStub();
+    const first = await store.create(BUCKET, RECORD);
+    const marker = stub?.markDeleted(BUCKET.bucket, KEY);
+    expect(await store.read(BUCKET)).toBeUndefined();
+    const second = await store.create(BUCKET, RECORD);
+    if (!first.created || !second.created) throw new Error("the lock was not created");
+    expect(await store.deleteBucket(BUCKET, NOT_INTERRUPTED)).toEqual({ kind: "absent" });
+    expect(stub?.deleteBatches).toEqual([
+      [`${KEY} ${first.version}`, `${KEY} ${marker}`],
+      [`${KEY} ${second.version}`],
+    ]);
+  });
+
+  test("the stub, as S3, makes the version under a current delete marker current once it is deleted", async () => {
+    const store = againstStub();
+    const first = await store.create(BUCKET, RECORD);
+    const marker = stub?.markDeleted(BUCKET.bucket, KEY) as string;
+    expect(await store.read(BUCKET)).toBeUndefined();
+    await store.remove(BUCKET, marker);
+    expect(await store.read(BUCKET)).toEqual({
+      version: first.created ? first.version : "",
+      record: RECORD,
+    });
+  });
+
+  test("the stub, as S3, resumes after a version marker once that version is deleted, and refuses one it never gave", async () => {
+    againstStub();
+    const [newest, middle, oldest] = stub?.addVersions(BUCKET.bucket, KEY, 3) ?? [];
+    const calls = await sdkS3Calls({
+      endpoint: stub?.endpoint,
+      forcePathStyle: true,
+      credentials: EXAMPLE_CREDENTIALS,
+    })({ region: BUCKET.region, profile: undefined, abortSignal: new AbortController().signal });
+    try {
+      await calls.deleteObjects(BUCKET.bucket, OWNER, [{ key: KEY, version: newest as string }]);
+      const page = await calls.listObjectVersions(BUCKET.bucket, OWNER, {
+        key: KEY,
+        version: newest,
+      });
+      expect(page.Versions?.map(({ VersionId, IsLatest }) => [VersionId, IsLatest])).toEqual([
+        [middle, true],
+        [oldest, false],
+      ]);
+      await expect(
+        calls.listObjectVersions(BUCKET.bucket, OWNER, { key: KEY, version: "never-given" }),
+      ).rejects.toMatchObject({ name: "InvalidArgument" });
+    } finally {
+      calls.close();
+    }
+  });
+
+  test("a version S3 would not delete leaves the lock held and the bucket in place", async () => {
+    const store = againstStub({ undeletable: { [FACTORY_STATE_KEY]: "AccessDenied" } });
+    await usedBucket(store);
+    expect(await store.deleteBucket(BUCKET, NOT_INTERRUPTED)).toEqual({
+      kind: "remains",
+      versions: 6,
+      codes: ["AccessDenied"],
+      failure: undefined,
+      lock: "held",
+    });
+    expect(await store.read(BUCKET)).toEqual({ version: expect.any(String), record: RECORD });
+    expect(await store.bucketExists(BUCKET)).toBe(true);
+    expect(stub?.stored(BUCKET.bucket)).toBe(6);
+  });
+
+  test("DeleteBucket refused for a version written since the listing", async () => {
+    const store = againstStub({
+      afterListing: () => {
+        stub?.addVersions(BUCKET.bucket, "late.json", 1);
+      },
+    });
+    stub?.addVersions(BUCKET.bucket, FACTORY_STATE_KEY, 1);
+    expect(await store.deleteBucket(BUCKET, NOT_INTERRUPTED)).toEqual({
+      kind: "remains",
+      versions: undefined,
+      codes: [],
+      failure: "S3 DeleteBucket on the state bucket failed: BucketNotEmpty",
+      lock: "deleted",
+    });
+    expect(await store.bucketExists(BUCKET)).toBe(true);
+  });
+
+  test("a bucket already gone is absent, and nothing else is asked", async () => {
+    const store = againstStub({ buckets: {} });
+    expect(await store.deleteBucket(BUCKET, NOT_INTERRUPTED)).toEqual({ kind: "absent" });
+    expect(stub?.requests).toEqual([`GET /${BUCKET.bucket}?versions owner=${OWNER}`]);
+  });
+
+  test("an empty bucket is deleted at once", async () => {
+    const store = againstStub();
+    expect(await store.deleteBucket(BUCKET, NOT_INTERRUPTED)).toEqual({ kind: "absent" });
+    expect(stub?.deleteBatches).toEqual([]);
   });
 });

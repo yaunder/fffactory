@@ -69,6 +69,24 @@ describe("fffactory executable", () => {
     expect(result.stderr).toContain('hosts[1].key: duplicates host key "a"');
   });
 
+  test("run from source, a Tailscale stand-in off the loopback is refused before any command, unechoed", () => {
+    const named = "https://stand-in.example/secretPART";
+    const result = fffactoryWithEnv(
+      process.env.PATH ?? "",
+      scratch,
+      { FFFACTORY_TAILSCALE_API: named },
+      "validate",
+      "--instance",
+      EXAMPLE,
+    );
+    expect(result.code).toBe(1);
+    expect(result.stdout).toBe("");
+    expect(result.stderr).toBe(
+      "fffactory: FFFACTORY_TAILSCALE_API names no local stand-in for Tailscale's API: " +
+        "it must be plain http:// on 127.0.0.1 or [::1], with no path\n",
+    );
+  });
+
   test("validate exits non-zero with an initialization instruction when nothing is found", () => {
     const result = fffactory("validate");
     expect(result.code).not.toBe(0);

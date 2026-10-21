@@ -168,6 +168,63 @@ describe("the worker dispatch endpoint", () => {
     await expect(readFile(join(root, "/usr/local/bin/factory-dispatch"))).rejects.toThrow();
   });
 
+  test("the not-requested projection stops dispatch, a rerun changes nothing, and apply restarts it", async () => {
+    // A schedule as the reconciler keeps it: `--apply` makes it what the persisted projection
+    // says, and `--check` passes only when it already is.
+    const schedule = { exists: false };
+    const calls: string[][] = [];
+    const run: ProcessRunner = async (argv) => {
+      calls.push([...argv]);
+      const projection = JSON.parse(await readFile(join(root, DISPATCH_PROJECTION_PATH), "utf8"));
+      const wanted = projection.active === true;
+      if (argv.includes("--apply")) schedule.exists = wanted;
+      const matches = schedule.exists === wanted;
+      return { kind: "exited", exitCode: matches ? 0 : 1, stdout: "{}", stderr: "" };
+    };
+    const stop = await readFile(
+      join(import.meta.dir, "fixtures/dispatch-not-requested.json"),
+      "utf8",
+    );
+    await endpoint(run).reconcileDispatch();
+    expect(schedule.exists).toBe(true);
+    calls.length = 0;
+
+    expect(await endpoint(run, stop).reconcileDispatch()).toEqual({
+      protocol_version: 1,
+      state: "not_requested",
+      blockers: [],
+      changed: true,
+    });
+    expect(schedule.exists).toBe(false);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toContain("--apply");
+    expect(await readFile(join(root, DISPATCH_PROJECTION_PATH), "utf8")).toBe(stop);
+    expect(await endpoint(run, stop).inspectDispatch()).toEqual({
+      protocol_version: 1,
+      state: "not_requested",
+      blockers: [],
+      changed: false,
+    });
+
+    calls.length = 0;
+    expect(await endpoint(run, stop).reconcileDispatch()).toEqual({
+      protocol_version: 1,
+      state: "not_requested",
+      blockers: [],
+      changed: false,
+    });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toContain("--check");
+
+    expect(await endpoint(run).reconcileDispatch()).toEqual({
+      protocol_version: 1,
+      state: "active",
+      blockers: [],
+      changed: true,
+    });
+    expect(schedule.exists).toBe(true);
+  });
+
   test("a missing Paseo credential is a failed reconciliation, never pending or active", async () => {
     const result = await endpoint(async () => ({
       kind: "exited",

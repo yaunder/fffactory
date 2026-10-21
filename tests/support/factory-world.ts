@@ -168,6 +168,8 @@ export function workerFleet(
       machines.reads += 1;
       return machines.inventory;
     },
+    // No stage lists the factory's VPCs.
+    listVpcs: async () => ({ kind: "vpcs", vpcIds: [] }),
   };
   const deps = {
     machines: inventory,

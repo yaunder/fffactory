@@ -450,6 +450,7 @@ describe("fffactory worker stop (worker-lifecycle §Stop)", () => {
     w.deps = {
       ...w.deps,
       machines: {
+        ...w.deps.machines,
         list: async () => {
           throw new Error("S3 PutObject on the state bucket failed: SlowDown");
         },
@@ -1715,6 +1716,7 @@ describe("after terminate --keep (worker-lifecycle §Terminate (keep))", () => {
     const w = world(TERMINATING);
     const instance = withAdmin();
     const machines = {
+      ...w.deps.machines,
       list: async () =>
         ({
           kind: "machines",

@@ -5,6 +5,7 @@ import {
   TAILSCALE_API,
   TAILSCALE_API_TIMEOUT_MS,
   tailscaleApiAdmin,
+  tailscaleApiBase,
 } from "../../src/infrastructure/tailscale-api-admin";
 import {
   type StubTailscaleApi,
@@ -249,5 +250,56 @@ describe("the Tailscale API admin client (worker-lifecycle §Tailnet device remo
   test("a session keeps its token to itself", async () => {
     const admin: TailnetAdminSession = await session();
     expect(said(admin, Object.keys(admin))).not.toContain(TOKEN);
+  });
+});
+
+describe("where the admin client reaches Tailscale's API (worker-lifecycle §Tailnet device removal)", () => {
+  test("Tailscale's own API, unless FFFACTORY_TAILSCALE_API names a stand-in", () => {
+    expect(tailscaleApiBase({})).toBe(TAILSCALE_API);
+    expect(tailscaleApiBase({ FFFACTORY_TAILSCALE_API: "" })).toBe(TAILSCALE_API);
+    expect(tailscaleApiBase({ FFFACTORY_TAILSCALE_API: "http://127.0.0.1:4321" })).toBe(
+      "http://127.0.0.1:4321",
+    );
+  });
+
+  test("a stand-in is plain HTTP on this machine's loopback, named by its origin", () => {
+    for (const named of ["http://127.0.0.1:4321", "http://[::1]:4321"])
+      expect(tailscaleApiBase({ FFFACTORY_TAILSCALE_API: named })).toBe(named);
+    expect(tailscaleApiBase({ FFFACTORY_TAILSCALE_API: "http://127.0.0.1:4321/" })).toBe(
+      "http://127.0.0.1:4321",
+    );
+  });
+
+  test("anything else is refused, naming the variable but never its value", () => {
+    const refused = [
+      "https://api.tailscale.com",
+      "https://127.0.0.1:4321",
+      "http://api.tailscale.com",
+      "http://10.0.0.7:4321",
+      "http://127.0.0.1.example.com:4321",
+      "http://localhost:4321",
+      "http://localhost.example.com",
+      "http://user:secretPART@127.0.0.1:4321",
+      "http://127.0.0.1:4321/api",
+      "http://127.0.0.1:4321?secretPART",
+      "http://127.0.0.1:4321#secretPART",
+      "ftp://127.0.0.1:4321",
+      "127.0.0.1:4321",
+      "not a url secretPART",
+    ];
+    for (const named of refused) {
+      let message = "";
+      try {
+        tailscaleApiBase({ FFFACTORY_TAILSCALE_API: named });
+      } catch (error) {
+        message = error instanceof Error ? error.message : String(error);
+      }
+      expect(message).toBe(
+        "FFFACTORY_TAILSCALE_API names no local stand-in for Tailscale's API: " +
+          "it must be plain http:// on 127.0.0.1 or [::1], with no path",
+      );
+      expect(message).not.toContain(named);
+      expect(message).not.toContain("secretPART");
+    }
   });
 });

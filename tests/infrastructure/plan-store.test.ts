@@ -222,6 +222,20 @@ describe("the local plan store", () => {
     expect(await readdir(join(directory, FACTORY))).toEqual([]);
   });
 
+  test("removes every plan of one factory, its directory with them, and no other factory's", async () => {
+    const { directory, store } = await fresh();
+    await saved(store, "k3x9q2ab");
+    await store.create(FACTORY, "unsaved1");
+    const other = "fff-other123" as FactoryId;
+    await store.create(other, "k3x9q2ab");
+    await store.removeAll(FACTORY);
+    expect(await readdir(directory)).toEqual([other]);
+    expect(await store.load(FACTORY, "k3x9q2ab")).toEqual({ kind: "missing" });
+    // A factory with no plans, or none left, is no failure.
+    await store.removeAll(FACTORY);
+    await expect(store.removeAll("../escape" as FactoryId)).rejects.toThrow("Not a factory ID");
+  });
+
   test("spends a saved plan durably: never loadable again, its Terraform plan kept", async () => {
     const { directory, store } = await fresh();
     const files = await savedBootstrap(store, "b00tstr4");

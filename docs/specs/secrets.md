@@ -59,7 +59,8 @@ one with `secret set NAME`, then `fffactory apply`
 OAuth client with the `devices:core` scope, with which `fffactory worker
 terminate` deletes a terminated worker's Tailscale devices from the operator's
 workstation ([worker lifecycle §Tailnet device
-removal](worker-lifecycle.md#tailnet-device-removal)). It is admin-tier:
+removal](worker-lifecycle.md#tailnet-device-removal)), and `fffactory teardown`
+the whole factory's ([teardown §Devices](teardown.md#devices)). It is admin-tier:
 `devices:core` can remove any device in the tailnet
 ([machine onboarding §5](../../MACHINE_ONBOARDING.md#5-prepare-the-tailnet)).
 Workers keep only their join-only auth key and never receive the admin client:
@@ -68,7 +69,7 @@ Workers keep only their join-only auth key and never receive the admin client:
 ([provisioning §Inputs](provisioning.md#terraform-inputs)), so the hosts' IAM policy
 never allows reading it. It is optional: factory.json is complete without it
 ([instance configuration §Completeness](instance-configuration.md#completeness)),
-and only `worker terminate` reads it, refusing without it. Terminate reads it
+and only `worker terminate` and `teardown` read it, each refusing without it. Terminate reads it
 by its ARN (`GetSecretValue`, within the same 30 s deadline) under the factory
 lock, and hands it, a `SecretMaterial`, to the Tailscale API adapter, which
 alone reveals it, for each token request (the first, and one renewal per call
@@ -139,7 +140,8 @@ at that instead.
 
 `secret set` does not take the factory-wide lock: secrets are set up before
 the first apply, when there is no state bucket to hold one, and it changes
-nothing that an apply has planned.
+nothing that an apply has planned. Teardown deletes them the same way when
+there is no state bucket ([teardown §No state bucket](teardown.md#no-state-bucket)).
 
 ### Reading the material
 
@@ -186,14 +188,175 @@ The material reaches Secrets Manager's request and nothing else:
 
 The write has a 30-second deadline (`SECRETS_MANAGER_TIMEOUT_MS`).
 
+## Deleting a factory's secrets
+
+Removing a whole factory ([#56](https://github.com/yaunder/fffactory/issues/56))
+deletes the secrets it owns, permanently, and confirms each is gone; it keeps
+every secret it only refers to. The teardown use case deletes them after the
+factory's devices, the admin client among them, and reports the kept ones
+([teardown §Report](teardown.md#report)), as `fffactory teardown` runs it
+([teardown §Command](teardown.md#command)).
+
+### Ownership
+
+A secret belongs to factory `<id>` only when both hold (D7):
+
+- its name starts with `<id>/` and goes on, as every name `secret set` gives
+  ([Names](#names)) does; and
+- it carries both tags exactly: `fffactory:factory-id = <id>` and
+  `fffactory:managed-by = fffactory`.
+
+| Secret | Is |
+| --- | --- |
+| `acme/tailscale-auth-key`, both tags | owned: deleted |
+| `acme/builder-1/paseo-password`, both tags | owned: deleted |
+| `acme/github-token`, `fffactory:factory-id = acme` only, or `managed-by` another value | tagged, not owned: kept |
+| `other/github-token` or `fffv/anthropic-api-key`, both of `acme`'s tags | tagged, not owned: kept |
+| `acme-lab/github-token`, tagged for `acme-lab` | not `acme`'s at all: `acme/` is not a prefix of `acme-lab/`, nor `acme` its tag |
+| A factory.json reference that is no owned secret: a harness `fffv/*` source, or one made by hand | referenced, not owned: kept |
+
+A tag alone, or a name alone, is never enough, so a harness credential source
+tagged by mistake, or a secret a person named under the factory's prefix, is
+never deleted. A factory.json reference is compared with the owned secrets by
+ARN; a partial ARN, without the six characters Secrets Manager adds after a
+hyphen, refers to the owned secret it names. Both kept groups are listed, so the
+operator sees what stays.
+
+### Listing
+
+`ListSecrets` in the factory Region, with the operator's credentials, filtered
+on the tag key `fffactory:factory-id` and the tag value `<id>`, with
+`IncludePlannedDeletion`, so secrets already scheduled for deletion are listed
+too; a secret with a deleted date is pending deletion. It is paginated (100 per
+page, following `NextToken` until there is none, even past an empty page),
+within one 30 s deadline for the whole listing, every page included. AWS matches tag filters by prefix, and
+the key and value filters each by any tag, so the listing may hold another
+factory's secrets (`acme-lab` for `acme`): only a secret whose
+`fffactory:factory-id` tag is exactly `<id>` is the factory's, owned or only
+tagged; every other is in no group. A listed secret without a name or a usable
+ARN fails the listing: it is never skipped. `ListSecrets` is eventually
+consistent (it "might not reflect changes from the last five minutes"); absence
+is confirmed by `DescribeSecret` alone.
+
+So the listing may leave out a secret stored or tagged minutes ago. Every
+factory.json reference under `<id>/` that no listed secret tagged with the
+factory ID answers (`unlistedReferences`) is looked up directly:
+`DescribeSecret` by its ARN, in the Region that ARN names, within the same
+30 s deadline as any one call. `DescribeSecret` answers the name, ARN, tags
+and deleted date, never the value (`SecretStore.describe`), and the secret it
+describes is judged by the same rule as a listed one (`classifySecrets`):
+
+| `DescribeSecret` | The reference is |
+| --- | --- |
+| Finds a secret the factory owns | owned: deleted as any other, restored first when pending |
+| Finds a secret it does not own (made by hand, or without both tags) | kept: tagged not owned, or referenced not owned |
+| `ResourceNotFoundException` | already absent: reported so, never kept |
+| Fails (AccessDenied, a timeout, any other error), describes a secret without a usable name or ARN (`unusable`), or another secret than the reference names | unresolved: teardown is refused before anything is removed, each worded for why ([teardown §Refusals](teardown.md#refusals)), and a rerun finishes once the lookup succeeds |
+
+A reference outside `<id>/` is never looked up: teardown deletes nothing
+outside the factory's names, so it is kept whatever it is.
+
+**Accepted risk:** an owned secret that is neither listed, `ListSecrets`
+lagging behind its creation or tagging, nor referenced by factory.json, such as
+one stored moments before factory.json stopped naming it, cannot be seen: it is
+left behind, and teardown reports done without it. Teardown has no other way
+to find it. Likewise, a stale listing can show a referenced secret with its old
+tags, such as tagged but not owned when its tags were changed by hand minutes
+ago: it is then kept, never described. This is narrow, since fffactory tags a
+secret when `CreateSecret` creates it. So is a reference by partial ARN whose
+name itself ends in a hyphen and six characters (such as
+`<id>/tailscale-admin-client`): Secrets Manager may read it as a complete ARN
+and answer not found, so it is reported already absent. fffactory writes full
+ARNs into factory.json. Rerun `fffactory teardown` a few minutes after storing
+or tagging a secret: once `ListSecrets` lists it as it is, the rerun deletes
+it.
+
+### Deletion and absence
+
+Each owned secret is deleted by its ARN, in the Region that ARN names (D8).
+The request carries no Region of its own: asked in another Region, Secrets
+Manager answers `ResourceNotFoundException`, which would read as absence.
+
+1. A secret pending deletion is restored first (`RestoreSecret`).
+2. Then `DeleteSecret` with `ForceDeleteWithoutRecovery`: no recovery window.
+   The listing is eventually consistent, so a secret it did not show pending may
+   have been scheduled for deletion since. When `DeleteSecret` answers
+   `InvalidRequestException` for such a secret, it is restored once and
+   `DeleteSecret` tried once more; a secret listed as pending is never restored
+   twice. Any failure of that restore or second deletion, `InvalidRequestException`
+   again included, is `remains`.
+3. Then `DescribeSecret` every 2 s until it answers
+   `ResourceNotFoundException`, within 60 s (`SECRET_DELETION_DEADLINE_MS`). Each
+   look after the first follows a sleep, so a stalled clock cannot stretch the
+   wait.
+
+The result is `absent`, or `remains` with a reason. Only the look's
+`ResourceNotFoundException` makes it `absent` (a `RestoreSecret` or
+`DeleteSecret` answering it skips to the look). Everything else is `remains`:
+a call that fails, AccessDenied or any other error; a call past its 30 s
+deadline, which may have reached AWS; the secret still found at the deadline
+(`Secrets Manager still finds it 60 s after its deletion`); or an interrupt
+(below). Reasons are the AWS session's descriptions, the operation and the error
+name, never an AWS message: `Secrets Manager DeleteSecret failed: AccessDeniedException`,
+`Secrets Manager DescribeSecret failed: timed out after 30 s`. A restore that
+fails leaves the secret pending and undeleted; a deletion that fails after a
+restore leaves it restored, no longer pending. Either way a rerun lists it again
+and starts over.
+
+The interrupt is checked before every call, the first included, and after every
+sleep: once it is set, no further Secrets Manager call starts, even when the call
+in flight as it landed then succeeds (a call already started still answers, and a
+failure is `remains` with its own reason). The reason says how far it got:
+
+| Interrupted | Reason | The secret |
+| --- | --- | --- |
+| Before any call | `interrupted before its deletion started` | Untouched |
+| Once `DeleteSecret` answered `InvalidRequestException`, before the restore | `interrupted once its deletion was refused, before its restore: it may be pending deletion` | Not restored |
+| Once restored, before `DeleteSecret` | `interrupted once restored, before its deletion: no longer pending deletion` | Restored, its deletion not requested |
+| Once its deletion was requested, or a call did not find it, before or between looks | `interrupted before its absence was confirmed` | Deletion requested, or not found, absence unconfirmed |
+
+Teardown reports an interrupted run `interrupted`, not by these reasons, and
+deletes no further secret ([teardown §Interruption](teardown.md#interruption)).
+
+Why in this order, per the Secrets Manager API reference (checked 2026-10-21):
+
+- `DeleteSecret` answers `InvalidRequestException` when "the secret is
+  scheduled for deletion", so a pending secret cannot be force-deleted, only
+  left to its recovery window. `RestoreSecret` "cancels the scheduled deletion
+  ... by removing the `DeletedDate` time stamp", after which the forced deletion
+  is allowed.
+- With `ForceDeleteWithoutRecovery`, "Secrets Manager performs the actual
+  deletion with an asynchronous background process, so there might be a short
+  delay before the secret is permanently deleted", and "if you forcibly delete
+  an already deleted or nonexistent secret, the operation does not return
+  `ResourceNotFoundException`". A successful deletion therefore proves nothing:
+  only `DescribeSecret` not finding the secret does.
+- `DescribeSecret` still describes a secret pending deletion, with its
+  `DeletedDate`, so a pending secret is never taken for an absent one.
+- A secret replicated to other Regions cannot be deleted until its replicas
+  are; fffactory never replicates one, and such a secret, restored and refused
+  again, `remains` with `InvalidRequestException`.
+
+### Permissions
+
+The operator's credentials need, beyond `secret set`'s:
+
+| Permission | Resource | For |
+| --- | --- | --- |
+| `secretsmanager:ListSecrets` | `*` (it is not scoped to resources) | Listing the factory's secrets. |
+| `secretsmanager:RestoreSecret` | `arn:aws:secretsmanager:REGION:ACCOUNT:secret:<factory ID>/*` | Restoring a pending secret. |
+| `secretsmanager:DeleteSecret` | The same | The forced deletion. |
+| `secretsmanager:DescribeSecret` | The same | Confirming absence, and looking up a reference the listing left out. A denial reads as `remains`, or refuses the lookup, never as absence. |
+
 ## Layer mapping
 
 | Layer | Module | Responsibility |
 | --- | --- | --- |
-| Domain | `src/domain/secrets.ts` | `SecretMaterial`, reading material from a prompt or standard input, the names and their targets (the factory-wide ones under `tailscale` or `credentials`, a host's under its entry), setting a reference in factory.json, the secrets' tags. Pure. |
+| Domain | `src/domain/secrets.ts` | `SecretMaterial`, reading material from a prompt or standard input, the names and their targets (the factory-wide ones under `tailscale` or `credentials`, a host's under its entry), setting a reference in factory.json, the secrets' tags, the Region a secret's ARN names (`secretRegion`); the ownership rule (`ownsSecret`), every reference factory.json holds (`secretReferences`), the classification of listed secrets and references (`classifySecrets`, which alone makes an `OwnedSecret`), and `SecretDeletion`. Pure. |
 | Application | `src/application/set-secret.ts` | `setSecret`: the order above. |
-| Application | `src/application/secret-store.ts`, `src/application/operator-prompt.ts` | The `SecretStore` and `OperatorPrompt` ports. |
-| Infrastructure | `src/infrastructure/aws-secrets-manager-store.ts` | `secretsManagerStore`: CreateSecret, then PutSecretValue for an existing secret; GetSecretValue for `worker terminate`'s admin client. |
+| Application | `src/application/delete-owned-secret.ts` | `deleteOwnedSecret`: restore if pending, force-delete (restoring once and retrying once on `InvalidRequestException`), then look until absent, with an injected clock, sleep and interrupt and a deadline; once interrupted, no further call starts. |
+| Application | `src/application/secret-store.ts`, `src/application/operator-prompt.ts` | The `SecretStore` (`write`, `read`, `list`, `restore`, `remove` with its `SecretRemoval`, `describe` with its `SecretDescription`, `exists`) and `OperatorPrompt` ports. |
+| Infrastructure | `src/infrastructure/aws-secrets-manager-store.ts` | `secretsManagerStore`: CreateSecret, then PutSecretValue for an existing secret; GetSecretValue for the admin client `worker terminate` and `teardown` use; ListSecrets with the tag filter, scheduled secrets and every page, RestoreSecret, DeleteSecret with `ForceDeleteWithoutRecovery` and DescribeSecret (whether it still finds the secret, or its name, ARN, tags and deleted date, one without a usable name or ARN `unusable`), each failure `failed` by name, `ResourceNotFoundException` `absent`, and DeleteSecret's `InvalidRequestException` `invalid`. |
 | Infrastructure | `src/infrastructure/aws-session.ts` | The deadline and failure descriptions shared with the lock store. |
 | Infrastructure | `src/infrastructure/terminal-prompt.ts` | `terminalPrompt`: the hidden prompt in raw mode, and standard input with its limit. |
 | CLI adapter | `src/cli/commands/secret.ts` | `fffactory secret set`: arguments, output and exit codes. |
@@ -201,15 +364,30 @@ The write has a 30-second deadline (`SECRETS_MANAGER_TIMEOUT_MS`).
 
 Tests: `tests/domain/secrets.test.ts` (redaction, line endings, empty and
 oversized material, names and targets, references set without disturbing
-anything else, tags), `tests/application/set-secret.test.ts` (standard input
-and the hidden prompt, the admin client, a host's password, each API
+anything else, tags; the ownership table, with `<id>/…` without the managed-by
+tag, a tagged `other/…` and `fffv/…`, and the `acme/` and `acme-lab/` prefix
+trap, every factory.json reference, the classification, and a secret's Region),
+`tests/application/delete-owned-secret.test.ts` (absent at once, asked in the
+Region its ARN names, absent after several looks, pending then restored then
+deleted, already gone, scheduled after the listing then restored once and
+deleted again or refused again, AccessDenied on the restore, deletion or look,
+a deletion timed out, the deadline, a stalled clock, an interrupt while
+waiting, before the first call, and during each restore and deletion, the
+retry's included, starting no further call),
+`tests/application/set-secret.test.ts` (standard input and the hidden prompt, the admin client, a host's password, each API
 credential stored and rotated, `--host` refused for each, rotation, a
 replaced reference, the
 account check before any material is read, refusals before AWS, material that
 is cancelled, empty or too large, factory.json changing meanwhile),
 `tests/infrastructure/aws-secrets-manager-store.test.ts` (stubbed calls, and
 the real SDK against `tests/support/stub-secrets-manager.ts`: create then put,
-tags, error names, a deadline), `tests/infrastructure/terminal-prompt.test.ts`
+tags, error names, a deadline; the listing's filter, scheduled secrets and
+pages, a pending secret refused a forced deletion (`invalid`) until restored,
+`InvalidRequestException` `invalid` only on a deletion, a deletion
+still described for a while, a forced deletion of a secret already gone, a
+secret described by name, ARN, tags and deleted date and never its value, one
+without a usable name or ARN `unusable`, and AccessDenied and timeouts as
+`failed`), `tests/infrastructure/terminal-prompt.test.ts`
 (raw mode on and off, nothing echoed, editing and cancelling keys, split
 multi-byte input, the input limit) and `tests/cli/secret.test.ts`. The
 acceptance test, that material never reaches standard output, standard error,
@@ -228,4 +406,5 @@ That the admin client reaches no worker is asserted in
 Introduced by [#98](https://github.com/yaunder/factory/issues/98); the admin
 client by [#8](https://github.com/yaunder/fffactory/issues/8), and its read by
 [#9](https://github.com/yaunder/fffactory/issues/9); the API credentials by
-[#67](https://github.com/yaunder/fffactory/issues/67).
+[#67](https://github.com/yaunder/fffactory/issues/67); deleting a factory's
+secrets by [#81](https://github.com/yaunder/fffactory/issues/81).

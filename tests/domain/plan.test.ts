@@ -13,6 +13,7 @@ import {
   newPlanId,
   newSavedBootstrapPlan,
   newSavedPlan,
+  outputChanges,
   PLAN_SCHEMA_VERSION,
   PLAN_TTL_MS,
   type PlanCircumstances,
@@ -84,6 +85,41 @@ describe("changes and their tally (plan-apply §Layer mapping)", () => {
       change: 0,
       destroy: 0,
     });
+  });
+});
+
+describe("root output changes (provisioning §Destroy plan)", () => {
+  test("reads each root output's change by name, in the plan's order; none without output_changes", () => {
+    expect(
+      outputChanges({
+        output_changes: {
+          host_keys: { actions: ["delete"], before: [], after: null },
+          network: { actions: ["no-op"], before: {}, after: {} },
+        },
+      }),
+    ).toEqual([
+      { name: "host_keys", actions: ["delete"] },
+      { name: "network", actions: ["no-op"] },
+    ]);
+    expect(outputChanges({ format_version: "1.2" })).toEqual([]);
+    expect(outputChanges({ output_changes: {} })).toEqual([]);
+  });
+
+  test("a plan or output change it cannot read is unreadable, failing closed", () => {
+    for (const plan of [
+      undefined,
+      [],
+      { output_changes: [] },
+      { output_changes: "host_keys" },
+      { output_changes: null },
+      { output_changes: { host_keys: null } },
+      { output_changes: { host_keys: {} } },
+      { output_changes: { host_keys: { actions: [] } } },
+      { output_changes: { host_keys: { actions: "delete" } } },
+      { output_changes: { host_keys: { actions: [7] } } },
+      { output_changes: { "host\u0007keys": { actions: ["delete"] } } },
+    ])
+      expect(outputChanges(plan)).toBeUndefined();
   });
 });
 

@@ -113,8 +113,8 @@ describe("fffactory", () => {
 });
 
 describe("which commands wait on an interrupt (plan-apply §Interruption)", () => {
-  test("apply, upgrade, doctor, status and worker report what an interrupt left, so they wait", () => {
-    for (const name of ["apply", "upgrade", "doctor", "status", "worker"])
+  test("apply, upgrade, doctor, status, worker and teardown report what an interrupt left, so they wait", () => {
+    for (const name of ["apply", "upgrade", "doctor", "status", "worker", "teardown"])
       expect(waitsOnInterrupt([name, "--instance", "/x/factory.json"])).toBe(true);
   });
 

@@ -110,7 +110,7 @@ const factoryName = (target: PlanTarget): string =>
   target.name === undefined ? target.factoryId : `${target.name} (${target.factoryId})`;
 
 /** What every plan shows first: which factory, account and Region, and which release. */
-function targetRows(target: PlanTarget, more: readonly Row[] = []): Block {
+export function targetRows(target: PlanTarget, more: readonly Row[] = []): Block {
   return {
     kind: "rows",
     rows: [
@@ -123,7 +123,7 @@ function targetRows(target: PlanTarget, more: readonly Row[] = []): Block {
 }
 
 /** One change, after its glyph in its color; a change of no known kind is named by its actions. */
-function changeLine(change: ResourceChange): Inline {
+export function changeLine(change: ResourceChange): Inline {
   const symbol = changeSymbol(change);
   if (symbol === undefined) return [verbatim(`${change.address} (${change.actions.join(", ")})`)];
   const kind = changeKind(change);

@@ -9,6 +9,7 @@
 import type { FactoryInstance, HostKey, Issue, SecretReference } from "./instance";
 import {
   changesSomething,
+  destroyedInstance,
   hostMachineAddress,
   isHostMachine,
   type ResourceChange,
@@ -150,13 +151,6 @@ function dropsOnly(raw: unknown, secret: SecretReference | undefined): boolean {
   const now = canonicalPolicy(after.policy);
   if (was === undefined || now === undefined || was === now) return false;
   return canonicalPolicy(withoutResource(before.policy as string, secret)) === now;
-}
-
-/** The instance a JSON plan's change destroys, as its `before` names it; undefined if unnamed. */
-function destroyedInstance(raw: unknown): string | undefined {
-  if (!isRecord(raw) || !isRecord(raw.change) || !isRecord(raw.change.before)) return undefined;
-  const { id } = raw.change.before;
-  return typeof id === "string" && id !== "" ? id : undefined;
 }
 
 /**

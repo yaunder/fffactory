@@ -5,12 +5,19 @@ import {
   BACKEND_STAGE,
   finishOperation,
   INFRASTRUCTURE_STAGE,
+  type OperationRecord,
   operationKey,
+  operationsPrefix,
   PIN_STAGE,
+  rememberedHostKeys,
   serializeOperation,
   startOperation,
   startStageOperation,
+  type StageStatus,
+  startTeardownOperation,
+  TEARDOWN_OPERATION,
   withDispatch,
+  withHostKeys,
   withMachine,
   withVerification,
   WORKERS_STAGE,
@@ -314,5 +321,188 @@ describe("operation records", () => {
     });
     expect(located.updated_at).toBe(LATER.toISOString());
     expect(JSON.parse(serializeOperation(located)).machine.state).toBe("running");
+  });
+});
+
+describe("a teardown's remembered host keys (teardown §Operation record)", () => {
+  const TEARDOWN_LOCK = { ...LOCK, operation: TEARDOWN_OPERATION };
+  const FACTORY = "fff-abcd1234" as FactoryId;
+  const stored = (record: unknown, key = operationKey(startTeardownOperation(TEARDOWN_LOCK))) => ({
+    key,
+    text: typeof record === "string" ? record : serializeOperation(record as never),
+  });
+
+  test("a teardown's record starts with its one stage authorizing, remembering no host key", () => {
+    expect(startTeardownOperation(TEARDOWN_LOCK)).toEqual({
+      ...startStageOperation(TEARDOWN_LOCK, TEARDOWN_OPERATION, "authorizing"),
+      host_keys: [],
+    });
+  });
+
+  test("remembers each well-formed host key once, adding to those it already holds", () => {
+    const started = startTeardownOperation(TEARDOWN_LOCK);
+    const first = withHostKeys(started, ["builder-1", "Not A Key", "ghost", "builder-1"], LATER);
+    expect(first.host_keys).toEqual(["builder-1" as HostKey, "ghost" as HostKey]);
+    expect(first.updated_at).toBe(LATER.toISOString());
+    const second = withHostKeys(first, ["builder-2", "ghost"], END);
+    expect(second.host_keys).toEqual(["builder-1", "ghost", "builder-2"] as HostKey[]);
+    expect(JSON.parse(serializeOperation(second)).host_keys).toEqual(second.host_keys);
+  });
+
+  test("are read back from every earlier teardown's record under the factory's prefix, once each", () => {
+    expect(operationsPrefix(FACTORY)).toBe("fff-abcd1234-operations/");
+    const earlier = withHostKeys(startTeardownOperation(TEARDOWN_LOCK), ["ghost", "a"], LATER);
+    const later = withHostKeys(
+      startTeardownOperation({
+        ...TEARDOWN_LOCK,
+        lock_id: "bbbbbbbb",
+        acquired_at: END.toISOString(),
+      }),
+      ["a", "b"],
+      END,
+    );
+    expect(
+      rememberedHostKeys(FACTORY, [stored(earlier), stored(later, operationKey(later))]),
+    ).toEqual({ kind: "remembered", keys: ["ghost", "a", "b"] as HostKey[] });
+    expect(rememberedHostKeys(FACTORY, [])).toEqual({ kind: "remembered", keys: [] });
+  });
+
+  test("another operation's record, and an object fffactory never keys a record as, remember nothing", () => {
+    const apply = startOperation(LOCK, undefined);
+    expect(
+      rememberedHostKeys(FACTORY, [
+        stored({ ...apply, host_keys: ["builder-1"] }, operationKey(apply)),
+        stored("{not json", "fff-abcd1234-operations/notes.txt"),
+        stored("{not json", "fff-abcd1234-operations/2026-09-30T10:00:00.000Z-aaaaaaaa.json.bak"),
+      ]),
+    ).toEqual({ kind: "remembered", keys: [] });
+  });
+
+  test.each([
+    ["not JSON", "{not json"],
+    ["not an object", "[]"],
+    ["without an operation", JSON.stringify({ factory_id: "fff-abcd1234" })],
+    [
+      "another factory's",
+      serializeOperation({
+        ...startTeardownOperation(TEARDOWN_LOCK),
+        factory_id: "fff-zzzz9999" as FactoryId,
+      }),
+    ],
+    [
+      "a teardown's whose host keys are no list",
+      JSON.stringify({ ...startTeardownOperation(TEARDOWN_LOCK), host_keys: "ghost" }),
+    ],
+    [
+      "a teardown's with a malformed host key",
+      JSON.stringify({
+        ...startTeardownOperation(TEARDOWN_LOCK),
+        host_keys: ["ghost", "Not A Key"],
+      }),
+    ],
+    [
+      "an apply's whose stages are no list",
+      JSON.stringify({ ...startOperation(LOCK, undefined), stages: "applied" }),
+    ],
+    [
+      "an apply's with a stage that is no stage",
+      JSON.stringify({
+        ...startOperation(LOCK, undefined),
+        stages: [{ name: INFRASTRUCTURE_STAGE }],
+      }),
+    ],
+  ])(
+    "a record keyed as fffactory keys one that is %s is unreadable, named by its key",
+    (_, text) => {
+      const good = withHostKeys(startTeardownOperation(TEARDOWN_LOCK), ["ghost"], LATER);
+      const key = "fff-abcd1234-operations/2026-09-30T11:00:00.000Z-cccccccc.json";
+      expect(rememberedHostKeys(FACTORY, [stored(good), stored(text, key)])).toEqual({
+        kind: "unreadable",
+        records: [key],
+      });
+    },
+  );
+
+  test("a teardown's record without host keys, from before teardown remembered any, remembers none", () => {
+    const old = startStageOperation(TEARDOWN_LOCK, TEARDOWN_OPERATION, "applying");
+    expect(old).not.toHaveProperty("host_keys");
+    expect(rememberedHostKeys(FACTORY, [stored(old)])).toEqual({ kind: "remembered", keys: [] });
+  });
+
+  /** A record of `operation` started at `at`, under lock ID `id`. */
+  const lockAt = (operation: string, at: string, id: string) => ({
+    ...LOCK,
+    operation,
+    lock_id: id,
+    acquired_at: at,
+  });
+  const teardownAt = (at: string, id: string, keys: readonly string[]) =>
+    withHostKeys(startTeardownOperation(lockAt(TEARDOWN_OPERATION, at, id)), keys, new Date(at));
+  /** An apply's (or upgrade's) record started at `at`, its infrastructure stage at `status`. */
+  const applyAt = (at: string, status: StageStatus, operation = "apply") =>
+    withStage(
+      startOperation(lockAt(operation, at, "dddddddd"), undefined),
+      INFRASTRUCTURE_STAGE,
+      status,
+      new Date(at),
+    );
+  const T1 = "2026-09-30T10:00:00.000Z";
+  const BETWEEN = "2026-09-30T10:05:00.000Z";
+  const T2 = "2026-09-30T10:20:00.000Z";
+  const chain = (between: OperationRecord) =>
+    [teardownAt(T2, "bbbbbbbb", ["b"]), between, teardownAt(T1, "aaaaaaaa", ["ghost"])].map(
+      (record) => stored(record, operationKey(record)),
+    );
+
+  test.each(
+    (["applying", "applied", "failed"] as const).flatMap((status) =>
+      ["apply", "upgrade"].map((operation) => ({ operation, status })),
+    ),
+  )(
+    "a teardown started before an $operation whose infrastructure stage is $status remembers nothing",
+    ({ operation, status }) => {
+      expect(rememberedHostKeys(FACTORY, chain(applyAt(BETWEEN, status, operation)))).toEqual({
+        kind: "remembered",
+        keys: ["b"] as HostKey[],
+      });
+    },
+  );
+
+  test.each(["planning", "awaiting_approval", "unchanged", "declined", "refused"] as const)(
+    "an apply whose infrastructure stage is %s changed no host: every teardown still remembers",
+    (status) => {
+      expect(rememberedHostKeys(FACTORY, chain(applyAt(BETWEEN, status)))).toEqual({
+        kind: "remembered",
+        keys: ["ghost", "b"] as HostKey[],
+      });
+    },
+  );
+
+  test("an apply before every teardown, or a worker operation between them, bounds nothing", () => {
+    const before = applyAt("2026-09-30T09:00:00.000Z", "applied");
+    expect(rememberedHostKeys(FACTORY, chain(before))).toEqual({
+      kind: "remembered",
+      keys: ["ghost", "b"] as HostKey[],
+    });
+    const terminate = withStage(
+      startStageOperation(lockAt("worker-terminate", BETWEEN, "dddddddd"), "terminate", "locating"),
+      "terminate",
+      "removed",
+      new Date(BETWEEN),
+    );
+    expect(rememberedHostKeys(FACTORY, chain(terminate))).toEqual({
+      kind: "remembered",
+      keys: ["ghost", "b"] as HostKey[],
+    });
+  });
+
+  test("a teardown started in the same millisecond as an apply that changed the factory is passed over", () => {
+    const records = [teardownAt(T1, "aaaaaaaa", ["ghost"]), applyAt(T1, "applied")];
+    expect(
+      rememberedHostKeys(
+        FACTORY,
+        records.map((record) => stored(record, operationKey(record))),
+      ),
+    ).toEqual({ kind: "remembered", keys: [] });
   });
 });
