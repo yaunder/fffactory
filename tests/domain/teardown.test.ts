@@ -6,8 +6,10 @@ import type { Machine } from "../../src/domain/status";
 import type { TailnetDevice } from "../../src/domain/tailnet";
 import {
   bucketRemains,
+  bucketAppeared,
   bucketUnreachable,
   CHECK_LISTED_DEVICES,
+  checkOutsideEc2,
   CHECK_UNCHECKED_DEVICES,
   DEVICES_NOT_CHECKED,
   destroyPlanMismatch,
@@ -18,6 +20,7 @@ import {
   interruptedTeardown,
   leftoversUnverified,
   machinesChanged,
+  ranWithoutLock,
   remainingAt,
   stateStillRecords,
   stoppedPartWay,
@@ -32,6 +35,7 @@ import {
   teardownConfirmation,
   teardownConfirmMismatch,
   teardownGateActions,
+  taggedWithoutBucket,
   teardownQuestion,
   typedIdConfirms,
 } from "../../src/domain/teardown";
@@ -844,6 +848,104 @@ describe("an interrupted teardown (teardown §Interruption)", () => {
       nextAction: "Once fffactory has exited, rerun `fffactory teardown`.",
     });
     expect(gone.nextAction).not.toContain("lock break");
+  });
+});
+
+describe("a factory without a state bucket (teardown §No state bucket)", () => {
+  const BUCKET = "fff-abcd1234-state";
+
+  test("says why it runs without a lock, claiming only what it observed", () => {
+    expect(ranWithoutLock(BUCKET)).toBe(
+      `No factory lock: S3 does not find the state bucket ${BUCKET}, which would hold it, and ` +
+        "EC2 lists no instance or VPC tagged with the factory ID; nothing outside EC2, such as " +
+        "IAM, was looked for. Without a lock, teardown deletes only the factory's tailnet " +
+        "devices, owned secrets and local saved plans, as `fffactory secret set` stores " +
+        "secrets before a bucket exists.",
+    );
+  });
+
+  test("leaves what it did not look for, outside EC2, to the operator: IAM", () => {
+    expect(checkOutsideEc2(ID)).toBe(
+      "Without the state bucket, teardown looked for nothing outside EC2: check IAM for the " +
+        `role and instance profile ${ID}-host, which a failed first apply may have left, and ` +
+        "delete them yourself if they are this factory's.",
+    );
+  });
+
+  test("refuses resources tagged with the factory ID, naming each: their state is lost", () => {
+    const machines: Machine[] = [
+      { instanceId: INSTANCE_1, state: "stopped", hostKey: "builder-1" },
+      { instanceId: INSTANCE_2, state: "running", hostKey: "tskey-pasted Secret" },
+    ];
+    const refused = taggedWithoutBucket(BUCKET, machines, ["vpc-0a1b2c3d"]);
+    expect(refused).toEqual({
+      summary: `The state bucket ${BUCKET} does not exist, but resources tagged with the factory's ID do`,
+      details: [
+        "Their Terraform state was kept in the state bucket: without it, teardown cannot destroy them, and nothing was removed.",
+        `EC2 instance ${INSTANCE_1} (stopped)`,
+        `EC2 instance ${INSTANCE_2} (running)`,
+        "VPC vpc-0a1b2c3d",
+      ],
+      nextAction:
+        "Check them in the EC2 console and remove those that are this factory's yourself, then rerun `fffactory teardown`.",
+    });
+    expect(JSON.stringify(refused)).not.toContain("tskey");
+  });
+
+  test("refuses a state bucket created after the review", () => {
+    expect(bucketAppeared(BUCKET)).toEqual({
+      summary: `The state bucket ${BUCKET} exists now, but did not when the factory was reviewed`,
+      details: ["Nothing was removed."],
+      nextAction: "Rerun `fffactory teardown` to review the factory as it is now.",
+    });
+  });
+
+  test("asks about what is left: its tailnet devices and owned secrets", () => {
+    expect(teardownQuestion(ID, true)).toBe(
+      `Remove what is left of factory ${ID}? Its tailnet devices and owned secrets are ` +
+        "deleted, and none can be recovered. Type the factory ID to confirm: ",
+    );
+  });
+
+  test("names no state bucket among what remains: there is none", () => {
+    const left = {
+      devices: [],
+      listedDevices: { possible: [], untagged: [] },
+      secrets: [`${ID}/tailscale-auth-key`],
+      bucket: undefined,
+    };
+    expect(remainingAt("secrets", left).bucket).toBeUndefined();
+    expect(
+      stoppedPartWay(
+        { summary: "It failed", details: [], nextAction: "Rerun it." },
+        remainingAt("secrets", left),
+      ).details,
+    ).toEqual([
+      `Remains: owned secrets ${ID}/tailscale-auth-key`,
+      "Remains: the local saved plans",
+    ]);
+  });
+
+  test("interrupted, it kept no lock, and the rerun needs no lock break", () => {
+    const at = {
+      reached: "awaiting_approval" as const,
+      removing: false,
+      record: false,
+      dispatchStopped: [],
+      listedDevices: { possible: [], untagged: [] },
+      lock: "none" as const,
+    };
+    expect(interruptedTeardown(at)).toEqual({
+      summary:
+        "Interrupted: the factory is not locked, since it has no state bucket to hold a lock",
+      details: ["Nothing was removed."],
+      nextAction: "Once fffactory has exited, rerun `fffactory teardown`.",
+    });
+    expect(
+      interruptedTeardown({ ...at, reached: "removing_secrets", removing: true }).details,
+    ).toEqual([
+      "Teardown had begun removing the factory, and was deleting the owned secrets: a rerun inventories again and finishes from what remains.",
+    ]);
   });
 });
 

@@ -371,8 +371,16 @@ export function teardownConfirmMismatch(factoryId: FactoryId): Refusal {
   );
 }
 
-/** The question asked once what will be removed and kept has been shown. */
-export function teardownQuestion(factoryId: FactoryId): string {
+/**
+ * The question asked once what will be removed and kept has been shown; `withoutBucket`, when
+ * only the tailnet devices and owned secrets are left (§No state bucket).
+ */
+export function teardownQuestion(factoryId: FactoryId, withoutBucket = false): string {
+  if (withoutBucket)
+    return (
+      `Remove what is left of factory ${factoryId}? Its tailnet devices and owned secrets are ` +
+      "deleted, and none can be recovered. Type the factory ID to confirm: "
+    );
   return (
     `Remove factory ${factoryId} and everything it owns? Its workers, network, IAM, ` +
     "Terraform state, tailnet devices, owned secrets and state bucket are deleted, and none " +
@@ -601,6 +609,19 @@ export function leftoversUnverified(part: "instances" | "vpcs", reason: string):
   ]);
 }
 
+/** Removing tagged resources outside Terraform state is the operator's, by hand. */
+const REMOVE_TAGGED = thenRerunTeardown(
+  "Check them in the EC2 console and remove those that are this factory's yourself",
+);
+
+/** Each tagged resource by its ID: `EC2 instance ID (STATE)`, `VPC ID`. */
+function taggedLines(machines: readonly Machine[], vpcIds: readonly string[]): string[] {
+  return [
+    ...machines.map(({ instanceId, state }) => `EC2 instance ${instanceId} (${state})`),
+    ...vpcIds.map((id) => `VPC ${id}`),
+  ];
+}
+
 /**
  * Resources tagged with the factory ID remain after the destroy, outside its Terraform state
  * (D12): the run stops before devices, secrets and the state bucket, each listed by its ID.
@@ -608,13 +629,69 @@ export function leftoversUnverified(part: "instances" | "vpcs", reason: string):
 export function leftoversRemain(machines: readonly Machine[], vpcIds: readonly string[]): Refusal {
   return refusal(
     "Resources tagged with the factory's ID remain after the destroy, outside its Terraform state",
-    thenRerunTeardown(
-      "Check them in the EC2 console and remove those that are this factory's yourself",
-    ),
+    REMOVE_TAGGED,
+    taggedLines(machines, vpcIds),
+  );
+}
+
+/**
+ * Without a state bucket (D10), why teardown runs without the factory lock: S3 does not find
+ * the bucket that would hold one, and EC2 lists nothing tagged that a lock would guard, as
+ * `secret set` runs before a bucket exists. It claims only what was looked at: nothing outside
+ * EC2 (`checkOutsideEc2`). Shown with the review and the report.
+ */
+export function ranWithoutLock(bucket: string): string {
+  return (
+    `No factory lock: S3 does not find the state bucket ${bucket}, which would hold it, and ` +
+    "EC2 lists no instance or VPC tagged with the factory ID; nothing outside EC2, such as " +
+    "IAM, was looked for. Without a lock, teardown deletes only the factory's tailnet " +
+    "devices, owned secrets and local saved plans, as `fffactory secret set` stores " +
+    "secrets before a bucket exists."
+  );
+}
+
+/**
+ * Without a state bucket, what teardown did not look for is the operator's to check: the
+ * factory's IAM role and instance profile (`<id>-host`), outside EC2 and its VPC, which a first
+ * apply that failed after creating them leaves behind (§No state bucket).
+ */
+export function checkOutsideEc2(factoryId: FactoryId): string {
+  return (
+    "Without the state bucket, teardown looked for nothing outside EC2: check IAM for the " +
+    `role and instance profile ${factoryId}-host, which a failed first apply may have left, and ` +
+    "delete them yourself if they are this factory's."
+  );
+}
+
+/**
+ * The state bucket does not exist, but EC2 lists instances (in any state but `terminated`) or
+ * VPCs tagged with the factory ID (D10): their Terraform state is lost with the bucket, so
+ * teardown cannot destroy them. Refused, each named, nothing removed: a step by hand first.
+ */
+export function taggedWithoutBucket(
+  bucket: string,
+  machines: readonly Machine[],
+  vpcIds: readonly string[],
+): Refusal {
+  return refusal(
+    `The state bucket ${bucket} does not exist, but resources tagged with the factory's ID do`,
+    REMOVE_TAGGED,
     [
-      ...machines.map(({ instanceId, state }) => `EC2 instance ${instanceId} (${state})`),
-      ...vpcIds.map((id) => `VPC ${id}`),
+      "Their Terraform state was kept in the state bucket: without it, teardown cannot destroy them, and nothing was removed.",
+      ...taggedLines(machines, vpcIds),
     ],
+  );
+}
+
+/**
+ * The state bucket, missing when the factory was reviewed, exists by the confirmation: changed
+ * live state invalidates the review, and the factory is no longer left without a lock.
+ */
+export function bucketAppeared(bucket: string): Refusal {
+  return refusal(
+    `The state bucket ${bucket} exists now, but did not when the factory was reviewed`,
+    `Rerun ${TEARDOWN} to review the factory as it is now.`,
+    ["Nothing was removed."],
   );
 }
 
@@ -674,16 +751,31 @@ export interface TeardownReview {
     readonly absent: readonly SecretReference[];
     readonly kept: KeptSecrets;
   };
-  /** The state bucket, deleted last. */
-  readonly bucket: string;
+  /** The state bucket: deleted last, or not found, so not deleted (`withoutLock`). */
+  readonly bucket: TeardownBucket;
+  /** Why teardown runs without the lock, the bucket missing (`ranWithoutLock`); undefined under it. */
+  readonly withoutLock: string | undefined;
+}
+
+/**
+ * The state bucket, by name, and what becomes of it: `deleted`, last of all (in the review, to
+ * be); `not_found` when S3 did not find it as this run looked (§No state bucket), so this run
+ * does not delete it.
+ */
+export interface TeardownBucket {
+  readonly name: string;
+  readonly outcome: "deleted" | "not_found";
 }
 
 /**
  * What teardown removed (D6), and what it kept and listed (D7, D9). `infrastructure` is
- * `absent` when the destroy plan found nothing to destroy, as when the root was already gone.
+ * `absent` when the destroy plan found nothing to destroy, as when the root was already gone;
+ * `not_found_by_ec2` without a state bucket, when no destroy plan was made: EC2 listed no
+ * instance or VPC tagged with the factory ID, and nothing outside EC2 was looked for
+ * (`checkOutsideEc2`).
  */
 export interface TeardownReport {
-  readonly infrastructure: "destroyed" | "absent";
+  readonly infrastructure: "destroyed" | "absent" | "not_found_by_ec2";
   /** The resources Terraform destroyed. */
   readonly changes: readonly ResourceChange[];
   /** Instances EC2 listed before the destroy, now gone with it. */
@@ -702,7 +794,10 @@ export interface TeardownReport {
     readonly absent: readonly SecretReference[];
     readonly kept: KeptSecrets;
   };
-  readonly bucket: string;
+  /** The state bucket: deleted, or not found by this run, so not deleted by it (`withoutLock`). */
+  readonly bucket: TeardownBucket;
+  /** Why teardown ran without the lock, the bucket missing (`ranWithoutLock`); undefined under it. */
+  readonly withoutLock: string | undefined;
 }
 
 /** factory.json is left as it was (D11), and the report says so. */
@@ -861,8 +956,11 @@ export interface TeardownRemaining {
   readonly secrets: readonly string[];
   /** Whether the factory's local saved plans remain. */
   readonly plans: boolean;
-  /** The state bucket, which always remains when teardown stops part way. */
-  readonly bucket: string;
+  /**
+   * The state bucket, which always remains when teardown stops part way under the lock;
+   * undefined without one, when S3 found no bucket (§No state bucket).
+   */
+  readonly bucket: string | undefined;
 }
 
 /** What is known to be left of each kind when teardown stops at `stop` (`TeardownRemaining`). */
@@ -893,7 +991,7 @@ function remainingLines(remaining: TeardownRemaining): string[] {
     ...listedDeviceLines(remaining.listedDevices),
     ...(secrets.length > 0 ? [`Remains: owned secrets ${secrets.join(", ")}`] : []),
     ...(remaining.plans ? ["Remains: the local saved plans"] : []),
-    `Remains: the state bucket ${remaining.bucket}`,
+    ...(remaining.bucket === undefined ? [] : [`Remains: the state bucket ${remaining.bucket}`]),
   ];
 }
 
@@ -909,7 +1007,10 @@ export function stoppedPartWay(refusal: Refusal, remaining: TeardownRemaining): 
 export interface TeardownInterruption {
   /** The last step it started. */
   readonly reached: TeardownStep;
-  /** Whether it had reached the destroy step: from there on the factory may be partly removed. */
+  /**
+   * Whether it had begun removing: reached the destroy step, or without a state bucket the
+   * devices step. From there on the factory may be partly removed.
+   */
   readonly removing: boolean;
   /** Whether its operation record was written, and is not being deleted with the bucket. */
   readonly record: boolean;
@@ -917,8 +1018,11 @@ export interface TeardownInterruption {
   readonly dispatchStopped: readonly string[];
   /** The devices the devices step listed but kept; none before it listed. */
   readonly listedDevices: ListedDevices;
-  /** `held` until the state bucket's deletion reached the lock (`LockAfterDeletion`). */
-  readonly lock: LockAfterDeletion;
+  /**
+   * `held` until the state bucket's deletion reached the lock (`LockAfterDeletion`); `none` when
+   * there was no bucket to hold one (§No state bucket).
+   */
+  readonly lock: LockAfterDeletion | "none";
 }
 
 /** What teardown was doing at each step, as an interruption reports it. */
@@ -937,7 +1041,8 @@ const DOING: Readonly<Record<TeardownStep, string>> = {
   deleting_bucket: "deleting the state bucket",
 };
 
-const INTERRUPTED_LOCK: Readonly<Record<LockAfterDeletion, string>> = {
+const INTERRUPTED_LOCK: Readonly<Record<TeardownInterruption["lock"], string>> = {
+  none: "Interrupted: the factory is not locked, since it has no state bucket to hold a lock",
   held: "Interrupted: the factory stays locked",
   unknown:
     "Interrupted while the state bucket was being deleted: the factory lock may already be gone with it",
@@ -951,7 +1056,7 @@ const EXITED = "Once fffactory has exited";
  * What an interrupted teardown tells the operator: whether the lock stays, how far it got, and
  * the next action. `fffactory lock break` is named only for this teardown once fffactory has
  * exited, the operation then confirmed dead; once the bucket's deletion reached the lock, only
- * for the lock a rerun finds still held by it.
+ * for the lock a rerun finds still held by it; never without a lock (`none`).
  */
 export function interruptedTeardown(at: TeardownInterruption): Refusal {
   const summary =
@@ -970,6 +1075,7 @@ export function interruptedTeardown(at: TeardownInterruption): Refusal {
         ...(at.dispatchStopped.length > 0 ? [dispatchLeftStopped(at.dispatchStopped)] : []),
       ];
   const nextAction = {
+    none: `${EXITED}, rerun ${TEARDOWN}.`,
     held: `${EXITED}, break the lock with \`fffactory lock break\`, then rerun ${TEARDOWN}.`,
     unknown: `${EXITED}, rerun ${TEARDOWN}. If it finds the factory locked by this teardown, break that lock with \`fffactory lock break\`, then rerun it.`,
     deleted: `${EXITED}, rerun ${TEARDOWN}.`,

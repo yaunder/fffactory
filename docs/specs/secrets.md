@@ -139,7 +139,8 @@ at that instead.
 
 `secret set` does not take the factory-wide lock: secrets are set up before
 the first apply, when there is no state bucket to hold one, and it changes
-nothing that an apply has planned.
+nothing that an apply has planned. Teardown deletes them the same way when
+there is no state bucket ([teardown §No state bucket](teardown.md#no-state-bucket)).
 
 ### Reading the material
 

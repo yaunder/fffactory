@@ -3,13 +3,13 @@
 Teardown removes a whole factory: everything it owns, under the existing
 safety rules, and nothing it only refers to. Epic:
 [#56](https://github.com/yaunder/fffactory/issues/56), decisions D1 to D13.
-This spec covers the use case with a state bucket present
-(`teardownFactory`, `src/application/teardown-factory.ts`): its happy path, its
-refusals, a [partial failure](#partial-failure), the [rerun](#rerun) that
-finishes it and an [interruption](#interruption). The cleanup without a
-state bucket follows in [#87](https://github.com/yaunder/fffactory/issues/87), and the
+This spec covers the use case (`teardownFactory`,
+`src/application/teardown-factory.ts`): with a state bucket, its happy path,
+its refusals, a [partial failure](#partial-failure), the [rerun](#rerun) that
+finishes it and an [interruption](#interruption); and the cleanup without a
+lock when there is [no state bucket](#no-state-bucket). The
 `fffactory teardown [--confirm FACTORY_ID] [--instance PATH] [--profile NAME]`
-command, its output and exit codes in
+command, its output and exit codes follow in
 [#88](https://github.com/yaunder/fffactory/issues/88).
 
 | Removed | How |
@@ -43,10 +43,11 @@ Teardown goes in this order, and stops at the first refusal:
    ([doctor §AWS account](doctor.md#aws-account)).
 4. The [CLI/pin match guard](plan-apply.md#clipin-match-guard): only the
    release factory.json pins may remove the factory.
-5. The state bucket: missing is the [no-bucket mode](#no-state-bucket); one
-   without every setting backend bootstrap applies is refused as `plan`
-   refuses it (`unready_bucket`); one S3 answers 403 for is refused, never
-   taken for the factory's ([Rerun](#rerun)). Teardown never creates a bucket.
+5. The state bucket: one S3 does not find (404) is the
+   [no-bucket mode](#no-state-bucket), which takes no lock; one without every
+   setting backend bootstrap applies is refused as `plan` refuses it
+   (`unready_bucket`); one S3 answers 403 for is refused, never taken for the
+   factory's ([Rerun](#rerun)). Teardown never creates a bucket.
 6. Take the factory-wide lock as operation `teardown`, and open its
    [operation record](#operation-record). A held lock refuses teardown and
    shows its holder; it is never broken ([provisioning §Lock](provisioning.md#lock)).
@@ -74,7 +75,8 @@ Teardown goes in this order, and stops at the first refusal:
     progress event): the target (factory.json's path, the factory, its account,
     Region and release), the destroy plan's changes, the instances and VPCs,
     the devices to delete and those only listed, the owned secrets and the kept
-    ones, and the state bucket.
+    ones, and the state bucket (`TeardownBucket`: its name, and `outcome`
+    `deleted`, last of all).
 11. The [confirmation](#confirmation).
 12. Stop dispatch on every running worker the tailnet locates
     ([Gates](#gates)), recording each outcome.
@@ -96,7 +98,8 @@ Teardown goes in this order, and stops at the first refusal:
 20. Report what was removed and kept ([Report](#report)).
 
 Steps 1 to 5 reach nothing that could change: refusals there take no lock and
-write no record. From step 6 every refusal and decline is recorded and releases
+write no record. Without a state bucket, teardown goes on from step 5 without
+a lock or a record ([No state bucket](#no-state-bucket)). From step 6 every refusal and decline is recorded and releases
 the lock. Nothing is deleted before step 14, and nothing is asked of a worker
 before step 12.
 
@@ -254,6 +257,8 @@ releases the lock. Each is a summary, details and a next action
 | A gate | terminate's words, naming the worker ([Gates](#gates)) | [Gates](#gates) |
 | The admin client's secret gone while the factory's resources remain | `The Tailscale admin client's secret no longer exists, but the factory's resources remain` ([Rerun](#rerun)) | ``Store the admin client again with `fffactory secret set tailscale-admin-client`, then rerun `fffactory teardown`.`` |
 | The state bucket answers 403 | `The state bucket BUCKET cannot be reached in account ACCOUNT (S3 answered 403)` ([Rerun](#rerun)) | the permission, then rerun; or nothing left, after an earlier teardown |
+| No state bucket, but EC2 lists instances or VPCs tagged with the factory ID | `The state bucket BUCKET does not exist, but resources tagged with the factory's ID do`, each listed ([No state bucket](#no-state-bucket)) | ``Check them in the EC2 console and remove those that are this factory's yourself, then rerun `fffactory teardown`.`` |
+| No state bucket when reviewed, one by the confirmation | `The state bucket BUCKET exists now, but did not when the factory was reviewed` | ``Rerun `fffactory teardown` to review the factory as it is now.`` |
 
 A listing that fails says `Nothing was removed: a listing that failed is never
 taken for one that found nothing.`: an empty EC2 listing would read as no
@@ -317,7 +322,8 @@ in D6's order, each only when something of its kind is left:
   followed by `CHECK_LISTED_DEVICES`;
 - `Remains: owned secrets NAME, ...`;
 - `Remains: the local saved plans`;
-- `Remains: the state bucket BUCKET`, always.
+- `Remains: the state bucket BUCKET`, always under the lock; never without a
+  state bucket ([No state bucket](#no-state-bucket)).
 
 The devices listed but kept are never listed again once the admin client is
 deleted, so every outcome past the devices step carries them: a partial's
@@ -348,6 +354,10 @@ earlier run reported. What is gone is found gone, and reported so:
   deleted again ([secrets §Deletion and absence](secrets.md#deletion-and-absence)).
 - The state bucket is emptied from what is left in it, then deleted. A
   `partial` released the lock, so the rerun takes it again.
+- The state bucket already deleted: S3 no longer finds it, and EC2 lists
+  nothing tagged, so the rerun is the [no-bucket mode](#no-state-bucket),
+  without a lock. Its admin client already gone, the devices are not checked;
+  the secrets already gone are `absent`; it ends `done`.
 
 **The admin client already gone.** Teardown deletes the admin client only
 after the devices, which come after the destroy and the leftover check, so a
@@ -415,8 +425,9 @@ went with it, and the teardown is done.
 
 The result says how far it got (`reached`, the last step started: one the
 interrupt landed before is never started, even when the call before it then
-succeeded, and `removing`, whether it had reached the destroy step: from there
-on the factory may be partly removed),
+succeeded, and `removing`, whether it had begun removing: reached the destroy
+step, or [without a state bucket](#no-state-bucket) the devices step; from
+there on the factory may be partly removed),
 where dispatch is stopped (`dispatchStopped`), the devices listed but kept
 (`listedDevices`, [Partial failure](#partial-failure)), the record (only while
 it is not being deleted with the bucket) and what became of the lock (`lock`). Its words
@@ -429,6 +440,7 @@ only for this teardown once fffactory has exited, when it is confirmed dead:
 | The lock, no record written, or the record being deleted with the bucket | `Interrupted: the factory stays locked by this teardown, which may have no operation record` | The same |
 | The bucket's deletion reached the lock (`unknown`) | `Interrupted while the state bucket was being deleted: the factory lock may already be gone with it` | ``Once fffactory has exited, rerun `fffactory teardown`. If it finds the factory locked by this teardown, break that lock with `fffactory lock break`, then rerun it.`` |
 | Every version of the lock deleted (`deleted`) | `Interrupted while the state bucket was being deleted: the factory lock is already gone with it` | ``Once fffactory has exited, rerun `fffactory teardown`.`` |
+| No lock: [no state bucket](#no-state-bucket) (`none`) | `Interrupted: the factory is not locked, since it has no state bucket to hold a lock` | ``Once fffactory has exited, rerun `fffactory teardown`.`` |
 
 Its details: `Nothing was removed.`, and where dispatch is stopped
 (`dispatchLeftStopped`), before the destroy; once removing, `Teardown had
@@ -457,6 +469,9 @@ the operation's status alike and `failure` naming why. An interrupted teardown
 writes no more of it, and leaves it `running` at the step it reached. With the
 admin client [already gone](#rerun), `removing_devices` is skipped.
 
+Without a state bucket there is no record at all
+([No state bucket](#no-state-bucket)): its endings name no `operation`.
+
 A teardown that finished has no record: deleting the bucket deletes the record
 with the lock, so nothing is written, and the lock is not released, once the
 bucket is gone (`LockStore.deleteBucket` answers `absent`). Writing either
@@ -471,7 +486,10 @@ by its version, which is harmless either way.
 D11. A finished teardown reports (`TeardownReport`):
 
 - `infrastructure`: `destroyed`, or `absent` when the destroy plan changed
-  nothing, the `factory` root already gone; the resources destroyed, and the
+  nothing, the `factory` root already gone; without a state bucket
+  `not_found_by_ec2`: no destroy plan was made, EC2 listing no instance or VPC
+  tagged with the factory ID, and nothing outside EC2 was looked for
+  ([No state bucket](#no-state-bucket)); the resources destroyed, and the
   instances EC2 listed before (`ShownMachine`: its host key only when
   well-formed, a malformed tag only marked, `malformedHostKey`);
 - the devices deleted, by ID, and those listed but kept (`possible`,
@@ -488,22 +506,121 @@ D11. A finished teardown reports (`TeardownReport`):
   are reported apart, never as kept: they may already be gone, as on a rerun,
   or were never tagged. A reference to a tagged secret is listed once, with
   it;
-- the state bucket deleted.
+- the state bucket (`TeardownBucket`): its name, and `outcome` `deleted`, or
+  `not_found` in the [no-bucket mode](#no-state-bucket): not found by this run,
+  so not deleted by it;
+- `withoutLock`, only in the no-bucket mode: why it ran without the lock
+  (`ranWithoutLock`).
 
 With it, the advice teardown leaves the operator (`FACTORY_JSON_KEPT`,
 `REVOKE_SOURCES`, `CHECK_LISTED_DEVICES`, and `CHECK_UNCHECKED_DEVICES` when
-the devices were not checked): factory.json is left as it is;
+the devices were not checked, and `checkOutsideEc2` in the no-bucket mode):
+factory.json is left as it is;
 teardown revokes nothing it only refers to (the Tailscale auth key and admin
 OAuth client, and the API credentials kept), which the operator revokes at
-their providers once nothing else uses them; and the devices listed but not
-deleted, or not checked, are the operator's to check.
+their providers once nothing else uses them; the devices listed but not
+deleted, or not checked, are the operator's to check; and without a state
+bucket, so are the factory's IAM role and instance profile, which teardown did
+not look for.
 
 ## No state bucket
 
-D10. Teardown never bootstraps a bucket: a missing one ends the use case
-(`no_bucket`) before any lock. Cleaning up devices and owned secrets without
-the lock when EC2 lists nothing tagged is
-[#87](https://github.com/yaunder/fffactory/issues/87)'s.
+D10. The state bucket holds the lock, so a factory whose bucket S3 does not
+find (`HeadBucket` 404) has none to take: a first bootstrap that failed after
+`secret set` stored the factory's secrets, a bucket deleted by hand, or a
+[rerun](#rerun) after a teardown that deleted it. Teardown then runs as
+`secret set` does before a bucket exists
+([secrets §`fffactory secret set`](secrets.md#fffactory-secret-set)): without the lock
+and without an operation record. It never creates or bootstraps a bucket: it
+asks S3 only whether the bucket exists and is ready (`stateBucketState`), and
+runs no Terraform at all. A bucket S3 answers 403 for is not this mode: it is
+refused ([Rerun](#rerun)). Nor is one that exists without every setting
+backend bootstrap applies: it is refused as `plan` refuses it
+(`unready_bucket`, with its completion commands).
+
+In this mode teardown goes:
+
+1. Steps 1 to 4 of the [order](#order), as with a bucket.
+2. The Tailscale admin session (step 7), an admin client an earlier teardown
+   already deleted included: the devices are then not checked
+   ([Rerun](#rerun)).
+3. The inventory (step 8). EC2 listing anything tagged with the factory ID,
+   an instance in any state but `terminated` or a VPC, refuses teardown,
+   naming each: its Terraform state was in the bucket, so teardown cannot
+   destroy it, and removes nothing (`taggedWithoutBucket`): `The state bucket
+   BUCKET does not exist, but resources tagged with the factory's ID do`,
+   details `Their Terraform state was kept in the state bucket: without it,
+   teardown cannot destroy them, and nothing was removed.`, then `EC2 instance
+   ID (STATE)` and `VPC ID` each, next action ``Check them in the EC2 console
+   and remove those that are this factory's yourself, then rerun `fffactory
+   teardown`.`` This refusal comes before an admin client gone
+   ([Rerun](#rerun)): storing one again would not help. A listing that fails
+   refuses as with a bucket, never taken for nothing tagged.
+4. What will be removed and kept (`TeardownReview`): no destroy plan's
+   changes, no instance and no VPC, the devices and secrets as with a bucket,
+   the state bucket's `outcome` `not_found`, and `withoutLock`, why it runs
+   without the lock (`ranWithoutLock`), claiming only what was looked at: `No
+   factory lock: S3 does not find the state bucket BUCKET, which would hold
+   it, and EC2 lists no instance or VPC tagged with the factory ID; nothing
+   outside EC2, such as IAM, was looked for. Without a lock, teardown deletes
+   only the factory's tailnet devices, owned secrets and local saved plans, as
+   `fffactory secret set` stores secrets before a bucket exists.`
+5. The [confirmation](#confirmation), at a terminal asking `Remove what is
+   left of factory ID? Its tailnet devices and owned secrets are deleted, and
+   none can be recovered. Type the factory ID to confirm: `.
+6. Changed live state invalidates the review: once confirmed (the step
+   `verifying`), the bucket must still be missing and EC2 must still list
+   nothing tagged, asked one call at a time, the interrupt checked after
+   each ([Interruption](#interruption)). A bucket created
+   meanwhile (`The state bucket BUCKET exists now, but did not when the
+   factory was reviewed`, ``Rerun `fffactory teardown` to review the factory
+   as it is now.``), one answering 403, anything tagged or a listing that
+   fails refuses, removing nothing.
+7. The [devices](#devices) (step 16), listed afresh, by the keys factory.json
+   declares: with no state and no tagged instance, there are no others. Then
+   the owned secrets (step 17), the admin client among them, only after the
+   devices, and the local saved plans (step 18), a saved bootstrap plan among
+   them. There is no bucket to delete.
+8. The [report](#report): `infrastructure` `not_found_by_ec2` (no destroy
+   plan was made: it is inferred from EC2 alone), no changes and no instances,
+   the devices and secrets as with a bucket, the state bucket's `outcome`
+   `not_found`, `withoutLock`, and with the advice `checkOutsideEc2`.
+
+Dispatch, the gates and the destroy have nothing to act on: a worker has no
+machine without a tagged instance. Every refusal and a decline remove nothing
+and write nothing (`operation` undefined). What stops the run from the devices
+on is `partial` at its step, as [with a bucket](#partial-failure), but with no
+`operation` and no bucket among what remains (`remaining.bucket` undefined,
+no `Remains: the state bucket` line); a rerun finishes it. An interrupt keeps
+no lock, since there is none: the result is `interrupted`, `locked: false`,
+with `withoutLock` saying how far it got, a `TeardownInterruption` as
+`interruptedTeardown` words it ([Interruption](#interruption)): `reached`,
+`removing` (from the devices step on), the devices listed but kept, no
+`record`, no `dispatchStopped`, and the lock `none`. Interrupted by the time the bucket is
+found missing, before the admin session, it is the plain `interrupted`,
+`locked: false`, as before a lock. A run that finished is `done`, even when
+the interrupt landed at its end.
+
+**Accepted risk:** without a lock, nothing keeps another fffactory out
+between the check after the confirmation and the deletions: an `apply` that
+bootstraps the bucket in that window finds the secrets it needs deleted under
+it, and its workers cannot join the tailnet. This is the window `secret set`
+already runs in; the check after the confirmation narrows it to the deletions
+themselves.
+
+**Accepted risk:** without the state bucket, teardown looks for nothing
+outside EC2. The factory root also creates IAM outside the VPC: the role and
+instance profile `<id>-host` with its inline policy `<id>-read-secrets`. A
+first apply that created them and then failed, say on `VpcLimitExceeded`,
+leaves them, and a teardown after the bucket was deleted by hand reports
+`not_found_by_ec2` with them still there. The report says so (`ranWithoutLock`)
+and leaves them to the operator (`checkOutsideEc2`): ``Without the state
+bucket, teardown looked for nothing outside EC2: check IAM for the role and
+instance profile ID-host, which a failed first apply may have left, and delete
+them yourself if they are this factory's.`` In the IAM console, under Roles
+and under the instance profiles (`aws iam get-role --role-name ID-host`,
+`aws iam get-instance-profile --instance-profile-name ID-host`): delete the
+role's inline policy, remove it from the instance profile, then delete both.
 
 ## What it never prints
 
@@ -512,7 +629,8 @@ Tailscale answer body, token or secret, and no configuration value but the
 factory ID, well-formed host keys, `aws.account_id` and `aws.region`, and what
 `plan` already shows of factory.json: its `name` and path (the review's
 target), `state_backend.bucket` (the review, the report, the `deleting_bucket`
-progress event and `bucketRemains`), and the secret references it holds
+progress event, `bucketRemains`, `bucketUnreachable`, `taggedWithoutBucket`,
+`bucketAppeared` and `ranWithoutLock`), and the secret references it holds
 (validated ARNs, kept and listed). A
 `--confirm` value or typed answer that is not the factory ID is never echoed,
 nor a device's tags, a device's reported hostname teardown did not derive, a
@@ -526,12 +644,12 @@ names.
 
 | Layer | Module | Responsibility |
 | --- | --- | --- |
-| Domain | `src/domain/teardown.ts` | The guarded destroy plan's rule and its consistency with the exit code (`destroyPlanRefusal`, `destroyPlanMismatch`), `VpcInventory`; the devices teardown deletes and lists (`selectFactoryDevices`, `FactoryDevices`); the kept secrets' groups (`keptSecrets`) and the factory's names (`underFactoryNames`); the confirmation rule (`teardownConfirmation`, `typedIdConfirms`) and question; the gates' next actions (`teardownGateActions`) and the review invalidated by changed machines (`machinesChanged`); the review and report (`TeardownReview`, `TeardownReport`), carrying only what may be printed (`ShownMachine`, `ShownDevice`, `ShownSecret`); the steps (`TeardownStep`), where a partial teardown stopped (`TeardownStop`) and what remains of each kind (`remainingAt`, `TeardownRemaining`, `stoppedPartWay`); an interruption's words (`interruptedTeardown`); the words of every refusal and of the report's advice. Pure. |
+| Domain | `src/domain/teardown.ts` | The guarded destroy plan's rule and its consistency with the exit code (`destroyPlanRefusal`, `destroyPlanMismatch`), `VpcInventory`; the devices teardown deletes and lists (`selectFactoryDevices`, `FactoryDevices`); the kept secrets' groups (`keptSecrets`) and the factory's names (`underFactoryNames`); the confirmation rule (`teardownConfirmation`, `typedIdConfirms`) and question; the gates' next actions (`teardownGateActions`) and the review invalidated by changed machines (`machinesChanged`); the review and report (`TeardownReview`, `TeardownReport`), carrying only what may be printed (`ShownMachine`, `ShownDevice`, `ShownSecret`); the steps (`TeardownStep`), where a partial teardown stopped (`TeardownStop`) and what remains of each kind (`remainingAt`, `TeardownRemaining`, `stoppedPartWay`); an interruption's words (`interruptedTeardown`, its lock `none` without a state bucket); the state bucket's outcome (`TeardownBucket`); without a state bucket, why it runs without the lock (`ranWithoutLock`), what it leaves to the operator outside EC2 (`checkOutsideEc2`) and its refusals (`taggedWithoutBucket`, `bucketAppeared`); the words of every refusal and of the report's advice. Pure. |
 | Domain | `src/domain/initialization.ts` | `isGeneratedFactoryId`. |
 | Domain | `src/domain/worker-lifecycle.ts` | `removalGate` and `RemovalGateActions`: terminate's gates, their next actions completed by the command refused. |
 | Domain | `src/domain/operation.ts` | `TEARDOWN_OPERATION` and the teardown stage's statuses. |
 | Domain | `src/domain/secrets.ts` | `classifySecrets` and `refersTo`. |
-| Application | `src/application/teardown-factory.ts` | `teardownFactory`: the order above, under the lock and its record, the lock and record never touched once the bucket is gone; how far it got and what is left (`Progress`), every ending (`refusedUnder`, `failedUnder`, `partialUnder`, `interruptedUnder`), the interrupt checked once the run returns. |
+| Application | `src/application/teardown-factory.ts` | `teardownFactory`: the order above, under the lock and its record, the lock and record never touched once the bucket is gone; without a state bucket, the same steps from the admin session on without them (`withoutBucket`, `cleanUp`, a `TeardownLog` that writes nothing), the factory rechecked once confirmed (`stillWithoutBucket`); how far it got and what is left (`Progress`), every ending (`refusedUnder`, `failedUnder`, `partialUnder`, `interruptedUnder`), the interrupt checked once the run returns. |
 | Application | `src/application/worker-removal.ts` | Shared with `worker terminate`: `inspectForRemoval`, `openTailnetAdmin`, `deleteDevices`. |
 | Application | `src/application/stop-dispatch.ts`, `src/application/delete-owned-secret.ts` | `stopDispatch`, `deleteOwnedSecret`. |
 | Application | `src/application/plan-store.ts` | `PlanStore.removeAll`. |
@@ -551,7 +669,12 @@ carrying no tag and no malformed host key; what remains where it stopped and
 its lines, devices not checked and devices listed but kept carried past the
 devices step with their advice; the admin client's pending-deletion hint only
 when it is still found; an interruption's words, its step in words, the devices
-listed but kept, `fffactory lock break` only for this teardown once exited),
+listed but kept, `fffactory lock break` only for this teardown once exited,
+and never without a lock; without a state bucket, why it runs without the lock,
+claiming only what it observed, the IAM it leaves to the operator,
+the tagged resources named and never a malformed host key, a bucket created
+since the review, the question about what is left, no bucket among what
+remains),
 `tests/application/teardown-factory.test.ts` (a factory with no worker, one
 running worker, and two with one stopped, each ending with no instance,
 network, state, device, owned secret, plan or bucket, its referenced sources
@@ -568,7 +691,7 @@ started, added or gone since the review, or not listed again, the guarded
 destroy plan, its exit code disagreeing, each listing that fails, the admin
 client refused, a machine pending, a decline, a wrong `--confirm`, no terminal,
 no admin client, an incomplete factory.json, another account, a pin mismatch,
-no bucket; and once destroyed, a leftover stopping the run before devices,
+an unready bucket; and once destroyed, a leftover stopping the run before devices,
 secrets and the bucket, and a bucket that remains, recorded `partial`; each
 failure point, the destroy failing part way, tagged leftovers, a state still
 recording hosts or whose host keys cannot be read after the destroy (a stubbed
@@ -590,13 +713,30 @@ destroy plan's Terraform commands, during EC2's listing after the destroy,
 during a destroy that then succeeds (reaching no further step), past the
 devices step (naming the devices listed but kept), as the bucket is emptied
 before and after its lock, during the bucket's last deletion, and during each
-final record write, keeping the lock), `tests/infrastructure/plan-store.test.ts`
+final record write, keeping the lock; and without a state bucket (§No state
+bucket): a factory with only secrets cleaned up without a lock, saying so,
+devices and secrets after the review and the typed question about what is
+left, a decline, an instance tagged with the factory ID in each listed state
+and a tagged VPC refused even with the admin client gone, each EC2 listing
+that fails, a bucket created, answering 403, a tagged instance or VPC, or a
+listing failing once confirmed, each removing nothing, never a lock, record,
+bucket or Terraform call, a rerun after a teardown that deleted the bucket
+ending done with the devices not checked and the secrets already absent, a
+device or a secret left partial with no bucket among what remains and a rerun
+finishing it, the state bucket's outcome `not_found` and `infrastructure`
+`not_found_by_ec2`, the admin client gone indeed when a tagged VPC is refused,
+an interrupt at the question, while deleting the secrets, once confirmed as
+S3 or each EC2 listing answers (no further call started), and before anything
+is listed, keeping no lock, its `withoutLock` worded by `interruptedTeardown`
+as returned, and a run interrupted at its end still `done`; only
+`bucketExists` asked of the state bucket), `tests/infrastructure/plan-store.test.ts`
 (`removeAll`) and `tests/infrastructure/aws-s3-lock-store.test.ts` (an
 interrupted bucket deletion, the typed 403). terminate's own tests
 (`tests/application/worker-lifecycle.test.ts`) cover the shared helpers.
 
 Partial failure, rerun and interruption by
-[#86](https://github.com/yaunder/fffactory/issues/86). Introduced by
+[#86](https://github.com/yaunder/fffactory/issues/86); the cleanup without a
+state bucket by [#87](https://github.com/yaunder/fffactory/issues/87). Introduced by
 [#85](https://github.com/yaunder/fffactory/issues/85), on the
 building blocks of [#81](https://github.com/yaunder/fffactory/issues/81),
 [#82](https://github.com/yaunder/fffactory/issues/82),

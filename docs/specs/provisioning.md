@@ -886,7 +886,7 @@ Teardown also lists the VPCs carrying the factory ID tag: after the destroy,
 any left is a leftover outside Terraform state that stops the run before
 devices, secrets and the bucket (D12, [teardown §Order](teardown.md#order)),
 and without a state bucket, any found refuses the cleanup (D10,
-[#87](https://github.com/yaunder/fffactory/issues/87)). `MachineInventorySource.listVpcs`
+[teardown §No state bucket](teardown.md#no-state-bucket)). `MachineInventorySource.listVpcs`
 (`ec2MachineInventory`) calls EC2 `DescribeVpcs` in the factory Region with
 the filter `tag:fffactory:factory-id` = the factory ID, 1000 per page,
 following `NextToken`, every page within one 15 s deadline

@@ -22,6 +22,8 @@ import {
   CHECK_LISTED_DEVICES,
   CHECK_UNCHECKED_DEVICES,
   DEVICES_NOT_CHECKED,
+  interruptedTeardown,
+  ranWithoutLock,
   type TeardownStep,
   type VpcInventory,
 } from "../../src/domain/teardown";
@@ -353,7 +355,8 @@ describe("fffactory teardown: the happy path (teardown §Order)", () => {
           removed: OWNED.map(({ name }) => name),
           kept: { tagged: [], referenced: [SOURCE_ARN], unlisted: [] },
         },
-        bucket: BUCKET,
+        bucket: { name: BUCKET, outcome: "deleted" },
+        withoutLock: undefined,
       },
     });
     expectAllRemoved(w);
@@ -448,7 +451,8 @@ describe("fffactory teardown: the happy path (teardown §Order)", () => {
         ],
         vpcIds: [NETWORK_VPC],
         secrets: { kept: { referenced: [SOURCE_ARN] } },
-        bucket: BUCKET,
+        bucket: { name: BUCKET, outcome: "deleted" },
+        withoutLock: undefined,
       },
     });
     // The review comes before the question, and nothing was stopped before it was answered.
@@ -1064,13 +1068,6 @@ describe("fffactory teardown: refusals delete nothing (teardown §Refusals)", ()
       expectNothingRemoved(w);
     },
   );
-
-  test("leaves a factory without a state bucket to its own mode (T7)", async () => {
-    const w = world();
-    w.lockStore.buckets.delete(BUCKET);
-    expect(await teardownFactory(w.deps, request(w))).toEqual({ kind: "no_bucket" });
-    expect(w.terraform.calls).toEqual([]);
-  });
 });
 
 describe("fffactory teardown: what stops the run once the destroy applied", () => {
@@ -2187,5 +2184,570 @@ describe("fffactory teardown: an interrupt keeps the lock at every step (teardow
       dispatchStopped: [hostname("builder-1")],
     });
     expect(w.lockStore.locks.size).toBe(1);
+  });
+});
+
+/**
+ * A factory whose state bucket S3 does not find, as a first bootstrap that failed after `secret
+ * set` leaves it, or a bucket deleted by hand: no network, and no machine unless `machines`.
+ */
+function bucketless(options: WorldOptions & { readonly machines?: readonly Machine[] } = {}) {
+  const w = world(options);
+  w.lockStore.buckets.delete(BUCKET);
+  w.terraform.world.hosts.clear();
+  w.terraform.world.network = false;
+  if (options.machines !== undefined)
+    w.deps = {
+      ...w.deps,
+      machines: {
+        ...w.deps.machines,
+        list: async () => ({ kind: "machines", machines: [...(options.machines ?? [])] }),
+      },
+    };
+  return w;
+}
+
+/**
+ * Nothing reached the state bucket but asking whether it exists: no readiness asked of a bucket
+ * S3 does not find, and no bucket, lock or record made.
+ */
+function expectNoBucketTouched(w: World) {
+  expect(w.lockStore.calls.filter((call) => call !== `bucketExists ${BUCKET}`)).toEqual([]);
+  expect(w.lockStore.buckets.has(BUCKET)).toBe(false);
+  expect(w.lockStore.locks.size).toBe(0);
+  expect(w.lockStore.operations.size).toBe(0);
+  // No Terraform at all: neither a destroy nor a backend bootstrap was planned or applied.
+  expect(w.terraform.calls).toEqual([]);
+}
+
+/** Nothing the factory owns was removed. */
+function expectNothingDeleted(w: World) {
+  expect(w.admin.calls.filter((call) => call.startsWith("remove"))).toEqual([]);
+  expect(w.secrets.calls.filter((call) => /^(remove|restore)/.test(call))).toEqual([]);
+  expect(w.planStore.calls.filter((call) => call.startsWith("removeAll"))).toEqual([]);
+}
+
+describe("fffactory teardown: no state bucket (teardown §No state bucket)", () => {
+  test("cleans up a factory with only secrets without a lock, and says so", async () => {
+    const w = bucketless();
+    const result = await teardownFactory(w.deps, request(w));
+    expect(result).toEqual({
+      kind: "done",
+      report: {
+        infrastructure: "not_found_by_ec2",
+        changes: [],
+        machines: [],
+        devices: { removed: [], possible: [], untagged: [] },
+        devicesUnchecked: undefined,
+        secrets: {
+          removed: OWNED_NAMES,
+          absent: [],
+          kept: { tagged: [], referenced: [SOURCE_ARN], unlisted: [] },
+        },
+        bucket: { name: BUCKET, outcome: "not_found" },
+        withoutLock: ranWithoutLock(BUCKET),
+      },
+    });
+    expect(w.secrets.secrets()).toEqual([]);
+    for (const { arn: owned } of OWNED) expect(w.secrets.calls).toContain(`exists ${owned}`);
+    expect(w.secrets.calls.filter((call) => call.includes(SOURCE_ARN))).toEqual([]);
+    expect(w.planStore.calls).toContain(`removeAll ${FACTORY}`);
+    expect(w.progress.map(({ kind }) => kind)).toEqual([
+      "review",
+      "removing_devices",
+      "removing_secrets",
+    ]);
+    expectNoBucketTouched(w);
+  });
+
+  test("deletes the devices and secrets after the same review and typed confirmation", async () => {
+    const prompt = fakePrompt({ interactive: true, answers: [FACTORY] });
+    const devices = [
+      tailnetDevice("n0CNTRL", hostname("builder-1"), [WORKER_TAG]),
+      tailnetDevice("nU", hostname("builder-1"), []),
+    ];
+    const w = bucketless({ workers: { "builder-1": "running" }, devices, prompt });
+    const result = await teardownFactory(w.deps, request(w, { confirm: undefined }));
+    expect(result).toMatchObject({
+      kind: "done",
+      report: {
+        devices: {
+          removed: ["n0CNTRL"],
+          untagged: [{ id: "nU", hostname: hostname("builder-1") }],
+        },
+        secrets: { removed: OWNED_NAMES },
+        withoutLock: ranWithoutLock(BUCKET),
+      },
+    });
+    expect(prompt.asked).toEqual([
+      `Remove what is left of factory ${FACTORY}? Its tailnet devices and owned secrets are ` +
+        "deleted, and none can be recovered. Type the factory ID to confirm: ",
+    ]);
+    expect(w.progress[0]).toEqual({
+      kind: "review",
+      review: expect.objectContaining({
+        changes: [],
+        machines: [],
+        vpcIds: [],
+        devices: {
+          deleted: [{ id: "n0CNTRL", hostname: hostname("builder-1") }],
+          possible: [],
+          untagged: [{ id: "nU", hostname: hostname("builder-1") }],
+        },
+        secrets: expect.objectContaining({
+          owned: OWNED.map(({ name, arn: a }) => ({ name, arn: a })),
+        }),
+        bucket: { name: BUCKET, outcome: "not_found" },
+        withoutLock: ranWithoutLock(BUCKET),
+      }),
+    });
+    expect(w.admin.devices().map(({ id }) => id)).toEqual(["nU"]);
+    // No worker to stop dispatch on or inspect: nothing was asked of one.
+    expect(w.queue.reconcile).toEqual([]);
+    expect(w.control.calls).toEqual([]);
+    expectNoBucketTouched(w);
+  });
+
+  test("declined, it removes nothing", async () => {
+    const prompt = fakePrompt({ interactive: true, answers: ["no"] });
+    const w = bucketless({ prompt });
+    expect(await teardownFactory(w.deps, request(w, { confirm: undefined }))).toEqual({
+      kind: "declined",
+      operation: undefined,
+      recordFailure: undefined,
+    });
+    expectNothingDeleted(w);
+    expectNoBucketTouched(w);
+  });
+
+  test.each(["pending", "running", "stopping", "stopped", "shutting-down"] as const)(
+    "refuses an instance tagged with the factory ID (%s), naming it, and deletes nothing",
+    async (state) => {
+      const machine: Machine = { instanceId: "i-0123456789abcdef0", state, hostKey: "builder-1" };
+      const w = bucketless({ machines: [machine] });
+      expect(await teardownFactory(w.deps, request(w))).toEqual({
+        kind: "refused",
+        refusals: [
+          {
+            summary: `The state bucket ${BUCKET} does not exist, but resources tagged with the factory's ID do`,
+            details: [
+              "Their Terraform state was kept in the state bucket: without it, teardown cannot destroy them, and nothing was removed.",
+              `EC2 instance i-0123456789abcdef0 (${state})`,
+            ],
+            nextAction:
+              "Check them in the EC2 console and remove those that are this factory's yourself, then rerun `fffactory teardown`.",
+          },
+        ],
+        operation: undefined,
+        dispatchStopped: [],
+        recordFailure: undefined,
+      });
+      expect(w.progress).toEqual([]);
+      expectNothingDeleted(w);
+      expectNoBucketTouched(w);
+    },
+  );
+
+  test("refuses a VPC tagged with the factory ID, even with the admin client gone", async () => {
+    const w = bucketless({
+      vpcs: { kind: "vpcs", vpcIds: [NETWORK_VPC] },
+      listing: { kind: "listed", secrets: [OWNED[0] as ListedSecret] },
+    });
+    expect(await teardownFactory(w.deps, request(w))).toMatchObject({
+      kind: "refused",
+      refusals: [
+        {
+          summary: `The state bucket ${BUCKET} does not exist, but resources tagged with the factory's ID do`,
+          details: expect.arrayContaining([`VPC ${NETWORK_VPC}`]),
+        },
+      ],
+    });
+    // The admin client's secret was looked for and not found: no admin session was opened.
+    expect(w.secrets.calls).toContain(`exists ${ADMIN_ARN}`);
+    expect(w.admin.calls).toEqual([]);
+    expectNothingDeleted(w);
+    expectNoBucketTouched(w);
+  });
+
+  test.each([
+    {
+      part: "instances",
+      options: {
+        inventory: {
+          kind: "unavailable",
+          reason: "EC2 DescribeInstances failed: UnauthorizedOperation",
+        },
+      },
+      summary: "EC2 DescribeInstances failed: UnauthorizedOperation",
+    },
+    {
+      part: "VPCs",
+      options: {
+        vpcs: { kind: "unavailable", reason: "EC2 DescribeVpcs failed: UnauthorizedOperation" },
+      },
+      summary: "EC2 DescribeVpcs failed: UnauthorizedOperation",
+    },
+  ] as const)(
+    "refuses when EC2's $part cannot be listed: never taken for nothing tagged",
+    async ({ options, summary }) => {
+      const w = bucketless(options as WorldOptions);
+      expect(await teardownFactory(w.deps, request(w))).toMatchObject({
+        kind: "refused",
+        refusals: [
+          {
+            summary,
+            details: [
+              "Nothing was removed: a listing that failed is never taken for one that found nothing.",
+            ],
+          },
+        ],
+      });
+      expectNothingDeleted(w);
+      expectNoBucketTouched(w);
+    },
+  );
+
+  const APPEARED = `The state bucket ${BUCKET} exists now, but did not when the factory was reviewed`;
+  const TAGGED = `The state bucket ${BUCKET} does not exist, but resources tagged with the factory's ID do`;
+
+  test.each<{
+    case: string;
+    meanwhile: (w: World) => void;
+    machines?: MachineInventory;
+    vpcs?: VpcInventory;
+    summary: string;
+  }>([
+    {
+      case: "a state bucket created",
+      meanwhile: (w) => w.lockStore.buckets.add(BUCKET),
+      summary: APPEARED,
+    },
+    {
+      case: "the bucket's name answering 403",
+      meanwhile: (w) => w.lockStore.unreachable.add(BUCKET),
+      summary: `The state bucket ${BUCKET} cannot be reached in account 123456789012 (S3 answered 403)`,
+    },
+    {
+      case: "a tagged instance launched",
+      meanwhile: () => undefined,
+      machines: {
+        kind: "machines",
+        machines: [{ instanceId: "i-0123456789abcdef0", state: "pending", hostKey: "builder-1" }],
+      },
+      summary: TAGGED,
+    },
+    {
+      case: "a tagged VPC created",
+      meanwhile: () => undefined,
+      vpcs: { kind: "vpcs", vpcIds: [NETWORK_VPC] },
+      summary: TAGGED,
+    },
+    {
+      case: "EC2's instances not listed again",
+      meanwhile: () => undefined,
+      machines: {
+        kind: "unavailable",
+        reason: "EC2 DescribeInstances failed: RequestLimitExceeded",
+      },
+      summary: "EC2 DescribeInstances failed: RequestLimitExceeded",
+    },
+    {
+      case: "EC2's VPCs not listed again",
+      meanwhile: () => undefined,
+      vpcs: { kind: "unavailable", reason: "EC2 DescribeVpcs failed: RequestLimitExceeded" },
+      summary: "EC2 DescribeVpcs failed: RequestLimitExceeded",
+    },
+  ])(
+    "refuses once confirmed with $case while the question waited, deleting nothing",
+    async ({ meanwhile, machines, vpcs, summary }) => {
+      const w = bucketless();
+      // EC2 answers as the test says from its second listing on: after the review.
+      let confirmed = false;
+      const inventory: MachineInventorySource = {
+        list: async (...args) =>
+          confirmed && machines !== undefined ? machines : w.deps.machines.list(...args),
+        listVpcs: async (...args) =>
+          confirmed && vpcs !== undefined ? vpcs : w.deps.machines.listVpcs(...args),
+      };
+      const prompt = {
+        ...fakePrompt({ interactive: true }).prompt,
+        ask: async () => {
+          confirmed = true;
+          meanwhile(w);
+          return FACTORY;
+        },
+      };
+      const result = await teardownFactory(
+        { ...w.deps, machines: inventory, prompt },
+        request(w, { confirm: undefined }),
+      );
+      expect(result).toMatchObject({
+        kind: "refused",
+        refusals: [{ summary }],
+        operation: undefined,
+        dispatchStopped: [],
+      });
+      expectNothingDeleted(w);
+      expect(w.lockStore.calls.filter((call) => call !== `bucketExists ${BUCKET}`)).toEqual([]);
+      expect(w.lockStore.locks.size).toBe(0);
+      expect(w.terraform.calls).toEqual([]);
+    },
+  );
+
+  test("reruns after a teardown that deleted the bucket end done: devices not checked, secrets already absent", async () => {
+    const w = world({ workers: { "builder-1": "running" } });
+    expect((await teardownFactory(w.deps, request(w))).kind).toBe("done");
+    const calls = w.lockStore.calls.length;
+    const progress = w.progress.length;
+    expect(await teardownFactory(w.deps, request(w))).toEqual({
+      kind: "done",
+      report: {
+        infrastructure: "not_found_by_ec2",
+        changes: [],
+        machines: [],
+        devices: { removed: [], possible: [], untagged: [] },
+        devicesUnchecked: DEVICES_NOT_CHECKED,
+        secrets: {
+          removed: [],
+          absent: [AUTH_ARN, ADMIN_ARN],
+          kept: { tagged: [], referenced: [SOURCE_ARN], unlisted: [] },
+        },
+        bucket: { name: BUCKET, outcome: "not_found" },
+        withoutLock: ranWithoutLock(BUCKET),
+      },
+    });
+    expect(w.progress.slice(progress)).toContainEqual(
+      expect.objectContaining({
+        kind: "review",
+        review: expect.objectContaining({ devicesUnchecked: DEVICES_NOT_CHECKED }),
+      }),
+    );
+    expect(w.lockStore.calls.slice(calls)).toEqual([
+      `bucketExists ${BUCKET}`,
+      `bucketExists ${BUCKET}`,
+    ]);
+    expectNothingOwned(w);
+  });
+
+  test("a device not deleted stops it before the secrets, with no bucket among what remains; the rerun finishes", async () => {
+    const failing: Record<string, string> = { n0CNTRL: "Tailscale answered HTTP 500" };
+    const w = bucketless({ workers: { "builder-1": "running" } });
+    const admin = fakeTailnetAdmin({
+      devices: [tailnetDevice("n0CNTRL", hostname("builder-1"), [WORKER_TAG])],
+      failing,
+    });
+    const deps = { ...w.deps, tailnetAdmin: admin.admin };
+    const partial = await teardownFactory(deps, request(w));
+    expect(partial).toMatchObject({
+      kind: "partial",
+      stoppedAt: "devices",
+      remaining: { devices: ["n0CNTRL"], secrets: OWNED_NAMES, plans: true, bucket: undefined },
+      operation: undefined,
+      recordFailure: undefined,
+    });
+    if (partial.kind !== "partial") throw new Error("not partial");
+    expect(partial.refusal.details.filter((line) => line.includes("state bucket"))).toEqual([]);
+    expect(w.secrets.calls.filter((call) => call.startsWith("remove"))).toEqual([]);
+    delete failing.n0CNTRL;
+    expect(await teardownFactory(deps, request(w))).toMatchObject({
+      kind: "done",
+      report: { devices: { removed: ["n0CNTRL"] }, withoutLock: ranWithoutLock(BUCKET) },
+    });
+    expect(admin.devices()).toEqual([]);
+    expect(w.secrets.secrets()).toEqual([]);
+    expectNoBucketTouched(w);
+  });
+
+  test("a secret not confirmed gone leaves it partial; the rerun, its admin client gone, finishes", async () => {
+    const w = bucketless();
+    w.secrets.removeFails.set(AUTH_ARN, {
+      kind: "failed",
+      reason: "Secrets Manager DeleteSecret failed: AccessDeniedException",
+    });
+    expect(await teardownFactory(w.deps, request(w))).toMatchObject({
+      kind: "partial",
+      stoppedAt: "secrets",
+      remaining: { secrets: [`${FACTORY}/tailscale-auth-key`], plans: true, bucket: undefined },
+      refusal: { summary: "Not every secret the factory owns is gone" },
+      operation: undefined,
+    });
+    w.secrets.removeFails.clear();
+    expect(await teardownFactory(w.deps, request(w))).toMatchObject({
+      kind: "done",
+      report: {
+        devicesUnchecked: DEVICES_NOT_CHECKED,
+        secrets: { removed: [`${FACTORY}/tailscale-auth-key`], absent: [ADMIN_ARN] },
+        withoutLock: ranWithoutLock(BUCKET),
+      },
+    });
+    expect(w.secrets.secrets()).toEqual([]);
+    expectNoBucketTouched(w);
+  });
+
+  test("interrupted, it reports how far it got and that it kept no lock", async () => {
+    const atQuestion = bucketless();
+    let interrupted = false;
+    const prompt = {
+      ...fakePrompt({ interactive: true }).prompt,
+      ask: async () => {
+        interrupted = true;
+        return FACTORY;
+      },
+    };
+    expect(
+      await teardownFactory(
+        { ...atQuestion.deps, prompt, interrupted: () => interrupted },
+        request(atQuestion, { confirm: undefined }),
+      ),
+    ).toEqual({
+      kind: "interrupted",
+      locked: false,
+      withoutLock: {
+        reached: "awaiting_approval",
+        removing: false,
+        record: false,
+        dispatchStopped: [],
+        listedDevices: { possible: [], untagged: [] },
+        lock: "none",
+      },
+    });
+    expectNothingDeleted(atQuestion);
+    expectNoBucketTouched(atQuestion);
+
+    const devices = [
+      tailnetDevice("n0CNTRL", hostname("builder-1"), [WORKER_TAG]),
+      tailnetDevice("nU", hostname("builder-1"), []),
+    ];
+    const removing = bucketless({ workers: { "builder-1": "running" }, devices });
+    let removals = 0;
+    const secrets = {
+      ...removing.deps.secrets,
+      remove: async (request: Parameters<typeof removing.deps.secrets.remove>[0]) => {
+        removals += 1;
+        return removing.deps.secrets.remove(request);
+      },
+    };
+    const result = await teardownFactory(
+      { ...removing.deps, secrets, interrupted: () => removals > 0 },
+      request(removing),
+    );
+    expect(result).toEqual({
+      kind: "interrupted",
+      locked: false,
+      withoutLock: {
+        reached: "removing_secrets",
+        removing: true,
+        record: false,
+        dispatchStopped: [],
+        listedDevices: {
+          possible: [],
+          untagged: [{ id: "nU", hostname: hostname("builder-1") }],
+        },
+        lock: "none",
+      },
+    });
+    // What it returns is what `interruptedTeardown` words, as it is.
+    if (result.kind !== "interrupted" || result.locked || result.withoutLock === undefined)
+      throw new Error("not interrupted without a lock");
+    expect(interruptedTeardown(result.withoutLock)).toMatchObject({
+      summary:
+        "Interrupted: the factory is not locked, since it has no state bucket to hold a lock",
+      nextAction: "Once fffactory has exited, rerun `fffactory teardown`.",
+    });
+    expect(removals).toBe(1);
+    expect(removing.planStore.calls.filter((call) => call.startsWith("removeAll"))).toEqual([]);
+    expectNoBucketTouched(removing);
+  });
+
+  test.each([
+    { during: "asking S3 for the bucket", at: "bucketExists", listed: [] },
+    { during: "listing EC2's instances", at: "list", listed: ["list"] },
+    { during: "listing EC2's VPCs", at: "listVpcs", listed: ["list", "listVpcs"] },
+  ] as const)(
+    "interrupted once confirmed while $during, it starts no further call and removes nothing",
+    async ({ at, listed }) => {
+      const w = bucketless();
+      let confirmed = false;
+      let interrupted = false;
+      // EC2's listings started once confirmed; the interrupt lands as the call `at` answers.
+      const calls: string[] = [];
+      const answered = (call: string) => {
+        if (!confirmed) return;
+        if (call !== "bucketExists") calls.push(call);
+        if (call === at) interrupted = true;
+      };
+      const bucketExists = w.lockStore.bucketExists.bind(w.lockStore);
+      w.lockStore.bucketExists = async (bucket) => {
+        const exists = await bucketExists(bucket);
+        answered("bucketExists");
+        return exists;
+      };
+      const machines: MachineInventorySource = {
+        list: async (...args) => {
+          const listing = await w.deps.machines.list(...args);
+          answered("list");
+          return listing;
+        },
+        listVpcs: async (...args) => {
+          const listing = await w.deps.machines.listVpcs(...args);
+          answered("listVpcs");
+          return listing;
+        },
+      };
+      const prompt = {
+        ...fakePrompt({ interactive: true }).prompt,
+        ask: async () => {
+          confirmed = true;
+          return FACTORY;
+        },
+      };
+      const result = await teardownFactory(
+        { ...w.deps, machines, prompt, interrupted: () => interrupted },
+        request(w, { confirm: undefined }),
+      );
+      expect(result).toEqual({
+        kind: "interrupted",
+        locked: false,
+        withoutLock: {
+          reached: "verifying",
+          removing: false,
+          record: false,
+          dispatchStopped: [],
+          listedDevices: { possible: [], untagged: [] },
+          lock: "none",
+        },
+      });
+      expect(calls).toEqual([...listed]);
+      expectNothingDeleted(w);
+      expectNoBucketTouched(w);
+    },
+  );
+
+  test("a run that finished is done, even when the interrupt landed at its end", async () => {
+    const w = bucketless();
+    let interrupted = false;
+    const removeAll = w.planStore.removeAll.bind(w.planStore);
+    w.planStore.removeAll = async (factoryId) => {
+      await removeAll(factoryId);
+      interrupted = true;
+    };
+    const result = await teardownFactory({ ...w.deps, interrupted: () => interrupted }, request(w));
+    expect(result).toMatchObject({
+      kind: "done",
+      report: { withoutLock: ranWithoutLock(BUCKET) },
+    });
+    expect(interrupted).toBe(true);
+    expect(w.secrets.secrets()).toEqual([]);
+    expectNoBucketTouched(w);
+  });
+
+  test("interrupted before anything is listed, nothing is locked", async () => {
+    const w = bucketless();
+    expect(await teardownFactory({ ...w.deps, interrupted: () => true }, request(w))).toEqual({
+      kind: "interrupted",
+      locked: false,
+    });
+    expect(w.admin.calls).toEqual([]);
+    expectNoBucketTouched(w);
   });
 });
