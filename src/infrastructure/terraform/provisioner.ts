@@ -297,6 +297,7 @@ export function terraformProvisioner({
         const inputs = join(directory, "inputs.tfvars.json");
         await writeFile(inputs, JSON.stringify(request.variables), { mode: 0o600 });
         const args = ["plan", "-input=false", "-no-color", "-detailed-exitcode"];
+        if (request.destroy === true) args.push("-destroy");
         if (request.stateLock === false) args.push("-lock=false");
         const { exitCode } = await run(
           session,

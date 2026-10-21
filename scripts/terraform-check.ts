@@ -22,7 +22,11 @@
  * 6. the removal plan check (`terraform-removal-check.ts`): `worker terminate`'s scoped
  *    removal rule, `removalPlanRefusal`, judges Terraform's real removal plans, each planned
  *    from a local state for several hosts or one that `terraform-state-fixture.ts`
- *    synthesizes from Terraform's own plans, with no AWS account and no factory state.
+ *    synthesizes from Terraform's own plans, with no AWS account and no factory state;
+ * 7. the destroy plan check (`terraform-destroy-check.ts`): teardown's guarded destroy plan
+ *    rule, `destroyPlanRefusal`, judges Terraform's real `plan -destroy` of the factory root
+ *    from synthesized states with one host and with two, and from an empty state, each plan
+ *    deleting every resource the state holds and nothing else.
  *
  * The plans run against no AWS account. An override file, added only to this script's copy
  * of the modules, keeps state local and gives the AWS provider documentation example keys,
@@ -32,7 +36,8 @@
  * credentials files set to /dev/null and the instance metadata service disabled. Downloads the
  * managed Terraform (into the FFFactory cache) and the AWS provider when they are not cached.
  * Spec: docs/specs/provisioning.md §Resources and namespacing; the removal plans,
- * docs/specs/worker-lifecycle.md §Terminate (remove).
+ * docs/specs/worker-lifecycle.md §Terminate (remove); the destroy plans,
+ * docs/specs/provisioning.md §Destroy plan.
  */
 import { cp, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
@@ -57,6 +62,7 @@ import {
 } from "../src/infrastructure/terraform/resource-names";
 import { type TerraformSession, terraformRunner } from "../src/infrastructure/terraform/runner";
 import { renderUserData } from "../tests/support/user-data";
+import { destroyPlanProblems } from "./terraform-destroy-check";
 import { removalPlanProblems } from "./terraform-removal-check";
 import { resourceSchemas } from "./terraform-state-fixture";
 
@@ -294,10 +300,11 @@ function namespacingProblems(plans: readonly Plan[]): string[] {
 }
 
 /**
- * The removal plan check (`terraform-removal-check.ts`) in a copy of its own, whose factory
- * root keeps its synthesized state locally; true when every case holds.
+ * The removal plan check (`terraform-removal-check.ts`), then the destroy plan check
+ * (`terraform-destroy-check.ts`), in a copy of their own, whose factory root keeps its
+ * synthesized state locally; true when every case of both holds.
  */
-async function removalCheck(
+async function stateChecks(
   work: string,
   endpoint: string,
   session: (directory: string, data: string) => TerraformSession,
@@ -312,7 +319,7 @@ async function removalCheck(
     timeoutMs: 10 * MINUTES,
   });
   const example = JSON.parse(await readFile(join(ROOT, "examples/factory.json"), "utf8"));
-  const { report, problems } = await removalPlanProblems({
+  const context = {
     run,
     provisioner: terraformProvisioner({
       cacheDirectory: cache,
@@ -330,11 +337,30 @@ async function removalCheck(
     },
     example,
     factoryId: FACTORY_IDS[0] as FactoryId,
-  });
-  for (const line of report) console.log(line);
-  if (problems.length === 0) return true;
-  console.error(`Removal plan check failed:\n${problems.map((p) => `  ${p}`).join("\n")}`);
-  return false;
+  };
+  const removal = await removalPlanProblems(context);
+  for (const line of removal.report) console.log(line);
+  if (removal.problems.length > 0) {
+    console.error(
+      `Removal plan check failed:\n${removal.problems.map((p) => `  ${p}`).join("\n")}`,
+    );
+    return false;
+  }
+  console.log(
+    "removal plans: Terraform's plans of each removal are exactly the removal's, and removalPlanRefusal allows and refuses them as fffactory must",
+  );
+  const destroy = await destroyPlanProblems(context);
+  for (const line of destroy.report) console.log(line);
+  if (destroy.problems.length > 0) {
+    console.error(
+      `Destroy plan check failed:\n${destroy.problems.map((p) => `  ${p}`).join("\n")}`,
+    );
+    return false;
+  }
+  console.log(
+    "destroy plans: Terraform's destroy plans delete every resource of the factory root and nothing else, and destroyPlanRefusal allows them and refuses every tampered one",
+  );
+  return true;
 }
 
 async function main(): Promise<number> {
@@ -464,10 +490,7 @@ async function main(): Promise<number> {
     console.log(
       "credentials: the hosts' policy allows the enrollment key, the Paseo passwords and every credential reference",
     );
-    if (!(await removalCheck(work, `http://127.0.0.1:${server.port}`, session, cache))) return 1;
-    console.log(
-      "removal plans: Terraform's plans of each removal are exactly the removal's, and removalPlanRefusal allows and refuses them as fffactory must",
-    );
+    if (!(await stateChecks(work, `http://127.0.0.1:${server.port}`, session, cache))) return 1;
     return 0;
   } finally {
     server.stop(true);

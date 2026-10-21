@@ -122,7 +122,7 @@ the shipped lockfile, which init may not change. Then:
 
 | Port call | Terraform command | Deadline | Result |
 | --- | --- | --- | --- |
-| `plan` | `plan -input=false -no-color -detailed-exitcode [-lock=false] -var-file=<inputs.tfvars.json> -out=<plan file>` | 30 min | `changes`: exit 2 is true, exit 0 false. |
+| `plan` | `plan -input=false -no-color -detailed-exitcode [-destroy] [-lock=false] -var-file=<inputs.tfvars.json> -out=<plan file>` | 30 min | `changes`: exit 2 is true, exit 0 false. |
 | `showPlan` | `show -json -no-color <plan file>` | 5 min | The parsed JSON plan. |
 | `applyPlan` | `apply -input=false -no-color <plan file>` | 60 min | Applies exactly the saved plan. |
 | `output` | `output -json -no-color` | 5 min | Each output's value by name. |
@@ -130,7 +130,9 @@ the shipped lockfile, which init may not change. Then:
 `init` has a 10-minute deadline. `plan` adds `-lock=false` when its request
 says `stateLock: false`, which a plan made outside the factory-wide lock does
 ([plan-apply §Plan](plan-apply.md#plan)); otherwise Terraform takes its own
-state lock as usual. `show`, `apply` of a saved plan file and `output` take the
+state lock as usual. It adds `-destroy` when its request says `destroy: true`,
+which only teardown's guarded destroy plan does ([Destroy plan](#destroy-plan));
+otherwise it plans as usual. `show`, `apply` of a saved plan file and `output` take the
 state lock or not as Terraform does. The plan file is an absolute path the caller
 owns; a relative one is refused. Input variables and backend settings reach
 Terraform only through the operation's private files, never as command
@@ -390,7 +392,10 @@ Terraform's real removal plans
 ([worker lifecycle §Terminate (remove)](worker-lifecycle.md#terminate-remove)):
 from local states synthesized from its own plans of the example with several
 hosts and with one, it plans each removal with `-refresh=false` and judges
-the JSON plan with `removalPlanRefusal`. The plans reach no AWS account: an override file in the script's copy only keeps
+the JSON plan with `removalPlanRefusal`. Last, from such states with one host
+and with two, and from an empty state, it plans the `factory` root with
+`-destroy -refresh=false` and judges each plan with `destroyPlanRefusal`
+([Destroy plan](#destroy-plan)). The plans reach no AWS account: an override file in the script's copy only keeps
 state local, gives the provider AWS's documentation example keys, skips its
 account and credential checks, and points every endpoint at a local
 stand-in that answers only the image parameter lookup.
@@ -791,6 +796,103 @@ state bucket failed: REASON`, where the reason is the S3 error code, `the
 credential provider failed (NAME)`, `network error (CODE)` or `timed out after
 N s`, never an AWS or SDK message.
 
+## Destroy plan
+
+Removing a whole factory ([#56](https://github.com/yaunder/fffactory/issues/56))
+destroys its `factory` root first (D6), with a destroy plan guarded before it
+is shown or confirmed (D13). No command calls this yet: the teardown use case
+and `fffactory teardown` follow, and decide when, and under which lock, it is
+planned and applied. `plan` and `apply` keep the D11 refusals of host destroys
+([plan and apply §Refusals](plan-apply.md#refusals-until-lifecycle-work-lands-d11)),
+and the state bucket, outside the `factory` root, is never Terraform's to
+destroy ([Deleting the state bucket](#deleting-the-state-bucket)).
+
+The destroy plan is `plan -destroy` of the `factory` root (`PlanRequest.destroy`,
+[Operations](#operations)) with today's projection: factory.json projected by
+`projectFactoryVariables` with the host keys the state records, read with
+`Provisioner.output` as a plan reads them
+([Stable host keys](#stable-host-keys)). Destroy mode destroys whatever the
+state holds, but Terraform still evaluates the configuration, so its variables
+must be supplied and valid. The saved plan is read back with `showPlan`
+(`show -json`) and judged by `destroyPlanRefusal` (`src/domain/teardown.ts`),
+over the factory's instances EC2 lists by the factory ID tag
+([status §Inventories](status.md#inventories)):
+
+- A plan that cannot be read is refused: not a JSON object, `resource_changes`
+  not a list, or a change without a printable address or a non-empty list of
+  printable actions ([plan and apply](plan-apply.md), `resourceChanges`).
+- Every resource change's actions must be exactly `["delete"]`, `["no-op"]` or
+  `["read"]`. Anything else is refused, `create`, `update`, a replacement
+  (`["delete", "create"]` or `["create", "delete"]`), `forget` and any action
+  fffactory does not know among them, and so is a list mixing the allowed ones.
+- Each `delete` of a managed `aws_instance` (by type and mode, or by address
+  when the plan names neither, as [D11](plan-apply.md#refusals-until-lifecycle-work-lands-d11)
+  judges one) must destroy the instance EC2 lists for that host: the `id` its
+  change's `before` names must be an instance EC2 lists for the factory, whose
+  `fffactory:host-key` tag is a well-formed host key `KEY`, and the change's
+  address must be `module.hosts.aws_instance.host["KEY"]`. This is the check
+  `worker terminate` makes of the one host it removes
+  ([worker lifecycle §Terminate (remove)](worker-lifecycle.md#terminate-remove)),
+  made of every host. An empty inventory lists no instance, so every instance
+  delete is refused.
+- A plan with no change, an empty state's, passes: the `factory` root is
+  already absent, as on a rerun after it was destroyed.
+
+| Refused | Summary | Details | Next action |
+| --- | --- | --- | --- |
+| Unreadable | `Terraform's destroy plan could not be read` | None | ``Rerun `fffactory teardown`.`` |
+| A change other than a delete, no-op or read | `Terraform's destroy plan does more than destroy the factory's resources` | Each offending change, in the plan's order, as `ADDRESS (ACTIONS)`, such as `module.network.aws_vpc.this (update)` | ``Check the factory's Terraform state with `fffactory plan`, then rerun `fffactory teardown`.`` |
+| An instance delete EC2 does not back | `Terraform's destroy plan destroys an instance EC2 does not list for the factory` | Each such delete as `ADDRESS (delete): ` and why: `the plan does not name the instance it destroys`; `instance ID, which EC2 does not list with the factory's tags`; `instance ID, which EC2 lists without a well-formed host key tag`; `instance ID, which EC2 lists for host KEY` | ``Check the factory's instances in the EC2 console, then rerun `fffactory teardown`.`` |
+
+The first refusal that applies is the one given, in the table's order. A host
+key tag that is not a well-formed host key is never echoed.
+
+The rule relies on Terraform's documented JSON plan format and plan modes
+(checked 2026-10-21 for the pinned 1.16):
+
+- `plan -destroy` "creates a plan whose goal is to destroy all remote objects
+  that currently exist, leaving an empty Terraform state";
+  `-detailed-exitcode` exits 0 for "empty diff (no changes)" and 2 when
+  changes are present.
+- `resource_changes` describes "the individual change actions that Terraform
+  plans", each with `change.actions`, one of `["no-op"]`, `["create"]`,
+  `["read"]`, `["update"]`, `["delete", "create"]`, `["create", "delete"]` and
+  `["delete"]`; "for `["create"]` and `["delete"]` actions, either `before` or
+  `after` is unset (respectively)", so a delete's `before` holds the object as
+  the state knew it, an instance's `id` among it. `forget`, which a `removed`
+  block with `destroy = false` plans ("remove the resource from state without
+  destroying the actual resource"), is not in that list; it is refused like any
+  other action, and the modules hold no `removed` block ([Guardrails](#guardrails)).
+- `resource_drift` reports what refreshing found, not what the plan does, and
+  is not read.
+
+`just terraform-check` checks the rule against Terraform's own destroy plans
+([Guardrails](#guardrails)): from local states synthesized from its plans of
+the example with one host and with two, and from an empty state, each planned
+with `-destroy -refresh=false` as teardown plans it. Each plan must delete
+every managed resource its prior state holds and change nothing else (the
+empty state's changes nothing, and `-detailed-exitcode` agrees);
+`destroyPlanRefusal` must pass it with EC2 listing the instances the state
+records, and refuse it with EC2 listing none, with another instance listed in
+place of one, and with any one change tampered into `update`, a replacement or
+`forget`.
+
+### Tagged VPCs
+
+Teardown also lists the VPCs carrying the factory ID tag: after the destroy,
+any left is a leftover outside Terraform state that stops the run before
+devices, secrets and the bucket (D12), and without a state bucket, any found
+refuses the cleanup (D10). `MachineInventorySource.listVpcs`
+(`ec2MachineInventory`) calls EC2 `DescribeVpcs` in the factory Region with
+the filter `tag:fffactory:factory-id` = the factory ID, 1000 per page,
+following `NextToken`, every page within one 15 s deadline
+(`EC2_INVENTORY_TIMEOUT_MS`), and answers each VPC's ID (`VpcInventory`). The
+listing proves absence, so it never skips: a VPC without a well-formed ID
+(`vpc-` and 8 to 32 hexadecimal digits) makes it `unavailable`, `EC2
+DescribeVpcs listed a VPC without a well-formed ID`, as do a failure, by error
+name or network code (`EC2 DescribeVpcs failed: REASON`), and the deadline. It
+needs `ec2:DescribeVpcs`, which EC2 does not scope to resources.
+
 ## Deleting the state bucket
 
 Removing a whole factory ([#56](https://github.com/yaunder/fffactory/issues/56))
@@ -926,7 +1028,7 @@ The operator's credentials need, beyond the lock's:
 | Layer | Module | Responsibility |
 | --- | --- | --- |
 | Domain | `src/domain/managed-terraform.ts` | `SUPPORTED_TERRAFORM`, the one pin; `ManagedTerraformState` and the `terraform` doctor check. Pure. |
-| Application | `src/application/provisioner.ts` | The `Provisioner` port: `plan`, `showPlan`, `applyPlan`, `output`; `ProvisioningFailed` and `diagnosticsFileOf`. |
+| Application | `src/application/provisioner.ts` | The `Provisioner` port: `plan` (in destroy mode when asked), `showPlan`, `applyPlan`, `output`; `ProvisioningFailed` and `diagnosticsFileOf`. |
 | Application | `src/application/managed-terraform.ts` | The read-only `ManagedTerraformProbe` port and `managedTerraformPaths`, the cache layout. |
 | Infrastructure | `src/infrastructure/terraform/installer.ts` | `managedTerraform`: platform names, download, SHA256SUMS and archive verification, atomic install, `inspect`. |
 | Infrastructure | `src/infrastructure/terraform/zip.ts` | Extracting one entry from a zip archive. |
@@ -939,6 +1041,8 @@ The operator's credentials need, beyond the lock's:
 | Infrastructure | `assets/terraform/` | The Terraform modules and their provider lockfiles. |
 | Domain | `src/domain/backend-bootstrap.ts` | The create-only rule (`bootstrapPlanVerdict`, each offending change as a `ResourceChange`) and `BootstrapContext`; the state bucket's readiness rule, its TLS-only policy and its check, and `UnreadyBucket` (where the bucket is, what S3 reports and each setting it lacks). Pure; no text layout. |
 | Domain | `src/domain/factory-lock.ts` | The lock record, its key and break-log key, parsing, staleness (`isStale`, `lockAge`, `formatDuration`), and the break confirmation rule (`confirmsBreak`). Pure; no text layout. |
+| Domain | `src/domain/teardown.ts` | The guarded destroy plan's rule (`destroyPlanRefusal`, each refusal a summary, details and next action) and `VpcInventory`. Pure. |
+| Infrastructure | `src/infrastructure/ec2-inventory.ts` | `ec2MachineInventory`'s `listVpcs`: the factory's tagged VPCs from `DescribeVpcs`, paged, within one deadline, a VPC without a well-formed ID or a failure `unavailable`. |
 | Domain | `src/domain/state-bucket-deletion.ts` | `DELETE_OBJECTS_LIMIT`, the order the bucket is emptied in, page by page with the lock's versions set aside (`deletionBatches`), then the lock's, in batches of their own, those no longer current oldest first and the current one alone and last (`lockBatches`), and how deleting it ended (`BucketDeletion`, and what became of the lock, `LockAfterDeletion`). Pure. |
 | CLI adapter | `src/cli/presentation/lock.ts` | The holder lines (`describeHeldLock`) and the lock refusal: `lockRefusalReport` in blocks for plan, apply and upgrade, and the unstyled `lockRefusal` the worker commands still print. |
 | Application | `src/application/bootstrap-backend.ts` | `bootstrapBackend` and `beginFactoryOperation`: the bootstrap plan approved as a `PlanReview`, an unready bucket returned as its `UnreadyBucket`; and `applySavedBootstrap`, a saved bootstrap plan's exact apply, its review shown as the same `PlanReview`. |
@@ -975,7 +1079,7 @@ environment for a profile and for the chain, SIGINT at the deadline, the
 exact text and mode of the private inputs, CLI configuration and backend
 files, literal backend values and refused setting names, the lockfile
 refusal, operation cleanup, stale operation directories removed, `-lock=false`
-only when asked, a failed command's standard error kept in a private diagnostics
+and `-destroy` only when asked, a failed command's standard error kept in a private diagnostics
 file it names and never in its message, old diagnostics removed, diagnostics that
 cannot be kept blocking nothing, a decoy
 `terraform` on `PATH` that must never
@@ -1000,8 +1104,20 @@ factory IDs sharing no name) and `tests/assets/terraform/guardrails.test.ts`
 the required provider version, each projection matches its root module's
 variables, and no validation of the `hosts` variable requires a host).
 `scripts/terraform-check.ts` runs the modules' `fmt`, `validate`, namespacing
-plans, the empty factory's plan and the removal plans with the managed
-Terraform in CI.
+plans, the empty factory's plan, the removal plans and the destroy plans
+(`scripts/terraform-destroy-check.ts`) with the managed Terraform in CI.
+Destroy plan: `tests/domain/teardown.test.ts` (hand-written plans: deletes,
+reads and no-ops passed; an update, a create, a replacement either way,
+`forget`, an unknown action and a mixed list refused, each as `ADDRESS
+(ACTIONS)` in the plan's order; an instance delete EC2 does not list, one
+listed for another host or without a well-formed host key tag (never echoed),
+one that names no instance, and every one with an empty inventory refused; an
+unreadable plan refused; an empty plan passed), and
+`tests/infrastructure/ec2-inventory.test.ts` (the tagged VPC listing over
+stubbed calls: its filter, pages and session, none listed, a VPC without a
+well-formed ID, a failure by name and the deadline; and over the real SDK
+against `tests/support/stub-ec2-instances.ts`, which applies `DescribeVpcs`'
+tag filters, another factory's and an untagged VPC left out).
 First apply and lock: `tests/domain/backend-bootstrap.test.ts` (resource
 changes read, unreadable plans, the create-only rule; the readiness rule, the
 TLS-only policy check and policy, the unready bucket's location, readiness and
@@ -1066,4 +1182,5 @@ and the factory-wide lock by [#98](https://github.com/yaunder/factory/issues/98)
 interruption rule, operation records and the state revision by
 [#99](https://github.com/yaunder/factory/issues/99); the hosts' read of the
 credential references by [#68](https://github.com/yaunder/fffactory/issues/68);
-deleting the state bucket by [#82](https://github.com/yaunder/fffactory/issues/82).
+deleting the state bucket by [#82](https://github.com/yaunder/fffactory/issues/82); the
+destroy plan and the tagged VPC listing by [#83](https://github.com/yaunder/fffactory/issues/83).

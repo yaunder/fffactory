@@ -56,12 +56,12 @@ with the asynchronous `support/spawn-cli.ts`, which can also feed its standard i
 synchronous spawn blocks the stub.
 
 Tests never run the host's `ssh` or `tailscale`, or reach a worker or tailnet: use the
-fakes in `support/doctor-fakes.ts` and `support/fake-workers.ts` (the EC2 inventory, the
+fakes in `support/doctor-fakes.ts` and `support/fake-workers.ts` (the EC2 inventory and its tagged VPCs, the
 peer view, an SSH transport scripted per worker hostname, this machine as a worker), an
 injected `ProcessRunner`, or stand-in scripts on a private `PATH` holding only the real
 tools they need (`cli/main.test.ts`, `cli/status-executable.test.ts`, which also points
 EC2 at `support/stub-ec2-instances.ts`, which also answers `StopInstances`,
-`StartInstances` and `TerminateInstances`). `worker stop|start|terminate` run against
+`StartInstances` and `TerminateInstances`, and `DescribeVpcs`, applying its tag filters). `worker stop|start|terminate` run against
 `fake-workers.ts`'s `fakeMachineControl`, whose state reads follow a script and which
 records every call, so a test can assert EC2 was never asked to change anything
 (`mutations`), and terminate against its `fakeTailnetAdmin`, a tailnet of `tailnetDevice`s

@@ -138,6 +138,16 @@ export function resourceChanges(plan: unknown): ResourceChange[] | undefined {
   return changes.every((change) => change !== undefined) ? changes : undefined;
 }
 
+/**
+ * The object a JSON plan's change (one entry of `resource_changes`, as Terraform gives it)
+ * destroys, by the `id` its `before` names; undefined if it names none.
+ */
+export function destroyedInstance(raw: unknown): string | undefined {
+  if (!isRecord(raw) || !isRecord(raw.change) || !isRecord(raw.change.before)) return undefined;
+  const { id } = raw.change.before;
+  return typeof id === "string" && id !== "" ? id : undefined;
+}
+
 /** Actions that change nothing: reading a data source, or leaving a resource as it is. */
 const UNCHANGED = new Set(["no-op", "read"]);
 

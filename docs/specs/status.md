@@ -285,7 +285,7 @@ versions and digests the worker reported after validation.
 | Application | `src/application/status.ts` | `factoryStatus`: completeness, the account check, the inventories, each worker. |
 | Application | `src/application/inspect-dispatch.ts` | Reads dispatch through the fixed activator operation. |
 | Application | `src/application/machine-inventory.ts` | The `MachineInventorySource` port. |
-| Infrastructure | `src/infrastructure/ec2-inventory.ts` | `ec2MachineInventory` over `DescribeInstances` (AWS SDK for JavaScript v3), paged, within one deadline. |
+| Infrastructure | `src/infrastructure/ec2-inventory.ts` | `ec2MachineInventory` over `DescribeInstances` (AWS SDK for JavaScript v3), paged, within one deadline; also teardown's tagged VPC listing over `DescribeVpcs` ([provisioning §Tagged VPCs](provisioning.md#tagged-vpcs)). |
 | CLI adapter | `src/cli/commands/status.ts` | Arguments, the refusals, the human and JSON reports, the exit code. |
 
 Tests: `tests/domain/status.test.ts` (every finding and its order, a drifted

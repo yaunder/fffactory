@@ -48,6 +48,7 @@ import {
   workInspectionJson,
 } from "../../src/domain/work-inspection";
 import type { Machine, MachineInventory } from "../../src/domain/status";
+import type { VpcInventory } from "../../src/domain/teardown";
 import type { PeerView, TailnetDevice, TailnetPeer, WorkerAddress } from "../../src/domain/tailnet";
 import type { WorkerEndpoint } from "../../src/host/endpoint";
 import { sha256Text } from "../../src/infrastructure/release-tarball";
@@ -117,18 +118,28 @@ export function machine(
   return { instanceId, state, hostKey };
 }
 
-/** MachineInventorySource returning fixed machines, recording each request. */
+/**
+ * MachineInventorySource returning fixed machines and tagged VPCs (none by default), recording
+ * each request: machine listings in `requests`, VPC listings in `vpcRequests`.
+ */
 export function fakeMachineInventory(
   inventory: MachineInventory = { kind: "machines", machines: [] },
+  vpcs: VpcInventory = { kind: "vpcs", vpcIds: [] },
 ) {
-  const requests: { credentials: CredentialSelection; region: string; factoryId: FactoryId }[] = [];
+  type Request = { credentials: CredentialSelection; region: string; factoryId: FactoryId };
+  const requests: Request[] = [];
+  const vpcRequests: Request[] = [];
   const machines: MachineInventorySource = {
     list: async (credentials, region, factoryId) => {
       requests.push({ credentials, region, factoryId });
       return inventory;
     },
+    listVpcs: async (credentials, region, factoryId) => {
+      vpcRequests.push({ credentials, region, factoryId });
+      return vpcs;
+    },
   };
-  return { machines, requests };
+  return { machines, requests, vpcRequests };
 }
 
 /**

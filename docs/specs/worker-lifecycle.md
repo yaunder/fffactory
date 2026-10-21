@@ -217,8 +217,9 @@ and its tailnet devices are deleted. It is the only way to remove a host:
 removing one from factory.json by hand is still refused by the D11 refusal,
 which names this command
 ([plan-apply §Refusals](plan-apply.md#refusals-until-lifecycle-work-lands-d11)),
-and the scoped removal plan is the only plan allowed to destroy a host
-machine. It is a reduced form of host retirement
+and the scoped removal plan is the only plan allowed to destroy one host
+machine (teardown's guarded destroy plan destroys them all with the whole
+factory: [provisioning §Destroy plan](provisioning.md#destroy-plan)). It is a reduced form of host retirement
 ([design §Host retirement](../designs/fffactory-v2.md#host-retirement)): no
 snapshot, no `retiring` step, and dispatch is not paused first.
 

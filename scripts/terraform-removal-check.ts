@@ -204,7 +204,7 @@ function credentialSecrets(example: Json, factoryId: FactoryId): Json {
  * their own Paseo passwords, one without, one sharing another's) or one with its own, and
  * every factory-wide credential reference, which no removal may change.
  */
-function fixtureDocument(context: RemovalCheckContext, hosts: RemovalCase["hosts"]): Json {
+export function fixtureDocument(context: RemovalCheckContext, hosts: RemovalCase["hosts"]): Json {
   const { example, factoryId } = context;
   const [template] = example.hosts as [Json];
   const { paseo_password_secret: _, ...bare } = template;
@@ -233,7 +233,7 @@ function fixtureDocument(context: RemovalCheckContext, hosts: RemovalCase["hosts
   };
 }
 
-function parsed(document: Json): FactoryInstance {
+export function parsed(document: Json): FactoryInstance {
   const result = parseFactoryInstance(document);
   if (!result.valid)
     throw new Error(
@@ -283,7 +283,7 @@ function policyProblems(plan: unknown, remaining: FactoryInstance, secret: strin
 }
 
 /** The instance ID the state's `hosts` output records for `key`. */
-function recordedInstance(outputs: Readonly<Record<string, unknown>>, key: HostKey): string {
+export function recordedInstance(outputs: Readonly<Record<string, unknown>>, key: HostKey): string {
   const hosts = outputs.hosts;
   const host = isJson(hosts) ? hosts[key] : undefined;
   const id = isJson(host) ? host.instance_id : undefined;
@@ -333,7 +333,7 @@ async function removalPlan(
   return { shown, changes: exitCode === 2, remaining };
 }
 
-function target(context: RemovalCheckContext): ProvisioningTarget {
+export function target(context: RemovalCheckContext): ProvisioningTarget {
   return {
     configuration: { directory: context.tree, root: "factory" },
     credentials: { source: "chain" },

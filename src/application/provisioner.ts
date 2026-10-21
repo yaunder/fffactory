@@ -36,6 +36,12 @@ export interface PlanRequest extends ProvisioningTarget {
    * killed: the factory lock and the saved plan's state revision guard consistency instead.
    */
   readonly stateLock?: boolean;
+  /**
+   * Whether to plan in destroy mode (`plan -destroy`): every object the state holds destroyed,
+   * whatever `variables` declare. False when omitted. Only teardown's guarded destroy plan asks
+   * for one (`docs/specs/provisioning.md` §Destroy plan).
+   */
+  readonly destroy?: boolean;
 }
 
 export interface SavedPlanRequest extends ProvisioningTarget {

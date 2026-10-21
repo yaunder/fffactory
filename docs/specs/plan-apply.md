@@ -615,8 +615,10 @@ again under the lock.
 ### Refusals until lifecycle work lands (D11)
 
 A host is removed only by `fffactory worker terminate KEY`, whose scoped
-removal plan is the only plan allowed to destroy a host machine
-([worker lifecycle §Terminate (remove)](worker-lifecycle.md#terminate-remove)).
+removal plan is the only plan allowed to destroy one host machine
+([worker lifecycle §Terminate (remove)](worker-lifecycle.md#terminate-remove));
+only teardown's guarded destroy plan, which destroys the whole factory, may
+destroy them all ([provisioning §Destroy plan](provisioning.md#destroy-plan)).
 Until host replacement lands in milestone M3, `plan` and `apply` refuse,
 naming the capability the change needs, and nothing is saved or applied:
 
