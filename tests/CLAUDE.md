@@ -28,9 +28,13 @@ proves it. A spawned `fffactory` gets an explicit environment built on
 AWS through a fake `CallerIdentity` or `VpcQuotaProbe` (`support/doctor-fakes.ts`), the
 versioned in-memory `support/memory-lock-store.ts` (whose bucket deletion removes only that
 bucket's records and break log, and can stop before the lock, or after it with the bucket left,
-`deletionLeaves`) and `support/memory-plan-store.ts`,
+`deletionLeaves`, or at an interrupt set by `beforeLock`, and whose `unreachable` buckets answer
+`bucketExists` with S3's 403) and `support/memory-plan-store.ts`,
 the fakes in `support/fake-secrets.ts` (Secrets Manager, whose listing, restore, deletion and
-looks answer as scripted and are recorded in `calls`, and the operator prompt) and
+looks answer as scripted and are recorded in `calls`; `fakeSecretsManager`, a world of secrets
+those calls change, so a rerun sees what the run before deleted, with failures a test sets and
+clears between runs, deletions left lingering until `finishDeletion`, and looks (`exists`) that
+find a secret only in the Region its ARN names; and the operator prompt) and
 `support/fake-provisioner.ts` (a scripted `fakeProvisioner`, and `fakeFactoryWorld`, a
 factory whose Terraform state changes as plans apply and whose apply can be stopped part
 way, which can replace a host or change its instance type in place (`resize`), and whose
@@ -79,7 +83,8 @@ Teardown (`application/teardown-factory.test.ts`) runs against the same world, w
 plan (`PlanRequest.destroy`) deletes every host machine and its network (`network`, also for a
 factory without hosts), an EC2 inventory the test derives from that world so instances and
 `NETWORK_VPC` vanish once it is destroyed, `fakeWorkflowQueue` and `fakeControlPlane` wrapped
-to order dispatch stops before inspections, and `MemoryPlanStore`'s `removeAll`.
+to order dispatch stops before inspections, `fakeSecretsManager`, and `MemoryPlanStore`'s
+`removeAll`; a rerun runs teardown again over the same world.
 Tests never reach Tailscale's API: `infrastructure/tailscale-api-admin.test.ts` sends real
 HTTP to
 `support/stub-tailscale-api.ts`, a local stand-in for the token exchange, the device list

@@ -10,7 +10,7 @@ import type {
   SecretWrite,
 } from "../../src/application/secret-store";
 import type { SecretReference } from "../../src/domain/instance";
-import { SecretMaterial } from "../../src/domain/secrets";
+import { type ListedSecret, SecretMaterial, secretRegion } from "../../src/domain/secrets";
 
 /**
  * SecretStore keeping secrets in memory by name, as Secrets Manager would: the first write
@@ -120,4 +120,94 @@ export function fakePrompt(
     },
   };
   return { prompt, asked, hidden, limits };
+}
+
+/**
+ * Secrets Manager as a world that teardown's calls change, so a rerun sees what the run before
+ * it left: `list` answers the secrets still there (or `listing`'s failure), `read` the value in
+ * `values` of one there and not pending deletion, `restore` cancels a pending deletion, `remove`
+ * deletes one (a pending one is refused as invalid, a missing one succeeds, as a forced deletion
+ * does), and `exists` finds one still there, only when asked in the Region its ARN names: asked
+ * anywhere else, Secrets Manager finds nothing, which proves nothing. A test changes the world
+ * between runs through the mutable `removeFails` (`remove`'s answer by ARN), `restoreFails`
+ * (`restore`'s) and `lingering` (ARNs a deletion leaves pending, still found, as a deletion not
+ * yet done), and `finishDeletion`, which ends one such deletion. Every call is recorded in
+ * `calls`, as `fakeSecretStore` records them.
+ */
+export function fakeSecretsManager(
+  options: {
+    secrets?: readonly ListedSecret[];
+    values?: Readonly<Record<string, string>>;
+    listing?: Extract<SecretListing, { kind: "failed" }>;
+  } = {},
+) {
+  let secrets = [...(options.secrets ?? [])];
+  const calls: string[] = [];
+  const removeFails = new Map<string, SecretRemoval>();
+  const restoreFails = new Map<string, SecretChange>();
+  const lingering = new Set<string>();
+  const find = (reference: string) => secrets.find(({ arn }) => arn === reference);
+  const record = (operation: string, reference: string) => calls.push(`${operation} ${reference}`);
+  const replace = (reference: string, change: (secret: ListedSecret) => ListedSecret[]) => {
+    secrets = secrets.flatMap((secret) => (secret.arn === reference ? change(secret) : [secret]));
+  };
+  const store: SecretStore = {
+    list: async (request) => {
+      calls.push(`list ${request.factoryId}`);
+      return options.listing ?? { kind: "listed", secrets: [...secrets] };
+    },
+    read: async ({ reference }) => {
+      const secret = find(reference);
+      const value = options.values?.[reference];
+      const failed = (name: string) =>
+        new Error(`Reading the secret from Secrets Manager failed: ${name}`);
+      if (secret === undefined || value === undefined) throw failed("ResourceNotFoundException");
+      if (secret.pendingDeletion) throw failed("InvalidRequestException");
+      return new SecretMaterial(value);
+    },
+    restore: async ({ reference }) => {
+      record("restore", reference);
+      const failure = restoreFails.get(reference);
+      if (failure !== undefined) return failure;
+      if (find(reference) === undefined) return { kind: "absent" };
+      replace(reference, (secret) => [{ ...secret, pendingDeletion: false }]);
+      return { kind: "done" };
+    },
+    remove: async ({ reference }) => {
+      record("remove", reference);
+      const failure = removeFails.get(reference);
+      if (failure !== undefined) return failure;
+      if (find(reference)?.pendingDeletion)
+        return {
+          kind: "invalid",
+          reason: "Secrets Manager DeleteSecret failed: InvalidRequestException",
+        };
+      replace(reference, (secret) =>
+        lingering.has(reference) ? [{ ...secret, pendingDeletion: true }] : [],
+      );
+      return { kind: "done" };
+    },
+    exists: async ({ reference, region }) => {
+      record("exists", reference);
+      const found = region === secretRegion(reference) && find(reference) !== undefined;
+      return found ? { kind: "present" } : { kind: "absent" };
+    },
+    write: async () => {
+      throw new Error("teardown never writes a secret");
+    },
+  };
+  /** Secrets Manager finishes deleting a secret a deletion left lingering: it is gone. */
+  const finishDeletion = (reference: string) => {
+    lingering.delete(reference);
+    replace(reference, (secret) => (secret.pendingDeletion ? [] : [secret]));
+  };
+  return {
+    store,
+    calls,
+    removeFails,
+    restoreFails,
+    lingering,
+    finishDeletion,
+    secrets: () => secrets,
+  };
 }

@@ -75,9 +75,13 @@ export function lockBatches(lock: readonly ListedVersion[]): ObjectVersion[][] {
   ];
 }
 
+/** Why the bucket remains when an interrupt stopped its deletion: no further call was started. */
+export const DELETION_INTERRUPTED = "Interrupted: no further S3 call was started";
+
 /**
- * What became of the factory lock when the bucket remains. `held`: none of its versions was
- * deleted, so a lock in place stays held. `deleted`: every one was, so the factory is unlocked
+ * What became of the factory lock when the bucket remains. `held`: its current version was
+ * never asked to be deleted (an interrupt may have stopped the deletion after older ones), so a
+ * lock in place stays held. `deleted`: every one was, so the factory is unlocked
  * and another operation may lock it. `unknown`: a DeleteObjects call for them failed, or
  * refused one, so the lock may still be held, or gone; never an earlier version of it current,
  * as the current one is deleted alone and only once every older one is gone (`lockBatches`).
@@ -100,7 +104,10 @@ export type BucketDeletion =
       readonly versions: number | undefined;
       /** S3's error code for each version DeleteObjects reported it could not delete, each once. */
       readonly codes: readonly string[];
-      /** The call that failed, as the AWS session describes it: an error name, never a message. */
+      /**
+       * The call that failed, as the AWS session describes it: an error name, never a message;
+       * or `DELETION_INTERRUPTED` when an interrupt stopped the deletion before its next call.
+       */
       readonly failure: string | undefined;
       readonly lock: LockAfterDeletion;
     };

@@ -18,12 +18,18 @@ import { newLockRecord } from "../../src/domain/factory-lock";
 import type { FactoryInstance, SecretReference } from "../../src/domain/instance";
 import type { ListedSecret } from "../../src/domain/secrets";
 import type { Machine, MachineInventory, MachineState } from "../../src/domain/status";
-import type { VpcInventory } from "../../src/domain/teardown";
+import {
+  CHECK_LISTED_DEVICES,
+  CHECK_UNCHECKED_DEVICES,
+  DEVICES_NOT_CHECKED,
+  type TeardownStep,
+  type VpcInventory,
+} from "../../src/domain/teardown";
 import type { PeerView, TailnetDevice } from "../../src/domain/tailnet";
 import { FAKE_CALLER, fakeCallerIdentity } from "../support/doctor-fakes";
 import { fakeControlPlane, fakeWorkflowQueue } from "../support/fake-control-plane";
 import { fakeFactoryWorld, NETWORK_VPC } from "../support/fake-provisioner";
-import { fakePrompt, fakeSecretStore } from "../support/fake-secrets";
+import { fakePrompt, fakeSecretStore, fakeSecretsManager } from "../support/fake-secrets";
 import {
   type Answer,
   fakeTailnet,
@@ -46,6 +52,8 @@ const hostname = (key: string) => `${FACTORY}-${key}`;
 const arn = (name: string) =>
   `arn:aws:secretsmanager:eu-west-2:123456789012:secret:${name}-AbCdEf` as SecretReference;
 
+/** The auth key's reference, as `declaring` gives factory.json. */
+const AUTH_ARN = arn(`${FACTORY}/tailscale-auth-key`);
 /** The admin client's reference, and the client secret Secrets Manager holds for it. */
 const ADMIN_ARN = arn(`${FACTORY}/tailscale-admin-client`);
 const ADMIN_SECRET = "tskey-client-kExample1CNTRL-0123456789abcdef";
@@ -88,6 +96,8 @@ interface WorldOptions {
   readonly inventory?: MachineInventory;
   readonly vpcs?: VpcInventory;
   readonly dispatchFailure?: string;
+  /** Instances tagged with the factory ID outside its Terraform state, listed with its own. */
+  readonly strays?: Machine[];
 }
 
 /**
@@ -110,13 +120,16 @@ function world(options: WorldOptions = {}) {
     list: async () =>
       options.inventory ?? {
         kind: "machines",
-        machines: [...terraform.world.hosts].map(
-          (key): Machine => ({
-            instanceId: `i-${key}`,
-            state: workers[key] ?? "running",
-            hostKey: key,
-          }),
-        ),
+        machines: [
+          ...[...terraform.world.hosts].map(
+            (key): Machine => ({
+              instanceId: `i-${key}`,
+              state: workers[key] ?? "running",
+              hostKey: key,
+            }),
+          ),
+          ...(options.strays ?? []),
+        ],
       },
     listVpcs: async () =>
       options.vpcs ?? { kind: "vpcs", vpcIds: terraform.world.network ? [NETWORK_VPC] : [] },
@@ -151,9 +164,11 @@ function world(options: WorldOptions = {}) {
       return queue.queue.reconcileDispatch(worker, projection);
     },
   };
-  const secrets = fakeSecretStore({
+  // Secrets Manager as a world, so a rerun sees what the run before it deleted.
+  const secrets = fakeSecretsManager({
     values: { [ADMIN_ARN]: ADMIN_SECRET },
-    listing: options.listing ?? { kind: "listed", secrets: OWNED },
+    secrets: options.listing?.kind === "listed" ? options.listing.secrets : OWNED,
+    ...(options.listing?.kind === "failed" ? { listing: options.listing } : {}),
   });
   const admin = fakeTailnetAdmin({
     devices:
@@ -262,6 +277,23 @@ function expectNothingAfterBucket(w: World) {
   expect(deletion).toBeGreaterThan(-1);
   expect(calls.slice(deletion + 1)).toEqual([]);
 }
+
+/** Nothing the factory owns remains, as a rerun that finished leaves it. */
+function expectNothingOwned(w: World, admin: ReturnType<typeof fakeTailnetAdmin> = w.admin) {
+  expect(w.terraform.world.hosts.size).toBe(0);
+  expect(w.terraform.world.network).toBe(false);
+  expect(admin.devices().filter(({ hostName }) => hostName.startsWith(`${FACTORY}-`))).toEqual([]);
+  expect(w.secrets.secrets()).toEqual([]);
+  expect(w.planStore.directories.size).toBe(0);
+  expect(w.lockStore.buckets.has(BUCKET)).toBe(false);
+  expect(w.lockStore.locks.size).toBe(0);
+}
+
+const OWNED_NAMES = OWNED.map(({ name }) => name);
+
+/** Why an admin client Secrets Manager still finds may not be readable: it is pending deletion. */
+const PENDING_DELETION =
+  "Secrets Manager does not read a secret pending deletion either, as the admin client is for a while once teardown deleted it: rerun `fffactory teardown` once it is gone.";
 
 /** `admin`, whose tailnet lists `late` too from its second listing on: after the review. */
 function withLateDevices(
@@ -993,28 +1025,45 @@ describe("fffactory teardown: refusals delete nothing (teardown §Refusals)", ()
     expect(w.lockStore.calls.filter((call) => call.startsWith("create"))).toEqual([]);
   });
 
-  test("refuses an admin client whose secret cannot be read", async () => {
-    const w = world({ workers: { "builder-1": "running" } });
-    const secrets = fakeSecretStore({
-      readFailsWith: new Error(
-        "Reading the secret from Secrets Manager failed: AccessDeniedException",
-      ),
-    });
-    const result = await teardownFactory({ ...w.deps, secrets: secrets.store }, request(w));
-    expect(result).toMatchObject({
-      kind: "refused",
-      refusals: [
-        {
-          summary: "Reading the secret from Secrets Manager failed: AccessDeniedException",
-          nextAction:
-            "Check that the credentials may call secretsmanager:GetSecretValue on the secret " +
-            "tailscale.admin_client_secret refers to, then rerun `fffactory teardown`.",
-        },
-      ],
-    });
-    expect(w.admin.calls).toEqual([]);
-    expectNothingRemoved(w);
-  });
+  test.each([
+    {
+      // DescribeSecret still finds it: it is not gone, only unreadable, perhaps pending deletion.
+      found: "still found",
+      presence: { kind: "present" },
+      details: [PENDING_DELETION],
+    },
+    {
+      found: "its look failed",
+      presence: { kind: "failed", reason: "Secrets Manager DescribeSecret failed: AccessDenied" },
+      details: [],
+    },
+  ] as const)(
+    "refuses an admin client whose secret cannot be read ($found)",
+    async ({ presence, details }) => {
+      const w = world({ workers: { "builder-1": "running" } });
+      const secrets = fakeSecretStore({
+        readFailsWith: new Error(
+          "Reading the secret from Secrets Manager failed: AccessDeniedException",
+        ),
+        presence: [presence],
+      });
+      const result = await teardownFactory({ ...w.deps, secrets: secrets.store }, request(w));
+      expect(result).toMatchObject({
+        kind: "refused",
+        refusals: [
+          {
+            summary: "Reading the secret from Secrets Manager failed: AccessDeniedException",
+            details,
+            nextAction:
+              "Check that the credentials may call secretsmanager:GetSecretValue on the secret " +
+              "tailscale.admin_client_secret refers to, then rerun `fffactory teardown`.",
+          },
+        ],
+      });
+      expect(w.admin.calls).toEqual([]);
+      expectNothingRemoved(w);
+    },
+  );
 
   test("leaves a factory without a state bucket to its own mode (T7)", async () => {
     const w = world();
@@ -1054,7 +1103,10 @@ describe("fffactory teardown: what stops the run once the destroy applied", () =
           "Resources tagged with the factory's ID remain after the destroy, outside its Terraform state",
         details: [
           "EC2 instance i-0stray (running)",
-          "Its tailnet devices, secrets and state bucket were kept.",
+          "Remains: tailnet devices n0CNTRL",
+          `Remains: owned secrets ${OWNED.map(({ name }) => name).join(", ")}`,
+          "Remains: the local saved plans",
+          `Remains: the state bucket ${BUCKET}`,
         ],
       },
     });
@@ -1213,7 +1265,11 @@ describe("fffactory teardown: failures (teardown §Refusals)", () => {
         summary: "Not every Tailscale device of the factory was deleted",
         details: [
           "Deleting device n0CNTRL failed: Tailscale answered HTTP 500",
-          "Its secrets and state bucket were kept, the admin client among them.",
+          "The admin client was kept, so a rerun can delete them.",
+          "Remains: tailnet devices n0CNTRL",
+          `Remains: owned secrets ${OWNED.map(({ name }) => name).join(", ")}`,
+          "Remains: the local saved plans",
+          `Remains: the state bucket ${BUCKET}`,
         ],
       },
     });
@@ -1272,7 +1328,9 @@ describe("fffactory teardown: failures (teardown §Refusals)", () => {
         details: [
           `${FACTORY}/tailscale-auth-key: Secrets Manager DeleteSecret failed: AccessDeniedException`,
           `${FACTORY}/tailscale-admin-client: Secrets Manager DeleteSecret failed: AccessDeniedException`,
-          "Its state bucket was kept.",
+          `Remains: owned secrets ${OWNED.map(({ name }) => name).join(", ")}`,
+          "Remains: the local saved plans",
+          `Remains: the state bucket ${BUCKET}`,
         ],
       },
     });
@@ -1296,7 +1354,8 @@ describe("fffactory teardown: failures (teardown §Refusals)", () => {
         details: [
           "S3 DeleteObjects on the state bucket failed: timed out after 30 s",
           "An unknown number of object versions and delete markers remain in it.",
-          "The factory lock may still be held, or be gone.",
+          "Deleting the factory lock's versions stopped part way: teardown released it by its version.",
+          `Remains: the state bucket ${BUCKET}`,
         ],
       },
     });
@@ -1332,5 +1391,801 @@ describe("fffactory teardown: an interrupt keeps the lock", () => {
     expect(w.lockStore.locks.size).toBe(1);
     expect(w.queue.reconcile).toEqual([]);
     expect(destroyed(w)).toEqual([]);
+  });
+});
+
+describe("fffactory teardown: each failure point lists what remains, and a rerun finishes it (teardown §Partial failure, §Rerun)", () => {
+  test("the destroy failing part way: the state may still hold resources, and the rerun destroys them", async () => {
+    const w = world({ workers: { "builder-1": "stopped" } });
+    w.terraform.world.beforeChange = (applied) => {
+      if (applied === 1) throw new Error("`terraform apply` exited with status 1");
+    };
+    expect(await teardownFactory(w.deps, request(w))).toMatchObject({
+      kind: "partial",
+      stoppedAt: "destroy",
+      remaining: {
+        state: true,
+        devices: ["n0CNTRL"],
+        secrets: OWNED_NAMES,
+        plans: true,
+        bucket: BUCKET,
+      },
+      refusal: {
+        summary:
+          "Destroying the factory's resources failed: `terraform apply` exited with status 1",
+        nextAction: "Rerun `fffactory teardown`: it plans the destroy again from what exists now.",
+      },
+    });
+    expect(w.terraform.world.network).toBe(true);
+    expect(w.lockStore.locks.size).toBe(0);
+    w.terraform.world.beforeChange = undefined;
+    expect(await teardownFactory(w.deps, request(w))).toMatchObject({
+      kind: "done",
+      report: {
+        infrastructure: "destroyed",
+        devices: { removed: ["n0CNTRL"] },
+        secrets: { removed: OWNED_NAMES, absent: [] },
+      },
+    });
+    expectNothingOwned(w);
+  });
+
+  test("tagged resources left after the destroy stop the run until removed by hand (D12)", async () => {
+    const strays: Machine[] = [{ instanceId: "i-0stray", state: "running", hostKey: undefined }];
+    const w = world({ workers: { "builder-1": "stopped" }, strays });
+    const leftover = {
+      kind: "partial",
+      stoppedAt: "leftovers",
+      remaining: { state: false, devices: ["n0CNTRL"], secrets: OWNED_NAMES, plans: true },
+      refusal: {
+        nextAction:
+          "Check them in the EC2 console and remove those that are this factory's yourself, then rerun `fffactory teardown`.",
+      },
+    };
+    expect(await teardownFactory(w.deps, request(w))).toMatchObject(leftover);
+    // The rerun finds the factory's root already destroyed, and the stray still there.
+    expect(await teardownFactory(w.deps, request(w))).toMatchObject(leftover);
+    expect(w.admin.calls.filter((call) => call.startsWith("remove"))).toEqual([]);
+    strays.length = 0;
+    expect(await teardownFactory(w.deps, request(w))).toMatchObject({
+      kind: "done",
+      report: { infrastructure: "absent", devices: { removed: ["n0CNTRL"] } },
+    });
+    expectNothingOwned(w);
+  });
+
+  /**
+   * `provisioner`, whose `output` once the destroy applied answers `outputs` once: what a state
+   * read after the destroy finds. Only a stub can make a state that still records a host EC2 no
+   * longer lists (D12's defence in depth): a real one would list the instance, which the leftover
+   * check finds first, or drop the record when its refresh finds the instance gone.
+   */
+  function stateAfterDestroy(w: World, outputs: Readonly<Record<string, unknown>>) {
+    const { provisioner } = w.terraform;
+    let answered = false;
+    return {
+      ...provisioner,
+      output: async (target: Parameters<typeof provisioner.output>[0]) => {
+        if (destroyed(w).length === 0 || answered) return provisioner.output(target);
+        answered = true;
+        return outputs;
+      },
+    };
+  }
+
+  test("a state still recording hosts after the destroy stops the run (D12); a rerun reading a state that records none finishes", async () => {
+    const w = world({ workers: { "builder-1": "stopped" } });
+    const provisioner = stateAfterDestroy(w, { host_keys: ["builder-1"] });
+    expect(await teardownFactory({ ...w.deps, provisioner }, request(w))).toMatchObject({
+      kind: "partial",
+      stoppedAt: "leftovers",
+      refusal: {
+        summary: "The factory's Terraform state still records hosts after the destroy",
+        details: expect.arrayContaining(["Host builder-1"]),
+        nextAction:
+          "Rerun `fffactory teardown`: it plans the destroy again from what the state records.",
+      },
+    });
+    expect(w.admin.calls.filter((call) => call.startsWith("remove"))).toEqual([]);
+    // The rerun reads the state the destroy left, which records nothing: nothing to destroy.
+    expect(await teardownFactory(w.deps, request(w))).toMatchObject({
+      kind: "done",
+      report: { infrastructure: "absent", devices: { removed: ["n0CNTRL"] } },
+    });
+    expect(destroyed(w)).toHaveLength(1);
+    expectNothingOwned(w);
+  });
+
+  test("a state whose host keys cannot be read after the destroy stops the run, naming fffactory plan", async () => {
+    const w = world({ workers: { "builder-1": "stopped" } });
+    const provisioner = stateAfterDestroy(w, { host_keys: "builder-1" });
+    expect(await teardownFactory({ ...w.deps, provisioner }, request(w))).toMatchObject({
+      kind: "partial",
+      stoppedAt: "leftovers",
+      refusal: {
+        summary: "The host keys the factory's Terraform state records could not be read",
+        nextAction:
+          "Check the factory's Terraform state with `fffactory plan`, then rerun `fffactory teardown`.",
+      },
+    });
+    expect((await teardownFactory(w.deps, request(w))).kind).toBe("done");
+    expectNothingOwned(w);
+  });
+
+  test("a device not deleted keeps the secrets, the admin client among them, for the rerun", async () => {
+    const w = world({ workers: { "builder-1": "stopped" } });
+    const failing: Record<string, string> = { n0CNTRL: "Tailscale answered HTTP 500" };
+    const admin = fakeTailnetAdmin({
+      devices: [tailnetDevice("n0CNTRL", hostname("builder-1"), [WORKER_TAG])],
+      failing,
+    });
+    const deps = { ...w.deps, tailnetAdmin: admin.admin };
+    expect(await teardownFactory(deps, request(w))).toMatchObject({
+      kind: "partial",
+      stoppedAt: "devices",
+      remaining: { devices: ["n0CNTRL"], secrets: OWNED_NAMES, plans: true, bucket: BUCKET },
+    });
+    expect(w.secrets.calls.filter((call) => call.startsWith("remove"))).toEqual([]);
+    delete failing.n0CNTRL;
+    expect(await teardownFactory(deps, request(w))).toMatchObject({
+      kind: "done",
+      report: {
+        infrastructure: "absent",
+        devices: { removed: ["n0CNTRL"] },
+        devicesUnchecked: undefined,
+      },
+    });
+    expectNothingOwned(w, admin);
+  });
+
+  const DENIED = {
+    kind: "failed",
+    reason: "Secrets Manager DeleteSecret failed: AccessDeniedException",
+  } as const;
+
+  test.each([
+    {
+      case: "denied",
+      fail: (w: World) => w.secrets.removeFails.set(AUTH_ARN, DENIED),
+      reason: "Secrets Manager DeleteSecret failed: AccessDeniedException",
+      listing: OWNED,
+    },
+    {
+      case: "still pending, its restore refused",
+      fail: (w: World) =>
+        w.secrets.restoreFails.set(AUTH_ARN, {
+          kind: "failed",
+          reason: "Secrets Manager RestoreSecret failed: AccessDeniedException",
+        }),
+      reason: "Secrets Manager RestoreSecret failed: AccessDeniedException",
+      listing: [{ ...(OWNED[0] as ListedSecret), pendingDeletion: true }, OWNED[1] as ListedSecret],
+    },
+    {
+      case: "still found at the deadline",
+      fail: (w: World) => w.secrets.lingering.add(AUTH_ARN),
+      reason: "Secrets Manager still finds it 60 s after its deletion",
+      listing: OWNED,
+    },
+  ])(
+    "a secret that remains ($case) keeps the bucket; the rerun, its admin client gone, finishes",
+    async ({ fail, reason, listing }) => {
+      const w = world({
+        workers: { "builder-1": "stopped" },
+        listing: { kind: "listed", secrets: listing },
+      });
+      fail(w);
+      expect(await teardownFactory(w.deps, request(w))).toMatchObject({
+        kind: "partial",
+        stoppedAt: "secrets",
+        remaining: {
+          devices: [],
+          secrets: [`${FACTORY}/tailscale-auth-key`],
+          plans: true,
+          bucket: BUCKET,
+        },
+        refusal: {
+          summary: "Not every secret the factory owns is gone",
+          details: expect.arrayContaining([`${FACTORY}/tailscale-auth-key: ${reason}`]),
+        },
+      });
+      // The admin client was deleted after the devices; the rerun cannot list them again.
+      expect(w.secrets.secrets().map(({ arn: left }) => left)).toEqual([AUTH_ARN]);
+      w.secrets.removeFails.clear();
+      w.secrets.restoreFails.clear();
+      w.secrets.lingering.clear();
+      const progress = w.progress.length;
+      expect(await teardownFactory(w.deps, request(w))).toMatchObject({
+        kind: "done",
+        report: {
+          infrastructure: "absent",
+          devices: { removed: [], possible: [], untagged: [] },
+          devicesUnchecked: DEVICES_NOT_CHECKED,
+          secrets: { removed: [`${FACTORY}/tailscale-auth-key`], absent: [ADMIN_ARN] },
+        },
+      });
+      expect(w.progress.slice(progress)).toContainEqual(
+        expect.objectContaining({
+          kind: "review",
+          review: expect.objectContaining({ devicesUnchecked: DEVICES_NOT_CHECKED }),
+        }),
+      );
+      expectNothingOwned(w);
+    },
+  );
+
+  test("devices listed but kept stay reported past the devices step; reruns without the admin client say they were not checked", async () => {
+    const devices = [
+      tailnetDevice("n0CNTRL", hostname("builder-1"), [WORKER_TAG]),
+      tailnetDevice("nU", hostname("builder-1"), []),
+    ];
+    const w = world({ workers: { "builder-1": "stopped" }, devices });
+    const late = [tailnetDevice("nL", hostname("late"), [WORKER_TAG])];
+    const tailnetAdmin = withLateDevices(w.admin, late);
+    const deps = { ...w.deps, tailnetAdmin };
+    w.secrets.removeFails.set(AUTH_ARN, DENIED);
+    const listedDevices = {
+      possible: [{ id: "nL", hostname: hostname("late") }],
+      untagged: [{ id: "nU", hostname: hostname("builder-1") }],
+    };
+    expect(await teardownFactory(deps, request(w))).toMatchObject({
+      kind: "partial",
+      stoppedAt: "secrets",
+      remaining: { devices: [], listedDevices, secrets: [`${FACTORY}/tailscale-auth-key`] },
+      refusal: {
+        details: expect.arrayContaining([
+          `Listed, not deleted: tailnet devices nL (${hostname("late")}), nU (${hostname("builder-1")})`,
+          CHECK_LISTED_DEVICES,
+        ]),
+      },
+    });
+    // The admin client went after the devices: no rerun can list them again.
+    expect(w.secrets.secrets().map(({ arn: left }) => left)).toEqual([AUTH_ARN]);
+    const unchecked = {
+      kind: "partial",
+      stoppedAt: "secrets",
+      remaining: { devices: "unchecked", listedDevices: { possible: [], untagged: [] } },
+      refusal: {
+        details: expect.arrayContaining([
+          `Tailnet devices: ${DEVICES_NOT_CHECKED}`,
+          CHECK_UNCHECKED_DEVICES,
+        ]),
+      },
+    };
+    expect(await teardownFactory(deps, request(w))).toMatchObject(unchecked);
+    w.secrets.removeFails.clear();
+    expect(await teardownFactory(deps, request(w))).toMatchObject({
+      kind: "done",
+      report: { devicesUnchecked: DEVICES_NOT_CHECKED },
+    });
+    expect(w.admin.devices().map(({ id }) => id)).toEqual(["nU"]);
+  });
+
+  test("the admin client still found after its deletion: the rerun is refused until it is gone, then finishes", async () => {
+    const w = world({ workers: { "builder-1": "stopped" } });
+    w.secrets.lingering.add(ADMIN_ARN);
+    expect(await teardownFactory(w.deps, request(w))).toMatchObject({
+      kind: "partial",
+      stoppedAt: "secrets",
+      remaining: { devices: [], secrets: [`${FACTORY}/tailscale-admin-client`] },
+      refusal: {
+        details: expect.arrayContaining([
+          `${FACTORY}/tailscale-admin-client: Secrets Manager still finds it 60 s after its deletion`,
+        ]),
+      },
+    });
+    // Pending deletion, it cannot be read, and DescribeSecret still finds it: never taken for gone.
+    const calls = w.secrets.calls.length;
+    expect(await teardownFactory(w.deps, request(w))).toMatchObject({
+      kind: "refused",
+      refusals: [
+        {
+          summary: "Reading the secret from Secrets Manager failed: InvalidRequestException",
+          details: [PENDING_DELETION],
+        },
+      ],
+    });
+    expect(w.secrets.calls.slice(calls)).toEqual([`exists ${ADMIN_ARN}`]);
+    expect(w.lockStore.locks.size).toBe(0);
+    w.secrets.finishDeletion(ADMIN_ARN);
+    expect(await teardownFactory(w.deps, request(w))).toMatchObject({
+      kind: "done",
+      report: {
+        infrastructure: "absent",
+        devicesUnchecked: DEVICES_NOT_CHECKED,
+        secrets: { removed: [], absent: [AUTH_ARN, ADMIN_ARN] },
+      },
+    });
+    expectNothingOwned(w);
+  });
+
+  test("the admin client not deleted keeps it readable: the rerun lists and deletes devices as the first would", async () => {
+    const w = world({ workers: { "builder-1": "stopped" } });
+    w.secrets.removeFails.set(ADMIN_ARN, DENIED);
+    expect(await teardownFactory(w.deps, request(w))).toMatchObject({
+      kind: "partial",
+      stoppedAt: "secrets",
+      remaining: { secrets: [`${FACTORY}/tailscale-admin-client`] },
+    });
+    w.secrets.removeFails.clear();
+    expect(await teardownFactory(w.deps, request(w))).toMatchObject({
+      kind: "done",
+      report: {
+        devicesUnchecked: undefined,
+        secrets: { removed: [`${FACTORY}/tailscale-admin-client`], absent: [AUTH_ARN] },
+      },
+    });
+    expect(w.admin.calls.filter((call) => call === "devices").length).toBeGreaterThan(2);
+    expectNothingOwned(w);
+  });
+
+  test("a secret listed as pending deletion is restored, then deleted for good", async () => {
+    const pending = { ...(OWNED[0] as ListedSecret), pendingDeletion: true };
+    const w = world({ listing: { kind: "listed", secrets: [pending, OWNED[1] as ListedSecret] } });
+    expect((await teardownFactory(w.deps, request(w))).kind).toBe("done");
+    expect(w.secrets.calls).toContain(`restore ${AUTH_ARN}`);
+    expectNothingOwned(w);
+  });
+
+  test.each(["held", "unknown", "deleted"] as const)(
+    "a bucket that remains (its lock %s) is all that is left; the rerun deletes it",
+    async (lock) => {
+      const w = world({ workers: { "builder-1": "stopped" } });
+      w.lockStore.deletionLeaves = {
+        kind: "remains",
+        versions: 1,
+        codes: ["AccessDenied"],
+        failure: undefined,
+        lock,
+      };
+      expect(await teardownFactory(w.deps, request(w))).toMatchObject({
+        kind: "partial",
+        stoppedAt: "bucket",
+        remaining: { state: false, devices: [], secrets: [], plans: false, bucket: BUCKET },
+        refusal: { summary: `The state bucket ${BUCKET} remains` },
+      });
+      expect(w.lockStore.locks.size).toBe(0);
+      w.lockStore.deletionLeaves = undefined;
+      expect(await teardownFactory(w.deps, request(w))).toMatchObject({
+        kind: "done",
+        report: {
+          infrastructure: "absent",
+          devicesUnchecked: DEVICES_NOT_CHECKED,
+          secrets: { removed: [], absent: [AUTH_ARN, ADMIN_ARN] },
+        },
+      });
+      expectNothingOwned(w);
+    },
+  );
+
+  test("an error once the destroy started says how far it got and what remains; the rerun finishes", async () => {
+    const w = world();
+    const removeAll = w.planStore.removeAll.bind(w.planStore);
+    w.planStore.removeAll = async () => {
+      throw new Error("the local plans could not be removed (EACCES)");
+    };
+    expect(await teardownFactory(w.deps, request(w))).toMatchObject({
+      kind: "partial",
+      stoppedAt: "plans",
+      remaining: { devices: [], secrets: [], plans: true, bucket: BUCKET },
+      refusal: {
+        summary: "the local plans could not be removed (EACCES)",
+        details: ["Remains: the local saved plans", `Remains: the state bucket ${BUCKET}`],
+        nextAction: "Check the factory with `fffactory status`, then rerun `fffactory teardown`.",
+      },
+    });
+    w.planStore.removeAll = removeAll;
+    expect(await teardownFactory(w.deps, request(w))).toMatchObject({
+      kind: "done",
+      report: {
+        infrastructure: "absent",
+        devicesUnchecked: DEVICES_NOT_CHECKED,
+        secrets: { removed: [], absent: [AUTH_ARN, ADMIN_ARN] },
+      },
+    });
+    expectNothingOwned(w);
+  });
+});
+
+describe("fffactory teardown: a rerun (teardown §Rerun)", () => {
+  test.each<{
+    case: string;
+    workers: Readonly<Record<string, MachineState>>;
+    vpcs: VpcInventory | undefined;
+  }>([
+    { case: "EC2 still lists its machines", workers: { "builder-1": "running" }, vpcs: undefined },
+    { case: "its state still holds resources", workers: {}, vpcs: { kind: "vpcs", vpcIds: [] } },
+  ])(
+    "refuses an admin client gone while the factory's resources remain ($case), removing nothing",
+    async ({ workers, vpcs }) => {
+      const w = world({
+        workers,
+        ...(vpcs === undefined ? {} : { vpcs }),
+        listing: { kind: "listed", secrets: [OWNED[0] as ListedSecret] },
+      });
+      expect(await teardownFactory(w.deps, request(w))).toMatchObject({
+        kind: "refused",
+        refusals: [
+          {
+            summary:
+              "The Tailscale admin client's secret no longer exists, but the factory's resources remain",
+          },
+        ],
+        dispatchStopped: [],
+      });
+      expect(w.queue.reconcile).toEqual([]);
+      expectNothingRemoved(w);
+    },
+  );
+
+  test("an admin client outside the factory's names that cannot be read is refused, never taken for gone", async () => {
+    const w = world();
+    const elsewhere = arn("fffv/tailscale-admin-client");
+    const base = instanceOf([]);
+    const instance = { ...base, tailscale: { ...base.tailscale, admin_client_secret: elsewhere } };
+    expect(await teardownFactory(w.deps, request(w, { instance }))).toMatchObject({
+      kind: "refused",
+      refusals: [
+        { summary: "Reading the secret from Secrets Manager failed: ResourceNotFoundException" },
+      ],
+    });
+    expect(w.secrets.calls).not.toContain(`exists ${elsewhere}`);
+    expectNothingRemoved(w);
+  });
+
+  test("an admin client in another Region than the factory's is looked for in its own Region", async () => {
+    const elsewhere =
+      `arn:aws:secretsmanager:us-east-1:123456789012:secret:${FACTORY}/tailscale-admin-client-AbCdEf` as SecretReference;
+    // Pending deletion in us-east-1: asked about in the factory's Region, it would be absent.
+    const pending: ListedSecret = {
+      ...secret(`${FACTORY}/tailscale-admin-client`),
+      arn: elsewhere,
+    };
+    const w = world({
+      listing: {
+        kind: "listed",
+        secrets: [OWNED[0] as ListedSecret, { ...pending, pendingDeletion: true }],
+      },
+    });
+    // Nothing else of the factory is left: an admin client taken for gone would finish.
+    w.terraform.world.network = false;
+    const base = instanceOf([]);
+    const instance = { ...base, tailscale: { ...base.tailscale, admin_client_secret: elsewhere } };
+    expect(await teardownFactory(w.deps, request(w, { instance }))).toMatchObject({
+      kind: "refused",
+      refusals: [
+        {
+          summary: "Reading the secret from Secrets Manager failed: ResourceNotFoundException",
+          details: [PENDING_DELETION],
+        },
+      ],
+    });
+    expect(w.secrets.calls).toEqual([`exists ${elsewhere}`]);
+    expectNothingRemoved(w);
+  });
+
+  test("a state bucket S3 answers 403 for is refused before any lock, never taken for the factory's", async () => {
+    const w = world();
+    w.lockStore.unreachable.add(BUCKET);
+    expect(await teardownFactory(w.deps, request(w))).toMatchObject({
+      kind: "refused",
+      refusals: [
+        {
+          summary: `The state bucket ${BUCKET} cannot be reached in account 123456789012 (S3 answered 403)`,
+        },
+      ],
+      operation: undefined,
+    });
+    expect(w.lockStore.calls.filter((call) => !call.startsWith("bucketExists"))).toEqual([]);
+    expect(w.terraform.calls).toEqual([]);
+  });
+
+  test("a machine reviewed shutting down that terminates meanwhile is no change", async () => {
+    const w = world({
+      strays: [{ instanceId: "i-0old", state: "shutting-down", hostKey: "old" }],
+    });
+    const machines = changingMachines(w.deps.machines, (listed) => ({
+      kind: "machines",
+      machines: listed.filter(({ instanceId }) => instanceId !== "i-0old"),
+    }));
+    expect((await teardownFactory({ ...w.deps, machines }, request(w))).kind).toBe("done");
+  });
+
+  test("an error after dispatch was stopped fails it, naming where dispatch is stopped", async () => {
+    const w = world({ workers: { "builder-1": "running" } });
+    const controlPlane: ControlPlane = {
+      ...w.control.controlPlane,
+      activeAgents: async () => {
+        throw new Error("the worker answered something fffactory cannot read");
+      },
+    };
+    expect(await teardownFactory({ ...w.deps, controlPlane }, request(w))).toMatchObject({
+      kind: "failed",
+      refusal: { summary: "the worker answered something fffactory cannot read" },
+      dispatchStopped: [hostname("builder-1")],
+    });
+    expectNothingRemoved(w);
+  });
+
+  test("a plan directory that cannot be removed never turns a finished refusal into a failure", async () => {
+    const w = world({
+      workers: { "builder-1": "running" },
+      activity: { kind: "active", count: 1 },
+    });
+    w.planStore.remove = async () => {
+      throw new Error("ENOENT: the plan directory is gone");
+    };
+    expect((await teardownFactory(w.deps, request(w))).kind).toBe("refused");
+    expect(records(w)[0]).toMatchObject({ status: "refused" });
+    expect(w.lockStore.locks.size).toBe(0);
+  });
+});
+
+describe("fffactory teardown: an interrupt keeps the lock at every step (teardown §Interruption)", () => {
+  const STEPS: readonly TeardownStep[] = [
+    "authorizing",
+    "inventorying",
+    "planning",
+    "stopping_dispatch",
+    "inspecting",
+    "applying",
+    "verifying",
+    "removing_devices",
+    "removing_secrets",
+    "removing_plans",
+    "deleting_bucket",
+  ];
+  const after = (step: TeardownStep, later: TeardownStep) =>
+    STEPS.indexOf(step) >= STEPS.indexOf(later);
+
+  test.each([...STEPS])("interrupted once %s is recorded, it starts nothing more", async (step) => {
+    const w = world({ workers: { "builder-1": "running" } });
+    let interrupted = false;
+    const write = w.lockStore.writeOperation.bind(w.lockStore);
+    w.lockStore.writeOperation = async (bucket, record) => {
+      await write(bucket, record);
+      if (record.stages[0]?.status === step) interrupted = true;
+    };
+    const result = await teardownFactory({ ...w.deps, interrupted: () => interrupted }, request(w));
+    expect(result).toMatchObject({
+      kind: "interrupted",
+      locked: true,
+      record: { bucket: BUCKET },
+      reached: step,
+      removing: after(step, "verifying"),
+      lock: "held",
+      dispatchStopped: after(step, "inspecting") ? [hostname("builder-1")] : [],
+    });
+    expect(w.lockStore.locks.size).toBe(1);
+    expect(w.lockStore.operationWrites.at(-1)?.stages[0]?.status).toBe(step);
+    expect(destroyed(w).length).toBe(after(step, "verifying") ? 1 : 0);
+    if (!after(step, "verifying")) expect(w.terraform.world.hosts.size).toBe(1);
+    const removes = (calls: readonly string[]) => calls.filter((call) => call.startsWith("remove"));
+    expect(removes(w.admin.calls).length).toBe(after(step, "removing_secrets") ? 1 : 0);
+    expect(removes(w.secrets.calls).length).toBe(after(step, "removing_plans") ? 2 : 0);
+    expect(w.planStore.calls.some((call) => call.startsWith("removeAll"))).toBe(
+      after(step, "deleting_bucket"),
+    );
+    expect(w.lockStore.calls.some((call) => call.startsWith("deleteBucket"))).toBe(false);
+  });
+
+  test("interrupted while the bucket is emptied, before its lock: the lock is held, its record may be gone", async () => {
+    const w = world();
+    let interrupted = false;
+    w.lockStore.beforeLock = () => {
+      interrupted = true;
+    };
+    const result = await teardownFactory({ ...w.deps, interrupted: () => interrupted }, request(w));
+    expect(result).toMatchObject({
+      kind: "interrupted",
+      reached: "deleting_bucket",
+      removing: true,
+      lock: "held",
+      record: undefined,
+    });
+    expect(w.lockStore.locks.size).toBe(1);
+    expectNothingAfterBucket(w);
+  });
+
+  test.each(["unknown", "deleted"] as const)(
+    "interrupted once the bucket's deletion reached the lock (%s): it says so, and writes nothing more",
+    async (lock) => {
+      const w = world();
+      let interrupted = false;
+      w.lockStore.deletionLeaves = {
+        kind: "remains",
+        versions: undefined,
+        codes: [],
+        failure: undefined,
+        lock,
+      };
+      const remove = w.lockStore.deleteBucket.bind(w.lockStore);
+      w.lockStore.deleteBucket = async (bucket, stop) => {
+        const left = await remove(bucket, stop);
+        interrupted = true;
+        return left;
+      };
+      const result = await teardownFactory(
+        { ...w.deps, interrupted: () => interrupted },
+        request(w),
+      );
+      expect(result).toMatchObject({
+        kind: "interrupted",
+        reached: "deleting_bucket",
+        lock,
+        record: undefined,
+      });
+      expectNothingAfterBucket(w);
+    },
+  );
+
+  test("interrupted as the bucket is deleted, it is done: the lock went with the bucket", async () => {
+    const w = world();
+    let interrupted = false;
+    const remove = w.lockStore.deleteBucket.bind(w.lockStore);
+    w.lockStore.deleteBucket = async (bucket, stop) => {
+      const left = await remove(bucket, stop);
+      interrupted = true;
+      return left;
+    };
+    const result = await teardownFactory({ ...w.deps, interrupted: () => interrupted }, request(w));
+    expect(result.kind).toBe("done");
+    expectNothingAfterBucket(w);
+  });
+
+  test.each([
+    {
+      ending: "refused",
+      options: { workers: { "builder-1": "running" }, activity: { kind: "active", count: 1 } },
+      confirm: FACTORY,
+    },
+    {
+      ending: "declined",
+      options: {
+        workers: { "builder-1": "running" },
+        prompt: fakePrompt({ interactive: true, answers: ["no"] }),
+      },
+      confirm: undefined,
+    },
+    { ending: "failed", options: { workers: { "builder-1": "running" } }, confirm: FACTORY },
+    { ending: "partial", options: { workers: { "builder-1": "stopped" } }, confirm: FACTORY },
+  ] as const)(
+    "interrupted while its $ending record is written, it reports the interrupt and keeps the lock",
+    async ({ ending, options, confirm }) => {
+      const w = world(options as WorldOptions);
+      if (ending === "failed") w.terraform.world.failNext = "plan";
+      if (ending === "partial") w.terraform.world.failNext = "applyPlan";
+      let interrupted = false;
+      const write = w.lockStore.writeOperation.bind(w.lockStore);
+      w.lockStore.writeOperation = async (bucket, record) => {
+        await write(bucket, record);
+        if (record.status !== "running") interrupted = true;
+      };
+      const result = await teardownFactory(
+        { ...w.deps, interrupted: () => interrupted },
+        request(w, { confirm }),
+      );
+      expect(result).toMatchObject({ kind: "interrupted", locked: true, lock: "held" });
+      expect(records(w)[0]).toMatchObject({ status: ending });
+      expect(w.lockStore.locks.size).toBe(1);
+    },
+  );
+
+  test.each([
+    { during: "terraformDirectory", ran: [] },
+    { during: "output", ran: ["output"] },
+    { during: "plan", ran: ["output", "plan"] },
+  ] as const)(
+    "interrupted during the destroy plan's $during, it starts no further Terraform command",
+    async ({ during, ran }) => {
+      const w = world({ workers: { "builder-1": "running" } });
+      let interrupted = false;
+      const { provisioner } = w.terraform;
+      const interrupting = {
+        ...provisioner,
+        output: async (target: Parameters<typeof provisioner.output>[0]) => {
+          const outputs = await provisioner.output(target);
+          if (during === "output") interrupted = true;
+          return outputs;
+        },
+        plan: async (planRequest: Parameters<typeof provisioner.plan>[0]) => {
+          const planned = await provisioner.plan(planRequest);
+          if (during === "plan") interrupted = true;
+          return planned;
+        },
+      };
+      const terraformDirectory = async () => {
+        if (during === "terraformDirectory") interrupted = true;
+        return TERRAFORM;
+      };
+      const result = await teardownFactory(
+        {
+          ...w.deps,
+          provisioner: interrupting,
+          terraformDirectory,
+          interrupted: () => interrupted,
+        },
+        request(w),
+      );
+      expect(result).toMatchObject({ kind: "interrupted", reached: "planning", removing: false });
+      expect(w.terraform.calls.map(({ call }) => call)).toEqual([...ran]);
+      expect(w.lockStore.locks.size).toBe(1);
+    },
+  );
+
+  test("interrupted while EC2 is listed after the destroy, it reads no Terraform state", async () => {
+    const w = world({ workers: { "builder-1": "stopped" } });
+    let interrupted = false;
+    const machines = changingMachines(w.deps.machines, (listed) => {
+      // The inventory's listing is the first, the recheck before the gates the second.
+      if (destroyed(w).length > 0) interrupted = true;
+      return { kind: "machines", machines: listed };
+    });
+    const result = await teardownFactory(
+      { ...w.deps, machines, interrupted: () => interrupted },
+      request(w),
+    );
+    expect(result).toMatchObject({ kind: "interrupted", reached: "verifying", removing: true });
+    const calls = w.terraform.calls.map(({ call }) => call);
+    expect(calls.slice(calls.indexOf("applyPlan") + 1)).toEqual([]);
+  });
+
+  test("interrupted during a destroy that then succeeds, it reports the step it was at, not the next", async () => {
+    const w = world({ workers: { "builder-1": "stopped" } });
+    let interrupted = false;
+    w.terraform.world.beforeChange = () => {
+      interrupted = true;
+    };
+    const result = await teardownFactory({ ...w.deps, interrupted: () => interrupted }, request(w));
+    expect(result).toMatchObject({ kind: "interrupted", reached: "applying", removing: true });
+    expect(w.terraform.world.hosts.size).toBe(0);
+    expect(w.lockStore.operationWrites.at(-1)?.stages[0]?.status).toBe("applying");
+  });
+
+  test("interrupted past the devices step, it reports the devices listed but kept", async () => {
+    const devices = [
+      tailnetDevice("n0CNTRL", hostname("builder-1"), [WORKER_TAG]),
+      tailnetDevice("nU", hostname("builder-1"), []),
+    ];
+    const w = world({ workers: { "builder-1": "stopped" }, devices });
+    let interrupted = false;
+    const remove = w.secrets.store.remove;
+    const secrets = {
+      ...w.secrets.store,
+      remove: async (lookup: Parameters<typeof remove>[0]) => {
+        interrupted = true;
+        return remove(lookup);
+      },
+    };
+    const result = await teardownFactory(
+      { ...w.deps, secrets, interrupted: () => interrupted },
+      request(w),
+    );
+    expect(result).toMatchObject({
+      kind: "interrupted",
+      reached: "removing_secrets",
+      listedDevices: { possible: [], untagged: [{ id: "nU", hostname: hostname("builder-1") }] },
+    });
+  });
+
+  test("an interrupt after dispatch was stopped names where it is stopped", async () => {
+    const w = world({ workers: { "builder-1": "running" } });
+    let interrupted = false;
+    const controlPlane: ControlPlane = {
+      ...w.control.controlPlane,
+      activeAgents: async () => {
+        interrupted = true;
+        throw new Error("interrupted while reading the activity");
+      },
+    };
+    const result = await teardownFactory(
+      { ...w.deps, controlPlane, interrupted: () => interrupted },
+      request(w),
+    );
+    expect(result).toMatchObject({
+      kind: "interrupted",
+      removing: false,
+      dispatchStopped: [hostname("builder-1")],
+    });
+    expect(w.lockStore.locks.size).toBe(1);
   });
 });

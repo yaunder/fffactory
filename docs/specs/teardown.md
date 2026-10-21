@@ -4,10 +4,10 @@ Teardown removes a whole factory: everything it owns, under the existing
 safety rules, and nothing it only refers to. Epic:
 [#56](https://github.com/yaunder/fffactory/issues/56), decisions D1 to D13.
 This spec covers the use case with a state bucket present
-(`teardownFactory`, `src/application/teardown-factory.ts`), its happy path and
-its refusals. Partial failure, rerun and interruption follow in
-[#86](https://github.com/yaunder/fffactory/issues/86), the cleanup without a
-state bucket in [#87](https://github.com/yaunder/fffactory/issues/87), and the
+(`teardownFactory`, `src/application/teardown-factory.ts`): its happy path, its
+refusals, a [partial failure](#partial-failure), the [rerun](#rerun) that
+finishes it and an [interruption](#interruption). The cleanup without a
+state bucket follows in [#87](https://github.com/yaunder/fffactory/issues/87), and the
 `fffactory teardown [--confirm FACTORY_ID] [--instance PATH] [--profile NAME]`
 command, its output and exit codes in
 [#88](https://github.com/yaunder/fffactory/issues/88).
@@ -45,14 +45,16 @@ Teardown goes in this order, and stops at the first refusal:
    release factory.json pins may remove the factory.
 5. The state bucket: missing is the [no-bucket mode](#no-state-bucket); one
    without every setting backend bootstrap applies is refused as `plan`
-   refuses it (`unready_bucket`). Teardown never creates a bucket.
+   refuses it (`unready_bucket`); one S3 answers 403 for is refused, never
+   taken for the factory's ([Rerun](#rerun)). Teardown never creates a bucket.
 6. Take the factory-wide lock as operation `teardown`, and open its
    [operation record](#operation-record). A held lock refuses teardown and
    shows its holder; it is never broken ([provisioning §Lock](provisioning.md#lock)).
 7. Open the Tailscale admin session (`openTailnetAdmin`, as `worker terminate`
    does, [worker lifecycle §Tailnet device removal](worker-lifecycle.md#tailnet-device-removal)):
    a secret that cannot be read, or a client Tailscale does not accept, refuses
-   teardown before anything is listed.
+   teardown before anything is listed. An admin client an earlier teardown
+   already deleted is the [rerun](#rerun)'s: the devices are then not checked.
 8. The inventory: the factory's tagged instances in every state but
    `terminated` and its tagged VPCs (EC2,
    [provisioning §Tagged VPCs](provisioning.md#tagged-vpcs)), its tagged secrets
@@ -81,8 +83,9 @@ Teardown goes in this order, and stops at the first refusal:
 14. Apply exactly the saved destroy plan, unless it changes nothing (the
     `factory` root already gone).
 15. Verify that nothing tagged with the factory ID remains: EC2 lists no
-    instance and no VPC. Anything left, or a listing that fails, stops the run
-    before devices, secrets and the bucket (D12).
+    instance and no VPC, and, once the destroy applied, the factory's
+    Terraform state records no host key. Anything left, or a listing or read
+    that fails, stops the run before devices, secrets and the bucket (D12).
 16. Delete the [devices](#devices), listed afresh.
 17. Delete the owned secrets, each confirmed absent
     ([secrets §Deletion and absence](secrets.md#deletion-and-absence)), the
@@ -118,7 +121,9 @@ so no agent dispatch could start is missed by the inspection:
    factory's EC2 instances changed after they were reviewed`, each change
    listed (`EC2 instance ID of HOSTNAME: running, reviewed stopped`, `... no
    longer listed`, `... (STATE): not reviewed`, `... its host key tag
-   changed`; `of HOSTNAME` only for a well-formed key), next action ``Rerun
+   changed`; `of HOSTNAME` only for a well-formed key; a machine reviewed
+   `shutting-down` that is no longer listed has finished terminating, no
+   change, as right after `worker terminate`), next action ``Rerun
    `fffactory teardown` to review the factory as it is now.`` A listing that
    fails refuses as the inventory's does. Nothing is deleted, the lock is
    released, and dispatch stays stopped where it was, for `fffactory apply` to
@@ -247,6 +252,8 @@ releases the lock. Each is a summary, details and a next action
 | EC2's instances changed since the review | `The factory's EC2 instances changed after they were reviewed`, each change listed ([Gates](#gates)) | ``Rerun `fffactory teardown` to review the factory as it is now.`` |
 | EC2's instances cannot be listed again | the listing's own failure | as the inventory's |
 | A gate | terminate's words, naming the worker ([Gates](#gates)) | [Gates](#gates) |
+| The admin client's secret gone while the factory's resources remain | `The Tailscale admin client's secret no longer exists, but the factory's resources remain` ([Rerun](#rerun)) | ``Store the admin client again with `fffactory secret set tailscale-admin-client`, then rerun `fffactory teardown`.`` |
+| The state bucket answers 403 | `The state bucket BUCKET cannot be reached in account ACCOUNT (S3 answered 403)` ([Rerun](#rerun)) | the permission, then rerun; or nothing left, after an earlier teardown |
 
 A listing that fails says `Nothing was removed: a listing that failed is never
 taken for one that found nothing.`: an empty EC2 listing would read as no
@@ -254,15 +261,187 @@ instance the destroy plan may delete, and every one of its instance deletes
 would be refused for the wrong reason; an empty secrets or devices listing
 would read as nothing to remove.
 
+The admin client's secret that cannot be read refuses with its error. When it
+is under `<id>/` and `DescribeSecret`, in the Region its ARN names, still finds
+it, as it finds a secret pending deletion, the refusal adds `Secrets Manager
+does not read a secret pending deletion either, as the admin client is for a
+while once teardown deleted it: rerun `fffactory teardown` once it is gone.`;
+not otherwise, such as when the look fails.
+
 Terraform failing to plan the destroy fails teardown (`Planning the factory's
 destruction failed: REASON`, `Nothing was removed.`), recorded `failed`, with
-the private diagnostics file's path, never Terraform's output.
+the private diagnostics file's path, never Terraform's output. Any other error
+before the destroy fails it the same way (`failed`, `Check the factory with
+`fffactory status`, then rerun `fffactory teardown`.`). A failure, like a
+refusal, names the workers dispatch was stopped on first (`dispatchStopped`).
 
 What stops the run once the destroy was applied, or while it was, is
-`partial`: the destroy failing, anything tagged left after it, a device, secret
-or the bucket left behind. Each says what was kept; reporting what remains of
-each kind, and finishing it on a rerun, are
-[#86](https://github.com/yaunder/fffactory/issues/86)'s.
+`partial` ([Partial failure](#partial-failure)).
+
+## Partial failure
+
+D6, D8, D12. Once Terraform is asked to destroy the factory, whatever stops
+the run is `partial`, recorded `partial` (exit 2), and the lock is released.
+Each step starts only once the one before finished, so everything before
+where it stopped is gone, and everything from there on remains. The result
+says how far it got (`stoppedAt`), what remains of each kind (`remaining`,
+`TeardownRemaining`), and why (`refusal`): what failed, its details, then one
+line per kind that remains (`stoppedPartWay`), and a next action that always
+reruns `fffactory teardown`, after a step by hand when one is needed.
+
+| Stopped at (`stoppedAt`) | Fails | Leaves | Next action |
+| --- | --- | --- | --- |
+| `destroy` | Terraform's apply: `Destroying the factory's resources failed: REASON`, and its diagnostics file | Terraform may have destroyed part of the factory: whatever its state still holds, then everything below | ``Rerun `fffactory teardown`: it plans the destroy again from what exists now.`` |
+| `leftovers` | Instances or VPCs tagged with the factory ID after the destroy, outside its state (D12), each by ID | The devices, secrets, plans and bucket | ``Check them in the EC2 console and remove those that are this factory's yourself, then rerun `fffactory teardown`.`` |
+| `leftovers` | The state still records host keys after the destroy: `The factory's Terraform state still records hosts after the destroy`, `Host KEY` each (`A host key that is not well-formed` for another) | The same | ``Rerun `fffactory teardown`: it plans the destroy again from what the state records.`` |
+| `leftovers` | Listing EC2 again failed: nothing proves the factory gone | The same | The permission, then rerun |
+| `leftovers` | The state's recorded host keys cannot be read after the destroy: `The host keys the factory's Terraform state records could not be read` | The same | ``Check the factory's Terraform state with `fffactory plan`, then rerun `fffactory teardown`.`` |
+| `devices` | A device not deleted (`Deleting device ID failed: REASON`), or the devices not listed again | Those devices (the review's when unlisted), every owned secret, the admin client among them (`The admin client was kept, so a rerun can delete them.`), the plans and the bucket | ``Check the devices at https://login.tailscale.com/admin/machines, then rerun `fffactory teardown`.`` (the OAuth client when unlisted) |
+| `secrets` | A secret not confirmed gone: denied, past the 60 s deadline, a restore of one pending refused ([secrets §Deletion and absence](secrets.md#deletion-and-absence)): `NAME: REASON` each | Those secrets, the plans and the bucket | ``Check the credentials may delete and describe them, then rerun `fffactory teardown`.`` |
+| `plans` | Removing the local saved plans | The plans and the bucket | ``Check the factory with `fffactory status`, then rerun `fffactory teardown`.`` |
+| `bucket` | The state bucket remains (`The state bucket BUCKET remains`, what is left of it and of the lock, [Operation record](#operation-record)) | The bucket | ``Check that the credentials may list and delete the bucket's object versions, and delete the bucket, then rerun `fffactory teardown`.`` |
+
+Any other error once the destroy started is `partial` at the step it was in,
+with teardown's own words for it and ``Check the factory with `fffactory
+status`, then rerun `fffactory teardown`.``. The lines that list what remains,
+in D6's order, each only when something of its kind is left:
+
+- `Remains: whatever the factory's Terraform state still holds` (only at `destroy`);
+- `Remains: tailnet devices ID, ...`, or, the admin client already gone,
+  wherever the run stops, ``Tailnet devices: not checked: teardown deletes the
+  admin client only after the devices`` followed by `CHECK_UNCHECKED_DEVICES`
+  ([Rerun](#rerun));
+- once the devices step listed them, the devices it listed but kept (D9's
+  `possible` and `untagged`, `listedDevices`): `Listed, not deleted: tailnet
+  devices ID (HOSTNAME), ...`, the hostname only when teardown derived it,
+  followed by `CHECK_LISTED_DEVICES`;
+- `Remains: owned secrets NAME, ...`;
+- `Remains: the local saved plans`;
+- `Remains: the state bucket BUCKET`, always.
+
+The devices listed but kept are never listed again once the admin client is
+deleted, so every outcome past the devices step carries them: a partial's
+`remaining.listedDevices`, an [interruption](#interruption)'s `listedDevices`,
+and the [report](#report)'s `possible` and `untagged`.
+
+When the state bucket remains, the lock was released whatever its deletion
+reached: `held`, by the release; `unknown`, `Deleting the factory lock's
+versions stopped part way: teardown released it by its version.`; `deleted`,
+gone with the bucket's versions. Only an [interrupted](#interruption) teardown
+keeps it.
+
+## Rerun
+
+A rerun goes through the same [order](#order), confirmed again, and
+inventories afresh: it resumes from what actually exists, never from what an
+earlier run reported. What is gone is found gone, and reported so:
+
+- The `factory` root already destroyed: the destroy plan changes nothing, and
+  the report says `infrastructure: absent`.
+- Devices already deleted are not found: nothing to delete.
+- Owned secrets already deleted are not listed. factory.json's references
+  under `<id>/` the listing does not find are each looked for with
+  `DescribeSecret`, in the Region their ARN names: those it no longer finds
+  are reported already absent (`absent`, in the review and the report); one
+  still found, or whose look fails, stays `unlisted`, never reported kept.
+- A secret left pending deletion, or still being deleted, is restored, then
+  deleted again ([secrets §Deletion and absence](secrets.md#deletion-and-absence)).
+- The state bucket is emptied from what is left in it, then deleted. A
+  `partial` released the lock, so the rerun takes it again.
+
+**The admin client already gone.** Teardown deletes the admin client only
+after the devices, which come after the destroy and the leftover check, so a
+rerun after the secrets' step may find its secret gone. When the admin
+client's secret cannot be read, teardown asks whether it is gone as only
+teardown leaves it: its name under `<id>/` (teardown deletes nothing else),
+and `DescribeSecret`, in the Region its ARN names, no longer finding it. Then
+teardown goes on without an admin session: it lists no device, and reports the
+devices `not checked: teardown deletes the admin client only after the
+devices` (`devicesUnchecked`, `DEVICES_NOT_CHECKED`, in the review, the report
+and a partial's remains wherever it stops), never as remaining, with the advice
+`CHECK_UNCHECKED_DEVICES`: `The admin client's secret no longer exists, so the
+tailnet's devices were not listed: teardown deletes it only once they are gone.
+Check the devices at https://login.tailscale.com/admin/machines for any an
+earlier teardown listed but did not delete, and, if the secret was deleted
+otherwise, for the factory's own.` The earlier run named those it listed but
+kept ([Partial failure](#partial-failure)). Once the destroy plan is made, anything teardown
+removes before the devices still there refuses it (`The Tailscale admin
+client's secret no longer exists, but the factory's resources remain`): EC2
+lists an instance or VPC tagged with the factory ID, or the destroy plan
+changes something. Nothing is deleted, and no dispatch is stopped; the next
+action stores an admin client again. So a rerun never deletes less than the
+first run would have. Any other unreadable admin client, one outside
+`<id>/`, one still found (pending deletion, or a denial) or whose look fails,
+refuses as before ([Refusals](#refusals)). So an admin client still found
+pending deletion past its deadline (`secrets` partial) refuses the reruns until
+Secrets Manager no longer finds it; the next rerun then finishes.
+
+**Accepted risk:** an admin client deleted by hand, under `<id>/`, of a
+factory with nothing tagged left and nothing in its state is taken the same
+way: its devices are reported not checked, never deleted or claimed absent.
+
+**The state bucket's name.** A bucket deleted by an earlier teardown frees its
+name, which another account may then take. Every S3 request requires the
+factory's account to own the bucket, so `HeadBucket` then answers 403, which
+is also its answer when the credentials may not reach the bucket
+(`StateBucketUnreachable`, [provisioning §Backend bootstrap](provisioning.md#backend-bootstrap)).
+Teardown cannot tell which, refuses before any lock, and never takes it for
+the factory's bucket: `The state bucket BUCKET cannot be reached in account
+ACCOUNT (S3 answered 403)`, details `S3 answers 403 when these credentials may
+not reach the bucket, and when its name belongs to another account, as it may
+once an earlier teardown deleted it: teardown cannot tell which, and never
+takes it for the factory's bucket.`, next action ``Check that the credentials
+may reach the bucket (s3:ListBucket), then rerun `fffactory teardown`. If an
+earlier teardown reached the state bucket's deletion, it had removed
+everything else of the factory it could before: the name may since be another
+account's, and nothing of the factory is left in it.`` A bucket S3 no longer
+finds at all is the [no-bucket mode](#no-state-bucket).
+
+## Interruption
+
+Teardown checks its interrupt (`interrupted`) after every step and every call,
+and every wait goes through the injected sleep. From the interrupt on it starts
+nothing more: no Terraform command (the destroy plan's `output`, `plan
+-destroy` and `show`, and the state read after the destroy, each start only
+while it is not interrupted), device, secret or S3 deletion, and no more of its
+record. It keeps the lock (`settleFactoryLock`), and reports
+`interrupted` whatever the run returned once the interrupt landed, even during
+its last record write (the pattern of [worker lifecycle
+§Interruption](worker-lifecycle.md#interruption) that
+[#38](https://github.com/yaunder/fffactory/issues/38) asks apply to adopt), so
+the outcome reported and the lock kept never disagree. Interrupted before the
+lock, nothing is locked. The one exception: once the bucket is gone, the lock
+went with it, and the teardown is done.
+
+The result says how far it got (`reached`, the last step started: one the
+interrupt landed before is never started, even when the call before it then
+succeeded, and `removing`, whether it had reached the destroy step: from there
+on the factory may be partly removed),
+where dispatch is stopped (`dispatchStopped`), the devices listed but kept
+(`listedDevices`, [Partial failure](#partial-failure)), the record (only while
+it is not being deleted with the bucket) and what became of the lock (`lock`). Its words
+(`interruptedTeardown`, `src/domain/teardown.ts`) name `fffactory lock break`
+only for this teardown once fffactory has exited, when it is confirmed dead:
+
+| Left | Summary | Next action |
+| --- | --- | --- |
+| The lock, with the record | `Interrupted: the factory stays locked, with a record of this teardown` | ``Once fffactory has exited, break the lock with `fffactory lock break`, then rerun `fffactory teardown`.`` |
+| The lock, no record written, or the record being deleted with the bucket | `Interrupted: the factory stays locked by this teardown, which may have no operation record` | The same |
+| The bucket's deletion reached the lock (`unknown`) | `Interrupted while the state bucket was being deleted: the factory lock may already be gone with it` | ``Once fffactory has exited, rerun `fffactory teardown`. If it finds the factory locked by this teardown, break that lock with `fffactory lock break`, then rerun it.`` |
+| Every version of the lock deleted (`deleted`) | `Interrupted while the state bucket was being deleted: the factory lock is already gone with it` | ``Once fffactory has exited, rerun `fffactory teardown`.`` |
+
+Its details: `Nothing was removed.`, and where dispatch is stopped
+(`dispatchLeftStopped`), before the destroy; once removing, `Teardown had
+begun removing the factory, and was DOING: a rerun inventories again and
+finishes from what remains.`, DOING the step in words (`destroying the
+factory's resources`, `checking that nothing tagged with the factory ID
+remains`, `deleting the tailnet devices`, `deleting the owned secrets`,
+`removing the local saved plans`, `deleting the state bucket`), then the
+devices listed but kept and `CHECK_LISTED_DEVICES`, when there are any.
+Deleting the bucket, interrupted,
+starts no further S3 call ([provisioning §Deleting the state
+bucket](provisioning.md#deleting-the-state-bucket)): the lock is `held` until
+the call for its current version was made.
 
 ## Operation record
 
@@ -274,7 +453,9 @@ again with `dispatch` once each running worker's dispatch is stopped:
 `not_requested`, or `failed` with its reason), `inspecting`, `applying`,
 `verifying`, `removing_devices`, `removing_secrets`, `removing_plans` and
 `deleting_bucket`. It ends `refused`, `declined`, `failed` or `partial`, with
-the operation's status alike and `failure` naming why.
+the operation's status alike and `failure` naming why. An interrupted teardown
+writes no more of it, and leaves it `running` at the step it reached. With the
+admin client [already gone](#rerun), `removing_devices` is skipped.
 
 A teardown that finished has no record: deleting the bucket deletes the record
 with the lock, so nothing is written, and the lock is not released, once the
@@ -296,7 +477,10 @@ D11. A finished teardown reports (`TeardownReport`):
 - the devices deleted, by ID, and those listed but kept (`possible`,
   `untagged`), each by ID and the hostname teardown derived, `<id>-<key>`,
   when its reported hostname is that for a well-formed key (`ShownDevice`);
-- the owned secrets deleted, and the kept ones in three groups
+- `devicesUnchecked`: `not checked: teardown deletes the admin client only
+  after the devices` when the admin client was already gone ([Rerun](#rerun));
+- the owned secrets deleted, those already absent (`absent`, [Rerun](#rerun)),
+  and the kept ones in three groups
   (`keptSecrets`): tagged with the factory ID but not owned (by name and ARN,
   never their tags); referenced by
   factory.json outside the factory's names (such as `fffv/*`); and referenced
@@ -307,11 +491,12 @@ D11. A finished teardown reports (`TeardownReport`):
 - the state bucket deleted.
 
 With it, the advice teardown leaves the operator (`FACTORY_JSON_KEPT`,
-`REVOKE_SOURCES`, `CHECK_LISTED_DEVICES`): factory.json is left as it is;
+`REVOKE_SOURCES`, `CHECK_LISTED_DEVICES`, and `CHECK_UNCHECKED_DEVICES` when
+the devices were not checked): factory.json is left as it is;
 teardown revokes nothing it only refers to (the Tailscale auth key and admin
 OAuth client, and the API credentials kept), which the operator revokes at
 their providers once nothing else uses them; and the devices listed but not
-deleted are the operator's to check.
+deleted, or not checked, are the operator's to check.
 
 ## No state bucket
 
@@ -341,16 +526,16 @@ names.
 
 | Layer | Module | Responsibility |
 | --- | --- | --- |
-| Domain | `src/domain/teardown.ts` | The guarded destroy plan's rule and its consistency with the exit code (`destroyPlanRefusal`, `destroyPlanMismatch`), `VpcInventory`; the devices teardown deletes and lists (`selectFactoryDevices`, `FactoryDevices`); the kept secrets' groups (`keptSecrets`); the confirmation rule (`teardownConfirmation`, `typedIdConfirms`) and question; the gates' next actions (`teardownGateActions`) and the review invalidated by changed machines (`machinesChanged`); the review and report (`TeardownReview`, `TeardownReport`), carrying only what may be printed (`ShownMachine`, `ShownDevice`, `ShownSecret`); the words of every refusal and of the report's advice. Pure. |
+| Domain | `src/domain/teardown.ts` | The guarded destroy plan's rule and its consistency with the exit code (`destroyPlanRefusal`, `destroyPlanMismatch`), `VpcInventory`; the devices teardown deletes and lists (`selectFactoryDevices`, `FactoryDevices`); the kept secrets' groups (`keptSecrets`) and the factory's names (`underFactoryNames`); the confirmation rule (`teardownConfirmation`, `typedIdConfirms`) and question; the gates' next actions (`teardownGateActions`) and the review invalidated by changed machines (`machinesChanged`); the review and report (`TeardownReview`, `TeardownReport`), carrying only what may be printed (`ShownMachine`, `ShownDevice`, `ShownSecret`); the steps (`TeardownStep`), where a partial teardown stopped (`TeardownStop`) and what remains of each kind (`remainingAt`, `TeardownRemaining`, `stoppedPartWay`); an interruption's words (`interruptedTeardown`); the words of every refusal and of the report's advice. Pure. |
 | Domain | `src/domain/initialization.ts` | `isGeneratedFactoryId`. |
 | Domain | `src/domain/worker-lifecycle.ts` | `removalGate` and `RemovalGateActions`: terminate's gates, their next actions completed by the command refused. |
 | Domain | `src/domain/operation.ts` | `TEARDOWN_OPERATION` and the teardown stage's statuses. |
 | Domain | `src/domain/secrets.ts` | `classifySecrets` and `refersTo`. |
-| Application | `src/application/teardown-factory.ts` | `teardownFactory`: the order above, under the lock and its record, the lock and record never touched once the bucket is gone. |
+| Application | `src/application/teardown-factory.ts` | `teardownFactory`: the order above, under the lock and its record, the lock and record never touched once the bucket is gone; how far it got and what is left (`Progress`), every ending (`refusedUnder`, `failedUnder`, `partialUnder`, `interruptedUnder`), the interrupt checked once the run returns. |
 | Application | `src/application/worker-removal.ts` | Shared with `worker terminate`: `inspectForRemoval`, `openTailnetAdmin`, `deleteDevices`. |
 | Application | `src/application/stop-dispatch.ts`, `src/application/delete-owned-secret.ts` | `stopDispatch`, `deleteOwnedSecret`. |
 | Application | `src/application/plan-store.ts` | `PlanStore.removeAll`. |
-| Application | `src/application/lock-store.ts`, `src/application/provisioner.ts`, `src/application/machine-inventory.ts` | `LockStore.deleteBucket`, `PlanRequest.destroy`, `MachineInventorySource.listVpcs`. |
+| Application | `src/application/lock-store.ts`, `src/application/provisioner.ts`, `src/application/machine-inventory.ts` | `LockStore.deleteBucket` (and its `interrupted`), `StateBucketUnreachable`, `PlanRequest.destroy`, `MachineInventorySource.listVpcs`. |
 | Infrastructure | `src/infrastructure/plan-store.ts` | `removeAll`: the factory's plan directory, removed whole. |
 
 Tests: `tests/domain/teardown.test.ts` (device selection: known keys exactly
@@ -360,8 +545,13 @@ devices deleted and a hand-chosen ID's only listed, `acme` against
 rule, the typed ID, the mismatch never echoing its value; the gates' next
 actions, for a declared worker and an undeclared one; the kept secrets'
 groups; the destroy plan's consistency with its exit code; once reviewed, a
-namespace device not shown only listed; `machinesChanged`; the shown machines
-and devices carrying no tag and no malformed host key),
+namespace device not shown only listed; `machinesChanged`, a machine reviewed
+shutting down and gone since no change; the shown machines and devices
+carrying no tag and no malformed host key; what remains where it stopped and
+its lines, devices not checked and devices listed but kept carried past the
+devices step with their advice; the admin client's pending-deletion hint only
+when it is still found; an interruption's words, its step in words, the devices
+listed but kept, `fffactory lock break` only for this teardown once exited),
 `tests/application/teardown-factory.test.ts` (a factory with no worker, one
 running worker, and two with one stopped, each ending with no instance,
 network, state, device, owned secret, plan or bucket, its referenced sources
@@ -379,11 +569,35 @@ destroy plan, its exit code disagreeing, each listing that fails, the admin
 client refused, a machine pending, a decline, a wrong `--confirm`, no terminal,
 no admin client, an incomplete factory.json, another account, a pin mismatch,
 no bucket; and once destroyed, a leftover stopping the run before devices,
-secrets and the bucket, and a bucket that remains, recorded `partial`), and
-`tests/infrastructure/plan-store.test.ts` (`removeAll`). terminate's own tests
+secrets and the bucket, and a bucket that remains, recorded `partial`; each
+failure point, the destroy failing part way, tagged leftovers, a state still
+recording hosts or whose host keys cannot be read after the destroy (a stubbed
+state read: a consistent world's EC2 lists a recorded host's instance first),
+a device, a secret denied, past its deadline or pending with its restore
+refused, the local plans, the bucket with its lock in each state, listing what
+remains, its next action, and a rerun over the world it left ending with
+nothing owned, the admin client already gone among them; devices listed but
+kept reported past the devices step, and reruns without the admin client
+reporting the devices not checked wherever they stop; the admin client still
+found past its deadline, refusing the rerun until it is gone; a secret listed
+pending deletion; an admin client gone while resources remain, or outside
+`<id>/`, refused; an admin client in another Region looked for there; the
+admin client unreadable, the pending-deletion hint only when it is still
+found; a bucket answering 403; a machine reviewed shutting down gone since; a
+failure after dispatch was stopped naming it; a plan directory not removed
+never overwriting a refusal; an interrupt at each step, during each of the
+destroy plan's Terraform commands, during EC2's listing after the destroy,
+during a destroy that then succeeds (reaching no further step), past the
+devices step (naming the devices listed but kept), as the bucket is emptied
+before and after its lock, during the bucket's last deletion, and during each
+final record write, keeping the lock), `tests/infrastructure/plan-store.test.ts`
+(`removeAll`) and `tests/infrastructure/aws-s3-lock-store.test.ts` (an
+interrupted bucket deletion, the typed 403). terminate's own tests
 (`tests/application/worker-lifecycle.test.ts`) cover the shared helpers.
 
-Introduced by [#85](https://github.com/yaunder/fffactory/issues/85), on the
+Partial failure, rerun and interruption by
+[#86](https://github.com/yaunder/fffactory/issues/86). Introduced by
+[#85](https://github.com/yaunder/fffactory/issues/85), on the
 building blocks of [#81](https://github.com/yaunder/fffactory/issues/81),
 [#82](https://github.com/yaunder/fffactory/issues/82),
 [#83](https://github.com/yaunder/fffactory/issues/83) and

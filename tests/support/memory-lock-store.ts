@@ -1,8 +1,13 @@
-import type { LockCreation, LockStore, StateBucket } from "../../src/application/lock-store";
+import {
+  type LockCreation,
+  type LockStore,
+  type StateBucket,
+  StateBucketUnreachable,
+} from "../../src/application/lock-store";
 import type { StateBucketReadiness } from "../../src/domain/backend-bootstrap";
 import type { HeldLock, LockBreakEntry, LockRecord } from "../../src/domain/factory-lock";
 import { type OperationRecord, operationKey } from "../../src/domain/operation";
-import type { BucketDeletion } from "../../src/domain/state-bucket-deletion";
+import { type BucketDeletion, DELETION_INTERRUPTED } from "../../src/domain/state-bucket-deletion";
 
 /** A state bucket as backend bootstrap leaves it. */
 export const READY_BUCKET: StateBucketReadiness = {
@@ -20,7 +25,9 @@ export const READY_BUCKET: StateBucketReadiness = {
  * by key, each write replacing the last, with every write in `operationWrites`; the
  * factory's Terraform state revision per bucket is `states`, absent before any apply. Break
  * logs and operation records are kept by key, each remembering its bucket: deleting a bucket
- * removes its own, then its lock, then the bucket.
+ * removes its own, then its lock, then the bucket, and an interrupt by then (`beforeLock` can
+ * set one) leaves the lock and the bucket. A bucket in `unreachable` answers `bucketExists` as
+ * S3's 403 does: another account's name, or one these credentials may not reach.
  */
 export class MemoryLockStore implements LockStore {
   readonly calls: string[] = [];
@@ -48,6 +55,10 @@ export class MemoryLockStore implements LockStore {
    * deletes the bucket.
    */
   deletionLeaves: Extract<BucketDeletion, { kind: "remains" }> | undefined;
+  /** Runs once `deleteBucket` has deleted every other key, before the lock's versions. */
+  beforeLock: (() => void) | undefined;
+  /** Buckets whose HeadBucket S3 answers with 403. */
+  readonly unreachable = new Set<string>();
 
   constructor(existing: readonly string[] = []) {
     for (const bucket of existing) this.buckets.add(bucket);
@@ -71,6 +82,8 @@ export class MemoryLockStore implements LockStore {
 
   async bucketExists(bucket: StateBucket): Promise<boolean> {
     this.calls.push(`bucketExists ${bucket.bucket}`);
+    if (this.unreachable.has(bucket.bucket))
+      throw new StateBucketUnreachable(bucket.bucket, bucket.accountId);
     return this.buckets.has(bucket.bucket);
   }
 
@@ -126,7 +139,7 @@ export class MemoryLockStore implements LockStore {
     return this.states.get(bucket.bucket);
   }
 
-  async deleteBucket(bucket: StateBucket): Promise<BucketDeletion> {
+  async deleteBucket(bucket: StateBucket, interrupted: () => boolean): Promise<BucketDeletion> {
     this.calls.push(`deleteBucket ${bucket.bucket}`);
     if (!this.buckets.has(bucket.bucket)) return { kind: "absent" };
     for (const [key, written] of this.written)
@@ -136,6 +149,15 @@ export class MemoryLockStore implements LockStore {
         this.written.delete(key);
       }
     this.states.delete(bucket.bucket);
+    this.beforeLock?.();
+    if (interrupted())
+      return {
+        kind: "remains",
+        versions: undefined,
+        codes: [],
+        failure: DELETION_INTERRUPTED,
+        lock: "held",
+      };
     const left = this.deletionLeaves;
     if (left === undefined || left.lock === "deleted") this.locks.delete(bucket.bucket);
     if (left) return left;

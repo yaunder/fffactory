@@ -499,7 +499,7 @@ account than `aws.account_id`. Then:
    | --- | --- |
    | 200 | The bucket exists: no bootstrap, if it is ready (below). |
    | 404 | It does not: bootstrap it. |
-   | 403 | Refused: `The state bucket B is not accessible in account A: it belongs to another account, or these credentials may not reach it (S3 answered 403)`. Bucket names are global, so the name may be taken. |
+   | 403 | Refused: `The state bucket B is not accessible in account A: it belongs to another account, or these credentials may not reach it (S3 answered 403)`. Bucket names are global, so the name may be taken. The refusal is typed (`StateBucketUnreachable`), so teardown can say what it may mean after an earlier teardown ([teardown §Rerun](teardown.md#rerun)). |
    | 301 | Refused: `The state bucket B exists outside the factory Region R (S3 answered 301)`. |
 
    An existing bucket must carry every setting backend bootstrap applies,
@@ -959,6 +959,14 @@ calls, every one with `ExpectedBucketOwner` set to the factory's account:
 A bucket another account owns answers 403 to the listing: it `remains`,
 nothing is deleted, and it is never taken for absent. A failed call stops the
 deletion at once; the next run lists again and resumes from what is left.
+
+An interrupt (`interrupted`, [teardown §Interruption](teardown.md#interruption))
+starts no further call: no listing, no `DeleteObjects` and no `DeleteBucket`.
+A call already made finishes and is counted. The bucket `remains`, its failure
+`Interrupted: no further S3 call was started` (`DELETION_INTERRUPTED`), with
+the lock `held` until the call for its current version was made, since that
+version goes alone in the last call of all, and `deleted` once every one of its
+versions is gone.
 Each listing page, each `DeleteObjects` call and `DeleteBucket` has a 30 s
 deadline of its own (`S3_TIMEOUT_MS`), so a bucket too large to list within
 one still loses a page of versions to every run.

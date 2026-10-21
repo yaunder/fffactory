@@ -11,6 +11,10 @@
  *
  * A refusal, a decline or a failure before the destroy deletes nothing and releases the lock;
  * a refusal after dispatch was stopped leaves it stopped, for `fffactory apply` to restart.
+ * Once the destroy started, what stops the run is `partial`: how far it got and what remains
+ * of each kind. A rerun inventories again and finishes from what remains, an admin client an
+ * earlier teardown already deleted included (§Rerun). An interrupt keeps the lock, and is
+ * reported whatever the run returned (§Interruption).
  */
 import {
   type AccountExpectation,
@@ -52,13 +56,20 @@ import {
 import { placedRepositories } from "../domain/repository-placement";
 import { hostName } from "../domain/resource-naming";
 import type { WorkerIdentity } from "../domain/rollout";
-import { classifySecrets, type SecretInventory, secretReferences } from "../domain/secrets";
+import {
+  classifySecrets,
+  type SecretInventory,
+  secretReferences,
+  secretRegion,
+} from "../domain/secrets";
 import { recordedHostKeys } from "../domain/stable-host-keys";
-import type { BucketDeletion } from "../domain/state-bucket-deletion";
+import type { BucketDeletion, LockAfterDeletion } from "../domain/state-bucket-deletion";
 import { locateWorker, type Machine } from "../domain/status";
 import type { TailnetDevice } from "../domain/tailnet";
 import {
   bucketRemains,
+  bucketUnreachable,
+  DEVICES_NOT_CHECKED,
   destroyApplyFailed,
   destroyKeysUnreadable,
   destroyPlanMismatch,
@@ -69,17 +80,27 @@ import {
   dispatchNotStopped,
   type FactoryDevices,
   inventoryUnavailable,
+  type KeptSecrets,
   keptSecrets,
+  type ListedDevices,
   leftoversRemain,
   leftoversUnverified,
   machineInPassing,
   machinesChanged,
+  NO_LISTED_DEVICES,
+  remainingAt,
   secretsRemain,
   selectFactoryDevices,
   shownDevices,
   shownMachines,
+  stateStillRecords,
+  stoppedPartWay,
+  type TeardownRemaining,
   type TeardownReport,
   type TeardownReview,
+  type TeardownStep,
+  type TeardownStop,
+  teardownAdminClientGone,
   teardownAdminClientMissing,
   teardownAdminClientUnusable,
   teardownAdminSecretUnreadable,
@@ -90,6 +111,7 @@ import {
   teardownQuestion,
   thenRerunTeardown,
   typedIdConfirms,
+  underFactoryNames,
 } from "../domain/teardown";
 import { type Refusal, removalGate } from "../domain/worker-lifecycle";
 import type { OperationLocation } from "./apply-factory";
@@ -106,7 +128,7 @@ import {
   stateBucketOf,
 } from "./factory-lock";
 import type { HostTransport } from "./host-transport";
-import type { LockStore, StateBucket } from "./lock-store";
+import { type LockStore, type StateBucket, StateBucketUnreachable } from "./lock-store";
 import type { MachineInventorySource } from "./machine-inventory";
 import type { OperatorPrompt } from "./operator-prompt";
 import { factoryTarget } from "./plan-factory";
@@ -114,7 +136,7 @@ import type { PlanStore } from "./plan-store";
 import { projectFactoryVariables } from "./project-terraform-inputs";
 import { diagnosticsFileOf, type Provisioner, type SavedPlanRequest } from "./provisioner";
 import { type AccountRequirement, requireExpectedAccount } from "./require-expected-account";
-import type { SecretStore } from "./secret-store";
+import type { SecretPresence, SecretStore } from "./secret-store";
 import { stopDispatch } from "./stop-dispatch";
 import type { TailnetAdmin, TailnetAdminSession } from "./tailnet-admin";
 import type { TailnetPeers } from "./tailnet-peers";
@@ -201,11 +223,25 @@ export type FactoryTeardown =
   | { readonly kind: "unready_bucket"; readonly bucket: UnreadyBucket }
   | { readonly kind: "locked"; readonly held: HeldLock | undefined }
   | { readonly kind: "interrupted"; readonly locked: false }
-  /** Interrupted holding the lock, which stays with the record as far as it was written. */
+  /**
+   * Interrupted holding the lock, which it never released: it stays with the record as far as
+   * it was written, unless the state bucket's deletion reached it (`lock`). `record` is
+   * undefined once the bucket's deletion started: the record may be gone with it.
+   * `interruptedTeardown` (`src/domain/teardown.ts`) words it.
+   */
   | {
       readonly kind: "interrupted";
       readonly locked: true;
       readonly record: OperationLocation | undefined;
+      /** The last step it started. */
+      readonly reached: TeardownStep;
+      /** Whether it had reached the destroy step: from there on the factory may be partly removed. */
+      readonly removing: boolean;
+      /** The workers dispatch was stopped on, which `fffactory apply` restarts. */
+      readonly dispatchStopped: readonly string[];
+      /** The devices the devices step listed but kept, the operator's to check. */
+      readonly listedDevices: ListedDevices;
+      readonly lock: LockAfterDeletion;
     }
   /**
    * Refused, deleting nothing: before the lock (`operation` undefined), or under it.
@@ -225,24 +261,29 @@ export type FactoryTeardown =
       readonly operation: OperationLocation;
       readonly recordFailure: string | undefined;
     }
-  /** Failed before the destroy: nothing was deleted. */
+  /**
+   * Failed before the destroy: nothing was deleted. `dispatchStopped` names the workers
+   * dispatch was stopped on first, which `fffactory apply` restarts.
+   */
   | {
       readonly kind: "failed";
       readonly refusal: Refusal;
       readonly operation: OperationLocation;
+      readonly dispatchStopped: readonly string[];
       readonly recordFailure: string | undefined;
       /** The private local file keeping a failed Terraform command's diagnostics, if any. */
       readonly diagnosticsFile?: string | undefined;
     }
   /**
-   * Stopped once the destroy was applied, or as it was: some of the factory is removed, and
-   * `refusal` says what was kept.
-   *
-   * TODO(re-evaluate when #86 lands): report what remains of each kind and how far teardown
-   * got, and finish from every partial state on a rerun.
+   * Stopped once the destroy was applied, or as it was: some of the factory is removed. How far
+   * it got (`stoppedAt`), what remains of each kind (`remaining`), and `refusal`: what failed,
+   * then what remains, and the next action, a rerun or a step by hand before it
+   * (§Partial failure).
    */
   | {
       readonly kind: "partial";
+      readonly stoppedAt: TeardownStop;
+      readonly remaining: TeardownRemaining;
       readonly refusal: Refusal;
       readonly operation: OperationLocation;
       readonly recordFailure: string | undefined;
@@ -321,9 +362,8 @@ export async function teardownFactory(
   if (!account.allowed) return { kind: "account_refused", requirement: account, expectation };
   const mismatch = pinRefusal(instance.release, request.release);
   if (mismatch !== undefined) return { kind: "release_mismatch", message: mismatch };
-  const bucket = await stateBucketState(deps.lockStore, teardown.bucket);
-  if (bucket.kind === "missing") return { kind: "no_bucket" };
-  if (bucket.kind === "unready") return { kind: "unready_bucket", bucket: bucket.bucket };
+  const bucket = await bucketChecked(deps, teardown);
+  if (bucket !== undefined) return bucket;
   if (deps.interrupted()) return { kind: "interrupted", locked: false };
   const acquisition = await acquireFactoryLock(deps.lockStore, {
     bucket: teardown.bucket,
@@ -335,6 +375,26 @@ export async function teardownFactory(
   });
   if (!acquisition.acquired) return { kind: "locked", held: acquisition.held };
   return underLock(deps, teardown, acquisition.lock);
+}
+
+/**
+ * How the state bucket ends the teardown before any lock: missing (`no_bucket`), unready, or
+ * answering 403, which may be another account's bucket by now (§Rerun), never taken for the
+ * factory's. Undefined when it is ready.
+ */
+async function bucketChecked(
+  deps: TeardownDependencies,
+  teardown: Teardown,
+): Promise<FactoryTeardown | undefined> {
+  try {
+    const bucket = await stateBucketState(deps.lockStore, teardown.bucket);
+    if (bucket.kind === "missing") return { kind: "no_bucket" };
+    if (bucket.kind === "unready") return { kind: "unready_bucket", bucket: bucket.bucket };
+    return undefined;
+  } catch (error) {
+    if (!(error instanceof StateBucketUnreachable)) throw error;
+    return refusedBefore(bucketUnreachable(teardown.bucket.bucket, teardown.bucket.accountId));
+  }
 }
 
 function reasonOf(error: unknown): string {
@@ -352,6 +412,7 @@ function teardownLog(deps: TeardownDependencies, teardown: Teardown, lock: Facto
   const { clock } = teardown.request;
   let record: OperationRecord = startStageOperation(lock.record, TEARDOWN_OPERATION, "authorizing");
   let written = false;
+  let reached: TeardownStep = "authorizing";
   let state: "open" | "sealed" | "gone" = "open";
   const write = async (next: OperationRecord) => {
     if (deps.interrupted() || state !== "open") return;
@@ -362,6 +423,8 @@ function teardownLog(deps: TeardownDependencies, teardown: Teardown, lock: Facto
   return {
     location: { bucket: lock.bucket.bucket, key: operationKey(record) },
     written: () => written,
+    /** The last step started, whether or not its record was written; never one after the interrupt. */
+    reached: () => reached,
     gone: () => state === "gone",
     /** The bucket, and the lock and record in it, are deleted. */
     deleted: () => {
@@ -371,7 +434,12 @@ function teardownLog(deps: TeardownDependencies, teardown: Teardown, lock: Facto
       if (state === "open") state = "sealed";
     },
     start: () => write(record),
-    stage: (status: StageStatus) => write(withStage(record, TEARDOWN_OPERATION, status, clock())),
+    stage: async (status: TeardownStep) => {
+      // Interrupted, the step is never started: the caller checks the interrupt next.
+      if (deps.interrupted()) return;
+      reached = status;
+      await write(withStage(record, TEARDOWN_OPERATION, status, clock()));
+    },
     dispatch: (
       outcomes: readonly (WorkerIdentity & {
         readonly kind: DispatchRecord["status"];
@@ -393,28 +461,57 @@ function teardownLog(deps: TeardownDependencies, teardown: Teardown, lock: Facto
 
 type TeardownLog = ReturnType<typeof teardownLog>;
 
-/** How far the teardown got: whether Terraform was asked to destroy anything. */
+/** How far the teardown got, and what it knows is left, for whatever ends it. */
 interface Progress {
-  destroying: boolean;
+  /** The state bucket, which remains until the very end. */
+  readonly bucket: string;
+  /** Where it is once it reached the destroy step; undefined before. */
+  stop: TeardownStop | undefined;
+  /** The workers dispatch was stopped on, as each stop completes. */
+  readonly dispatchStopped: string[];
+  /** The devices left by ID: the review's to delete, then those not deleted. */
+  devices: readonly string[] | "unchecked";
+  /**
+   * The devices the devices step listed but kept: carried to whatever ends the run, since no
+   * rerun lists them again once the admin client is deleted.
+   */
+  listedDevices: ListedDevices;
+  /** The owned secrets left by name: every one, then those not confirmed gone. */
+  secrets: readonly string[];
+  /** What became of the lock once the bucket's deletion started; undefined before. */
+  lock: LockAfterDeletion | undefined;
 }
 
-function interruptedUnder(log: TeardownLog): FactoryTeardown {
-  // TODO(re-evaluate when #86 lands): say how far teardown got, and once the bucket's deletion
-  // started, that the lock may already be gone.
-  return { kind: "interrupted", locked: true, record: log.written() ? log.location : undefined };
+/**
+ * Interrupted: the lock is kept (`settleFactoryLock`), and the record named only while it is
+ * not being deleted with the bucket.
+ */
+function interruptedUnder(log: TeardownLog, progress: Progress): FactoryTeardown {
+  return {
+    kind: "interrupted",
+    locked: true,
+    record: log.written() && progress.lock === undefined ? log.location : undefined,
+    reached: log.reached(),
+    removing: progress.stop !== undefined,
+    dispatchStopped: [...progress.dispatchStopped],
+    listedDevices: progress.listedDevices,
+    lock: progress.lock ?? "held",
+  };
 }
 
 async function refusedUnder(
   log: TeardownLog,
+  progress: Progress,
   refusals: readonly Refusal[],
-  dispatchStopped: readonly string[] = [],
 ): Promise<FactoryTeardown> {
   const recordFailure = await log.finish("refused", "refused", refusals[0]?.summary);
+  const dispatchStopped = [...progress.dispatchStopped];
   return { kind: "refused", refusals, operation: log.location, dispatchStopped, recordFailure };
 }
 
 async function failedUnder(
   log: TeardownLog,
+  progress: Progress,
   refusal: Refusal,
   diagnosticsFile?: string,
 ): Promise<FactoryTeardown> {
@@ -423,20 +520,27 @@ async function failedUnder(
     kind: "failed",
     refusal,
     operation: log.location,
+    dispatchStopped: [...progress.dispatchStopped],
     recordFailure,
     ...(diagnosticsFile === undefined ? {} : { diagnosticsFile }),
   };
 }
 
+/** Stopped part way, at `progress.stop`: what failed, then what remains of each kind. */
 async function partialUnder(
   log: TeardownLog,
+  progress: Progress,
   refusal: Refusal,
   diagnosticsFile?: string,
 ): Promise<FactoryTeardown> {
+  const stoppedAt = progress.stop ?? "destroy";
+  const remaining = remainingAt(stoppedAt, progress);
   const recordFailure = await log.finish("partial", "partial", refusal.summary);
   return {
     kind: "partial",
-    refusal,
+    stoppedAt,
+    remaining,
+    refusal: stoppedPartWay(refusal, remaining),
     operation: log.location,
     recordFailure,
     ...(diagnosticsFile === undefined ? {} : { diagnosticsFile }),
@@ -446,7 +550,8 @@ async function partialUnder(
 /**
  * Every step under the lock, which it settles at the end: released unless interrupted, and
  * never once the bucket, and the lock with it, is deleted. An interrupt keeps the lock, so the
- * outcome is then reported as interrupted, unless the bucket is already gone.
+ * outcome is then reported as interrupted, whatever the run returned, even one that landed
+ * during its last record write, unless the bucket is already gone.
  */
 async function underLock(
   deps: TeardownDependencies,
@@ -454,16 +559,27 @@ async function underLock(
   lock: FactoryLock,
 ): Promise<FactoryTeardown> {
   const log = teardownLog(deps, teardown, lock);
-  const progress: Progress = { destroying: false };
+  const progress: Progress = {
+    bucket: teardown.bucket.bucket,
+    stop: undefined,
+    dispatchStopped: [],
+    devices: [],
+    listedDevices: NO_LISTED_DEVICES,
+    secrets: [],
+    lock: undefined,
+  };
   try {
     const result = await operateOrFail(deps, teardown, log, progress);
-    return deps.interrupted() && !log.gone() ? interruptedUnder(log) : result;
+    return deps.interrupted() && !log.gone() ? interruptedUnder(log, progress) : result;
   } finally {
     if (!log.gone()) await settleFactoryLock(deps.lockStore, lock, deps.interrupted);
   }
 }
 
-/** The teardown, with an error under the lock recorded as its failure, or partial once it destroys. */
+/**
+ * The teardown, with an error under the lock recorded as its failure, or partial once it
+ * destroys; once the bucket's deletion may have reached the lock, nothing more is written.
+ */
 async function operateOrFail(
   deps: TeardownDependencies,
   teardown: Teardown,
@@ -471,12 +587,15 @@ async function operateOrFail(
   progress: Progress,
 ): Promise<FactoryTeardown> {
   try {
-    if (deps.interrupted()) return interruptedUnder(log);
+    if (deps.interrupted()) return interruptedUnder(log, progress);
     return await operate(deps, teardown, log, progress);
   } catch (error) {
-    if (deps.interrupted()) return interruptedUnder(log);
+    if (deps.interrupted()) return interruptedUnder(log, progress);
+    if (progress.lock !== undefined && progress.lock !== "held") log.seal();
     const refusal = teardownFailed(reasonOf(error));
-    return progress.destroying ? partialUnder(log, refusal) : failedUnder(log, refusal);
+    return progress.stop === undefined
+      ? failedUnder(log, progress, refusal)
+      : partialUnder(log, progress, refusal);
   }
 }
 
@@ -484,8 +603,13 @@ async function operateOrFail(
 interface Inventory {
   readonly machines: readonly Machine[];
   readonly vpcIds: readonly string[];
-  readonly devices: readonly TailnetDevice[];
+  /** The tailnet's devices; undefined when the admin client is already gone: not checked. */
+  readonly devices: readonly TailnetDevice[] | undefined;
   readonly secrets: SecretInventory;
+  /** The secrets kept (`keptSecrets`), `unlisted` without those already absent. */
+  readonly kept: KeptSecrets;
+  /** References under `<id>/` the listing did not find and DescribeSecret no longer finds. */
+  readonly absent: readonly SecretReference[];
 }
 
 /** The admin session, then the inventory, then the destroy plan in a plan directory of its own. */
@@ -497,34 +621,41 @@ async function operate(
 ): Promise<FactoryTeardown> {
   await log.start();
   const admin = await authorize(deps, teardown);
-  if (deps.interrupted()) return interruptedUnder(log);
-  if (admin.kind === "refused") return refusedUnder(log, [admin.refusal]);
+  if (deps.interrupted()) return interruptedUnder(log, progress);
+  if (admin.kind === "refused") return refusedUnder(log, progress, [admin.refusal]);
   await log.stage("inventorying");
-  const listing = await listInventory(deps, teardown, admin.session);
-  if (deps.interrupted()) return interruptedUnder(log);
-  if (listing.kind === "refused") return refusedUnder(log, listing.refusals);
+  const session = admin.kind === "open" ? admin.session : undefined;
+  const listing = await listInventory(deps, teardown, session);
+  if (deps.interrupted()) return interruptedUnder(log, progress);
+  if (listing.kind === "refused") return refusedUnder(log, progress, listing.refusals);
+  progress.secrets = listing.inventory.secrets.owned.map(({ name }) => name);
   const { factoryId } = teardown;
   const planId = newPlanId(teardown.request.randomBytes);
   const files = await deps.planStore.create(factoryId, planId);
   try {
-    const run = { inventory: listing.inventory, admin: admin.session, progress };
+    const run = { inventory: listing.inventory, admin: session, progress };
     return await planned(deps, teardown, log, run, files.factory);
   } finally {
     // Once the bucket is gone the plans went before it (`removeAll`): nothing after the
-    // bucket's deletion may turn a finished teardown into a failure.
-    if (!log.gone()) await deps.planStore.remove(factoryId, planId);
+    // bucket's deletion may turn a finished teardown into a failure. Nor may this plan's
+    // directory, which no record names and the next teardown's `removeAll` removes: a removal
+    // that fails is left at that, never overwriting how the run ended.
+    if (!log.gone()) await deps.planStore.remove(factoryId, planId).catch(() => undefined);
   }
 }
 
 /**
  * The factory's tailnet admin session, opened before anything is listed, so a client that
- * cannot delete its devices refuses the teardown instead of leaving them behind.
+ * cannot delete its devices refuses the teardown instead of leaving them behind; or `gone`, the
+ * admin client's secret deleted as an earlier teardown leaves it (`adminClientGone`), which
+ * `planned` accepts only once nothing else of the factory but what follows the devices is left.
  */
 async function authorize(
   deps: TeardownDependencies,
   teardown: Teardown,
 ): Promise<
   | { readonly kind: "open"; readonly session: TailnetAdminSession }
+  | { readonly kind: "gone" }
   | { readonly kind: "refused"; readonly refusal: Refusal }
 > {
   const opening = await openTailnetAdmin(deps, {
@@ -533,8 +664,12 @@ async function authorize(
     credentials: teardown.request.credentials,
   });
   switch (opening.kind) {
-    case "unreadable":
-      return { kind: "refused", refusal: teardownAdminSecretUnreadable(opening.reason) };
+    case "unreadable": {
+      const presence = await adminClientPresence(deps, teardown);
+      if (presence === "absent") return { kind: "gone" };
+      const found = presence === "present";
+      return { kind: "refused", refusal: teardownAdminSecretUnreadable(opening.reason, found) };
+    }
     case "unusable":
       return { kind: "refused", refusal: teardownAdminClientUnusable(opening.reason) };
     case "open":
@@ -543,19 +678,65 @@ async function authorize(
   }
 }
 
+/**
+ * Whether the admin client's secret, unreadable, is gone as only teardown deletes it: `absent`
+ * when named under the factory's names (`<id>/`) and no longer found by DescribeSecret in the
+ * Region its ARN names (`secretRegion`; asked anywhere else, its absence would prove nothing).
+ * A look that fails (`failed`), or finds it (`present`, perhaps pending deletion), is no proof:
+ * the read's failure stands. Undefined when it is not under the factory's names: not looked for.
+ */
+async function adminClientPresence(
+  deps: TeardownDependencies,
+  teardown: Teardown,
+): Promise<SecretPresence["kind"] | undefined> {
+  const reference = teardown.adminClient;
+  if (!underFactoryNames(teardown.factoryId, reference)) return undefined;
+  const presence = await deps.secrets.exists({
+    reference,
+    region: secretRegion(reference),
+    credentials: teardown.request.credentials,
+  });
+  return presence.kind;
+}
+
+/**
+ * The secrets teardown keeps, and the references under `<id>/` the listing did not find that
+ * DescribeSecret no longer finds either: already absent, as a rerun finds them. One still
+ * found, or whose look failed, stays `unlisted`.
+ */
+async function sortedSecrets(
+  deps: TeardownDependencies,
+  teardown: Teardown,
+  secrets: SecretInventory,
+): Promise<Pick<Inventory, "kept" | "absent">> {
+  const kept = keptSecrets(teardown.factoryId, secrets);
+  const { credentials } = teardown.request;
+  const looks = await Promise.all(
+    kept.unlisted.map((reference) =>
+      deps.secrets.exists({ reference, region: secretRegion(reference), credentials }),
+    ),
+  );
+  const gone = (index: number) => looks[index]?.kind === "absent";
+  return {
+    kept: { ...kept, unlisted: kept.unlisted.filter((_, index) => !gone(index)) },
+    absent: kept.unlisted.filter((_, index) => gone(index)),
+  };
+}
+
 type Listing =
   | { readonly kind: "listed"; readonly inventory: Inventory }
   | { readonly kind: "refused"; readonly refusals: readonly Refusal[] };
 
 /**
- * The factory's tagged instances and VPCs, its secrets and the tailnet's devices. A listing
- * that fails refuses: it is never taken for one that found nothing. A worker's machine on its
- * way to running or stopped refuses too, before anything is asked.
+ * The factory's tagged instances and VPCs, its secrets and the tailnet's devices (none
+ * without an admin session: not checked). A listing that fails refuses: it is never taken for
+ * one that found nothing. A worker's machine on its way to running or stopped refuses too,
+ * before anything is asked.
  */
 async function listInventory(
   deps: TeardownDependencies,
   teardown: Teardown,
-  admin: TailnetAdminSession,
+  admin: TailnetAdminSession | undefined,
 ): Promise<Listing> {
   const { credentials } = teardown.request;
   const { region, factoryId } = teardown;
@@ -563,7 +744,7 @@ async function listInventory(
     deps.machines.list(credentials, region, factoryId),
     deps.machines.listVpcs(credentials, region, factoryId),
     deps.secrets.list({ factoryId, region, credentials }),
-    admin.devices(),
+    admin === undefined ? ({ kind: "unchecked" } as const) : admin.devices(),
   ]);
   const refused = (refusal: Refusal): Listing => ({ kind: "refused", refusals: [refusal] });
   if (machines.kind === "unavailable")
@@ -573,17 +754,19 @@ async function listInventory(
   if (devices.kind === "failed") return refused(inventoryUnavailable("devices", devices.reason));
   const passing = machines.machines.flatMap((machine) => inPassing(teardown, machine));
   if (passing.length > 0) return { kind: "refused", refusals: passing };
+  const classified = classifySecrets(
+    factoryId,
+    secrets.secrets,
+    secretReferences(teardown.request.instance),
+  );
   return {
     kind: "listed",
     inventory: {
       machines: machines.machines,
       vpcIds: vpcs.vpcIds,
-      devices: devices.devices,
-      secrets: classifySecrets(
-        factoryId,
-        secrets.secrets,
-        secretReferences(teardown.request.instance),
-      ),
+      devices: devices.kind === "unchecked" ? undefined : devices.devices,
+      secrets: classified,
+      ...(await sortedSecrets(deps, teardown, classified)),
     },
   };
 }
@@ -617,13 +800,16 @@ type DestroyPlanning =
       readonly kind: "failed";
       readonly refusal: Refusal;
       readonly diagnosticsFile: string | undefined;
-    };
+    }
+  /** Interrupted between its Terraform commands: no further one was started. */
+  | { readonly kind: "interrupted" };
 
 /**
  * The guarded destroy plan (`docs/specs/provisioning.md` §Destroy plan): `plan -destroy` of the
  * factory root, under Terraform's state lock, with factory.json projected with the host keys
  * the state records, judged by `destroyPlanRefusal` over the instances EC2 lists, and refused
- * when Terraform's exit code and its JSON plan disagree.
+ * when Terraform's exit code and its JSON plan disagree. Once interrupted, it starts no further
+ * Terraform command.
  */
 async function planDestroy(
   deps: TeardownDependencies,
@@ -631,9 +817,12 @@ async function planDestroy(
   planFile: string,
   machines: readonly Machine[],
 ): Promise<DestroyPlanning> {
+  const interrupted = { kind: "interrupted" } as const;
   try {
     const target = factoryTarget(teardown.bucket, await deps.terraformDirectory());
+    if (deps.interrupted()) return interrupted;
     const recorded = recordedHostKeys(await deps.provisioner.output(target));
+    if (deps.interrupted()) return interrupted;
     if (recorded === undefined) return { kind: "refused", refusal: destroyKeysUnreadable() };
     const projection = projectFactoryVariables(teardown.request.instance, recorded);
     if (!projection.ok)
@@ -645,6 +834,7 @@ async function planDestroy(
       stateLock: true,
       destroy: true,
     });
+    if (deps.interrupted()) return interrupted;
     const shown = await deps.provisioner.showPlan(saved);
     const changes = resourceChanges(shown) ?? [];
     const refusal = destroyPlanRefusal(shown, machines) ?? destroyPlanMismatch(applies, changes);
@@ -662,7 +852,8 @@ async function planDestroy(
 /** One teardown's findings as it goes on. */
 interface Run {
   readonly inventory: Inventory;
-  readonly admin: TailnetAdminSession;
+  /** Undefined when the admin client is already gone: the devices are not checked. */
+  readonly admin: TailnetAdminSession | undefined;
   readonly progress: Progress;
 }
 
@@ -683,19 +874,19 @@ async function planned(
   planFile: string,
 ): Promise<FactoryTeardown> {
   await log.stage("planning");
-  if (deps.interrupted()) return interruptedUnder(log);
+  if (deps.interrupted()) return interruptedUnder(log, run.progress);
   const planning = await planDestroy(deps, teardown, planFile, run.inventory.machines);
-  if (deps.interrupted()) return interruptedUnder(log);
-  if (planning.kind === "refused") return refusedUnder(log, [planning.refusal]);
-  if (planning.kind === "failed")
-    return failedUnder(log, planning.refusal, planning.diagnosticsFile);
+  if (planning.kind !== "planned") return unplanned(deps, log, run.progress, planning);
+  if (deps.interrupted()) return interruptedUnder(log, run.progress);
+  if (run.admin === undefined && remainsBeforeDevices(run.inventory, planning))
+    return refusedUnder(log, run.progress, [teardownAdminClientGone()]);
   const keys = [
     ...(teardown.request.instance.hosts ?? []).map(({ key }) => key),
     ...planning.recorded,
     ...run.inventory.machines.flatMap(({ hostKey }) => (hostKey === undefined ? [] : [hostKey])),
   ];
   const devices = selectFactoryDevices(
-    run.inventory.devices,
+    run.inventory.devices ?? [],
     teardown.factoryId,
     keys,
     teardown.tag,
@@ -706,10 +897,36 @@ async function planned(
     keys,
     shownDeleted: devices.deleted.map(({ id }) => id),
   };
+  run.progress.devices = run.admin === undefined ? "unchecked" : next.shownDeleted;
   deps.progress({ kind: "review", review: reviewOf(teardown, next, devices) });
-  const ended = await unconfirmed(deps, teardown, log);
+  const ended = await unconfirmed(deps, teardown, log, run.progress);
   if (ended !== undefined) return ended;
   return gated(deps, teardown, log, next);
+}
+
+/** How a destroy plan that was not made ends the teardown: interrupted, refused or failed. */
+async function unplanned(
+  deps: TeardownDependencies,
+  log: TeardownLog,
+  progress: Progress,
+  planning: Exclude<DestroyPlanning, { readonly kind: "planned" }>,
+): Promise<FactoryTeardown> {
+  if (planning.kind === "interrupted" || deps.interrupted()) return interruptedUnder(log, progress);
+  if (planning.kind === "refused") return refusedUnder(log, progress, [planning.refusal]);
+  return failedUnder(log, progress, planning.refusal, planning.diagnosticsFile);
+}
+
+/**
+ * Whether anything teardown removes before its devices remains: instances or VPCs tagged with
+ * the factory ID, or resources its state holds. An earlier teardown deletes the admin client
+ * only once none does; with the admin client gone while one does, the devices could not be
+ * deleted after it, so the teardown is refused.
+ */
+function remainsBeforeDevices(
+  inventory: Inventory,
+  planning: Extract<DestroyPlanning, { readonly kind: "planned" }>,
+): boolean {
+  return inventory.machines.length > 0 || inventory.vpcIds.length > 0 || planning.applies;
 }
 
 /** What will be removed and kept, as shown before the confirmation. */
@@ -730,9 +947,11 @@ function reviewOf(teardown: Teardown, run: Planned, devices: FactoryDevices): Te
     machines: shownMachines(inventory.machines),
     vpcIds: inventory.vpcIds,
     devices: shownDevices(teardown.factoryId, devices),
+    devicesUnchecked: run.admin === undefined ? DEVICES_NOT_CHECKED : undefined,
     secrets: {
       owned: inventory.secrets.owned.map(({ name, arn }) => ({ name, arn })),
-      kept: keptSecrets(teardown.factoryId, inventory.secrets),
+      absent: inventory.absent,
+      kept: inventory.kept,
     },
     bucket: teardown.bucket.bucket,
   };
@@ -747,11 +966,12 @@ async function unconfirmed(
   deps: TeardownDependencies,
   teardown: Teardown,
   log: TeardownLog,
+  progress: Progress,
 ): Promise<FactoryTeardown | undefined> {
   if (!teardown.asks) return undefined;
   await log.stage("awaiting_approval");
   const answer = await deps.prompt.ask(teardownQuestion(teardown.factoryId));
-  if (deps.interrupted()) return interruptedUnder(log);
+  if (deps.interrupted()) return interruptedUnder(log, progress);
   if (typedIdConfirms(answer, teardown.factoryId)) return undefined;
   const recordFailure = await log.finish("declined", "declined");
   return { kind: "declined", operation: log.location, recordFailure };
@@ -792,20 +1012,21 @@ async function gated(
   log: TeardownLog,
   run: Planned,
 ): Promise<FactoryTeardown> {
+  const { progress } = run;
   await log.stage("stopping_dispatch");
-  if (deps.interrupted()) return interruptedUnder(log);
+  if (deps.interrupted()) return interruptedUnder(log, progress);
   const running = runningWorkers(teardown, run.inventory.machines);
-  const stopping = await stopDispatchEverywhere(deps, teardown, log, running);
-  if (deps.interrupted()) return interruptedUnder(log);
-  if (stopping.refusals.length > 0) return refusedUnder(log, stopping.refusals, stopping.stopped);
+  const refused = await stopDispatchEverywhere(deps, teardown, log, running, progress);
+  if (deps.interrupted()) return interruptedUnder(log, progress);
+  if (refused.length > 0) return refusedUnder(log, progress, refused);
   await log.stage("inspecting");
-  if (deps.interrupted()) return interruptedUnder(log);
+  if (deps.interrupted()) return interruptedUnder(log, progress);
   const changed = await machinesRechecked(deps, teardown, run.inventory.machines);
-  if (deps.interrupted()) return interruptedUnder(log);
-  if (changed !== undefined) return refusedUnder(log, [changed], stopping.stopped);
+  if (deps.interrupted()) return interruptedUnder(log, progress);
+  if (changed !== undefined) return refusedUnder(log, progress, [changed]);
   const refusals = await gateRefusals(deps, teardown, run.inventory.machines, running);
-  if (refusals === undefined || deps.interrupted()) return interruptedUnder(log);
-  if (refusals.length > 0) return refusedUnder(log, refusals, stopping.stopped);
+  if (refusals === undefined || deps.interrupted()) return interruptedUnder(log, progress);
+  if (refusals.length > 0) return refusedUnder(log, progress, refusals);
   return destroy(deps, teardown, log, run);
 }
 
@@ -827,17 +1048,18 @@ async function machinesRechecked(
 
 /**
  * Stops dispatch on every running worker the tailnet locates (`stopDispatch`), recording each
- * outcome; one it does not locate is left to the gates, which refuse it. A stop that failed
- * refuses the teardown, naming the worker.
+ * outcome, and each worker stopped in `progress` as it is, so whatever ends the run names it;
+ * one it does not locate is left to the gates, which refuse it. A stop that failed refuses the
+ * teardown, naming the worker: its refusals.
  */
 async function stopDispatchEverywhere(
   deps: TeardownDependencies,
   teardown: Teardown,
   log: TeardownLog,
   running: readonly RunningWorker[],
-): Promise<{ readonly stopped: readonly string[]; readonly refusals: readonly Refusal[] }> {
+  progress: Progress,
+): Promise<readonly Refusal[]> {
   const view = await deps.peers.view();
-  const stopped: string[] = [];
   const refusals: Refusal[] = [];
   const outcomes: Parameters<TeardownLog["dispatch"]>[0][number][] = [];
   for (const each of running) {
@@ -851,12 +1073,12 @@ async function stopDispatchEverywhere(
       refusals.push(dispatchNotStopped(worker, stop.reason, actionsFor(each)));
       outcomes.push({ ...worker, kind: "failed", summary: stop.reason });
     } else {
-      stopped.push(worker.hostname);
+      progress.dispatchStopped.push(worker.hostname);
       outcomes.push({ ...worker, kind: "not_requested" });
     }
   }
   if (outcomes.length > 0) await log.dispatch(outcomes);
-  return { stopped, refusals };
+  return refusals;
 }
 
 /** Says that each stopped worker passes the gates uninspected, as it does for terminate. */
@@ -913,33 +1135,39 @@ async function destroy(
   log: TeardownLog,
   run: Planned,
 ): Promise<FactoryTeardown> {
+  const { progress } = run;
   await log.stage("applying");
-  if (deps.interrupted()) return interruptedUnder(log);
+  if (deps.interrupted()) return interruptedUnder(log, progress);
   deps.progress({ kind: "destroying" });
-  run.progress.destroying = true;
+  progress.stop = "destroy";
   if (run.planning.applies) {
     try {
       await deps.provisioner.applyPlan(run.planning.saved);
     } catch (error) {
-      if (deps.interrupted()) return interruptedUnder(log);
-      return partialUnder(log, destroyApplyFailed(reasonOf(error)), diagnosticsFileOf(error));
+      if (deps.interrupted()) return interruptedUnder(log, progress);
+      const failed = destroyApplyFailed(reasonOf(error));
+      return partialUnder(log, progress, failed, diagnosticsFileOf(error));
     }
   }
+  progress.stop = "leftovers";
   await log.stage("verifying");
-  if (deps.interrupted()) return interruptedUnder(log);
-  const leftover = await leftovers(deps, teardown);
-  if (deps.interrupted()) return interruptedUnder(log);
-  if (leftover !== undefined) return partialUnder(log, leftover);
+  if (deps.interrupted()) return interruptedUnder(log, progress);
+  const leftover = await leftovers(deps, teardown, run.planning);
+  if (deps.interrupted()) return interruptedUnder(log, progress);
+  if (leftover !== undefined) return partialUnder(log, progress, leftover);
   return removeDevices(deps, teardown, log, run);
 }
 
 /**
- * Why the factory cannot be taken for destroyed: EC2 still lists instances or VPCs tagged with
- * its ID, outside its Terraform state, or cannot list them. Undefined when it lists none.
+ * Why the factory cannot be taken for destroyed (D12): EC2 still lists instances or VPCs tagged
+ * with its ID, outside its Terraform state, or cannot list them; or, once the destroy applied,
+ * the state still records host keys, or cannot be read. Undefined when nothing is left, and
+ * once interrupted, which the caller checks first: no Terraform command starts after it.
  */
 async function leftovers(
   deps: TeardownDependencies,
   teardown: Teardown,
+  planning: Extract<DestroyPlanning, { readonly kind: "planned" }>,
 ): Promise<Refusal | undefined> {
   const { credentials } = teardown.request;
   const { region, factoryId } = teardown;
@@ -949,13 +1177,18 @@ async function leftovers(
   ]);
   if (machines.kind === "unavailable") return leftoversUnverified("instances", machines.reason);
   if (vpcs.kind === "unavailable") return leftoversUnverified("vpcs", vpcs.reason);
-  if (machines.machines.length === 0 && vpcs.vpcIds.length === 0) return undefined;
-  return leftoversRemain(machines.machines, vpcs.vpcIds);
+  if (machines.machines.length > 0 || vpcs.vpcIds.length > 0)
+    return leftoversRemain(machines.machines, vpcs.vpcIds);
+  if (!planning.applies || deps.interrupted()) return undefined;
+  const recorded = recordedHostKeys(await deps.provisioner.output(planning.saved));
+  if (recorded === undefined) return destroyKeysUnreadable();
+  return recorded.length > 0 ? stateStillRecords(recorded) : undefined;
 }
 
 /**
  * Deletes the factory's tailnet devices (D9), listed afresh; any left behind stops the run with
- * the secrets kept, the admin client among them, so a rerun can delete them.
+ * the secrets kept, the admin client among them, so a rerun can delete them. With the admin
+ * client already gone, they are not checked (`DEVICES_NOT_CHECKED`), and the run goes on.
  */
 async function removeDevices(
   deps: TeardownDependencies,
@@ -963,11 +1196,16 @@ async function removeDevices(
   log: TeardownLog,
   run: Planned,
 ): Promise<FactoryTeardown> {
+  const { progress, admin } = run;
+  progress.stop = "devices";
+  if (admin === undefined)
+    return removeSecrets(deps, teardown, log, run, { removed: [], possible: [], untagged: [] });
   await log.stage("removing_devices");
-  if (deps.interrupted()) return interruptedUnder(log);
+  if (deps.interrupted()) return interruptedUnder(log, progress);
   deps.progress({ kind: "removing_devices" });
-  const listing = await run.admin.devices();
-  if (listing.kind === "failed") return partialUnder(log, devicesRemain([], listing.reason));
+  const listing = await admin.devices();
+  if (listing.kind === "failed")
+    return partialUnder(log, progress, devicesRemain([], listing.reason));
   const selection = selectFactoryDevices(
     listing.devices,
     teardown.factoryId,
@@ -975,14 +1213,41 @@ async function removeDevices(
     teardown.tag,
     run.shownDeleted,
   );
-  const { removed, failed } = await deleteDevices(run.admin, selection.deleted, deps.interrupted);
-  if (deps.interrupted()) return interruptedUnder(log);
-  if (failed.length > 0) return partialUnder(log, devicesRemain(failed, undefined));
   const { possible, untagged } = shownDevices(teardown.factoryId, selection);
+  progress.listedDevices = { possible, untagged };
+  const { removed, failed } = await deleteDevices(admin, selection.deleted, deps.interrupted);
+  progress.devices = selection.deleted.map(({ id }) => id).filter((id) => !removed.includes(id));
+  if (deps.interrupted()) return interruptedUnder(log, progress);
+  if (failed.length > 0) return partialUnder(log, progress, devicesRemain(failed, undefined));
   return removeSecrets(deps, teardown, log, run, { removed, possible, untagged });
 }
 
 type DevicesRemoved = TeardownReport["devices"];
+
+/**
+ * Deletes each owned secret in turn (`deleteOwnedSecret`), keeping `progress.secrets` to those
+ * not yet confirmed gone, until an interrupt: those that remain, and why.
+ */
+async function deleteSecrets(
+  deps: TeardownDependencies,
+  teardown: Teardown,
+  run: Planned,
+): Promise<{ readonly name: string; readonly reason: string }[]> {
+  const { clock, credentials } = teardown.request;
+  const remaining: { readonly name: string; readonly reason: string }[] = [];
+  const left = new Set(run.inventory.secrets.owned.map(({ name }) => name));
+  for (const secret of run.inventory.secrets.owned) {
+    if (deps.interrupted()) break;
+    const deletion = await deleteOwnedSecret(
+      { secrets: deps.secrets, clock, sleep: deps.sleep, interrupted: deps.interrupted },
+      { secret, credentials },
+    );
+    if (deletion.kind === "remains") remaining.push({ name: secret.name, reason: deletion.reason });
+    else left.delete(secret.name);
+    run.progress.secrets = [...left];
+  }
+  return remaining;
+}
 
 /** Deletes every owned secret permanently and confirms it gone (D7, D8). */
 async function removeSecrets(
@@ -992,59 +1257,63 @@ async function removeSecrets(
   run: Planned,
   devices: DevicesRemoved,
 ): Promise<FactoryTeardown> {
+  const { progress, inventory } = run;
+  progress.stop = "secrets";
   await log.stage("removing_secrets");
-  if (deps.interrupted()) return interruptedUnder(log);
+  if (deps.interrupted()) return interruptedUnder(log, progress);
   deps.progress({ kind: "removing_secrets" });
-  const { clock } = teardown.request;
-  const remaining: { readonly name: string; readonly reason: string }[] = [];
-  for (const secret of run.inventory.secrets.owned) {
-    if (deps.interrupted()) return interruptedUnder(log);
-    const deletion = await deleteOwnedSecret(
-      { secrets: deps.secrets, clock, sleep: deps.sleep, interrupted: deps.interrupted },
-      { secret, credentials: teardown.request.credentials },
-    );
-    if (deletion.kind === "remains") remaining.push({ name: secret.name, reason: deletion.reason });
-  }
-  if (deps.interrupted()) return interruptedUnder(log);
-  if (remaining.length > 0) return partialUnder(log, secretsRemain(remaining));
+  const remaining = await deleteSecrets(deps, teardown, run);
+  if (deps.interrupted()) return interruptedUnder(log, progress);
+  if (remaining.length > 0) return partialUnder(log, progress, secretsRemain(remaining));
   const report: TeardownReport = {
     infrastructure: run.planning.applies ? "destroyed" : "absent",
     changes: run.planning.changes,
-    machines: shownMachines(run.inventory.machines),
+    machines: shownMachines(inventory.machines),
     devices,
+    devicesUnchecked: run.admin === undefined ? DEVICES_NOT_CHECKED : undefined,
     secrets: {
-      removed: run.inventory.secrets.owned.map(({ name }) => name),
-      kept: keptSecrets(teardown.factoryId, run.inventory.secrets),
+      removed: inventory.secrets.owned.map(({ name }) => name),
+      absent: inventory.absent,
+      kept: inventory.kept,
     },
     bucket: teardown.bucket.bucket,
   };
-  return removeLast(deps, teardown, log, report);
+  return removeLast(deps, teardown, log, progress, report);
 }
 
 /**
  * The local saved plans, then the state bucket (D6). On `absent` the lock and the record went
  * with it: nothing more is written, and the lock is not released. A bucket that remains with
  * the lock held ends recorded, and the lock is released; once its lock's versions were being
- * deleted, nothing more is written into it.
+ * deleted, nothing more is written into it. From the deletion's start, `progress.lock` says
+ * what became of the lock: `unknown` while S3 is asked, then the deletion's answer.
  */
 async function removeLast(
   deps: TeardownDependencies,
   teardown: Teardown,
   log: TeardownLog,
+  progress: Progress,
   report: TeardownReport,
 ): Promise<FactoryTeardown> {
+  progress.stop = "plans";
   await log.stage("removing_plans");
-  if (deps.interrupted()) return interruptedUnder(log);
+  if (deps.interrupted()) return interruptedUnder(log, progress);
   await deps.planStore.removeAll(teardown.factoryId);
+  progress.stop = "bucket";
   await log.stage("deleting_bucket");
-  if (deps.interrupted()) return interruptedUnder(log);
+  if (deps.interrupted()) return interruptedUnder(log, progress);
   deps.progress({ kind: "deleting_bucket", bucket: teardown.bucket.bucket });
-  // TODO(re-evaluate when #86 lands): pass `interrupted`, so no DeleteObjects call starts once set.
-  const deletion: BucketDeletion = await deps.lockStore.deleteBucket(teardown.bucket);
+  progress.lock = "unknown";
+  const deletion: BucketDeletion = await deps.lockStore.deleteBucket(
+    teardown.bucket,
+    deps.interrupted,
+  );
   if (deletion.kind === "absent") {
     log.deleted();
     return { kind: "done", report };
   }
+  progress.lock = deletion.lock;
   if (deletion.lock !== "held") log.seal();
-  return partialUnder(log, bucketRemains(teardown.bucket.bucket, deletion));
+  if (deps.interrupted()) return interruptedUnder(log, progress);
+  return partialUnder(log, progress, bucketRemains(teardown.bucket.bucket, deletion));
 }

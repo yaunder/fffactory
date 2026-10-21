@@ -1,5 +1,9 @@
 import type { S3ClientConfig } from "@aws-sdk/client-s3";
-import type { LockStore, StateBucket } from "../application/lock-store";
+import {
+  type LockStore,
+  type StateBucket,
+  StateBucketUnreachable,
+} from "../application/lock-store";
 import { deniesInsecureTransport, type StateBucketReadiness } from "../domain/backend-bootstrap";
 import {
   type HeldLock,
@@ -14,6 +18,7 @@ import { FACTORY_STATE_KEY } from "../domain/plan";
 import {
   type BucketDeletion,
   DELETE_OBJECTS_LIMIT,
+  DELETION_INTERRUPTED,
   deletionBatches,
   type ListedVersion,
   type LockAfterDeletion,
@@ -324,19 +329,18 @@ async function readiness(calls: S3Calls, bucket: StateBucket): Promise<StateBuck
 /** A conditional write refused because the object exists, or another write to it is in flight. */
 const REFUSED_WRITES = new Set(["PreconditionFailed", "ConditionalRequestConflict"]);
 
+/** HeadBucket's 403, told apart from every other failure outside the AWS session. */
+const UNREACHABLE = "unreachable";
+
 /**
- * A failed HeadBucket: false when the bucket does not exist, a refusal when it exists out of
- * the factory's reach. Its answers have no body, so the SDK can name only a 404: the HTTP
- * status tells them apart.
+ * A failed HeadBucket: false when the bucket does not exist, `UNREACHABLE` when it exists out
+ * of the factory's reach (403), a refusal otherwise. Its answers have no body, so the SDK can
+ * name only a 404: the HTTP status tells them apart.
  */
-function headBucketFailure(error: unknown, bucket: StateBucket): false {
+function headBucketFailure(error: unknown, bucket: StateBucket): false | typeof UNREACHABLE {
   const status = httpStatus(error);
   if (status === 404) return false;
-  if (status === 403)
-    throw new AdapterRefusal(
-      `The state bucket ${bucket.bucket} is not accessible in account ${bucket.accountId}: ` +
-        "it belongs to another account, or these credentials may not reach it (S3 answered 403)",
-    );
+  if (status === 403) return UNREACHABLE;
   if (status === 301)
     throw new AdapterRefusal(
       `The state bucket ${bucket.bucket} exists outside the factory Region ${bucket.region} ` +
@@ -480,22 +484,41 @@ export function s3LockStore(
   }
 
   /**
+   * One DeleteObjects call, its answer counted in `tally`: what is left once it fails or finds
+   * the bucket gone, undefined otherwise.
+   */
+  async function deleteBatch(
+    bucket: StateBucket,
+    batch: readonly ObjectVersion[],
+    tally: Tally,
+    lock: LockAfterDeletion,
+  ): Promise<BucketDeletion | undefined> {
+    const answer = await step(bucket, "DeleteObjects", (calls) =>
+      calls.deleteObjects(bucket.bucket, bucket.accountId, batch),
+    );
+    if (answer.kind === "gone") return { kind: "absent" };
+    if (answer.kind === "failed") return remains(tally, answer.reason, lock);
+    count(tally, batch, answer.value);
+    return undefined;
+  }
+
+  /**
    * Deletes a group's batches in turn, each even after S3 refused a version in another, and
-   * counts what is left in `tally`; what is left once a call fails or finds the bucket gone.
+   * counts what is left in `tally`; what is left once a call fails or finds the bucket gone, or
+   * once interrupted before a call: then the lock is `held`, since the lock's current version
+   * goes alone in the last call of all.
    */
   async function deleteGroup(
     bucket: StateBucket,
     group: readonly (readonly ObjectVersion[])[],
     tally: Tally,
     lock: LockAfterDeletion,
+    interrupted: () => boolean,
   ): Promise<BucketDeletion | undefined> {
     for (const batch of group) {
-      const answer = await step(bucket, "DeleteObjects", (calls) =>
-        calls.deleteObjects(bucket.bucket, bucket.accountId, batch),
-      );
-      if (answer.kind === "gone") return { kind: "absent" };
-      if (answer.kind === "failed") return remains(tally, answer.reason, lock);
-      count(tally, batch, answer.value);
+      if (interrupted()) return remains(tally, DELETION_INTERRUPTED, "held");
+      const stopped = await deleteBatch(bucket, batch, tally, lock);
+      if (stopped) return stopped;
     }
     return undefined;
   }
@@ -503,14 +526,16 @@ export function s3LockStore(
   /**
    * Lists one page and deletes its other keys, even after S3 refused a version on an earlier
    * page, and sets the lock's versions aside in `lock`: where the next page starts, or what is
-   * left once a call fails or finds the bucket gone.
+   * left once a call fails or finds the bucket gone, or once interrupted.
    */
   async function deletePage(
     bucket: StateBucket,
     from: VersionMarker | undefined,
     tally: Tally,
     lock: ListedVersion[],
+    interrupted: () => boolean,
   ): Promise<BucketDeletion | { readonly next: VersionMarker | undefined }> {
+    if (interrupted()) return remains(tally, DELETION_INTERRUPTED, "held");
     const page = await step(bucket, "ListObjectVersions", (calls) => listPage(calls, bucket, from));
     if (page.kind === "gone") return { kind: "absent" };
     if (page.kind === "failed") return remains(tally, page.reason, "held");
@@ -519,7 +544,7 @@ export function s3LockStore(
     tally.complete = next === undefined;
     const batches = deletionBatches(bucket.factoryId, versions);
     lock.push(...batches.lock);
-    return (await deleteGroup(bucket, batches.others, tally, "held")) ?? { next };
+    return (await deleteGroup(bucket, batches.others, tally, "held", interrupted)) ?? { next };
   }
 
   /**
@@ -530,11 +555,12 @@ export function s3LockStore(
   async function deletePages(
     bucket: StateBucket,
     tally: Tally,
+    interrupted: () => boolean,
   ): Promise<BucketDeletion | { readonly lock: readonly ListedVersion[] }> {
     const lock: ListedVersion[] = [];
     let marker: VersionMarker | undefined;
     do {
-      const deleted = await deletePage(bucket, marker, tally, lock);
+      const deleted = await deletePage(bucket, marker, tally, lock, interrupted);
       if ("kind" in deleted) return deleted;
       marker = deleted.next;
     } while (marker !== undefined);
@@ -551,9 +577,10 @@ export function s3LockStore(
     bucket: StateBucket,
     lock: readonly ListedVersion[],
     tally: Tally,
+    interrupted: () => boolean,
   ): Promise<BucketDeletion | undefined> {
     for (const batch of lockBatches(lock)) {
-      const stopped = await deleteGroup(bucket, [batch], tally, "unknown");
+      const stopped = await deleteGroup(bucket, [batch], tally, "unknown", interrupted);
       if (stopped) return stopped;
       if (tally.codes.size > 0) return remains(tally, undefined, "unknown");
     }
@@ -561,10 +588,21 @@ export function s3LockStore(
   }
 
   /**
-   * DeleteBucket on the emptied bucket, the lock's versions deleted. A refusal for versions
-   * written since is no count.
+   * DeleteBucket on the emptied bucket, the lock's versions deleted, unless interrupted. A
+   * refusal for versions written since is no count.
    */
-  async function deleteEmptied(bucket: StateBucket): Promise<BucketDeletion> {
+  async function deleteEmptied(
+    bucket: StateBucket,
+    interrupted: () => boolean,
+  ): Promise<BucketDeletion> {
+    if (interrupted())
+      return {
+        kind: "remains",
+        versions: 0,
+        codes: [],
+        failure: DELETION_INTERRUPTED,
+        lock: "deleted",
+      };
     const notEmpty = "BucketNotEmpty";
     const answer = await step(bucket, "DeleteBucket", async (calls) => {
       try {
@@ -656,15 +694,18 @@ export function s3LockStore(
   }
 
   return {
-    bucketExists: (bucket) =>
-      session(bucket, "HeadBucket", async (calls) => {
+    async bucketExists(bucket) {
+      const exists = await session(bucket, "HeadBucket", async (calls) => {
         try {
           await calls.headBucket(bucket.bucket, bucket.accountId);
           return true;
         } catch (error) {
           return headBucketFailure(error, bucket);
         }
-      }),
+      });
+      if (exists !== UNREACHABLE) return exists;
+      throw new StateBucketUnreachable(bucket.bucket, bucket.accountId);
+    },
 
     create: (bucket, record: LockRecord) =>
       session(bucket, "PutObject", async (calls) => {
@@ -716,12 +757,15 @@ export function s3LockStore(
         }
       }),
 
-    async deleteBucket(bucket) {
+    async deleteBucket(bucket, interrupted) {
       const tally: Tally = { left: 0, complete: false, codes: new Set() };
-      const listed = await deletePages(bucket, tally);
+      const listed = await deletePages(bucket, tally, interrupted);
       if ("kind" in listed) return listed;
       if (tally.codes.size > 0) return remains(tally, undefined, "held");
-      return (await deleteLock(bucket, listed.lock, tally)) ?? deleteEmptied(bucket);
+      return (
+        (await deleteLock(bucket, listed.lock, tally, interrupted)) ??
+        deleteEmptied(bucket, interrupted)
+      );
     },
 
     logBreak: (bucket, key, entry: LockBreakEntry) =>

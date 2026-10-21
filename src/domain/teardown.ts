@@ -24,6 +24,7 @@ import {
   parseHostKey,
   type SecretReference,
 } from "./instance";
+import type { StageStatus } from "./operation";
 import type { WorkerIdentity } from "./rollout";
 import { carriesFactoryId, hostName } from "./resource-naming";
 import { refersTo, type SecretInventory, type ListedSecret } from "./secrets";
@@ -225,6 +226,30 @@ export interface ShownDevices {
   readonly untagged: readonly ShownDevice[];
 }
 
+/**
+ * The devices teardown listed but kept (D9), the operator's to check: possibly this factory's,
+ * or named like it without its tag. Once the admin client is deleted, no rerun lists them again.
+ */
+export type ListedDevices = Pick<ShownDevices, "possible" | "untagged">;
+
+/** No device listed but kept: none listed yet. */
+export const NO_LISTED_DEVICES: ListedDevices = { possible: [], untagged: [] };
+
+/** `ID (HOSTNAME)`, the hostname only when teardown derived it. */
+function deviceLine({ id, hostname }: ShownDevice): string {
+  return hostname === undefined ? id : `${id} (${hostname})`;
+}
+
+/** The devices listed but kept, then the advice to check them; nothing when there are none. */
+function listedDeviceLines({ possible, untagged }: ListedDevices): string[] {
+  const listed = [...possible, ...untagged];
+  if (listed.length === 0) return [];
+  return [
+    `Listed, not deleted: tailnet devices ${listed.map(deviceLine).join(", ")}`,
+    CHECK_LISTED_DEVICES,
+  ];
+}
+
 function shownDevice(factoryId: FactoryId, device: TailnetDevice): ShownDevice {
   const prefix = `${factoryId}-`;
   const name = device.hostName.toLowerCase();
@@ -277,6 +302,14 @@ function secretNameOf(reference: SecretReference): string {
   return reference.split(":secret:")[1] ?? "";
 }
 
+/**
+ * Whether a reference names a secret under the factory's names (`<id>/`), the only ones
+ * teardown may delete: one outside them was never deleted by teardown.
+ */
+export function underFactoryNames(factoryId: FactoryId, reference: SecretReference): boolean {
+  return secretNameOf(reference).startsWith(`${factoryId}/`);
+}
+
 /** The secrets teardown leaves, in three groups the report lists apart. */
 export interface KeptSecrets {
   /** Tagged with the factory ID, but not owned (D7): kept. */
@@ -298,7 +331,7 @@ export function keptSecrets(factoryId: FactoryId, inventory: SecretInventory): K
   const others = inventory.referencedNotOwned.filter(
     (reference) => !inventory.taggedNotOwned.some((secret) => refersTo(reference, secret.arn)),
   );
-  const ours = (reference: SecretReference) => secretNameOf(reference).startsWith(`${factoryId}/`);
+  const ours = (reference: SecretReference) => underFactoryNames(factoryId, reference);
   return {
     tagged: inventory.taggedNotOwned.map(shownSecret),
     referenced: others.filter((reference) => !ours(reference)),
@@ -415,7 +448,9 @@ function instanceNamed(factoryId: FactoryId, { instanceId, hostKey }: Machine): 
  * dispatch is stopped, must be those reviewed, each in the state and with the host key tag it
  * was reviewed in. A worker started, stopped, added or removed while the confirmation waited
  * would otherwise be judged by the gates as it was, and destroyed uninspected. Each change is
- * listed, a host key tag only when well-formed. Undefined when nothing changed.
+ * listed, a host key tag only when well-formed. A machine reviewed `shutting-down` was already
+ * being terminated, and neither stopped nor inspected: one no longer listed has finished, which
+ * is no change. Undefined when nothing changed.
  */
 export function machinesChanged(
   factoryId: FactoryId,
@@ -426,7 +461,8 @@ export function machinesChanged(
     ...reviewed.flatMap((before) => {
       const now = listed.find(({ instanceId }) => instanceId === before.instanceId);
       const named = instanceNamed(factoryId, before);
-      if (now === undefined) return [`${named}: no longer listed`];
+      if (now === undefined)
+        return before.state === "shutting-down" ? [] : [`${named}: no longer listed`];
       if (now.hostKey !== before.hostKey) return [`${named}: its host key tag changed`];
       if (now.state !== before.state) return [`${named}: ${now.state}, reviewed ${before.state}`];
       return [];
@@ -451,14 +487,69 @@ export function teardownAdminClientMissing(): Refusal {
   );
 }
 
-/** The admin client's secret could not be read; `reason` names the error, never quoting AWS. */
-export function teardownAdminSecretUnreadable(reason: string): Refusal {
+/**
+ * The admin client's secret could not be read; `reason` names the error, never quoting AWS.
+ * `found`: DescribeSecret still finds it, so it may be pending deletion, as teardown leaves it for
+ * a while once it deleted it.
+ */
+export function teardownAdminSecretUnreadable(reason: string, found: boolean): Refusal {
   return refusal(
     reason,
     thenRerunTeardown(
       "Check that the credentials may call secretsmanager:GetSecretValue on the secret " +
         "tailscale.admin_client_secret refers to",
     ),
+    found
+      ? [
+          `Secrets Manager does not read a secret pending deletion either, as the admin client is for a while once teardown deleted it: rerun ${TEARDOWN} once it is gone.`,
+        ]
+      : [],
+  );
+}
+
+/**
+ * The admin client's secret no longer exists while the factory's resources remain: teardown
+ * deletes it only after the destroy and the devices, so it did not go by an earlier teardown's
+ * hand, and the devices cannot be deleted without it. Refused, deleting nothing.
+ */
+export function teardownAdminClientGone(): Refusal {
+  return refusal(
+    "The Tailscale admin client's secret no longer exists, but the factory's resources remain",
+    thenRerunTeardown(
+      "Store the admin client again with `fffactory secret set tailscale-admin-client`",
+    ),
+    [
+      "Teardown deletes the admin client only once the factory's resources and tailnet devices are gone: without it, the devices cannot be deleted.",
+    ],
+  );
+}
+
+/**
+ * The devices of a rerun whose admin client an earlier teardown already deleted: not listed,
+ * since nothing can list them without it, and never reported as remaining.
+ */
+export const DEVICES_NOT_CHECKED =
+  "not checked: teardown deletes the admin client only after the devices";
+
+/**
+ * Devices not checked are the operator's to check: those an earlier teardown listed but did not
+ * delete, which no rerun lists again, and the factory's own, should the admin client have gone
+ * otherwise.
+ */
+export const CHECK_UNCHECKED_DEVICES = `The admin client's secret no longer exists, so the tailnet's devices were not listed: teardown deletes it only once they are gone. Check the devices at ${ADMIN_CONSOLE} for any an earlier teardown listed but did not delete, and, if the secret was deleted otherwise, for the factory's own.`;
+
+/**
+ * S3 answered 403 for the state bucket, to a request requiring the factory's account to own it:
+ * these credentials may not reach it, or another account owns the name, as it may once an
+ * earlier teardown deleted the bucket. Refused before any lock, never taken for the factory's.
+ */
+export function bucketUnreachable(bucket: string, accountId: string): Refusal {
+  return refusal(
+    `The state bucket ${bucket} cannot be reached in account ${accountId} (S3 answered 403)`,
+    `${thenRerunTeardown("Check that the credentials may reach the bucket (s3:ListBucket)")} If an earlier teardown reached the state bucket's deletion, it had removed everything else of the factory it could before: the name may since be another account's, and nothing of the factory is left in it.`,
+    [
+      "S3 answers 403 when these credentials may not reach the bucket, and when its name belongs to another account, as it may once an earlier teardown deleted it: teardown cannot tell which, and never takes it for the factory's bucket.",
+    ],
   );
 }
 
@@ -506,7 +597,7 @@ export function inventoryUnavailable(part: InventoryPart, reason: string): Refus
  */
 export function leftoversUnverified(part: "instances" | "vpcs", reason: string): Refusal {
   return refusal(reason, thenRerunTeardown(INVENTORY_CHECKS[part]), [
-    "Terraform destroyed the factory's resources, but nothing proves that none tagged with its ID remains: its tailnet devices, secrets and state bucket were kept.",
+    "Terraform destroyed the factory's resources, but nothing proves that none tagged with its ID remains.",
   ]);
 }
 
@@ -523,7 +614,6 @@ export function leftoversRemain(machines: readonly Machine[], vpcIds: readonly s
     [
       ...machines.map(({ instanceId, state }) => `EC2 instance ${instanceId} (${state})`),
       ...vpcIds.map((id) => `VPC ${id}`),
-      "Its tailnet devices, secrets and state bucket were kept.",
     ],
   );
 }
@@ -560,9 +650,7 @@ export function destroyApplyFailed(reason: string): Refusal {
   return refusal(
     `Destroying the factory's resources failed: ${reason}`,
     `Rerun ${TEARDOWN}: it plans the destroy again from what exists now.`,
-    [
-      "Terraform may have destroyed some of the factory's resources before it stopped. Its tailnet devices, secrets and state bucket were kept.",
-    ],
+    ["Terraform may have destroyed some of the factory's resources before it stopped."],
   );
 }
 
@@ -578,7 +666,14 @@ export interface TeardownReview {
   readonly machines: readonly ShownMachine[];
   readonly vpcIds: readonly string[];
   readonly devices: ShownDevices;
-  readonly secrets: { readonly owned: readonly ShownSecret[]; readonly kept: KeptSecrets };
+  /** `DEVICES_NOT_CHECKED` when the admin client is already gone, as on a rerun; `devices` then lists none. */
+  readonly devicesUnchecked: string | undefined;
+  readonly secrets: {
+    readonly owned: readonly ShownSecret[];
+    /** factory.json references under `<id>/` that DescribeSecret no longer finds: already absent. */
+    readonly absent: readonly SecretReference[];
+    readonly kept: KeptSecrets;
+  };
   /** The state bucket, deleted last. */
   readonly bucket: string;
 }
@@ -599,7 +694,14 @@ export interface TeardownReport {
     readonly possible: readonly ShownDevice[];
     readonly untagged: readonly ShownDevice[];
   };
-  readonly secrets: { readonly removed: readonly string[]; readonly kept: KeptSecrets };
+  /** `DEVICES_NOT_CHECKED` when the admin client was already gone: no device was listed. */
+  readonly devicesUnchecked: string | undefined;
+  readonly secrets: {
+    readonly removed: readonly string[];
+    /** factory.json references under `<id>/` already absent, as an earlier teardown leaves them. */
+    readonly absent: readonly SecretReference[];
+    readonly kept: KeptSecrets;
+  };
   readonly bucket: string;
 }
 
@@ -624,7 +726,7 @@ export function devicesRemain(
   failed: readonly { readonly id: string; readonly reason: string }[],
   unlisted: string | undefined,
 ): Refusal {
-  const kept = "Its secrets and state bucket were kept, the admin client among them.";
+  const kept = "The admin client was kept, so a rerun can delete them.";
   return unlisted === undefined
     ? refusal(
         "Not every Tailscale device of the factory was deleted",
@@ -645,22 +747,25 @@ export function secretsRemain(
   return refusal(
     "Not every secret the factory owns is gone",
     thenRerunTeardown("Check the credentials may delete and describe them"),
-    [...remaining.map(({ name, reason }) => `${name}: ${reason}`), "Its state bucket was kept."],
+    remaining.map(({ name, reason }) => `${name}: ${reason}`),
   );
 }
 
-/** What became of the factory lock when the state bucket remains. */
+/**
+ * What became of the factory lock when the state bucket remains. Only a teardown that returned
+ * reports it, and that one released whatever was left of the lock by its version: an
+ * interrupted one keeps it, and says so instead (`interruptedTeardown`).
+ */
 const LOCK_LEFT: Readonly<Record<LockAfterDeletion, string>> = {
   held: "The factory lock was not deleted: teardown released it.",
-  unknown: "The factory lock may still be held, or be gone.",
+  unknown:
+    "Deleting the factory lock's versions stopped part way: teardown released it by its version.",
   deleted: "The factory lock was deleted with the bucket's versions: the factory is unlocked.",
 };
 
 /**
  * The state bucket remains (`LockStore.deleteBucket`): what failed, what is left of it, and
  * what became of the lock.
- *
- * TODO(re-evaluate when #86 lands): name the lock's next action when it may still be held.
  */
 export function bucketRemains(
   bucket: string,
@@ -687,4 +792,187 @@ export function bucketRemains(
 /** A step under the lock failed unexpectedly; `reason` is fffactory's words. */
 export function teardownFailed(reason: string): Refusal {
   return refusal(reason, thenRerunTeardown("Check the factory with `fffactory status`"));
+}
+
+/**
+ * The factory's Terraform state still records host keys once its destroy was applied: the
+ * destroy did not remove all it should have (D12). Each key is named only when well-formed.
+ */
+export function stateStillRecords(keys: readonly string[]): Refusal {
+  return refusal(
+    "The factory's Terraform state still records hosts after the destroy",
+    `Rerun ${TEARDOWN}: it plans the destroy again from what the state records.`,
+    keys.map((key) => {
+      const parsed = parseHostKey(key);
+      return parsed.ok ? `Host ${parsed.value}` : "A host key that is not well-formed";
+    }),
+  );
+}
+
+/** The steps teardown's record goes through, in order (§Operation record). */
+export type TeardownStep = Extract<
+  StageStatus,
+  | "authorizing"
+  | "inventorying"
+  | "planning"
+  | "awaiting_approval"
+  | "stopping_dispatch"
+  | "inspecting"
+  | "applying"
+  | "verifying"
+  | "removing_devices"
+  | "removing_secrets"
+  | "removing_plans"
+  | "deleting_bucket"
+>;
+
+/**
+ * Where a teardown that had begun removing the factory stopped, in D6's order: the destroy, the
+ * proof that nothing tagged remains (`leftovers`, D12), the devices, the secrets, the local
+ * saved plans, the state bucket.
+ */
+export type TeardownStop = "destroy" | "leftovers" | "devices" | "secrets" | "plans" | "bucket";
+
+const STOPS: readonly TeardownStop[] = [
+  "destroy",
+  "leftovers",
+  "devices",
+  "secrets",
+  "plans",
+  "bucket",
+];
+
+/**
+ * What a teardown stopped part way left of the factory, by kind, in D6's order: every kind
+ * before where it stopped is gone, since each step starts only once the one before finished.
+ */
+export interface TeardownRemaining {
+  /** Whether the factory's Terraform state may still hold resources: its destroy failed. */
+  readonly state: boolean;
+  /**
+   * The tailnet devices left, by ID: those the review showed deleted until the devices' step
+   * ran, then those it could not delete. `unchecked` when the admin client was already gone,
+   * wherever the run stopped.
+   */
+  readonly devices: readonly string[] | "unchecked";
+  /** The devices the devices step listed but kept (`ListedDevices`); none before it listed. */
+  readonly listedDevices: ListedDevices;
+  /** The owned secrets left, by name: all of them until their step ran, then those not gone. */
+  readonly secrets: readonly string[];
+  /** Whether the factory's local saved plans remain. */
+  readonly plans: boolean;
+  /** The state bucket, which always remains when teardown stops part way. */
+  readonly bucket: string;
+}
+
+/** What is known to be left of each kind when teardown stops at `stop` (`TeardownRemaining`). */
+export function remainingAt(
+  stop: TeardownStop,
+  left: Pick<TeardownRemaining, "devices" | "listedDevices" | "secrets" | "bucket">,
+): TeardownRemaining {
+  const before = (step: TeardownStop) => STOPS.indexOf(stop) <= STOPS.indexOf(step);
+  return {
+    state: stop === "destroy",
+    devices: left.devices === "unchecked" || before("devices") ? left.devices : [],
+    listedDevices: left.listedDevices,
+    secrets: before("secrets") ? left.secrets : [],
+    plans: before("plans"),
+    bucket: left.bucket,
+  };
+}
+
+function remainingLines(remaining: TeardownRemaining): string[] {
+  const { devices, secrets } = remaining;
+  return [
+    ...(remaining.state ? ["Remains: whatever the factory's Terraform state still holds"] : []),
+    ...(devices === "unchecked"
+      ? [`Tailnet devices: ${DEVICES_NOT_CHECKED}`, CHECK_UNCHECKED_DEVICES]
+      : devices.length > 0
+        ? [`Remains: tailnet devices ${devices.join(", ")}`]
+        : []),
+    ...listedDeviceLines(remaining.listedDevices),
+    ...(secrets.length > 0 ? [`Remains: owned secrets ${secrets.join(", ")}`] : []),
+    ...(remaining.plans ? ["Remains: the local saved plans"] : []),
+    `Remains: the state bucket ${remaining.bucket}`,
+  ];
+}
+
+/**
+ * Why teardown stopped part way (`refusal`: what failed, and the next action, rerunning
+ * teardown or a step by hand first), with what remains of each kind listed after its details.
+ */
+export function stoppedPartWay(refusal: Refusal, remaining: TeardownRemaining): Refusal {
+  return { ...refusal, details: [...refusal.details, ...remainingLines(remaining)] };
+}
+
+/** How far an interrupted teardown got, and what it left of the lock and its record. */
+export interface TeardownInterruption {
+  /** The last step it started. */
+  readonly reached: TeardownStep;
+  /** Whether it had reached the destroy step: from there on the factory may be partly removed. */
+  readonly removing: boolean;
+  /** Whether its operation record was written, and is not being deleted with the bucket. */
+  readonly record: boolean;
+  /** The workers dispatch was stopped on, which `fffactory apply` restarts. */
+  readonly dispatchStopped: readonly string[];
+  /** The devices the devices step listed but kept; none before it listed. */
+  readonly listedDevices: ListedDevices;
+  /** `held` until the state bucket's deletion reached the lock (`LockAfterDeletion`). */
+  readonly lock: LockAfterDeletion;
+}
+
+/** What teardown was doing at each step, as an interruption reports it. */
+const DOING: Readonly<Record<TeardownStep, string>> = {
+  authorizing: "opening the Tailscale admin session",
+  inventorying: "listing what the factory has",
+  planning: "planning the factory's destruction",
+  awaiting_approval: "waiting for the confirmation",
+  stopping_dispatch: "stopping dispatch",
+  inspecting: "inspecting the workers",
+  applying: "destroying the factory's resources",
+  verifying: "checking that nothing tagged with the factory ID remains",
+  removing_devices: "deleting the tailnet devices",
+  removing_secrets: "deleting the owned secrets",
+  removing_plans: "removing the local saved plans",
+  deleting_bucket: "deleting the state bucket",
+};
+
+const INTERRUPTED_LOCK: Readonly<Record<LockAfterDeletion, string>> = {
+  held: "Interrupted: the factory stays locked",
+  unknown:
+    "Interrupted while the state bucket was being deleted: the factory lock may already be gone with it",
+  deleted:
+    "Interrupted while the state bucket was being deleted: the factory lock is already gone with it",
+};
+
+const EXITED = "Once fffactory has exited";
+
+/**
+ * What an interrupted teardown tells the operator: whether the lock stays, how far it got, and
+ * the next action. `fffactory lock break` is named only for this teardown once fffactory has
+ * exited, the operation then confirmed dead; once the bucket's deletion reached the lock, only
+ * for the lock a rerun finds still held by it.
+ */
+export function interruptedTeardown(at: TeardownInterruption): Refusal {
+  const summary =
+    at.lock !== "held"
+      ? INTERRUPTED_LOCK[at.lock]
+      : at.record
+        ? `${INTERRUPTED_LOCK.held}, with a record of this teardown`
+        : `${INTERRUPTED_LOCK.held} by this teardown, which may have no operation record`;
+  const details = at.removing
+    ? [
+        `Teardown had begun removing the factory, and was ${DOING[at.reached]}: a rerun inventories again and finishes from what remains.`,
+        ...listedDeviceLines(at.listedDevices),
+      ]
+    : [
+        "Nothing was removed.",
+        ...(at.dispatchStopped.length > 0 ? [dispatchLeftStopped(at.dispatchStopped)] : []),
+      ];
+  const nextAction = {
+    held: `${EXITED}, break the lock with \`fffactory lock break\`, then rerun ${TEARDOWN}.`,
+    unknown: `${EXITED}, rerun ${TEARDOWN}. If it finds the factory locked by this teardown, break that lock with \`fffactory lock break\`, then rerun it.`,
+    deleted: `${EXITED}, rerun ${TEARDOWN}.`,
+  }[at.lock];
+  return refusal(summary, nextAction, details);
 }

@@ -6,20 +6,29 @@ import type { Machine } from "../../src/domain/status";
 import type { TailnetDevice } from "../../src/domain/tailnet";
 import {
   bucketRemains,
+  bucketUnreachable,
   CHECK_LISTED_DEVICES,
+  CHECK_UNCHECKED_DEVICES,
+  DEVICES_NOT_CHECKED,
   destroyPlanMismatch,
   destroyPlanRefusal,
   destroyProjectionRefusal,
   dispatchLeftStopped,
   FACTORY_JSON_KEPT,
+  interruptedTeardown,
   leftoversUnverified,
   machinesChanged,
+  remainingAt,
+  stateStillRecords,
+  stoppedPartWay,
   REVOKE_SOURCES,
   keptSecrets,
   selectFactoryDevices,
   shownDevices,
   shownMachines,
   TEARDOWN_UNCONFIRMABLE,
+  teardownAdminClientGone,
+  teardownAdminSecretUnreadable,
   teardownConfirmation,
   teardownConfirmMismatch,
   teardownGateActions,
@@ -402,6 +411,21 @@ describe("changed live state invalidates the review (teardown §Gates)", () => {
       ])?.details,
     ).toEqual([`EC2 instance ${INSTANCE_1} of ${ID}-builder-1: its host key tag changed`]);
   });
+
+  test("a machine reviewed shutting down that has since terminated is no change", () => {
+    const terminating: Machine[] = [machine(INSTANCE_1, "builder-1", "shutting-down")];
+    expect(machinesChanged(ID, terminating, [])).toBeUndefined();
+    // Any other machine gone, or one shutting down now, still invalidates the review.
+    expect(machinesChanged(ID, reviewed, [reviewed[1] as Machine])?.details).toEqual([
+      `EC2 instance ${INSTANCE_1} of ${ID}-builder-1: no longer listed`,
+    ]);
+    expect(
+      machinesChanged(ID, reviewed, [
+        { ...(reviewed[0] as Machine), state: "shutting-down" },
+        reviewed[1] as Machine,
+      ])?.details,
+    ).toEqual([`EC2 instance ${INSTANCE_1} of ${ID}-builder-1: shutting-down, reviewed running`]);
+  });
 });
 
 describe("the confirmation (teardown §Confirmation)", () => {
@@ -563,7 +587,7 @@ describe("teardown's words (teardown §Refusals, §Report)", () => {
     expect(leftoversUnverified("instances", "EC2 DescribeInstances failed: Throttling")).toEqual({
       summary: "EC2 DescribeInstances failed: Throttling",
       details: [
-        "Terraform destroyed the factory's resources, but nothing proves that none tagged with its ID remains: its tailnet devices, secrets and state bucket were kept.",
+        "Terraform destroyed the factory's resources, but nothing proves that none tagged with its ID remains.",
       ],
       nextAction:
         "Check your network connection and that the credentials may call ec2:DescribeInstances, then rerun `fffactory teardown`.",
@@ -587,8 +611,243 @@ describe("teardown's words (teardown §Refusals, §Report)", () => {
     expect(remains("deleted").at(-1)).toBe(
       "The factory lock was deleted with the bucket's versions: the factory is unlocked.",
     );
+    // Reported only once the run returned, so teardown released whatever was left of the lock.
+    expect(remains("unknown").at(-1)).toBe(
+      "Deleting the factory lock's versions stopped part way: teardown released it by its version.",
+    );
   });
 
+  test("names the admin client's secret as one that may be pending deletion only when it is still found", () => {
+    expect(
+      teardownAdminSecretUnreadable("Reading failed: InvalidRequestException", true).details,
+    ).toEqual([
+      "Secrets Manager does not read a secret pending deletion either, as the admin client is for a while once teardown deleted it: rerun `fffactory teardown` once it is gone.",
+    ]);
+    expect(teardownAdminSecretUnreadable("Reading failed: AccessDeniedException", false)).toEqual({
+      summary: "Reading failed: AccessDeniedException",
+      details: [],
+      nextAction:
+        "Check that the credentials may call secretsmanager:GetSecretValue on the secret tailscale.admin_client_secret refers to, then rerun `fffactory teardown`.",
+    });
+  });
+
+  test("an admin client gone while the factory's resources remain is refused", () => {
+    expect(teardownAdminClientGone()).toEqual({
+      summary:
+        "The Tailscale admin client's secret no longer exists, but the factory's resources remain",
+      details: [
+        "Teardown deletes the admin client only once the factory's resources and tailnet devices are gone: without it, the devices cannot be deleted.",
+      ],
+      nextAction:
+        "Store the admin client again with `fffactory secret set tailscale-admin-client`, then rerun `fffactory teardown`.",
+    });
+    expect(DEVICES_NOT_CHECKED).toBe(
+      "not checked: teardown deletes the admin client only after the devices",
+    );
+    expect(CHECK_UNCHECKED_DEVICES).toBe(
+      "The admin client's secret no longer exists, so the tailnet's devices were not listed: teardown deletes it only once they are gone. Check the devices at https://login.tailscale.com/admin/machines for any an earlier teardown listed but did not delete, and, if the secret was deleted otherwise, for the factory's own.",
+    );
+  });
+
+  test("a state bucket S3 answers 403 for is never taken for the factory's", () => {
+    expect(bucketUnreachable("fff-abcd1234-state", "123456789012")).toEqual({
+      summary:
+        "The state bucket fff-abcd1234-state cannot be reached in account 123456789012 (S3 answered 403)",
+      details: [
+        "S3 answers 403 when these credentials may not reach the bucket, and when its name belongs to another account, as it may once an earlier teardown deleted it: teardown cannot tell which, and never takes it for the factory's bucket.",
+      ],
+      nextAction:
+        "Check that the credentials may reach the bucket (s3:ListBucket), then rerun `fffactory teardown`. If an earlier teardown reached the state bucket's deletion, it had removed everything else of the factory it could before: the name may since be another account's, and nothing of the factory is left in it.",
+    });
+  });
+
+  test("host keys the state still records after the destroy are named, never a malformed one", () => {
+    expect(stateStillRecords(["builder-1", "tskey-pasted Secret"])).toEqual({
+      summary: "The factory's Terraform state still records hosts after the destroy",
+      details: ["Host builder-1", "A host key that is not well-formed"],
+      nextAction:
+        "Rerun `fffactory teardown`: it plans the destroy again from what the state records.",
+    });
+  });
+});
+
+describe("a teardown stopped part way (teardown §Partial failure)", () => {
+  const left = {
+    devices: ["n0CNTRL", "n1CNTRL"],
+    listedDevices: { possible: [], untagged: [] },
+    secrets: [`${ID}/tailscale-auth-key`, `${ID}/tailscale-admin-client`],
+    bucket: "fff-abcd1234-state",
+  };
+  const listedDevices = {
+    possible: [{ id: "nL", hostname: `${ID}-late` }],
+    untagged: [{ id: "nU", hostname: undefined }],
+  };
+
+  test("what remains is every kind from where it stopped on, in D6's order", () => {
+    expect(remainingAt("destroy", left)).toEqual({ state: true, ...left, plans: true });
+    expect(remainingAt("leftovers", left)).toEqual({ state: false, ...left, plans: true });
+    expect(remainingAt("devices", left)).toEqual({ state: false, ...left, plans: true });
+    expect(remainingAt("secrets", left)).toEqual({
+      state: false,
+      devices: [],
+      listedDevices: left.listedDevices,
+      secrets: left.secrets,
+      plans: true,
+      bucket: left.bucket,
+    });
+    expect(remainingAt("plans", left)).toEqual({
+      state: false,
+      devices: [],
+      listedDevices: left.listedDevices,
+      secrets: [],
+      plans: true,
+      bucket: left.bucket,
+    });
+    expect(remainingAt("bucket", left)).toEqual({
+      state: false,
+      devices: [],
+      listedDevices: left.listedDevices,
+      secrets: [],
+      plans: false,
+      bucket: left.bucket,
+    });
+  });
+
+  test("lists what remains after what failed, keeping the summary and next action", () => {
+    const failed = { summary: "It failed", details: ["Why"], nextAction: "Rerun it." };
+    expect(stoppedPartWay(failed, remainingAt("destroy", left))).toEqual({
+      summary: "It failed",
+      details: [
+        "Why",
+        "Remains: whatever the factory's Terraform state still holds",
+        "Remains: tailnet devices n0CNTRL, n1CNTRL",
+        `Remains: owned secrets ${ID}/tailscale-auth-key, ${ID}/tailscale-admin-client`,
+        "Remains: the local saved plans",
+        "Remains: the state bucket fff-abcd1234-state",
+      ],
+      nextAction: "Rerun it.",
+    });
+    expect(
+      stoppedPartWay(failed, remainingAt("leftovers", { ...left, devices: "unchecked" })).details,
+    ).toContain(`Tailnet devices: ${DEVICES_NOT_CHECKED}`);
+    expect(stoppedPartWay(failed, remainingAt("bucket", left)).details).toEqual([
+      "Why",
+      "Remains: the state bucket fff-abcd1234-state",
+    ]);
+  });
+
+  test("devices not checked stay so past the devices step, with the advice to check them", () => {
+    const unchecked = { ...left, devices: "unchecked" as const };
+    for (const stop of ["leftovers", "secrets", "plans", "bucket"] as const) {
+      expect(remainingAt(stop, unchecked).devices).toBe("unchecked");
+      const { details } = stoppedPartWay(
+        { summary: "It failed", details: [], nextAction: "Rerun it." },
+        remainingAt(stop, unchecked),
+      );
+      expect(details.slice(0, 2)).toEqual([
+        `Tailnet devices: ${DEVICES_NOT_CHECKED}`,
+        CHECK_UNCHECKED_DEVICES,
+      ]);
+    }
+  });
+
+  test("devices listed but kept stay reported past the devices step, with the advice to check them", () => {
+    const remaining = remainingAt("bucket", { ...left, listedDevices });
+    expect(remaining.listedDevices).toEqual(listedDevices);
+    expect(
+      stoppedPartWay({ summary: "It failed", details: [], nextAction: "Rerun it." }, remaining)
+        .details,
+    ).toEqual([
+      `Listed, not deleted: tailnet devices nL (${ID}-late), nU`,
+      CHECK_LISTED_DEVICES,
+      "Remains: the state bucket fff-abcd1234-state",
+    ]);
+  });
+});
+
+describe("an interrupted teardown (teardown §Interruption)", () => {
+  const at = {
+    reached: "inspecting" as const,
+    removing: false,
+    record: true,
+    dispatchStopped: [] as string[],
+    listedDevices: { possible: [], untagged: [] },
+    lock: "held" as const,
+  };
+
+  test("before anything is removed: locked, nothing removed, the lock broken once fffactory exited", () => {
+    expect(interruptedTeardown({ ...at, dispatchStopped: [`${ID}-builder-1`] })).toEqual({
+      summary: "Interrupted: the factory stays locked, with a record of this teardown",
+      details: [
+        "Nothing was removed.",
+        `Dispatch is stopped on ${ID}-builder-1: \`fffactory apply\` restarts it.`,
+      ],
+      nextAction:
+        "Once fffactory has exited, break the lock with `fffactory lock break`, then rerun `fffactory teardown`.",
+    });
+    expect(interruptedTeardown({ ...at, record: false }).summary).toBe(
+      "Interrupted: the factory stays locked by this teardown, which may have no operation record",
+    );
+  });
+
+  test("once removing: how far it got, in words, and the rerun finishing from what remains", () => {
+    expect(
+      interruptedTeardown({ ...at, reached: "removing_secrets", removing: true }).details,
+    ).toEqual([
+      "Teardown had begun removing the factory, and was deleting the owned secrets: a rerun inventories again and finishes from what remains.",
+    ]);
+    const words = {
+      applying: "destroying the factory's resources",
+      verifying: "checking that nothing tagged with the factory ID remains",
+      removing_devices: "deleting the tailnet devices",
+      removing_plans: "removing the local saved plans",
+      deleting_bucket: "deleting the state bucket",
+    } as const;
+    for (const [reached, doing] of Object.entries(words))
+      expect(
+        interruptedTeardown({ ...at, reached: reached as keyof typeof words, removing: true })
+          .details[0],
+      ).toContain(`and was ${doing}: `);
+  });
+
+  test("once removing, the devices listed but kept are reported, with the advice to check them", () => {
+    expect(
+      interruptedTeardown({
+        ...at,
+        reached: "removing_secrets",
+        removing: true,
+        listedDevices: {
+          possible: [],
+          untagged: [{ id: "nU", hostname: `${ID}-builder-1` }],
+        },
+      }).details.slice(1),
+    ).toEqual([`Listed, not deleted: tailnet devices nU (${ID}-builder-1)`, CHECK_LISTED_DEVICES]);
+  });
+
+  test("once the bucket's deletion reached the lock, it may be gone, and is broken only if found", () => {
+    const deleting = {
+      ...at,
+      reached: "deleting_bucket" as const,
+      removing: true,
+      record: false,
+    };
+    expect(interruptedTeardown({ ...deleting, lock: "unknown" })).toMatchObject({
+      summary:
+        "Interrupted while the state bucket was being deleted: the factory lock may already be gone with it",
+      nextAction:
+        "Once fffactory has exited, rerun `fffactory teardown`. If it finds the factory locked by this teardown, break that lock with `fffactory lock break`, then rerun it.",
+    });
+    const gone = interruptedTeardown({ ...deleting, lock: "deleted" });
+    expect(gone).toMatchObject({
+      summary:
+        "Interrupted while the state bucket was being deleted: the factory lock is already gone with it",
+      nextAction: "Once fffactory has exited, rerun `fffactory teardown`.",
+    });
+    expect(gone.nextAction).not.toContain("lock break");
+  });
+});
+
+describe("teardown's advice (teardown §Report)", () => {
   test("leaves factory.json and every source it only refers to to the operator", () => {
     expect(FACTORY_JSON_KEPT).toContain("factory.json is left as it is");
     expect(REVOKE_SOURCES).toContain("revokes nothing it only refers to");
