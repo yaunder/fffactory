@@ -17,8 +17,9 @@ import { AWS_ENV, readSecretValue } from "./secret-value";
 
 const TIMEOUT_MS = 2 * 60_000;
 /**
- * The whole activity answer's budget, every Paseo call in it together: under the CLI's
- * two-minute wait for the answer, so the worker answers, and frees the activator's lock, first.
+ * The whole agent list's budget, every Paseo call in it together: under the CLI's two-minute
+ * wait for the activity answer, so the worker answers, and frees the activator's lock, first.
+ * `host agents` keeps the same bound, so a dispatch tick never hangs on Paseo.
  */
 const ACTIVITY_BUDGET_MS = 90_000;
 /** Paseo's own cost: `DAEMON_PASSWORD_BCRYPT_COST` in `@getpaseo/server`'s auth.js. */
@@ -27,6 +28,11 @@ const ENV = {
   PATH: "/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
   HOME: "/root",
   LANG: "C.UTF-8",
+};
+/** The Paseo CLI's entire environment as `factory`. */
+const FACTORY_ENV = {
+  HOME: "/home/factory",
+  PATH: "/home/factory/.local/bin:/usr/local/bin:/usr/bin:/bin",
 };
 
 function failure(outcome: ProcessOutcome, what: string): ControlPlaneAction {
@@ -153,6 +159,8 @@ export async function paseoAgents(paseo: PaseoCommand): Promise<WorkerAgents> {
 
 export interface HostControlPlane {
   activity(): Promise<WorkerAgents>;
+  /** The same agents, read as `factory` without the activator, for the dispatcher. */
+  agents(): Promise<WorkerAgents>;
   install(): Promise<ControlPlaneAction>;
   reload(): Promise<ControlPlaneAction>;
   restart(): Promise<ControlPlaneAction>;
@@ -175,19 +183,27 @@ export function workerControlPlane(system: ApplySystem): HostControlPlane {
     "--",
     "/usr/bin/env",
     "-i",
-    "HOME=/home/factory",
-    "PATH=/home/factory/.local/bin:/usr/local/bin:/usr/bin:/bin",
+    ...Object.entries(FACTORY_ENV).map(([name, value]) => `${name}=${value}`),
     auth,
   ];
+  // The adapter over `command`, every call of one answer within one budget.
+  const agents = (command: readonly string[], env: Readonly<Record<string, string>>) => {
+    const deadline = system.now().getTime() + ACTIVITY_BUDGET_MS;
+    return paseoAgents(async (args) => {
+      const left = deadline - system.now().getTime();
+      if (left <= 0) return { kind: "timed_out" };
+      return system.run([...command, ...args], left, { env });
+    });
+  };
   return {
     async activity() {
       if (!system.isRoot()) return { kind: "unknown", reason: "not root" };
-      const deadline = system.now().getTime() + ACTIVITY_BUDGET_MS;
-      return paseoAgents(async (args) => {
-        const left = deadline - system.now().getTime();
-        if (left <= 0) return { kind: "timed_out" };
-        return system.run([...asFactory, ...args], left, { env: ENV });
-      });
+      return agents(asFactory, ENV);
+    },
+    async agents() {
+      // Paseo's state is factory's: as root its CLI would leave root-owned files there.
+      if (system.isRoot()) return { kind: "unknown", reason: "run as root" };
+      return agents([auth], FACTORY_ENV);
     },
     async install() {
       if (!system.isRoot()) return { kind: "failed", reason: "not root" };

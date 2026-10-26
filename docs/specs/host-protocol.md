@@ -181,6 +181,9 @@ operation of that activator and lock
 sudo -n /usr/local/libexec/fffactory-activate work inspect
 ```
 
+One subcommand goes neither over SSH nor through the activator: the worker's
+own dispatcher runs `host agents` as `factory` ([agents](#agents)).
+
 ## Versioning
 
 Every document carries `protocol_version`, the protocol's major version,
@@ -877,6 +880,38 @@ activity unknown and the worker to be replaced
 
 Unknown fails safe as busy does ([control plane §Pre-activation deferral](control-plane.md#pre-activation-deferral)).
 
+## agents
+
+```text
+/opt/fffactory/current/bin/fffactory host agents --json
+```
+
+The worker's dispatcher reads its agents here for its capacity check
+([dispatch §Capacity](dispatch.md#capacity)); the operator's fffactory never
+runs it. The dispatcher runs it on the worker as `factory`, with the active
+release's executable, and not through the activator, so a dispatch tick never
+waits on the host-operation lock and needs no root. It changes nothing.
+
+It lists the agents through the same adapter as
+[control-plane activity](#control-plane-activity) (`paseoAgents`), but runs the
+active release's `paseo-auth.sh` itself, with only `HOME=/home/factory` and
+`factory`'s `PATH` in its environment, every Paseo call within the same
+90-second budget. It prints the [activity document](#the-activity-document),
+indented by two spaces, on standard output: every agent's ID, fffactory state
+and `dispatched` flag, and no Paseo status, field or label.
+
+| Run | Exit and standard output |
+| --- | --- |
+| As `factory`, the agents read | 0, the document with its `agents`; nothing on standard error |
+| As `factory`, the agents not read | 1, the document with `agents` `null` and `activity` unknown, for its reason; that reason on one line on standard error, `fffactory host agents: <reason>`, so the dispatcher's error names it rather than the document |
+| As root | 1, nothing: `run it as factory, never root; the dispatcher runs it` on standard error. Paseo's state is `factory`'s, and its CLI run as root would leave root-owned files there. |
+| Without `--json`, or with anything else | 1, nothing |
+
+Another account cannot read `factory`'s Paseo password reference, so its
+agents are unknown. Exiting 1 for unknown agents makes the dispatcher fail its
+tick before it launches anything: an unreadable worker never reads as one
+without agents.
+
 ## Layer mapping
 
 | Layer | Module | Responsibility |
@@ -905,10 +940,10 @@ Unknown fails safe as busy does ([control plane §Pre-activation deferral](contr
 | Worker | `src/host/verify.ts` | `workerVerifier`: the verifiers and enrollment checks. |
 | Worker | `src/host/dispatch.ts` | Dispatch adoption, installation, reconciliation and checked observation, with privilege drop. |
 | Worker | `src/host/work.ts` | `workerWork`: the work inspection, over the worker's working trees, as `factory`, read-only. |
-| Worker | `src/host/control-plane.ts` | `workerControlPlane`: the Paseo activity, install, reload and restart; `paseoAgents`, the adapter translating Paseo's agents into fffactory's states. |
+| Worker | `src/host/control-plane.ts` | `workerControlPlane`: the Paseo activity, install, reload and restart, and `host agents`; `paseoAgents`, the adapter translating Paseo's agents into fffactory's states. |
 | Worker | `src/host/endpoint.ts` | `workerEndpoint`: all worker endpoints together. |
 | Worker | `assets/steps/` | The wrapped install steps, the pins and the plugin manifest. |
-| CLI adapter | `src/cli/commands/host.ts` | The fixed `fffactory host` inspect, apply, verify, repository, control-plane, dispatch and work operations. |
+| CLI adapter | `src/cli/commands/host.ts` | The fixed `fffactory host` inspect, apply, verify, repository, control-plane, dispatch, work and agents operations. |
 
 Tests: `tests/host/protocol-contract.test.ts` is the contract: four worker
 filesystems (`tests/host/worker-scenarios.ts`: installed with enrollment
@@ -925,7 +960,12 @@ read back without loss and each activator answer into the expected worker
 outcome. `tests/host/fixtures/activity-agents.json` likewise: the worker's
 `host control-plane activity` produces it byte for byte from a scripted Paseo,
 and the CLI reads it back without loss, over the transport, into the agents
-the busy rule judges. The other direction, a document the CLI sends, is
+the busy rule judges; `host agents`, run as `factory`, produces the same
+fixture from the same Paseo, and the dispatcher's Python test reads it as its
+capacity check's answer. `tests/host/control-plane.test.ts` runs `host agents`
+over a scripted Paseo (the auth wrapper run as itself, in `factory`'s
+environment, the budget, an unreadable list, root refused), and
+`tests/cli/host.test.ts` its exit statuses and refusals. The other direction, a document the CLI sends, is
 `tests/host/fixtures/dispatch-not-requested.json`, the projection that stops
 dispatch ([dispatch §Stopping dispatch](dispatch.md#stopping-dispatch)): the
 CLI side builds it byte for byte, and the worker side parses it without loss.
@@ -997,4 +1037,5 @@ Claude Code 2.1.302 pins and Codex's requirements by
 [#65](https://github.com/yaunder/fffactory/issues/65); the projection's
 credential references and the control-plane part's digest by
 [#68](https://github.com/yaunder/fffactory/issues/68); the `credentials` step by
-[#69](https://github.com/yaunder/fffactory/issues/69).
+[#69](https://github.com/yaunder/fffactory/issues/69); `host agents` by
+[#100](https://github.com/yaunder/fffactory/issues/100).

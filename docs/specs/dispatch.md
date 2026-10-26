@@ -168,10 +168,12 @@ new branch-off worktree workspace, labelled `factory-dispatch=true`,
 It never passes `--background`, Paseo's deprecated alias of `--no-wait`, removed
 after 2027-04-01. It drops `PASEO_AGENT_ID` and `PASEO_WORKSPACE_ID` from the
 launch's environment, so the agent is top-level and its workspace inherits
-nothing from the scheduled agent that runs the dispatcher. Its capacity and
-duplicate checks list agents with `paseo ls --global --background` and their
-label filters, so they also see agents in background workspaces, which a bare
-`ls` hides ([control plane §The Paseo pin](control-plane.md#the-paseo-pin)).
+nothing from the scheduled agent that runs the dispatcher. Its duplicate check
+(`previously_dispatched`) lists the agents labelled for the epic with
+`paseo ls --global --background` and the label filters, so it also sees agents
+in background workspaces, which a bare `ls` hides
+([control plane §The Paseo pin](control-plane.md#the-paseo-pin)); any listed
+agent, finished or not, means the epic was already dispatched.
 
 The reconciler finds the schedule by its `factory-dispatch` name, fails on more
 than one, and changes it in place, keeping its ID and run history: any
@@ -198,6 +200,43 @@ repository skill: `scripts/repository-skills.sh` no longer lists
 `dispatch` in `expected_skills` and instead asserts the shipped skill, program
 and reconciler at their `assets/steps/dispatch/` paths, and AGENTS.md's routing
 table records the move.
+
+## Capacity
+
+A worker runs at most one dispatched epic agent at a time (`CAP`). The
+dispatcher counts the agents holding that slot by asking the worker's own
+fffactory, never Paseo: `/opt/fffactory/current/bin/fffactory host agents
+--json` ([host protocol §agents](host-protocol.md#agents)), which translates
+Paseo's agents with the same adapter as every other gate
+([control plane §Agent states](control-plane.md#agent-states)). It counts the
+agents it launched (`dispatched`) that are `working` or `needs_input`, by the
+[busy rule](control-plane.md#the-busy-rule): an agent waiting on a permission
+holds the slot, and a `finished`, `failed` or `stopped` one never does, however
+long it stays listed. An agent dispatch did not launch, such as the scheduled
+agent running the dispatcher, never counts. No dispatcher code reads a Paseo
+status.
+
+When `host agents` exits non-zero, or prints anything the CLI's own activity
+parser would refuse, the tick fails (exit 1) before it reads an epic or launches
+anything, so an unreadable worker never reads as a free slot. The dispatcher
+accepts only a version-1 document whose `activity` is `idle` or `active` with a
+positive count, and whose `agents` list holds only objects with an `id` matching
+the agent ID rule, a `state` among fffactory's five, and a boolean `dispatched`;
+it ignores fields it does not know, as the
+[host protocol](host-protocol.md) requires. One malformed agent fails the whole
+tick rather than being skipped, since skipping it could free a slot it holds.
+Its error names `host agents`' reason, which that command writes on one line on
+standard error, or says the agent list is invalid; never the document. The
+duplicate check and the launch stay Paseo-specific inside the dispatcher.
+
+Tested in `assets/steps/dispatch/tests/test_factory_dispatch.py`: each state,
+dispatched or not, holding the slot or not; the checkout's
+`tests/host/fixtures/activity-agents.json` read as `host agents` prints it;
+a failing, unknown, other-version or malformed answer failing the tick with
+no epic read and nothing listed or launched, including a malformed agent (no or
+an unknown state, a non-boolean or missing `dispatched`, a missing or malformed
+ID) and a malformed `activity`; unknown fields ignored; a failing one's reason
+as the tick's one-line error; and no Paseo list for capacity.
 
 ## The `WorkflowQueue` connector
 
@@ -272,8 +311,10 @@ configuration flag alone.
 | The versioned desired and observed dispatch documents, the not-requested projection that stops dispatch and how stopping ended (`DispatchStop`) | domain (pure) | `src/domain/dispatch-projection.ts` |
 | The root endpoint, asset installation, privilege drop and persisted observation | host | `src/host/dispatch.ts` |
 | The dispatch program, schedule reconciler and skill | release assets | `assets/steps/dispatch/` |
+| The agents the capacity check counts (`host agents`), translated by the one Paseo adapter | host | `src/host/control-plane.ts`, `src/cli/commands/host.ts` |
 
 Introduced by [#105](https://github.com/yaunder/factory/issues/105). Skipped
 workers: [#134](https://github.com/yaunder/factory/issues/134). A delivered
 GitHub token's next action: [#70](https://github.com/yaunder/fffactory/issues/70).
 Stopping dispatch: [#84](https://github.com/yaunder/fffactory/issues/84).
+Capacity from `host agents`: [#100](https://github.com/yaunder/fffactory/issues/100).

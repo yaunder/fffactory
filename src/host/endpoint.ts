@@ -37,6 +37,7 @@ export function workerEndpoint(system: ApplySystem): WorkerEndpoint {
     inspectRepositories: () => repositories.inspectRepositories(),
     reconcileRepositories: () => repositories.reconcileRepositories(),
     activity: () => controlPlane.activity(),
+    agents: () => controlPlane.agents(),
     install: () => controlPlane.install(),
     reload: () => controlPlane.reload(),
     restart: () => controlPlane.restart(),

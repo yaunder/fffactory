@@ -10,7 +10,9 @@ temporary directories by `worker-scenarios.ts`, never the real `/`.
   `dispatch-not-requested.json`, the projection that stops dispatch, goes the other way: the
   CLI side builds it byte for byte, the worker side parses it unchanged, and `dispatch.test.ts`
   and the reconciler's Python test (`assets/steps/dispatch/tests/`) remove the schedule for it.
-  Change a document, its fixture and the CLI-side parser together.
+  `activity-agents.json` is also what `host agents` prints, and the dispatcher's Python test
+  (`assets/steps/dispatch/tests/test_factory_dispatch.py`) reads it as its capacity check's
+  answer. Change a document, its fixture and the CLI-side parser together.
 - Biome leaves `**/fixtures/**/*.json` alone: the fixtures are `JSON.stringify`'s output.
 - `apply.test.ts` runs `host apply` over fake steps: real bash scripts written into the
   temporary release and run by the real process runner, or a scripted runner. It holds the
@@ -26,9 +28,10 @@ temporary directories by `worker-scenarios.ts`, never the real `/`.
   answered by ARN: it asserts each command, deadline and standard input, and searches every
   argument, environment value and log line for the material it used.
 - `control-plane.test.ts` runs the control-plane endpoint over a scripted runner: for
-  activity, a scripted Paseo (`paseo`) answering its lists and each agent's inspection, as
-  0.13.2 prints them; for install, Secrets Manager answering the Paseo password: it checks the
-  hash setup is sent with `bcryptjs`'s `compareSync`, and searches every argument, environment
-  value and setup input for the password.
+  activity and `host agents`, a scripted Paseo (`paseo`) answering its lists and each agent's
+  inspection, as 0.13.2 prints them, after the auth wrapper however it was run; for install,
+  Secrets Manager answering the Paseo password: it checks the hash setup is sent with
+  `bcryptjs`'s `compareSync`, and searches every argument, environment value and setup input
+  for the password.
 - `verify.test.ts` answers every command with a scripted runner; `inspect.test.ts` covers the
   unprivileged read-only inspection.

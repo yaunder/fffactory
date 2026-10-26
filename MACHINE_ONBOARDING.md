@@ -665,8 +665,8 @@ dispatch agent's timeline names the exact reason
 - one of its tasks is not open, or an open pull request mentions it;
 - a task depends on an open issue outside the epic;
 - an `epic/<id>` branch already exists on the remote;
-- the host is at its cap of running agents: wait for the running agent to
-  finish, or answer its permission request;
+- the host is at its cap: an agent dispatch started is working or needs
+  input. Wait for it to finish its turn, or answer its permission request;
 - a Paseo agent already dispatched for the epic still exists: the epic stays
   skipped while it does;
 - the repository fails the FFFlow adoption check, or its checkout is not
@@ -679,6 +679,10 @@ dispatch agent's timeline names the exact reason
   skipped, and so is every later one, in any repository on the host, while
   the cause remains. A checkout that is only behind is fast-forwarded, not
   skipped.
+
+A run whose worker cannot read its own agents (`fffactory host agents`, run
+by the dispatcher) fails before it starts anything, its error naming why
+([dispatch §Capacity](docs/specs/dispatch.md#capacity)).
 
 Resolve the cause; the next scheduled run considers the epic again. Never
 start an agent by hand to work around a skip.

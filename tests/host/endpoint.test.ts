@@ -43,13 +43,19 @@ describe("the composed worker endpoint", () => {
       endpoint.reconcileDispatch(),
       endpoint.inspectDispatch(),
       endpoint.inspectWork(),
+      endpoint.agents(),
     ]);
 
     expect(endpoint.isRoot()).toBe(false);
-    expect(results).toHaveLength(13);
+    expect(results).toHaveLength(14);
     expect(results.slice(0, 4).every(({ status }) => status === "fulfilled")).toBe(true);
     expect(results[4]?.status).toBe("rejected");
     expect(results.slice(5, 9).every(({ status }) => status === "fulfilled")).toBe(true);
-    expect(results.slice(9).every(({ status }) => status === "rejected")).toBe(true);
+    expect(results.slice(9, 13).every(({ status }) => status === "rejected")).toBe(true);
+    // Unprivileged, as the dispatcher runs it: its Paseo list fails here, so unknown.
+    expect(results[13]).toEqual({
+      status: "fulfilled",
+      value: { kind: "unknown", reason: "Paseo activity could not be read" },
+    });
   });
 });

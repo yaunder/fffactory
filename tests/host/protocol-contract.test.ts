@@ -410,6 +410,12 @@ describe("host control-plane activity, both sides", () => {
     expect(`${activityJson(agents)}\n`).toBe(await fixture("activity-agents.json"));
   });
 
+  test("host agents, run as factory for the dispatcher, produces the same document", async () => {
+    const worker = { ...applyingSystem(root, PASEO), isRoot: () => false };
+    const agents = await workerControlPlane(worker).agents();
+    expect(`${activityJson(agents)}\n`).toBe(await fixture("activity-agents.json"));
+  });
+
   test("the CLI reads it back without loss, over the transport, into the busy rule's activity", async () => {
     const text = await fixture("activity-agents.json");
     const parsed = parseActivityDocument(text);

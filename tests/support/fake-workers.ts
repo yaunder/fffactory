@@ -527,6 +527,7 @@ export function fakeWorker(
       throw new Error("host repositories --apply was not expected");
     },
     activity: async () => ({ kind: "listed", agents: [] }),
+    agents: async () => ({ kind: "listed", agents: [] }),
     install: async () => ({ kind: "done" }),
     reload: async () => ({ kind: "done" }),
     restart: async () => ({ kind: "done" }),

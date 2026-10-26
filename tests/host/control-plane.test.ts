@@ -116,7 +116,8 @@ function paseo(answers: {
       : (answer as ProcessOutcome);
   const run: ProcessRunner = async (argv) => {
     calls.push([...argv]);
-    const [verb, , id] = argv.slice(AS_FACTORY.length);
+    // Paseo's own arguments follow the auth wrapper, however the wrapper itself was run.
+    const [verb, , id] = argv.slice(argv.findIndex((arg) => arg.endsWith(AUTH)) + 1);
     if (verb === "ls")
       return outcome(argv.includes("--label") ? (answers.dispatched ?? []) : answers.all);
     const inspected = answers.inspect?.[id ?? ""];
@@ -153,6 +154,91 @@ function endpoint(
   };
   return workerControlPlane(worker);
 }
+
+describe("host agents, the dispatcher's read of the same adapter", () => {
+  test("lists the agents through the active release auth wrapper as itself, in factory's clean environment", async () => {
+    const scripted = paseo({
+      all: [row("a1", "running"), row("b2", "idle")],
+      dispatched: [row("a1", "running")],
+      inspect: { a1: inspection("a1", [{ id: "p", tool: "Bash" }]) },
+    });
+    const runs: { argv: readonly string[]; env: ProcessOptions["env"] }[] = [];
+    const run: ProcessRunner = async (argv, timeout, options) => {
+      runs.push({ argv, env: options?.env });
+      return scripted.run(argv, timeout, options);
+    };
+    expect(await endpoint(run, PROJECTION, false).agents()).toEqual({
+      kind: "listed",
+      agents: [
+        { id: "a1", state: "needs_input", dispatched: true },
+        { id: "b2", state: "finished", dispatched: false },
+      ],
+    });
+    expect(runs.map((call) => call.argv)).toEqual([
+      [join(root, AUTH), "ls", "--global", "--background", "--json"],
+      [
+        join(root, AUTH),
+        "ls",
+        "--global",
+        "--background",
+        "--label",
+        "factory-dispatch=true",
+        "--json",
+      ],
+      [join(root, AUTH), "agent", "inspect", "a1", "--json"],
+    ]);
+    for (const call of runs)
+      expect(call.env).toEqual({
+        HOME: "/home/factory",
+        PATH: "/home/factory/.local/bin:/usr/local/bin:/usr/bin:/bin",
+      });
+  });
+
+  test("bounds the whole answer by the activity's budget", async () => {
+    let clock = 0;
+    const timeouts: number[] = [];
+    const scripted = paseo({
+      all: [row("a1", "running")],
+      inspect: { a1: inspection("a1", []) },
+    });
+    const run: ProcessRunner = async (argv, timeout, options) => {
+      timeouts.push(timeout);
+      clock += 50_000;
+      return scripted.run(argv, timeout, options);
+    };
+    const answer = await endpoint(
+      run,
+      PROJECTION,
+      false,
+      undefined,
+      () => new Date(clock),
+    ).agents();
+    expect(answer).toEqual({ kind: "unknown", reason: "a Paseo agent could not be inspected" });
+    expect(timeouts).toEqual([90_000, 40_000]);
+  });
+
+  test("an agent list it cannot read is unknown, as the activity's is", async () => {
+    const { run } = paseo({ all: { kind: "exited", exitCode: 1, stdout: "", stderr: "denied" } });
+    expect(await endpoint(run, PROJECTION, false).agents()).toEqual({
+      kind: "unknown",
+      reason: "Paseo activity could not be read",
+    });
+  });
+
+  test("refuses to run as root, where Paseo's files would become root's", async () => {
+    let ran = false;
+    const agents = await endpoint(
+      async () => {
+        ran = true;
+        return { kind: "not_found" };
+      },
+      PROJECTION,
+      true,
+    ).agents();
+    expect(agents).toEqual({ kind: "unknown", reason: "run as root" });
+    expect(ran).toBe(false);
+  });
+});
 
 describe("the worker control-plane endpoint", () => {
   test("reads every agent by dropping to factory and using the active release auth wrapper", async () => {

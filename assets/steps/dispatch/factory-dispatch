@@ -1,6 +1,11 @@
 #!/usr/bin/env python3
 """Pull ready FFFlow epics into top-level Paseo worktree agents."""
 
+# #97 and #100 changed this program in place, as their plans scoped them (D3's exception,
+# recorded in this directory's CLAUDE.md).
+# TODO(re-evaluate when the duplicate check (previously_dispatched) or the paseo run launch
+# next changes): port factory-dispatch to TypeScript (D3).
+
 import argparse
 import fcntl
 import json
@@ -14,14 +19,25 @@ from datetime import datetime, timezone
 DEFAULT_MANIFEST = Path("/var/lib/fffactory/repositories.json")
 DEFAULT_PROJECTION = Path("/var/lib/fffactory/dispatch.json")
 DEFAULT_ROOT = Path("/workspace/repos")
-ACTIVE_STEPS = Path("/opt/fffactory/current/steps")
+ACTIVE_RELEASE = Path("/opt/fffactory/current")
+ACTIVE_STEPS = ACTIVE_RELEASE / "steps"
 ADOPTION_CHECK = Path(os.environ.get("FACTORY_FFFLOW_CHECK_BIN",
                                      str(ACTIVE_STEPS / "repositories" / "check-ffflow-adoption.sh")))
 SYNC_REPOSITORIES = Path(os.environ.get("FACTORY_REPOSITORY_SYNC_BIN",
                                         str(ACTIVE_STEPS / "repositories" / "sync-repositories.sh")))
 PASEO = Path(os.environ.get("FACTORY_PASEO_BIN",
                             str(ACTIVE_STEPS / "control-plane" / "paseo-auth.sh")))
+FFFACTORY = Path(os.environ.get("FACTORY_FFFACTORY_BIN", str(ACTIVE_RELEASE / "bin" / "fffactory")))
 CAP = 1
+# The activity document's agent fields, as the CLI's parser reads them (AGENT_STATES and AGENT_ID
+# in src/domain/control-plane.ts): fffactory's agent states, and an ID no option can be read as.
+# TODO(re-evaluate when factory-dispatch is ported to TypeScript (D3), or AGENT_STATES, AGENT_ID
+# or workerActivity's busy rule changes): read host agents with parseActivityDocument and count
+# by workerActivity, deleting STATES, BUSY and AGENT_ID here, so the rule has one definition.
+STATES = ("working", "needs_input", "finished", "failed", "stopped")
+# fffactory's agent states that take a capacity slot (docs/specs/control-plane.md, the busy rule).
+BUSY = ("working", "needs_input")
+AGENT_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}")
 
 
 class DispatchError(Exception):
@@ -110,14 +126,41 @@ def ready_epic(repo, epic, remote, prs, issue_cache):
     return None
 
 
+def safe_integer(value):
+    # JavaScript's Number.isSafeInteger, as the CLI reads a count: never a boolean.
+    return type(value) in (int, float) and value == value and abs(value) <= 2 ** 53 - 1 \
+        and value == int(value)
+
+
+def readable_agent(agent):
+    return isinstance(agent, dict) and isinstance(agent.get("id"), str) \
+        and AGENT_ID.fullmatch(agent["id"]) is not None \
+        and isinstance(agent.get("state"), str) and agent["state"] in STATES \
+        and type(agent.get("dispatched")) is bool
+
+
+def readable_activity(document):
+    # Accepts exactly what the CLI's parseActivityDocument reads as listed agents; unknown fields
+    # are ignored, as the host protocol requires.
+    if not isinstance(document, dict) or not safe_integer(document.get("protocol_version")) \
+            or document["protocol_version"] != 1:
+        return False
+    activity = document.get("activity")
+    if not isinstance(activity, dict) or activity.get("kind") not in ("idle", "active") \
+            or activity["kind"] == "active" and not (safe_integer(activity.get("count"))
+                                                     and activity["count"] >= 1):
+        return False
+    return isinstance(document.get("agents"), list) and all(map(readable_agent, document["agents"]))
+
+
 def active_agents():
-    # The CLI applies the label filter on the daemon before producing rows. --background also
-    # lists agents in background workspaces, which Paseo otherwise hides.
-    rows = command_json(PASEO, "ls", "--global", "--background", "--label", "factory-dispatch=true",
-                        "--json")
-    if not isinstance(rows, list):
-        raise DispatchError("Paseo returned an invalid agent list")
-    return [row for row in rows if row.get("status") in ("running", "permission")]
+    # The worker's own fffactory reads the agents in its states (host agents, D7), so no Paseo
+    # status is read here. It exits non-zero when it cannot read them, which fails the tick; so
+    # does any answer the CLI would not read, so an unreadable agent never frees a slot.
+    document = command_json(FFFACTORY, "host", "agents", "--json")
+    if not readable_activity(document):
+        raise DispatchError("fffactory returned an invalid agent list")
+    return [agent for agent in document["agents"] if agent["dispatched"] and agent["state"] in BUSY]
 
 
 def previously_dispatched(alias, number):

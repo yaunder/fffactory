@@ -142,7 +142,9 @@ concept ([#98](https://github.com/yaunder/fffactory/issues/98)):
 
 They are `AgentState` in `src/domain/control-plane.ts`. Only the worker's
 Paseo adapter (`paseoAgents`, `src/host/control-plane.ts`), which `host
-control-plane activity` runs, knows Paseo's statuses. It lists every agent
+control-plane activity` and the dispatcher's `host agents`
+([host protocol §agents](host-protocol.md#agents)) run, knows Paseo's statuses;
+no dispatcher code reads one ([dispatch §Capacity](dispatch.md#capacity)). It lists every agent
 with `paseo ls --global --background --json`, then those dispatch launched
 with the same list and `--label factory-dispatch=true`, and translates each
 agent's status:
@@ -165,7 +167,8 @@ invalid`, `Paseo reported an agent status fffactory does not know`, `a Paseo
 agent could not be inspected` or `a Paseo agent's inspection was invalid`.
 Every Paseo call of one answer shares a 90-second budget, under the CLI's
 two-minute wait for it, so the worker answers, and frees the activator's lock,
-first: a call that would start past it, or outlasts it, has failed.
+first: a call that would start past it, or outlasts it, has failed. `host
+agents` keeps the same budget, so a dispatch tick never hangs on Paseo.
 
 The activity document carries each agent's ID, state and whether dispatch
 launched it, and no Paseo status, field or label
@@ -195,8 +198,10 @@ unpushed ([worker lifecycle §Gates (terminate)](worker-lifecycle.md#gates-termi
 The [pre-activation deferral](#pre-activation-deferral) in apply and upgrade,
 and the removal gates of `worker stop`, `worker terminate` and `teardown`
 ([worker lifecycle §Gates](worker-lifecycle.md#gates),
-[teardown §Gates](teardown.md#gates)) all judge by this rule; no code reads
-the document's `activity` count. Busy
+[teardown §Gates](teardown.md#gates)) all judge by this rule, and dispatch's
+capacity check counts its own agents by the same states
+([dispatch §Capacity](dispatch.md#capacity)); no code reads the document's
+`activity` count. Busy
 activity is named in fffactory's words, how many of each (`busyAgents`): `2
 agents are working on HOSTNAME`, `1 agent needs input on HOSTNAME`, `1 agent is
 working and 2 need input on HOSTNAME`. Tested in

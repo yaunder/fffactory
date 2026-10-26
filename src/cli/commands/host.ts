@@ -21,9 +21,11 @@ const USAGE = [
   "       fffactory host control-plane (activity | install | reload | restart)",
   "       fffactory host dispatch (adoption | reconcile | inspect)",
   "       fffactory host work inspect",
+  "       fffactory host agents --json",
   "",
   "The worker side of the host protocol. The operator's fffactory runs these on a",
-  "worker over SSH as fffactory-admin; there is no need to run them yourself.",
+  "worker over SSH as fffactory-admin, and the dispatcher runs agents as factory;",
+  "there is no need to run them yourself.",
   "",
   "  inspect --json  Print the worker's active release, configuration digest, last",
   "                  install, service states and readiness evidence as one",
@@ -39,6 +41,10 @@ const USAGE = [
   "  work inspect    As root, run by the activator: report, as the factory account,",
   "                  the uncommitted, unpushed and stashed work in every checkout",
   "                  and worktree. Reads only; changes nothing.",
+  "  agents --json   As factory, run by the dispatcher: print the worker's agents in",
+  "                  fffactory's states as the activity document; exits 1 when they",
+  "                  cannot be read, the reason on standard error. Reads only;",
+  "                  changes nothing.",
 ];
 
 function jsonOnly(args: readonly string[]): boolean {
@@ -161,9 +167,40 @@ async function work(args: readonly string[], context: CliContext): Promise<numbe
   return 0;
 }
 
+/**
+ * The worker's agents for its dispatcher, which runs this as `factory`: never through the
+ * activator, so a dispatch tick never waits on its lock. Unreadable agents exit 1, so
+ * dispatch fails safe rather than reading no agents, with their reason on one line on standard
+ * error for the tick's error; standard output keeps the document.
+ */
+async function agents(args: readonly string[], context: CliContext): Promise<number> {
+  if (!jsonOnly(args)) {
+    context.err("fffactory host agents: the host protocol is JSON; pass --json");
+    return 1;
+  }
+  if (context.worker.isRoot()) {
+    context.err("fffactory host agents: run it as factory, never root; the dispatcher runs it");
+    return 1;
+  }
+  const result = await context.worker.agents();
+  context.out(activityJson(result));
+  if (result.kind === "listed") return 0;
+  context.err(`fffactory host agents: ${result.reason}`);
+  return 1;
+}
+
 const SUBCOMMANDS: Readonly<
   Record<string, (args: readonly string[], context: CliContext) => Promise<number>>
-> = { inspect, apply, verify, repositories, "control-plane": controlPlane, dispatch, work };
+> = {
+  inspect,
+  apply,
+  verify,
+  repositories,
+  "control-plane": controlPlane,
+  dispatch,
+  work,
+  agents,
+};
 
 async function host(args: readonly string[], context: CliContext): Promise<number> {
   const [subcommand, ...rest] = args;
