@@ -14,7 +14,8 @@ record, writes no file and stores no result, so a worker it cannot reach has an
 unknown release: there is no last-known value to show. Its only calls are STS
 `GetCallerIdentity`, EC2 `DescribeInstances`, `tailscale status --json`, and
 `fffactory host inspect --json` plus, for an active release, `fffactory host
-repositories --json` on each reachable worker over SSH
+repositories --json` and dispatch inspection through the worker activator
+on each reachable worker over SSH
 ([host protocol](host-protocol.md)).
 
 ## Order
@@ -305,6 +306,8 @@ cannot reach with an unknown release; no release; unprovisioned and stopped
 machines not connected to, a stopped one with its own verdict; an unreadable
 EC2 inventory; Tailscale logged out; another account refused before any
 inventory; an incomplete factory.json refused before AWS),
+`tests/application/inspect-dispatch.test.ts` (the fixed dispatch inspection
+command, exit-status agreement, and fail-closed handling of untrusted answers),
 `tests/infrastructure/ec2-inventory.test.ts` (stubbed calls, and the real SDK
 against `tests/support/stub-ec2-instances.ts`), `tests/cli/status.test.ts`
 (exit codes 0, 2 and 1, no lock taken, no report once interrupted, the human
