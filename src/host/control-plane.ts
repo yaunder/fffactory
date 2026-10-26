@@ -1,6 +1,12 @@
 import { join } from "node:path";
 import { hashSync } from "bcryptjs";
-import type { AgentActivity, ControlPlaneAction } from "../domain/control-plane";
+import {
+  AGENT_ID,
+  type Agent,
+  type AgentState,
+  type ControlPlaneAction,
+  type WorkerAgents,
+} from "../domain/control-plane";
 import { WORKER_PATHS } from "../domain/host-protocol";
 import { parseHostProjection } from "../domain/host-projection";
 import { CREDENTIAL_COMMAND_TIMEOUT_MS } from "../domain/installation";
@@ -10,6 +16,11 @@ import type { ApplySystem } from "./apply";
 import { AWS_ENV, readSecretValue } from "./secret-value";
 
 const TIMEOUT_MS = 2 * 60_000;
+/**
+ * The whole activity answer's budget, every Paseo call in it together: under the CLI's
+ * two-minute wait for the answer, so the worker answers, and frees the activator's lock, first.
+ */
+const ACTIVITY_BUDGET_MS = 90_000;
 /** Paseo's own cost: `DAEMON_PASSWORD_BCRYPT_COST` in `@getpaseo/server`'s auth.js. */
 const PASEO_BCRYPT_COST = 12;
 const ENV = {
@@ -47,8 +58,101 @@ async function passwordHash(
   return { ok: true, hash: hashSync(password, PASEO_BCRYPT_COST) };
 }
 
+/** Runs the Paseo CLI with `args`, as `factory` and authenticated. */
+export type PaseoCommand = (args: readonly string[]) => Promise<ProcessOutcome>;
+
+/**
+ * fffactory's state for each Paseo status but `running`, which is `working` or `needs_input`
+ * by its pending permissions. Any status not here is unreadable.
+ */
+const STATE_OF: Readonly<Record<string, AgentState | "running">> = {
+  initializing: "working",
+  running: "running",
+  idle: "finished",
+  error: "failed",
+  closed: "stopped",
+};
+/** Every agent, background workspaces' too; `--label` keeps the ones dispatch launched. */
+const LIST = ["ls", "--global", "--background"] as const;
+const DISPATCHED = ["--label", "factory-dispatch=true"] as const;
+
+type Unread = Extract<WorkerAgents, { kind: "unknown" }>;
+const unread = (reason: string): Unread => ({ kind: "unknown", reason });
+
+interface Row {
+  readonly id: string;
+  readonly status: string;
+}
+
+function json(text: string): unknown {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return undefined;
+  }
+}
+
+function fields(value: unknown): Readonly<Record<string, unknown>> | undefined {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as Readonly<Record<string, unknown>>)
+    : undefined;
+}
+
+function row(value: unknown): Row | undefined {
+  const { id, status } = fields(value) ?? {};
+  return typeof id === "string" && AGENT_ID.test(id) && typeof status === "string"
+    ? { id, status }
+    : undefined;
+}
+
+/** A Paseo agent list's rows, or why it could not be read. */
+function listed(outcome: ProcessOutcome): readonly Row[] | Unread {
+  if (outcome.kind !== "exited" || outcome.exitCode !== 0)
+    return unread("Paseo activity could not be read");
+  const parsed = json(outcome.stdout);
+  if (!Array.isArray(parsed)) return unread("Paseo activity was invalid");
+  const rows = parsed.map(row);
+  return rows.includes(undefined) ? unread("Paseo activity was invalid") : (rows as Row[]);
+}
+
+/** A listed agent's state; a running one's from its pending permissions (`agent inspect`). */
+async function stateOf(paseo: PaseoCommand, agent: Row): Promise<AgentState | Unread> {
+  const state = STATE_OF[agent.status] as AgentState | "running";
+  if (state !== "running") return state;
+  const outcome = await paseo(["agent", "inspect", agent.id, "--json"]);
+  if (outcome.kind !== "exited" || outcome.exitCode !== 0)
+    return unread("a Paseo agent could not be inspected");
+  const inspection = fields(json(outcome.stdout));
+  const pending = inspection?.Id === agent.id ? inspection.PendingPermissions : undefined;
+  if (!Array.isArray(pending)) return unread("a Paseo agent's inspection was invalid");
+  return pending.length > 0 ? "needs_input" : "working";
+}
+
+/**
+ * The worker's agents in fffactory's states (`docs/specs/control-plane.md` §Agent states). The
+ * only code that knows Paseo's statuses: it lists every agent, marks the ones dispatch
+ * labelled, and inspects only the running ones for a pending permission. Anything it cannot
+ * read makes the whole answer unknown, never a guess.
+ */
+export async function paseoAgents(paseo: PaseoCommand): Promise<WorkerAgents> {
+  const all = listed(await paseo([...LIST, "--json"]));
+  if ("kind" in all) return all;
+  const dispatched = listed(await paseo([...LIST, ...DISPATCHED, "--json"]));
+  if ("kind" in dispatched) return dispatched;
+  if (all.some((agent) => !Object.hasOwn(STATE_OF, agent.status)))
+    return unread("Paseo reported an agent status fffactory does not know");
+  const launched = new Set(dispatched.map((agent) => agent.id));
+  const agents: Agent[] = [];
+  for (const agent of all) {
+    const state = await stateOf(paseo, agent);
+    if (typeof state !== "string") return state;
+    agents.push({ id: agent.id, state, dispatched: launched.has(agent.id) });
+  }
+  return { kind: "listed", agents };
+}
+
 export interface HostControlPlane {
-  activity(): Promise<AgentActivity>;
+  activity(): Promise<WorkerAgents>;
   install(): Promise<ControlPlaneAction>;
   reload(): Promise<ControlPlaneAction>;
   restart(): Promise<ControlPlaneAction>;
@@ -63,42 +167,27 @@ export function workerControlPlane(system: ApplySystem): HostControlPlane {
       env: ENV,
       ...(stdin === undefined ? {} : { stdin: new TextEncoder().encode(stdin) }),
     });
+  // The Paseo CLI as factory, in a clean environment, through the active release's auth wrapper.
+  const asFactory = [
+    "/usr/sbin/runuser",
+    "-u",
+    "factory",
+    "--",
+    "/usr/bin/env",
+    "-i",
+    "HOME=/home/factory",
+    "PATH=/home/factory/.local/bin:/usr/local/bin:/usr/bin:/bin",
+    auth,
+  ];
   return {
-    // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: hostile CLI output is parsed conservatively at this boundary
     async activity() {
       if (!system.isRoot()) return { kind: "unknown", reason: "not root" };
-      const outcome = await run([
-        "/usr/sbin/runuser",
-        "-u",
-        "factory",
-        "--",
-        "/usr/bin/env",
-        "-i",
-        "HOME=/home/factory",
-        "PATH=/home/factory/.local/bin:/usr/local/bin:/usr/bin:/bin",
-        auth,
-        // TODO(re-evaluate when #98 lands): list with --global --background; Paseo 0.12+ hides
-        // agents in background workspaces from a bare ls, so this does not count them.
-        "agent",
-        "ls",
-        "--json",
-      ]);
-      if (outcome.kind !== "exited" || outcome.exitCode !== 0)
-        return { kind: "unknown", reason: "Paseo activity could not be read" };
-      try {
-        const parsed: unknown = JSON.parse(outcome.stdout);
-        const agents = Array.isArray(parsed)
-          ? parsed
-          : typeof parsed === "object" &&
-              parsed !== null &&
-              Array.isArray((parsed as { agents?: unknown }).agents)
-            ? (parsed as { agents: unknown[] }).agents
-            : undefined;
-        if (agents === undefined) return { kind: "unknown", reason: "Paseo activity was invalid" };
-        return agents.length === 0 ? { kind: "idle" } : { kind: "active", count: agents.length };
-      } catch {
-        return { kind: "unknown", reason: "Paseo activity was invalid" };
-      }
+      const deadline = system.now().getTime() + ACTIVITY_BUDGET_MS;
+      return paseoAgents(async (args) => {
+        const left = deadline - system.now().getTime();
+        if (left <= 0) return { kind: "timed_out" };
+        return system.run([...asFactory, ...args], left, { env: ENV });
+      });
     },
     async install() {
       if (!system.isRoot()) return { kind: "failed", reason: "not root" };
@@ -116,22 +205,7 @@ export function workerControlPlane(system: ApplySystem): HostControlPlane {
     },
     async reload() {
       if (!system.isRoot()) return { kind: "failed", reason: "not root" };
-      return failure(
-        await run([
-          "/usr/sbin/runuser",
-          "-u",
-          "factory",
-          "--",
-          "/usr/bin/env",
-          "-i",
-          "HOME=/home/factory",
-          "PATH=/home/factory/.local/bin:/usr/local/bin:/usr/bin:/bin",
-          auth,
-          "daemon",
-          "reload",
-        ]),
-        "Paseo reload",
-      );
+      return failure(await run([...asFactory, "daemon", "reload"]), "Paseo reload");
     },
     async restart() {
       if (!system.isRoot()) return { kind: "failed", reason: "not root" };

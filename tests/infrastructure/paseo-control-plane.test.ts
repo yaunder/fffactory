@@ -58,7 +58,7 @@ describe("the Paseo control-plane adapter", () => {
 
   test("reads agent activity as the factory account, idle when none are listed", async () => {
     const { transport, commands } = fakeTransport(() =>
-      COMPLETED(0, activityJson({ kind: "idle" })),
+      COMPLETED(0, activityJson({ kind: "listed", agents: [] })),
     );
     expect(await paseoControlPlane(transport).activeAgents(address())).toEqual({ kind: "idle" });
     expect(commands[0]).toEqual([
@@ -70,14 +70,31 @@ describe("the Paseo control-plane adapter", () => {
     ] as unknown as RemoteCommand);
   });
 
-  test("counts listed agents as active, from an array or an { agents } object", async () => {
-    const array = fakeTransport(() => COMPLETED(0, activityJson({ kind: "active", count: 2 })));
-    expect(await paseoControlPlane(array.transport).activeAgents(address())).toEqual({
+  test("counts listed agents as active, whatever their states", async () => {
+    const listed = fakeTransport(() =>
+      COMPLETED(
+        0,
+        activityJson({
+          kind: "listed",
+          agents: [
+            { id: "one", state: "working", dispatched: true },
+            { id: "two", state: "finished", dispatched: false },
+          ],
+        }),
+      ),
+    );
+    expect(await paseoControlPlane(listed.transport).activeAgents(address())).toEqual({
       kind: "active",
       count: 2,
     });
-    const wrapped = fakeTransport(() => COMPLETED(0, activityJson({ kind: "active", count: 1 })));
-    expect(await paseoControlPlane(wrapped.transport).activeAgents(address())).toEqual({
+  });
+
+  // TODO(re-evaluate when #99 lands): an answer without the agent list is refused.
+  test("still reads an older worker's answer, without the agent list", async () => {
+    const older = fakeTransport(() =>
+      COMPLETED(0, JSON.stringify({ protocol_version: 1, activity: { kind: "active", count: 1 } })),
+    );
+    expect(await paseoControlPlane(older.transport).activeAgents(address())).toEqual({
       kind: "active",
       count: 1,
     });

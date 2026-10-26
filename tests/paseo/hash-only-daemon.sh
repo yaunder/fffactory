@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Proves, against the pinned Paseo, that the daemon a worker runs authenticates with only the
 # bcrypt hash fffactory writes, that nothing it launches sees PASEO_PASSWORD, that it downloads
-# no speech model with the merged config, and that it accepts factory-dispatch's launch and list
-# flags (docs/specs/control-plane.md §The Paseo pin):
+# no speech model with the merged config, that it accepts factory-dispatch's launch and list
+# flags, and that it answers the agent list and inspection the worker's agent adapter reads
+# (docs/specs/control-plane.md §The Paseo pin, §Agent states):
 #
 #   tests/paseo/hash-only-daemon.sh            # just paseo-check
 #
@@ -130,6 +131,19 @@ PYTHON
   [[ $(jq -r '[.[].id] | join(" ")' <<<"${out}") == "${agent_id}" ]] ||
     fail "the dispatcher's agent list does not show exactly the launched agent: ${out}"
   pass "an agent launched with --no-wait is listed with ls --global --background"
+  # What the worker's agent adapter reads (control-plane.md §Agent states): each listed agent's
+  # id, a token its AGENT_ID rule accepts, and status, and an inspected agent's pending permissions.
+  out="$(as_factory aws-right ls --global --background --json 2>&1)" ||
+    fail "the adapter's agent list failed: ${out}"
+  jq -e --arg id "${agent_id}" '($id | test("^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")) and
+    [.[] | select(.id == $id) | .status
+    | IN("initializing", "running", "idle", "error", "closed")] == [true]' <<<"${out}" >/dev/null ||
+    fail "the agent list does not show the launched agent's id and a known status: ${out}"
+  out="$(as_factory aws-right agent inspect "${agent_id}" --json 2>&1)" ||
+    fail "the agent could not be inspected: ${out}"
+  jq -e --arg id "${agent_id}" '.Id == $id and (.PendingPermissions | type) == "array"' \
+    <<<"${out}" >/dev/null || fail "the agent's inspection lacks its Id or PendingPermissions: ${out}"
+  pass "ls lists each agent's id and status, and agent inspect its pending permissions"
   local launched=""
   for _ in $(seq 60); do
     launched="$(grep -l '^PASEO_AGENT_ID=' "${work}"/claude-env.* 2>/dev/null | head -n 1 || true)"

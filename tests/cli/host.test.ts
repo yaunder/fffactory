@@ -9,7 +9,7 @@ import {
 } from "../../src/domain/installation";
 import { verificationJson } from "../../src/domain/readiness";
 import { repositoryInspectionJson } from "../../src/domain/repository-placement";
-import { activityJson, controlPlaneActionJson } from "../../src/domain/control-plane";
+import { type Agent, activityJson, controlPlaneActionJson } from "../../src/domain/control-plane";
 import { dispatchAdoptionJson, dispatchInspectionJson } from "../../src/domain/dispatch-projection";
 import { type WorkInspection, workInspectionJson } from "../../src/domain/work-inspection";
 import { harness } from "../support/cli-harness";
@@ -148,13 +148,13 @@ describe("fffactory host control-plane", () => {
   test("prints only versioned endpoint documents and propagates failures", async () => {
     const worker = fakeWorker(inspection(HOST), {
       isRoot: () => true,
-      activity: async () => ({ kind: "active", count: 2 }),
+      activity: async () => ({ kind: "listed", agents: AGENTS }),
       install: async () => ({ kind: "done" }),
       reload: async () => ({ kind: "failed", reason: "Paseo reload exited 1" }),
     });
     const active = harness(new MemoryInstanceStore(), {}, { worker });
     expect(await run(["host", "control-plane", "activity"], active.context)).toBe(0);
-    expect(active.out).toEqual([activityJson({ kind: "active", count: 2 })]);
+    expect(active.out).toEqual([activityJson({ kind: "listed", agents: AGENTS })]);
     const install = harness(new MemoryInstanceStore(), {}, { worker });
     expect(await run(["host", "control-plane", "install"], install.context)).toBe(0);
     expect(install.out).toEqual([controlPlaneActionJson({ kind: "done" })]);
@@ -207,6 +207,10 @@ describe("fffactory host repositories", () => {
 });
 
 const HOST = "fff-aaaa1111-builder-1";
+const AGENTS: readonly Agent[] = [
+  { id: "one", state: "needs_input", dispatched: true },
+  { id: "two", state: "finished", dispatched: false },
+];
 
 function applied(state: "succeeded" | "failed"): HostApplyResult {
   const steps = pendingSteps().map((step) => ({ ...step, status: "succeeded" as const }));

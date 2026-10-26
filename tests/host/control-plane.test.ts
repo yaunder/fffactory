@@ -58,6 +58,74 @@ function recording(secret: ProcessOutcome | string | null = PASSWORD) {
   return { calls, run };
 }
 
+const AUTH = "/opt/fffactory/current/steps/control-plane/paseo-auth.sh";
+/** How every Paseo command starts: as factory, in a clean environment, through the auth wrapper. */
+const AS_FACTORY = [
+  "/usr/sbin/runuser",
+  "-u",
+  "factory",
+  "--",
+  "/usr/bin/env",
+  "-i",
+  "HOME=/home/factory",
+  "PATH=/home/factory/.local/bin:/usr/local/bin:/usr/bin:/bin",
+  AUTH,
+];
+
+/** A row of `paseo ls --json`, as Paseo 0.13.2 prints it. */
+function row(id: string, status: string) {
+  return {
+    id,
+    shortId: id.slice(0, 7),
+    name: "Fix the build",
+    provider: "claude",
+    thinking: "auto",
+    status,
+    cwd: "/workspace/repos/factory",
+    created: "2 hours ago",
+  };
+}
+
+/** `paseo agent inspect ID --json`, as Paseo 0.13.2 prints it, trimmed to what matters. */
+function inspection(id: string, pending: readonly { id: string; tool: string }[]): ProcessOutcome {
+  const stdout = JSON.stringify({
+    Id: id,
+    Name: "Fix the build",
+    Status: "running",
+    Archived: false,
+    PendingPermissions: pending,
+  });
+  return { kind: "exited", exitCode: 0, stdout, stderr: "" };
+}
+
+type Answer = ProcessOutcome | readonly ReturnType<typeof row>[];
+
+/**
+ * A scripted Paseo: each list answers its rows (or an outcome), each inspection its agent's
+ * outcome. It records each command's argv; anything else fails the test.
+ */
+function paseo(answers: {
+  all: Answer;
+  dispatched?: Answer;
+  inspect?: Readonly<Record<string, ProcessOutcome>>;
+}) {
+  const calls: string[][] = [];
+  const outcome = (answer: Answer): ProcessOutcome =>
+    Array.isArray(answer)
+      ? { kind: "exited", exitCode: 0, stdout: JSON.stringify(answer), stderr: "" }
+      : (answer as ProcessOutcome);
+  const run: ProcessRunner = async (argv) => {
+    calls.push([...argv]);
+    const [verb, , id] = argv.slice(AS_FACTORY.length);
+    if (verb === "ls")
+      return outcome(argv.includes("--label") ? (answers.dispatched ?? []) : answers.all);
+    const inspected = answers.inspect?.[id ?? ""];
+    if (inspected === undefined) throw new Error(`unexpected command: ${argv.join(" ")}`);
+    return inspected;
+  };
+  return { calls, run };
+}
+
 /** The bcrypt hash setup was sent, after checking the reference line before it. */
 function sentHash(calls: readonly Call[]): string {
   const setup = calls.find((call) => call.argv[0] === "/bin/bash");
@@ -71,11 +139,12 @@ function endpoint(
   input = PROJECTION,
   isRoot = true,
   hostname = "fff-aaaa1111-builder-1",
+  now = () => new Date(),
 ) {
   const worker: ApplySystem = {
     ...system(root),
     run,
-    now: () => new Date(),
+    now,
     isRoot: () => isRoot,
     hostname: () => hostname,
     readInput: async () => input,
@@ -86,39 +155,200 @@ function endpoint(
 }
 
 describe("the worker control-plane endpoint", () => {
-  test("reads activity by dropping to factory and using the active release auth wrapper", async () => {
-    const calls: readonly string[][] = [];
-    const run: ProcessRunner = async (argv) => {
-      (calls as string[][]).push([...argv]);
-      return { kind: "exited", exitCode: 0, stdout: '{"agents":[{"id":"one"}]}', stderr: "" };
-    };
-    expect(await endpoint(run).activity()).toEqual({ kind: "active", count: 1 });
-    expect(calls[0]).toContain("/usr/sbin/runuser");
-    expect(calls[0]).toContain(
-      join(root, "/opt/fffactory/current/steps/control-plane/paseo-auth.sh"),
-    );
-    expect(calls[0]).toContain("factory");
+  test("reads every agent by dropping to factory and using the active release auth wrapper", async () => {
+    const { calls, run } = paseo({ all: [row("one", "idle")] });
+    expect(await endpoint(run).activity()).toEqual({
+      kind: "listed",
+      agents: [{ id: "one", state: "finished", dispatched: false }],
+    });
+    expect(calls).toHaveLength(2);
+    for (const call of calls)
+      expect(call.slice(0, AS_FACTORY.length)).toEqual([
+        ...AS_FACTORY.slice(0, -1),
+        join(root, AUTH),
+      ]);
+    expect(calls.map((call) => call.slice(AS_FACTORY.length))).toEqual([
+      ["ls", "--global", "--background", "--json"],
+      ["ls", "--global", "--background", "--label", "factory-dispatch=true", "--json"],
+    ]);
   });
 
   test.each([
-    ["[]", { kind: "idle" as const }],
-    ['{"agents":[]}', { kind: "idle" as const }],
-    [
-      '{"agents":"not-an-array"}',
-      { kind: "unknown" as const, reason: "Paseo activity was invalid" },
-    ],
-    ["not json", { kind: "unknown" as const, reason: "Paseo activity was invalid" }],
-  ])("conservatively interprets Paseo activity %s", async (stdout, expected) => {
-    const run: ProcessRunner = async () => ({ kind: "exited", exitCode: 0, stdout, stderr: "" });
-    expect(await endpoint(run).activity()).toEqual(expected);
+    ["initializing", "working"],
+    ["idle", "finished"],
+    ["error", "failed"],
+    ["closed", "stopped"],
+  ] as const)(
+    "translates an agent Paseo reports %s as %s, without inspecting it",
+    async (status, state) => {
+      const { calls, run } = paseo({ all: [row("one", status)] });
+      expect(await endpoint(run).activity()).toEqual({
+        kind: "listed",
+        agents: [{ id: "one", state, dispatched: false }],
+      });
+      expect(calls.filter((call) => call.includes("inspect"))).toEqual([]);
+    },
+  );
+
+  test.each([
+    [[], "working"],
+    [[{ id: "permission-1", tool: "Bash" }], "needs_input"],
+  ] as const)(
+    "inspects a running agent: with pending permissions %j it reads %s",
+    async (pending, state) => {
+      const { calls, run } = paseo({
+        all: [row("one", "running")],
+        inspect: { one: inspection("one", pending) },
+      });
+      expect(await endpoint(run).activity()).toEqual({
+        kind: "listed",
+        agents: [{ id: "one", state, dispatched: false }],
+      });
+      expect(calls.at(-1)?.slice(AS_FACTORY.length)).toEqual(["agent", "inspect", "one", "--json"]);
+    },
+  );
+
+  test("inspects only the running agents, and marks the ones dispatch launched", async () => {
+    const { calls, run } = paseo({
+      all: [
+        row("a1", "running"),
+        row("b2", "idle"),
+        row("c3", "running"),
+        row("d4", "initializing"),
+        row("e5", "closed"),
+      ],
+      dispatched: [row("b2", "idle"), row("c3", "running")],
+      inspect: { a1: inspection("a1", []), c3: inspection("c3", [{ id: "p", tool: "Edit" }]) },
+    });
+    expect(await endpoint(run).activity()).toEqual({
+      kind: "listed",
+      agents: [
+        { id: "a1", state: "working", dispatched: false },
+        { id: "b2", state: "finished", dispatched: true },
+        { id: "c3", state: "needs_input", dispatched: true },
+        { id: "d4", state: "working", dispatched: false },
+        { id: "e5", state: "stopped", dispatched: false },
+      ],
+    });
+    expect(calls.filter((call) => call.includes("inspect")).map((call) => call.at(-2))).toEqual([
+      "a1",
+      "c3",
+    ]);
   });
 
-  test("treats a failed Paseo activity command as unknown", async () => {
-    const run: ProcessRunner = async () => ({ kind: "timed_out" });
+  test("a worker with no agents lists none", async () => {
+    const { run } = paseo({ all: [] });
+    expect(await endpoint(run).activity()).toEqual({ kind: "listed", agents: [] });
+  });
+
+  test("a status fffactory does not know makes the whole activity unknown, before any inspection", async () => {
+    const { calls, run } = paseo({
+      all: [row("one", "running"), row("two", "permission")],
+      inspect: { one: inspection("one", []) },
+    });
     expect(await endpoint(run).activity()).toEqual({
       kind: "unknown",
-      reason: "Paseo activity could not be read",
+      reason: "Paseo reported an agent status fffactory does not know",
     });
+    expect(calls.filter((call) => call.includes("inspect"))).toEqual([]);
+  });
+
+  test.each([
+    [{ kind: "exited" as const, exitCode: 1, stdout: "", stderr: "no such agent" }],
+    [{ kind: "timed_out" as const }],
+  ])("a running agent it cannot inspect makes the activity unknown (%#)", async (outcome) => {
+    const { run } = paseo({ all: [row("one", "running")], inspect: { one: outcome } });
+    expect(await endpoint(run).activity()).toEqual({
+      kind: "unknown",
+      reason: "a Paseo agent could not be inspected",
+    });
+  });
+
+  test.each([
+    ["not json"],
+    ["[]"],
+    [JSON.stringify({ Id: "one", Status: "running" })],
+    [JSON.stringify({ Id: "one", Status: "running", PendingPermissions: "none" })],
+    [JSON.stringify({ Id: "other", Status: "running", PendingPermissions: [] })],
+  ])("an inspection it cannot read makes the activity unknown: %s", async (stdout) => {
+    const { run } = paseo({
+      all: [row("one", "running")],
+      inspect: { one: { kind: "exited", exitCode: 0, stdout, stderr: "" } },
+    });
+    expect(await endpoint(run).activity()).toEqual({
+      kind: "unknown",
+      reason: "a Paseo agent's inspection was invalid",
+    });
+  });
+
+  test.each([
+    ['{"agents":[]}'],
+    ["not json"],
+    ['[{"status":"idle"}]'],
+    ['[{"id":"one"}]'],
+    ['[{"id":"--all","status":"running"}]'],
+    ['[{"id":"one two","status":"idle"}]'],
+    ['["one"]'],
+  ])("conservatively reads Paseo's agent list %s as unknown", async (stdout) => {
+    const { calls, run } = paseo({ all: { kind: "exited", exitCode: 0, stdout, stderr: "" } });
+    expect(await endpoint(run).activity()).toEqual({
+      kind: "unknown",
+      reason: "Paseo activity was invalid",
+    });
+    expect(calls.filter((call) => call.includes("inspect"))).toEqual([]);
+  });
+
+  test.each([['{"agents":[]}'], ['[{"status":"idle"}]']])(
+    "conservatively reads Paseo's dispatched list %s as unknown",
+    async (stdout) => {
+      const { run } = paseo({
+        all: [row("one", "idle")],
+        dispatched: { kind: "exited", exitCode: 0, stdout, stderr: "" },
+      });
+      expect(await endpoint(run).activity()).toEqual({
+        kind: "unknown",
+        reason: "Paseo activity was invalid",
+      });
+    },
+  );
+
+  test.each(["all", "dispatched"] as const)(
+    "treats a failed Paseo %s list as unknown",
+    async (list) => {
+      const { run } = paseo({ all: [row("one", "idle")], [list]: { kind: "timed_out" } });
+      expect(await endpoint(run).activity()).toEqual({
+        kind: "unknown",
+        reason: "Paseo activity could not be read",
+      });
+    },
+  );
+
+  test("bounds the whole answer by one budget, under the CLI's wait, each command given what is left", async () => {
+    let clock = 0;
+    const timeouts: number[] = [];
+    const scripted = paseo({
+      all: [row("a1", "running"), row("b2", "running")],
+      inspect: { a1: inspection("a1", []), b2: inspection("b2", []) },
+    });
+    const run: ProcessRunner = async (argv, timeout, options) => {
+      timeouts.push(timeout);
+      clock += 40_000;
+      return scripted.run(argv, timeout, options);
+    };
+    const answer = await endpoint(
+      run,
+      PROJECTION,
+      true,
+      undefined,
+      () => new Date(clock),
+    ).activity();
+    expect(answer).toEqual({ kind: "unknown", reason: "a Paseo agent could not be inspected" });
+    expect(timeouts).toEqual([90_000, 50_000, 10_000]);
+    expect(scripted.calls.map((call) => call.at(-2))).toEqual([
+      "--background",
+      "factory-dispatch=true",
+      "a1",
+    ]);
   });
 
   test("reads the Paseo password by its reference as root and sends setup only the reference and Paseo's bcrypt hash", async () => {

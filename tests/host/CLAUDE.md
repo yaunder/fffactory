@@ -3,7 +3,8 @@
 Tests of `src/host/` (`docs/specs/host-protocol.md`) against worker filesystems laid out in
 temporary directories by `worker-scenarios.ts`, never the real `/`.
 
-- `fixtures/` (inspect, apply, verify and work documents) is the protocol's shared contract.
+- `fixtures/` (inspect, apply, verify, work and activity documents) is the protocol's shared
+  contract.
   `protocol-contract.test.ts` runs every fixture through both sides: the worker side must
   produce it byte for byte; the CLI side must parse it and serialize it back unchanged.
   `dispatch-not-requested.json`, the projection that stops dispatch, goes the other way: the
@@ -24,9 +25,10 @@ temporary directories by `worker-scenarios.ts`, never the real `/`.
 - `credentials.test.ts` runs the `credentials` step over a scripted runner, Secrets Manager
   answered by ARN: it asserts each command, deadline and standard input, and searches every
   argument, environment value and log line for the material it used.
-- `control-plane.test.ts` runs the control-plane endpoint over a scripted runner, Secrets
-  Manager answering the Paseo password: it checks the hash setup is sent with `bcryptjs`'s
-  `compareSync`, and searches every argument, environment value and setup input for the
-  password.
+- `control-plane.test.ts` runs the control-plane endpoint over a scripted runner: for
+  activity, a scripted Paseo (`paseo`) answering its lists and each agent's inspection, as
+  0.13.2 prints them; for install, Secrets Manager answering the Paseo password: it checks the
+  hash setup is sent with `bcryptjs`'s `compareSync`, and searches every argument, environment
+  value and setup input for the password.
 - `verify.test.ts` answers every command with a scripted runner; `inspect.test.ts` covers the
   unprivileged read-only inspection.

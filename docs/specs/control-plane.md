@@ -95,6 +95,60 @@ Reload-safe changes may reload with active agents. An active agent with no
 maintenance change causes no Paseo activity lookup or lifecycle action on an
 up-to-date rerun.
 
+## Agent states
+
+fffactory names a worker's agents in its own states, which name no Paseo
+concept ([#98](https://github.com/yaunder/fffactory/issues/98)):
+
+| State | The agent is |
+| --- | --- |
+| `working` | mid-task |
+| `needs_input` | blocked on a person approving something |
+| `finished` | done with its turn |
+| `failed` | stopped by an error in its turn |
+| `stopped` | not loaded |
+
+They are `AgentState` in `src/domain/control-plane.ts`. Only the worker's
+Paseo adapter (`paseoAgents`, `src/host/control-plane.ts`), which `host
+control-plane activity` runs, knows Paseo's statuses. It lists every agent
+with `paseo ls --global --background --json`, then those dispatch launched
+with the same list and `--label factory-dispatch=true`, and translates each
+agent's status:
+
+| fffactory state | From Paseo |
+| --- | --- |
+| `working` | `initializing`, or `running` with no pending permission |
+| `needs_input` | `running` with a pending permission |
+| `finished` | `idle` |
+| `failed` | `error` |
+| `stopped` | `closed` |
+
+Paseo has no status for a permission wait: such an agent stays `running`. So
+the adapter inspects each `running` agent, and only those, with
+`paseo agent inspect ID --json`, whose `PendingPermissions` it reads. Any other
+status, an agent ID that is not a short token, and a list or an inspection that
+fails or cannot be read make the whole activity `unknown`, never a guess, in
+fffactory's words: `Paseo activity could not be read`, `Paseo activity was
+invalid`, `Paseo reported an agent status fffactory does not know`, `a Paseo
+agent could not be inspected` or `a Paseo agent's inspection was invalid`.
+Every Paseo call of one answer shares a 90-second budget, under the CLI's
+two-minute wait for it, so the worker answers, and frees the activator's lock,
+first: a call that would start past it, or outlasts it, has failed.
+
+The activity document carries each agent's ID, state and whether dispatch
+launched it, and no Paseo status, field or label
+([host protocol §The activity document](host-protocol.md#the-activity-document)).
+Its `activity` field is unchanged and still counts every listed agent, whatever
+its state, now background workspaces' too. Apply, the removal gates and the
+[pre-activation deferral](#pre-activation-deferral) still decide from that
+count, so a finished agent still defers maintenance and refuses removal, until
+[#99](https://github.com/yaunder/fffactory/issues/99) judges busy from the
+states. Nothing archives agents. Tested in `tests/host/control-plane.test.ts`
+(each status, a `running` agent with and without a pending permission, only
+`running` agents inspected, an unknown status, a failed or unreadable list or
+inspection, the dispatched flag, the budget) and `tests/domain/control-plane.test.ts` (the
+document round-trips; every malformed agent rejected).
+
 ## Worker protocol and privilege boundary
 
 The operator connects as `fffactory-admin`, whose only sudo authority remains:
@@ -264,15 +318,21 @@ fffactory relies on these Paseo contracts, held by 0.13.2
   ([#71](https://github.com/yaunder/fffactory/issues/71)).
 - `GET /api/health` answers `200` without a password, and the `Host` rule
   of [§Release-owned installation](#release-owned-installation) is unchanged.
-- `paseo agent ls --json` prints a JSON array of the agents that are not
-  archived and sit in a workspace that is neither archived nor a *background
-  workspace*, whatever their status. From 0.12 the CLI reads the daemon's list
-  page by page, so the array holds every such agent, past the daemon's 200-row
-  page. Also from 0.12, an agent or `paseo workspace create --background` can
-  create a background workspace, and a workspace an agent in one creates is one
-  too; `--background` lists their agents as well. Activity counts any entry as
-  an active agent, so a worker is idle only when the array is empty. It lists
-  without `--background`, so an agent in a background workspace is not counted.
+- `paseo ls --global --json` (the same command as `paseo agent ls`) prints a
+  JSON array of the agents that are not archived, whatever their status: one object per
+  agent, with its `id` and `status`, one of `initializing`, `running`,
+  `idle`, `error` or `closed`, but neither its labels nor its pending
+  permissions. A permission wait is not a status: the agent stays `running`. From
+  0.12 the CLI reads the daemon's list page by page, so the array holds every
+  such agent, past the daemon's 200-row page. Also from 0.12, an agent or
+  `paseo workspace create --background` can create a *background workspace*,
+  and a workspace an agent in one creates is one too; `ls` hides their agents
+  unless given `--background`. Without `--global`, `ls` keeps only the agents
+  of active, non-archived workspaces. The [agent adapter](#agent-states) lists
+  with both.
+- `paseo agent inspect ID --json` prints one agent as an object whose `Id` is
+  its ID and whose `PendingPermissions` is an array, empty unless it waits on a
+  person approving something.
 - `paseo run --no-wait --json` launches an agent, prints its `agentId` on
   standard output and returns without waiting for its turn; `--label key=value`
   labels it, and `paseo ls --label key=value` keeps only the agents carrying
@@ -302,19 +362,22 @@ downloaded before are left where they are: nothing deletes them.
 
 `just paseo-check` (`tests/paseo/hash-only-daemon.sh`) also proves against the
 pin that `paseo --version` prints it, that the daemon on the merged config
-starts no speech-model download, and that an agent launched with
+starts no speech-model download, that an agent launched with
 `run --no-wait --label factory-dispatch=true` is listed by
-`ls --global --background --label factory-dispatch=true`.
+`ls --global --background --label factory-dispatch=true`, and that
+`ls --global --background --json` lists it with an ID the adapter accepts and
+one of the five statuses, and `agent inspect` with its `Id` and a
+`PendingPermissions` array.
 
 ## Layer mapping
 
 | Concern | Layer | Where |
 | --- | --- | --- |
 | Change classification | domain | `src/domain/change-classification.ts` |
-| Protocol documents | domain | `src/domain/control-plane.ts` |
+| Agent states, protocol documents | domain | `src/domain/control-plane.ts` |
 | Plan derivation | application | `src/application/plan-control-plane.ts` |
 | Deferral and reconciliation | application | `src/application/apply-control-plane.ts`, `apply-factory.ts` |
-| Worker endpoint, password hash | host | `src/host/control-plane.ts`, `src/host/secret-value.ts` |
+| Worker endpoint, the agent adapter (`paseoAgents`), password hash | host | `src/host/control-plane.ts`, `src/host/secret-value.ts` |
 | SSH adapter | infrastructure | `src/infrastructure/paseo-control-plane.ts` |
 | Setup, config merge, auth, unit and pin | release assets | `assets/steps/control-plane/` |
 | The pin against the hash | check | `tests/paseo/hash-only-daemon.sh` (`just paseo-check`) |

@@ -148,7 +148,9 @@ and invokes the active root-owned release's `host control-plane` endpoint in a
 clean environment. Activity and reload drop to `factory`; install reads the
 host projection on standard input and passes only its validated Paseo secret
 ARN to the active release's setup program; restart is a fixed systemd action.
-Responses are versioned JSON. See [control plane](control-plane.md).
+Responses are versioned JSON: activity answers the
+[activity document](#the-activity-document), the others an action document. See
+[control plane](control-plane.md).
 
 Dispatch adds three more fixed operations through that same activator and lock:
 
@@ -823,6 +825,53 @@ incomplete, `/workspace/repos/PATH: placed on this worker, but the work
 inspection did not report it` (`workFindings`). A placed checkout not cloned
 yet refuses too: the CLI cannot tell it from one the worker missed.
 
+## control-plane activity
+
+```text
+sudo -n /usr/local/libexec/fffactory-activate control-plane activity
+```
+
+The worker lists its agents through its Paseo adapter as `factory`
+([control plane §Agent states](control-plane.md#agent-states)) and answers the
+activity document within 90 seconds, under the CLI's two-minute wait. It exits
+0 whatever it found: agents it cannot read are an `unknown` activity, never an
+error.
+
+### The activity document
+
+```json
+{
+  "protocol_version": 1,
+  "activity": { "kind": "active", "count": 2 },
+  "agents": [
+    { "id": "4f1c2a9e-0b7d-4c3e-9a51-6d2e8f0b1c3a", "state": "needs_input", "dispatched": true },
+    { "id": "9a8b7c6d-5e4f-4a3b-2c1d-0e9f8a7b6c5d", "state": "finished", "dispatched": false }
+  ]
+}
+```
+
+| Field | Meaning |
+| --- | --- |
+| `activity` | `{"kind": "idle"}` when no agent is listed; `{"kind": "active", "count"}`, counting every listed agent whatever its state; `{"kind": "unknown", "reason"}` when the agents could not be read, the reason in fffactory's words, at most 200 characters. |
+| `agents` | Every listed agent, in the order listed: its `id` (letters, digits, `-` and `_`, starting with a letter or digit, at most 128), its `state` (`working`, `needs_input`, `finished`, `failed` or `stopped`, [control plane §Agent states](control-plane.md#agent-states)), and `dispatched`, true when dispatch launched it. `null` exactly when `activity` is unknown, so an unreadable worker never reads as one without agents. |
+
+No Paseo status, field or label appears in the document. `agents` is an
+addition ([#98](https://github.com/yaunder/fffactory/issues/98)), so the
+document keeps version 1, and `activity` is unchanged. A worker on an earlier
+release answers without `agents`. The CLI reads `agents` when present,
+rejecting one malformed, but decides only from `activity`, and still reads an
+answer without `agents`, until [#99](https://github.com/yaunder/fffactory/issues/99).
+
+### The CLI side
+
+| Result of running it | Reads as |
+| --- | --- |
+| Exit 0 and a valid document | its `activity` |
+| Exit 0 and output that is not a valid document, or another major version | unknown: "Paseo activity returned invalid data" |
+| Any other exit status, and every other transport outcome | unknown: "Paseo activity could not be read" |
+
+Unknown fails safe as active does ([control plane §Pre-activation deferral](control-plane.md#pre-activation-deferral)).
+
 ## Layer mapping
 
 | Layer | Module | Responsibility |
@@ -831,6 +880,7 @@ yet refuses too: the CLI cannot tell it from one the worker missed.
 | Domain | `src/domain/host-protocol.ts` | The worker paths, the inspect document's types, `hostInspectionJson`, `parseHostInspection`, `RemoteCommand`, `INSPECT_COMMAND`, `UPLOAD_COMMAND` and `activateCommand`. Pure. |
 | Domain | `src/domain/work-inspection.ts` | The work inspection's document, `workInspectionJson`, `parseWorkInspection`, `INSPECT_WORK_COMMAND`, the printable path and branch rules, and `workFindings`. Pure. |
 | Domain | `src/domain/host-projection.ts` | The host projection, its canonical text and its parser. Pure. |
+| Domain | `src/domain/control-plane.ts` | fffactory's agent states, the activity and action documents, `activityJson`, `parseActivityDocument`. Pure. |
 | Domain | `src/domain/dispatch-projection.ts` | The dispatch projection, adoption and inspection documents, their parsers, and fixed inspect command. Pure. |
 | Domain | `src/domain/installation.ts` | `INSTALL_STEPS`, step results, the install state rule, the apply document and record, `Installation`, and reading the activator's answer. Pure. |
 | Domain | `src/domain/readiness.ts` | The verify document, enrollment states, and the next actions the CLI names ([readiness](readiness.md)). Pure. |
@@ -850,6 +900,7 @@ yet refuses too: the CLI cannot tell it from one the worker missed.
 | Worker | `src/host/verify.ts` | `workerVerifier`: the verifiers and enrollment checks. |
 | Worker | `src/host/dispatch.ts` | Dispatch adoption, installation, reconciliation and checked observation, with privilege drop. |
 | Worker | `src/host/work.ts` | `workerWork`: the work inspection, over the worker's working trees, as `factory`, read-only. |
+| Worker | `src/host/control-plane.ts` | `workerControlPlane`: the Paseo activity, install, reload and restart; `paseoAgents`, the adapter translating Paseo's agents into fffactory's states. |
 | Worker | `src/host/endpoint.ts` | `workerEndpoint`: all worker endpoints together. |
 | Worker | `assets/steps/` | The wrapped install steps, the pins and the plugin manifest. |
 | CLI adapter | `src/cli/commands/host.ts` | The fixed `fffactory host` inspect, apply, verify, repository, control-plane, dispatch and work operations. |
@@ -866,7 +917,10 @@ verify` over worker filesystems with scripted tools the same way:
 `tests/host/fixtures/apply-{succeeded,failed,busy}.json` and
 `verify-pending.json` byte for byte on the worker side, and on the CLI side each
 read back without loss and each activator answer into the expected worker
-outcome. The other direction, a document the CLI sends, is
+outcome. `tests/host/fixtures/activity-agents.json` likewise: the worker's
+`host control-plane activity` produces it byte for byte from a scripted Paseo,
+and the CLI reads it back without loss, over the transport, into the activity
+it counts. The other direction, a document the CLI sends, is
 `tests/host/fixtures/dispatch-not-requested.json`, the projection that stops
 dispatch ([dispatch §Stopping dispatch](dispatch.md#stopping-dispatch)): the
 CLI side builds it byte for byte, and the worker side parses it without loss.

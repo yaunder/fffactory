@@ -31,7 +31,12 @@ over SSH as `fffactory-admin` (`docs/specs/host-protocol.md`). Rules:
   `runuser` and `env -i`; neither the operator nor `factory` receives broader sudo.
 - `host control-plane` runs only through the activator's fixed `activity`, `install`,
   `reload` and `restart` actions and shares that lock. Activity and reload drop to
-  `factory`; install reads the host projection from standard input, reads the Paseo password
+  `factory`. Activity runs `paseoAgents`, the one place Paseo's agent statuses are known: it
+  translates them into `domain/control-plane.ts`'s `AgentState`, inspects only `running`
+  agents, and answers `unknown` for anything it cannot read, all its calls within one budget
+  (`ACTIVITY_BUDGET_MS`) under the CLI's wait; no Paseo status, field or label
+  reaches its document. It takes a `PaseoCommand`, so another caller can run Paseo its own
+  way; install reads the host projection from standard input, reads the Paseo password
   by its reference as root and hashes it (bcryptjs at Paseo's cost), and invokes only the
   active release's setup program, the reference and the hash on its standard input; the
   password reaches only the hash function. Restart is the fixed Paseo systemd action.
