@@ -40,6 +40,8 @@ from pathlib import Path
 state = Path(os.environ["MOCK_PASEO_STATE"])
 a = sys.argv[1:]
 if a[0] == "ls":
+    with open(os.environ["MOCK_PASEO_LS_ARGS"], "a") as calls:
+        calls.write(json.dumps(a) + "\n")
     print(state.read_text())
 elif a[0] == "run":
     Path(os.environ["MOCK_PASEO_RUN_ARGS"]).write_text(json.dumps({
@@ -69,6 +71,7 @@ class FactoryDispatchTest(unittest.TestCase):
         self.projection = self.root / "dispatch.json"
         self.paseo_state = self.root / "agents.json"
         self.paseo_args = self.root / "run-args.json"
+        self.paseo_ls_args = self.root / "ls-args.jsonl"
         self.sync_calls = self.root / "sync-calls"
         self.paseo_state.write_text("[]")
         self.gitconfig = self.root / "gitconfig"
@@ -78,6 +81,7 @@ class FactoryDispatchTest(unittest.TestCase):
                          "PATH": str(self.bin) + os.pathsep + self.env["PATH"],
                          "MOCK_PASEO_STATE": str(self.paseo_state),
                          "MOCK_PASEO_RUN_ARGS": str(self.paseo_args),
+                         "MOCK_PASEO_LS_ARGS": str(self.paseo_ls_args),
                          "MOCK_SYNC_CALLS": str(self.sync_calls),
                          "FACTORY_REPOSITORY_ROOT": str(self.root / "repos"),
                          "PASEO_HOME": str(self.root / "paseo"),
@@ -144,6 +148,23 @@ class FactoryDispatchTest(unittest.TestCase):
         second = self.invoke()
         self.assertEqual(second["started"], [])
         self.assertEqual(second["skipped"][0]["reason"], "host cap reached")
+
+    def test_launches_without_waiting_by_the_current_flag(self):
+        # --background is Paseo's deprecated alias of --no-wait, removed after 2027-04-01.
+        self.invoke()
+        args = json.loads(self.paseo_args.read_text())["args"]
+        self.assertIn("--no-wait", args)
+        self.assertNotIn("--background", args)
+
+    def test_every_agent_list_includes_background_workspaces(self):
+        # Paseo 0.12+ hides agents in background workspaces from ls unless asked.
+        self.paseo_state.write_text(json.dumps([{"id":"agent-old","status":"idle"}]))
+        self.invoke()
+        calls = [json.loads(line) for line in self.paseo_ls_args.read_text().splitlines()]
+        self.assertEqual(len(calls), 2)
+        for call in calls:
+            self.assertIn("--global", call)
+            self.assertIn("--background", call)
 
     def test_readiness_reasons(self):
         for mode, reason in (("pr", "open PR #8"), ("dependency", "open external dependency #300")):

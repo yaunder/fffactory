@@ -1,10 +1,12 @@
 # tests/paseo: the pinned Paseo against what fffactory writes
 
 `hash-only-daemon.sh` (`just paseo-check`) runs the real Paseo pinned in
-`assets/steps/control-plane/versions.env` against the password hash fffactory writes
+`assets/steps/control-plane/versions.env` against the password hash fffactory writes, the
+merged speech switches and `factory-dispatch`'s `run` and `ls` flags
 (`docs/specs/control-plane.md` §The Paseo pin). It downloads the package, so neither `bun test`
-nor `just check-all` runs it; run it whenever the pin, the unit, the config merge or the hashing
-changes. Never by `bun test`: `hash-main.ts` is its helper, not a test.
+nor `just check-all` runs it; run it whenever the pin, the unit, the config merge, the hashing
+or the dispatcher's Paseo flags change. Never by `bun test`: `hash-main.ts` is its helper, not a
+test.
 
 - Use the real programs: the hash from `workerControlPlane`'s install (`hash-main.ts`), the merge
   by `paseo-config.sh` handed the hash as `setup-host.sh` hands it, the daemon started by

@@ -161,13 +161,25 @@ that ship beside them,
 `assets/steps/dispatch/tests/test_factory_dispatch.py` and
 `test_dispatch_schedule.py`, run in CI (not by `bun test`).
 
+The dispatcher launches an epic's agent with `paseo run --no-wait --json` in a
+new branch-off worktree workspace, labelled `factory-dispatch=true`,
+`factory-repository=<alias>`, `factory-epic=<number>` and
+`factory-dispatched-at=<stamp>`, and reads the `agentId` from standard output.
+It never passes `--background`, Paseo's deprecated alias of `--no-wait`, removed
+after 2027-04-01. It drops `PASEO_AGENT_ID` and `PASEO_WORKSPACE_ID` from the
+launch's environment, so the agent is top-level and its workspace inherits
+nothing from the scheduled agent that runs the dispatcher. Its capacity and
+duplicate checks list agents with `paseo ls --global --background` and their
+label filters, so they also see agents in background workspaces, which a bare
+`ls` hides ([control plane §The Paseo pin](control-plane.md#the-paseo-pin)).
+
 The reconciler finds the schedule by its `factory-dispatch` name, fails on more
 than one, and changes it in place, keeping its ID and run history: any
 difference in cadence, timezone, provider, model, mode, working directory or
 prompt is one `paseo schedule update`, followed by `schedule resume` when the
 schedule was paused, and a run limit or expiry that is set is cleared in the
-same update (`--no-max-runs`, `--no-expires-in`, which Paseo 0.11.4 honors and
-0.9.1 misread as values). An ordinary update sends neither flag. Only a schedule
+same update (`--no-max-runs`, `--no-expires-in`, which Paseo 0.11.4 and later
+honor and 0.9.1 misread as values). An ordinary update sends neither flag. Only a schedule
 that no update can bring to the declared state is deleted and created again,
 losing its history: a completed one, one with a thinking option, or one whose
 target is not a new agent. It reads the inspected schedule, run history
@@ -177,7 +189,7 @@ reports drift nor stops reconciliation
 
 Paseo keeps every run of a schedule in its record
 (`~/.paseo/schedules/<id>.json`), and `schedule inspect` returns all of them.
-0.11.4 has no setting that bounds or prunes that history, so it grows by one
+0.13.2 has no setting that bounds or prunes that history, so it grows by one
 entry per dispatch run for as long as the schedule lives. fffactory does not
 edit Paseo's private state to trim it.
 

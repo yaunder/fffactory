@@ -111,15 +111,17 @@ def ready_epic(repo, epic, remote, prs, issue_cache):
 
 
 def active_agents():
-    # The CLI applies the label filter on the daemon before producing rows.
-    rows = command_json(PASEO, "ls", "--global", "--label", "factory-dispatch=true", "--json")
+    # The CLI applies the label filter on the daemon before producing rows. --background also
+    # lists agents in background workspaces, which Paseo otherwise hides.
+    rows = command_json(PASEO, "ls", "--global", "--background", "--label", "factory-dispatch=true",
+                        "--json")
     if not isinstance(rows, list):
         raise DispatchError("Paseo returned an invalid agent list")
     return [row for row in rows if row.get("status") in ("running", "permission")]
 
 
 def previously_dispatched(alias, number):
-    rows = command_json(PASEO, "ls", "--global", "--label", "factory-dispatch=true",
+    rows = command_json(PASEO, "ls", "--global", "--background", "--label", "factory-dispatch=true",
                         "--label", f"factory-repository={alias}",
                         "--label", f"factory-epic={number}", "--json")
     if not isinstance(rows, list):
@@ -230,7 +232,7 @@ def dispatch(args):
                 prompt = (f"/fff:work-epic {number}\n\n"
                           f"This fresh Paseo worktree starts on a dispatch branch; create "
                           f"epic/{number} from {remote_ref} here as work-epic requires.")
-                response = command_json(PASEO, "run", "--background", "--json",
+                response = command_json(PASEO, "run", "--no-wait", "--json",
                                         "--provider", f"{schedule['provider']}/{schedule['model']}",
                                         "--mode", schedule["mode"],
                                         "--new-workspace", "worktree", "--worktree-mode", "branch-off",

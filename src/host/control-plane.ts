@@ -77,6 +77,8 @@ export function workerControlPlane(system: ApplySystem): HostControlPlane {
         "HOME=/home/factory",
         "PATH=/home/factory/.local/bin:/usr/local/bin:/usr/bin:/bin",
         auth,
+        // TODO(re-evaluate when #98 lands): list with --global --background; Paseo 0.12+ hides
+        // agents in background workspaces from a bare ls, so this does not count them.
         "agent",
         "ls",
         "--json",

@@ -34,6 +34,8 @@ fi
 config_next="$(mktemp "${paseo_config}.XXXXXX")"
 trap 'rm -f -- "${config_next}"' EXIT
 # daemon.hostnames is factory-owned: replaced, never merged, and never `true` (any host).
+# Dictation and voice mode are switched off: workers never use them, and either one has the
+# daemon download its local speech models (about 765 MB) at every start.
 printf '%s\n' "${current}" | jq --slurp --arg listen "${listen}" --arg hostnames "${hostnames}" '
   if length != 1 then error("config must be one JSON value") else .[0] end
   | if type != "object" then error("config root must be an object") else . end
@@ -49,5 +51,10 @@ printf '%s\n' "${current}" | jq --slurp --arg listen "${listen}" --arg hostnames
       .daemon.auth = ((.daemon.auth // {}) + {password: $ENV.FACTORY_PASEO_PASSWORD_HASH})
     elif .daemon.auth == null then .
     else del(.daemon.auth.password) end
+  | .features = (.features // {})
+  | if (.features | type) != "object" then error("features must be an object") else . end
+  | reduce ("dictation", "voiceMode") as $speech (.;
+      if (.features[$speech] // {} | type) != "object" then error("features.\($speech) must be an object")
+      else .features[$speech] = ((.features[$speech] // {}) + {enabled: false}) end)
 ' >"${config_next}" 2>/dev/null || fail 'the existing Paseo config is invalid' # jq's message can quote the config
 mv -f -- "${config_next}" "${paseo_config}"

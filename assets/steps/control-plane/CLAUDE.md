@@ -14,7 +14,8 @@ Spec: [docs/specs/control-plane.md](../../../docs/specs/control-plane.md).
   is the daemon's systemd unit; `versions.env` pins the Paseo package and its
   registry integrity value.
 - `paseo-config.sh` merges the listen address, the disabled relay,
-  `daemon.hostnames` and, when given one, the password's bcrypt hash
+  `daemon.hostnames`, dictation and voice mode switched off (so the daemon downloads no
+  speech model) and, when given one, the password's bcrypt hash
   (`daemon.auth.password`) into `config.json`, keeping every other setting. Given none,
   which only a projection delivered by hand can lead to (every host declares a password),
   it removes `daemon.auth.password`, so the unit's `ExecStartPre` keeps the daemon from

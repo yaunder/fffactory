@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-"""Exercise schedule reconciliation with the pinned CLI's (Paseo 0.11.4) JSON contract."""
+"""Exercise schedule reconciliation with the pinned CLI's (Paseo 0.13.2) JSON contract."""
 
 import json
 import os
@@ -36,7 +36,7 @@ elif args[:2] == ["schedule", "inspect"]:
 elif args[:2] == ["schedule", "delete"]:
     save(None); print("{}")
 elif args[:2] in (["schedule", "create"], ["schedule", "update"]):
-    # Paseo 0.11.4 refuses to update anything but a new-agent schedule, and has no
+    # Paseo 0.11.4 and later refuse to update anything but a new-agent schedule, and have no
     # update flag for the thinking option. It keeps the status; resume reactivates.
     if args[1] == "update" and record["target"]["type"] != "new-agent":
         raise SystemExit("Schedule not found: " + args[2])
@@ -52,7 +52,7 @@ elif args[:2] in (["schedule", "create"], ["schedule", "update"]):
       "status":value.get("status", "active"), "maxRuns":value.get("maxRuns"),
       "expiresAt":value.get("expiresAt")
     })
-    # Paseo 0.11.4 clears limits with the negated flags (0.9.1 misread them as values).
+    # Paseo 0.11.4 and later clear limits with the negated flags (0.9.1 misread them as values).
     if "--no-max-runs" in args: value["maxRuns"] = None
     if "--no-expires-in" in args: value["expiresAt"] = None
     save(value); print(json.dumps(value))

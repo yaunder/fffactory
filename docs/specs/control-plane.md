@@ -36,9 +36,9 @@ credential case of `tests/application/apply-factory-pipeline.test.ts`
 
 `listen-address` stands for every factory-owned daemon setting the release
 merges into `config.json` ([§Release-owned installation](#release-owned-installation)):
-the listen address, the disabled relay and the accepted hostnames
-(`daemon.hostnames`). They have no change of their own. Plan never reads
-`config.json`, so a change to how a release merges them reaches an existing
+the listen address, the disabled relay, the accepted hostnames
+(`daemon.hostnames`) and the speech switches. They have no change of their own.
+Plan never reads `config.json`, so a change to how a release merges them reaches an existing
 worker only through that new release: its version and asset digest plan
 `paseo-package` and `service-definition`, and its version, part of the
 projection, plans `listen-address`. All three are maintenance, so the
@@ -150,11 +150,14 @@ sets, in `config.json`:
 - `daemon.auth.password` to the password hash, when setup was given one,
   keeping the rest of `daemon.auth`. Without one, `daemon.auth.password` is
   removed, keeping the rest of `daemon.auth`, and a config without one is left
-  as it is ([§The daemon password](#the-daemon-password)).
+  as it is ([§The daemon password](#the-daemon-password));
+- `features.dictation.enabled` and `features.voiceMode.enabled` to `false`,
+  keeping the rest of `features` ([§The Paseo pin](#the-paseo-pin)).
 
 It keeps every other setting, sets `$schema` to Paseo's config schema and
 `version` to 1, and leaves the file `factory`'s, mode 0600. A config that is not one JSON object, or whose
-`daemon` or `daemon.auth` is not an object, fails setup and is left as it was, as
+`daemon`, `daemon.auth`, `features`, `features.dictation` or `features.voiceMode`
+is not an object, fails setup and is left as it was, as
 does a hash that is not a bcrypt hash (`$2a$`, `$2b$` or `$2y$`, a two-digit
 cost, 53 characters), which is never echoed. A rerun with the same inputs
 leaves the merged config unchanged; each install hashes the password afresh, so
@@ -225,7 +228,7 @@ of dispatch scheduling.
 
 ## The Paseo pin
 
-`assets/steps/control-plane/versions.env` pins `@getpaseo/cli` 0.11.4 with its
+`assets/steps/control-plane/versions.env` pins `@getpaseo/cli` 0.13.2 with its
 npm registry integrity value. Setup downloads the package with `npm pack` as
 `factory`, refuses one whose integrity differs from the pin, installs it into
 `factory`'s npm prefix, and fails unless `paseo --version` then prints exactly
@@ -237,8 +240,9 @@ applied by `fffactory upgrade` or `apply`: the release plans `paseo-package` and
 agents may be active, and the restart that follows installation starts the new
 daemon.
 
-fffactory relies on these Paseo contracts, held by 0.11.4
-([#46](https://github.com/yaunder/fffactory/issues/46)):
+fffactory relies on these Paseo contracts, held by 0.13.2
+([#46](https://github.com/yaunder/fffactory/issues/46), re-checked for 0.13.2 in
+[#97](https://github.com/yaunder/fffactory/issues/97)):
 
 - The service runs `paseo daemon run --home /home/factory/.paseo`. With a
   bcrypt hash in `config.json`'s `daemon.auth.password` (and no
@@ -246,7 +250,7 @@ fffactory relies on these Paseo contracts, held by 0.11.4
   requires the password it hashes: a CLI call sending a wrong one fails with
   `AUTH_FAILED`, and one sending none, or an HTTP request without one, is
   refused. Without a password it accepts every client. An agent's process gets
-  the daemon's whole environment, plus `PASEO_AGENT_ID` and a few others. 0.11.4 also writes a
+  the daemon's whole environment, plus `PASEO_AGENT_ID` and a few others. Paseo also writes a
   per-run `local-credential` file into its home, removed when it stops, which a
   CLI on the worker uses only when `PASEO_PASSWORD` is unset and it targets the
   daemon's own listen address. fffactory's calls
@@ -261,23 +265,46 @@ fffactory relies on these Paseo contracts, held by 0.11.4
 - `GET /api/health` answers `200` without a password, and the `Host` rule
   of [§Release-owned installation](#release-owned-installation) is unchanged.
 - `paseo agent ls --json` prints a JSON array of the agents that are not
-  archived and sit in a workspace that is not archived, whatever their status.
-  Activity counts any entry as an active agent, so a worker is idle only when
-  the array is empty.
+  archived and sit in a workspace that is neither archived nor a *background
+  workspace*, whatever their status. From 0.12 the CLI reads the daemon's list
+  page by page, so the array holds every such agent, past the daemon's 200-row
+  page. Also from 0.12, an agent or `paseo workspace create --background` can
+  create a background workspace, and a workspace an agent in one creates is one
+  too; `--background` lists their agents as well. Activity counts any entry as
+  an active agent, so a worker is idle only when the array is empty. It lists
+  without `--background`, so an agent in a background workspace is not counted.
+- `paseo run --no-wait --json` launches an agent, prints its `agentId` on
+  standard output and returns without waiting for its turn; `--label key=value`
+  labels it, and `paseo ls --label key=value` keeps only the agents carrying
+  every label given. `run --background` is a deprecated alias of `--no-wait`
+  from 0.12, warns on standard error and is removed after 2027-04-01
+  ([dispatch §The dispatch programs and skill](dispatch.md#the-dispatch-programs-and-skill)).
 - `paseo daemon reload` reloads the configuration without restarting.
-- 0.11.4 has no migration of Paseo's persisted state from 0.9.1: a 0.9.1 home's
-  `config.json` and schedules load unchanged. It needs the same Node.js 22
-  runtime.
+- From 0.13 the daemon rewrites a stored `running` or `initializing` agent to
+  `closed` at startup, before any client connects: a restart never resumes a
+  turn, so an agent a crash, a kill or a restart interrupted no longer reads
+  `running`.
+- 0.13.2 needs no migration of Paseo's persisted state from 0.11.4: a 0.11.4
+  home's `config.json`, agents and schedules load unchanged, and a workspace
+  record without `background` is not a background workspace. It needs the same
+  Node.js 22 runtime.
 
-The daemon still downloads its local speech models at start: a background
-download of the speech-to-text and text-to-speech models into
-`~/.paseo/models/local-speech`, about 765 MB, that workers never use. Paseo
-supports turning it off: with `features.dictation.enabled` and
-`features.voiceMode.enabled` both `false` in `config.json` (or
-`PASEO_DICTATION_ENABLED` and `PASEO_VOICE_MODE_ENABLED` false in the daemon's
-environment) it requests no model and starts no download. The release sets
-neither yet: `paseo-config.sh` merges only the settings of
-[§Release-owned installation](#release-owned-installation).
+At start, with dictation or voice mode on, the daemon downloads its local
+speech-to-text and text-to-speech models into `~/.paseo/models/local-speech`,
+about 765 MB, that workers never use
+([#73](https://github.com/yaunder/fffactory/issues/73)). `paseo-config.sh`
+therefore merges `features.dictation.enabled` and `features.voiceMode.enabled`
+as `false` ([§Release-owned installation](#release-owned-installation)), with
+which 0.13.2 requests no model and starts no download. Paseo's equivalent
+environment variables (`PASEO_DICTATION_ENABLED`, `PASEO_VOICE_MODE_ENABLED`)
+are not used, so the setting lives in the release-owned config. Models a worker
+downloaded before are left where they are: nothing deletes them.
+
+`just paseo-check` (`tests/paseo/hash-only-daemon.sh`) also proves against the
+pin that `paseo --version` prints it, that the daemon on the merged config
+starts no speech-model download, and that an agent launched with
+`run --no-wait --label factory-dispatch=true` is listed by
+`ls --global --background --label factory-dispatch=true`.
 
 ## Layer mapping
 
