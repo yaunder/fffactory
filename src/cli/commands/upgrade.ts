@@ -39,7 +39,9 @@ const USAGE = [
   "",
   "Exits as apply does: 0 once every worker is installed and verified, or stopped",
   "(a stopped worker gets the release once started and `fffactory apply` runs), 2",
-  "when a worker was skipped, and 1 when anything failed or was refused.",
+  "when anything is pending, deferred or skipped (a worker skipped, maintenance",
+  "deferred, a repository gap, dispatch pending or verification not ready), and 1",
+  "when anything failed or was refused.",
 ];
 
 const QUESTION = 'Move the pin and apply this plan? Only "yes" does: ';
@@ -76,9 +78,6 @@ function reportNoUpgrade(
   }
 }
 
-// TODO(re-evaluate when #11 lands): upgrade wires no control plane or workflow queue, so its
-// run skips the control-plane, dispatch and verification stages its plan shows, and its Result
-// has none of their rows; wire them as apply does, and its Result shows them unchanged.
 /**
  * Reports the upgrade's apply as apply's, with the pin's state: once moved, a rerun is apply's;
  * not moved, a notice before any Next block, whose rerun is the upgrade's.
@@ -138,6 +137,8 @@ async function upgrade(args: readonly string[], context: CliContext): Promise<nu
       interrupted: context.interrupted,
       peers: context.tailnet,
       transport: context.transport,
+      controlPlane: context.controlPlane,
+      workflowQueue: context.workflowQueue,
       assets: context.assets,
       progress: applying.progress,
       sleep: context.sleep,

@@ -1,18 +1,29 @@
 import { describe, expect, test } from "bun:test";
+import type { ControlPlane } from "../../src/application/control-plane";
+import type { WorkflowQueue } from "../../src/application/workflow-queue";
 import { run } from "../../src/cli/run";
 import type { Release } from "../../src/domain/instance";
 import type { ReleaseCompatibility } from "../../src/domain/release-compatibility";
 import { newLockRecord } from "../../src/domain/factory-lock";
 import { harness, TEST_NOW } from "../support/cli-harness";
 import { fakeCallerIdentity } from "../support/doctor-fakes";
-import { BUCKET, declaring, FACTORY, workerFleet } from "../support/factory-world";
+import { fakeControlPlane, fakeWorkflowQueue } from "../support/fake-control-plane";
+import {
+  BUCKET,
+  declaring,
+  FACTORY,
+  requestingDispatch,
+  workerFleet,
+} from "../support/factory-world";
 import { fakeFactoryWorld } from "../support/fake-provisioner";
+import { appliedRecord, inspection, installableWorker } from "../support/fake-workers";
 import { fakePrompt } from "../support/fake-secrets";
 import { MemoryInstanceStore } from "../support/memory-instance-store";
 import { MemoryLockStore } from "../support/memory-lock-store";
 import { MemoryPlanStore } from "../support/memory-plan-store";
 
 const PATH = "/work/repo/.fffactory/factory.json";
+const B1 = `${FACTORY}-builder-1`;
 /** What `fffactory upgrade` prints first: its release, and the instance it acts on. */
 const HEADER = [
   "fffactory upgrade · release 0.3.0",
@@ -32,11 +43,19 @@ const COMPATIBLE: ReleaseCompatibility = {
   base_generation_since: "0.0.0" as Release,
 };
 
-function text(release: string | undefined, overrides: object = {}): string {
-  return `${JSON.stringify({ ...declaring("builder-1"), release, ...overrides }, null, 2)}\n`;
+function text(
+  release: string | undefined,
+  overrides: object = {},
+  instance: object = declaring("builder-1"),
+): string {
+  return `${JSON.stringify({ ...instance, release, ...overrides }, null, 2)}\n`;
 }
 
-/** The CLI over a provisioned factory whose factory.json pins `pin`; the CLI is 0.3.0. */
+/**
+ * The CLI over a provisioned factory whose factory.json pins `pin`; the CLI is 0.3.0. Its
+ * workers are `fleet`'s, their Paseo healthy and idle unless `controlPlane` answers otherwise,
+ * and dispatch reconciles through `workflowQueue`, as `fffactory apply`'s do.
+ */
 function cli(
   options: {
     pin?: string;
@@ -45,6 +64,9 @@ function cli(
     interactive?: boolean;
     compatibility?: ReleaseCompatibility;
     bucket?: boolean;
+    fleet?: ReturnType<typeof workerFleet>;
+    controlPlane?: ControlPlane;
+    workflowQueue?: WorkflowQueue;
   } = {},
 ) {
   const store = new MemoryInstanceStore({
@@ -58,7 +80,9 @@ function cli(
     answers: options.answers ?? ["yes"],
   });
   const identity = fakeCallerIdentity();
-  const fleet = workerFleet();
+  const fleet = options.fleet ?? workerFleet();
+  const paseo = fakeControlPlane("healthy", { kind: "idle" });
+  const queue = fakeWorkflowQueue();
   const context = harness(
     store,
     {},
@@ -70,20 +94,21 @@ function cli(
       identity: identity.identity,
       tailnet: fleet.deps.peers,
       transport: fleet.deps.transport,
+      controlPlane: options.controlPlane ?? paseo.controlPlane,
+      workflowQueue: options.workflowQueue ?? queue.queue,
       compatibility: options.compatibility ?? COMPATIBLE,
     },
   );
   const pin = () => JSON.parse(store.files[PATH] ?? "{}").release;
-  return { ...context, store, lockStore, terraform, prompt, identity, pin };
+  return { ...context, store, lockStore, terraform, prompt, identity, pin, paseo, queue };
 }
 
 describe("fffactory upgrade (plan-apply §Upgrade)", () => {
   test("previews the pin move with the plan for this release, then pins and applies it once approved", async () => {
-    const { context, out, err, prompt, pin, lockStore } = cli();
+    const { context, out, err, prompt, pin, lockStore, paseo, queue } = cli();
     expect(await run(["upgrade"], context)).toBe(0);
     expect(err).toEqual([]);
-    // The plan shows every stage it approves, control plane and dispatch included; that upgrade
-    // then skips them is #11's, not this presentation's (below).
+    // The plan shows every stage it approves, control plane and dispatch included.
     expect(out.slice(0, 20)).toEqual([
       ...HEADER,
       "",
@@ -107,10 +132,8 @@ describe("fffactory upgrade (plan-apply §Upgrade)", () => {
       "",
     ]);
     // The pin is written first, then the worker installs: the Applying section says so as it
-    // happens, the Result and its Next block follow.
-    // TODO(re-evaluate when #11 lands): expect the Result's control-plane, dispatch and
-    // verification rows too: upgrade does not run those stages yet, so the Result has none.
-    expect(out.slice(20, 33)).toEqual([
+    // happens. The Result shows every stage apply runs (#11), and its Next block follows.
+    expect(out.slice(20, 36)).toEqual([
       "",
       rule("Applying"),
       "  Pin         factory.json now pins release 0.3.0",
@@ -120,11 +143,18 @@ describe("fffactory upgrade (plan-apply §Upgrade)", () => {
       RESULT,
       "    Infrastructure     no changes",
       "  ! builder-1          installed and verified · enrollment pending (3)",
+      "    ✔ Control plane   applied",
       "    ✔ Repositories    synchronized",
+      "      Dispatch        not requested",
+      "  ! Verification       The factory is ready: every worker is verified end to end · " +
+        "enrollment pending on 1 worker",
       expect.stringMatching(RECORD_LINE),
       "",
       rule("Next: enroll 3 accounts on builder-1"),
     ]);
+    // The planned Paseo maintenance was applied, and dispatch reconciled (#11).
+    expect(paseo.calls).toContain("install");
+    expect(queue.reconcile).toEqual([false]);
     expect(out.slice(-6)).toEqual([
       "    $ exit",
       "  Refresh enrollment verification, reviewing the new plan:",
@@ -136,6 +166,42 @@ describe("fffactory upgrade (plan-apply §Upgrade)", () => {
     expect(prompt.asked).toEqual([QUESTION]);
     expect(pin()).toBe("0.3.0");
     expect(lockStore.operationWrites[0]?.operation).toBe("upgrade");
+  });
+
+  test("deferred Paseo maintenance skips the worker and dispatch, and exits 2, as apply does", async () => {
+    // A worker on the pinned release, its Paseo running with an agent active.
+    const current = installableWorker(appliedRecord(B1), {
+      inspection: inspection(
+        B1,
+        { release: { state: "active", version: "0.2.0", sha256: "c".repeat(64) } },
+        "0.2.0",
+      ),
+    });
+    const { context, out, err, pin, paseo } = cli({
+      document: text("0.2.0", {}, requestingDispatch()),
+      fleet: workerFleet(["builder-1"], { [B1]: current }),
+      controlPlane: fakeControlPlane("healthy", { kind: "active", count: 1 }).controlPlane,
+    });
+    expect(await run(["upgrade"], context)).toBe(2);
+    expect(err).toEqual([]);
+    expect(out.slice(out.indexOf(RESULT))).toEqual([
+      RESULT,
+      "    Infrastructure     no changes",
+      "  ! builder-1          skipped · Paseo maintenance is deferred while agents may be active",
+      "    ! Control plane   deferred · Maintenance (paseo-package, service-definition, " +
+        `listen-address, password) was deferred while agents may be active on ${B1}; ` +
+        "it stays on its complete current release",
+      "    ✔ Repositories    synchronized",
+      "    ↷ Dispatch        skipped",
+      "  ! Verification       The factory is not ready: 1 of 1 workers need attention",
+      expect.stringMatching(RECORD_LINE),
+      "",
+      NEXT,
+      `  builder-1: Close the active agents on ${B1}, then rerun \`fffactory apply\``,
+    ]);
+    // The pin moved before the worker was skipped: apply by this release finishes it.
+    expect(pin()).toBe("0.3.0");
+    expect(paseo.calls).not.toContain("install");
   });
 
   test("once upgraded, apply by this release passes the CLI/pin match guard", async () => {

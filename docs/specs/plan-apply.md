@@ -1516,7 +1516,7 @@ factory.json's pin was not moved: it still pins the release it pinned.
      Workers          one at a time
        ~ builder-1   install release 0.3.0 and host configuration, then verify
      Control plane    before worker activation
-       ~ builder-1   paseo-package, service-definition, listen-address
+       ~ builder-1   paseo-package, service-definition, listen-address, password
      Repositories     one worker at a time
        ~ builder-1   reconcile 0 placed repositories as factory; preserve and report unmanaged checkouts
      Dispatch         after every readiness gate
@@ -1527,11 +1527,6 @@ factory.json's pin was not moved: it still pins the release it pinned.
    ```
 
    The plan shows every stage it approves.
-   TODO(re-evaluate when [#11](https://github.com/yaunder/fffactory/issues/11)
-   lands): `upgrade` does not yet apply the control-plane, dispatch and
-   verification stages its plan shows, so its Result has no control-plane,
-   dispatch or verification rows; the plan is right, the run is #11's, and
-   its Result then shows those rows as apply's does.
    The earlier pin is shown only when it is a plain `MAJOR.MINOR.PATCH`,
    which cannot hold anything else; otherwise `from the release it pins now`.
 3. Once approved, and only then, the new pin is written, the `Applying`
@@ -1542,8 +1537,10 @@ factory.json's pin was not moved: it still pins the release it pinned.
    after the plan was made`, `Nothing was applied.`, the pin notice (below),
    and a Next block reviewing a new plan with `fffactory upgrade`, exit 1.
 4. Then the plan is applied exactly as apply applies it: the saved Terraform
-   plan file, then the workers stage, and reported as apply reports it
-   ([What apply prints](#what-apply-prints)):
+   plan file, then every stage apply runs, the repository, control-plane and
+   dispatch stages and the end-to-end verification included, with apply's
+   maintenance deferral, and reported as apply reports it, each stage's rows
+   in its Result ([What apply prints](#what-apply-prints)):
 
    ```text
    ── Applying ─────────────────────────────────────────
@@ -1596,8 +1593,10 @@ nothing more of the record is written after an interrupt. The lock's and the rec
 `release` the running release. A lock an interrupted upgrade left is broken
 with `fffactory lock break`, which the pin guard does not refuse.
 
-The exit status is apply's: 0 once every worker is installed and verified, or
-stopped, 2 when a worker was skipped, 1 when anything failed or was refused.
+The exit status is apply's ([Apply](#apply) 10): 0 once every worker is
+installed and verified, or stopped, 2 when anything is pending, deferred or
+skipped (a worker skipped, maintenance deferred, a repository gap, dispatch
+pending or verification not ready), 1 when anything failed or was refused.
 
 ### Compatibility refusals (D11)
 
@@ -1904,8 +1903,11 @@ recorded as the infrastructure stage's; an interrupt after the pin was written,
 its lock broken and apply finishing; every refusal before AWS: nothing to
 upgrade, a downgrade, no pin, base and schema D11),
 `tests/cli/upgrade.test.ts` (the output and question, the pin row before the
-install, plan passing the guard once upgraded, declined, a failed apply naming
-`fffactory apply`, a failure once the pin moved and how to finish, no state
+install, every stage apply runs in its Result: the control plane applied, Paseo
+`install` called, dispatch reconciled and the end-to-end verification; a
+deferred maintenance exiting 2 with dispatch `skipped`, Paseo `install` not
+called and the pin moved; plan passing the guard once upgraded, declined, a
+failed apply naming `fffactory apply`, a failure once the pin moved and how to finish, no state
 bucket, factory.json changed, no terminal, a held lock refusing it, each with
 the pin notice before the Next block, nothing to upgrade and the other refusals
 without reaching AWS, usage),
