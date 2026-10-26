@@ -9,10 +9,11 @@ readonly paseo_config=${FACTORY_PASEO_CONFIG:-/home/factory/.paseo/config.json}
 readonly listen=${FACTORY_PASEO_LISTEN:-}
 # Whitespace-separated: the exact names Paseo accepts in a Host header besides the listen address.
 readonly hostnames=${FACTORY_PASEO_HOSTNAMES:-}
-# The bcrypt hash of the host's Paseo password, never the password; empty, for a host that
-# declares none, removes daemon.auth.password, so paseo.service's ExecStartPre keeps the daemon
-# stopped rather than running on a password fffactory no longer references. jq reads it from the
-# environment ($ENV), so it is never a command argument.
+# The bcrypt hash of the host's Paseo password, never the password. Empty only for a projection
+# delivered by hand without the password reference (every host declares one): it removes
+# daemon.auth.password, so paseo.service's ExecStartPre keeps the daemon stopped rather than
+# running on a password fffactory does not reference. jq reads it from the environment ($ENV),
+# so it is never a command argument.
 readonly password_hash=${FACTORY_PASEO_PASSWORD_HASH:-}
 
 fail() { printf 'fffactory Paseo config: %s\n' "$*" >&2; exit 1; }

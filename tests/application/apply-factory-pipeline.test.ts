@@ -285,7 +285,7 @@ describe("apply's full pipeline (dispatch §Requested versus active, §End-to-en
           key: "builder-1",
           hostname: "fff-abcd1234-builder-1",
           status: "deferred",
-          summary: `Maintenance (paseo-package, service-definition, listen-address) was deferred while agents may be active on ${B1}; it stays on its complete current release`,
+          summary: `Maintenance (paseo-package, service-definition, listen-address, password) was deferred while agents may be active on ${B1}; it stays on its complete current release`,
         },
       ],
       dispatch: [{ key: "builder-1", status: "skipped", blockers: [], summary: DEFERRED }],
@@ -611,7 +611,7 @@ describe("a password-bearing host (host protocol §The host projection, #132)", 
     const { controlPlane, installed } = fakeControlPlane("healthy", { kind: "idle" });
     // The worker starts holding the projection the 0.0.1 workers stage sent, without the
     // reference, so this apply has a drifted configuration to replace and must send one.
-    const fleet = enrolledFleet(currentWorker("builder-1"));
+    const fleet = enrolledFleet(currentWorker("builder-1", null));
     const { deps, request, world } = pipeline(PASSWORD_BEARING, { controlPlane }, fleet);
     const applied = await applyFactory(deps, request);
     if (applied.kind !== "applied") throw new Error(`expected applied, got ${applied.kind}`);

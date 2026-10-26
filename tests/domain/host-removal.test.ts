@@ -140,7 +140,7 @@ describe("removing one host from factory.json (worker-lifecycle §Terminate (rem
     expect(removed.repositories).toEqual(instance.repositories);
     const parsed = parseFactoryInstance(JSON.parse(serializeInstance(removed)));
     expect(parsed.valid).toBe(true);
-    expect(assessCompleteness(removed)).toEqual({ complete: true, missing: [] });
+    expect(assessCompleteness(removed)).toEqual({ complete: true, missing: [], commands: {} });
   });
 });
 

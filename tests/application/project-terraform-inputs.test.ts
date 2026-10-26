@@ -7,7 +7,13 @@ import {
 import { type FactoryInstance, parseFactoryInstance } from "../../src/domain/instance";
 
 const TAILSCALE = example.tailscale.auth_key_secret;
-const PASEO = "arn:aws:secretsmanager:us-east-1:123456789012:secret:example/b-2/paseo-AbCdEf";
+const paseo = (key: string) =>
+  `arn:aws:secretsmanager:us-east-1:123456789012:secret:example/${key}/paseo-AbCdEf`;
+
+/** A host with its machine declaration and Paseo password, as completeness requires. */
+function host(key: string, instance_type = "m7i.xlarge", root_volume_gib = 200) {
+  return { key, instance_type, root_volume_gib, paseo_password_secret: paseo(key) };
+}
 
 function instance(document: unknown = example): FactoryInstance {
   const parsed = parseFactoryInstance(document);
@@ -96,17 +102,9 @@ describe("factory.json projected into the factory root module's variables", () =
     expect(projection.ok && projection.variables.tailscale_tag).toBe("tag:lab-workers");
   });
 
-  test("hosts are keyed by host key; only hosts with a Paseo password reference list one", () => {
+  test("hosts are keyed by host key, each with its Paseo password reference", () => {
     const projection = projectFactoryVariables(
-      withHosts([
-        { key: "a-1", instance_type: "t3.large", root_volume_gib: 50 },
-        {
-          key: "b-2",
-          instance_type: "m7i.xlarge",
-          root_volume_gib: 200,
-          paseo_password_secret: PASEO,
-        },
-      ]),
+      withHosts([host("a-1", "t3.large", 50), host("b-2")]),
       [],
     );
     expect(projection.ok && projection.variables.hosts).toEqual({
@@ -114,7 +112,8 @@ describe("factory.json projected into the factory root module's variables", () =
       "b-2": { instance_type: "m7i.xlarge", root_volume_gib: 200 },
     });
     expect(projection.ok && projection.variables.paseo_password_secret_arns).toEqual({
-      "b-2": PASEO,
+      "a-1": paseo("a-1"),
+      "b-2": paseo("b-2"),
     });
   });
 
@@ -159,20 +158,19 @@ describe("factory.json projected into the factory root module's variables", () =
     });
   });
 
-  test("a host without its machine declaration is refused by field path", () => {
+  test("a host without its machine declaration or Paseo password is refused by field path", () => {
     expect(projectFactoryVariables(withHosts([{ key: "a" }]), [])).toEqual({
       ok: false,
       issues: [
         { path: "hosts[0].instance_type", message: "is required to plan" },
         { path: "hosts[0].root_volume_gib", message: "is required to plan" },
+        { path: "hosts[0].paseo_password_secret", message: "is required to plan" },
       ],
     });
   });
 
   test("renaming a host key is refused before any variable exists", () => {
-    const renamed = withHosts([
-      { key: "builder-one", instance_type: "m7i.xlarge", root_volume_gib: 200 },
-    ]);
+    const renamed = withHosts([host("builder-one")]);
     expect(projectFactoryVariables(renamed, ["builder-1"])).toEqual({
       ok: false,
       issues: [{ path: "hosts", message: expect.stringContaining('host key "builder-1"') }],
@@ -180,10 +178,7 @@ describe("factory.json projected into the factory root module's variables", () =
   });
 
   test("keeping every recorded host key and adding another is projected", () => {
-    const grown = withHosts([
-      { key: "builder-1", instance_type: "m7i.xlarge", root_volume_gib: 200 },
-      { key: "builder-2", instance_type: "m7i.xlarge", root_volume_gib: 200 },
-    ]);
+    const grown = withHosts([host("builder-1"), host("builder-2")]);
     const projection = projectFactoryVariables(grown, ["builder-1"]);
     expect(projection.ok && Object.keys(projection.variables.hosts)).toEqual([
       "builder-1",

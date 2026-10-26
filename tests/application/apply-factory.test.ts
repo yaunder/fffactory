@@ -119,7 +119,7 @@ describe("fffactory apply (plan-apply §Apply)", () => {
       "builder-1 installed",
       "builder-2 installed",
     ]);
-    const paseo = ["paseo-package", "service-definition", "listen-address"];
+    const paseo = ["paseo-package", "service-definition", "listen-address", "password"];
     const builders = [worker("builder-1"), worker("builder-2")];
     expect(approver.shown).toMatchObject([
       {

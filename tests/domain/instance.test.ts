@@ -536,7 +536,11 @@ describe("deliveredAccounts", () => {
 
 describe("assessCompleteness", () => {
   test("a complete document has nothing missing", () => {
-    expect(assessCompleteness(parsed(completeDocument()))).toEqual({ complete: true, missing: [] });
+    expect(assessCompleteness(parsed(completeDocument()))).toEqual({
+      complete: true,
+      missing: [],
+      commands: {},
+    });
   });
 
   test("a minimal partial document lists every field still needed", () => {
@@ -556,6 +560,7 @@ describe("assessCompleteness", () => {
         "tailscale.auth_key_secret",
         "hosts",
       ],
+      commands: {},
     });
   });
 
@@ -563,7 +568,11 @@ describe("assessCompleteness", () => {
     const complete = completeDocument();
     const tailscale = complete.tailscale as Record<string, unknown>;
     const document = { ...complete, tailscale: { ...tailscale, admin_client_secret: SECRET_ARN } };
-    expect(assessCompleteness(parsed(document))).toEqual({ complete: true, missing: [] });
+    expect(assessCompleteness(parsed(document))).toEqual({
+      complete: true,
+      missing: [],
+      commands: {},
+    });
   });
 
   test("credential references and interactive logins are optional", () => {
@@ -574,27 +583,51 @@ describe("assessCompleteness", () => {
       credentials: { github_token_secret: SECRET_ARN },
       hosts: [{ ...host, interactive_logins: ["openai"] }],
     };
-    expect(assessCompleteness(parsed(document))).toEqual({ complete: true, missing: [] });
+    expect(assessCompleteness(parsed(document))).toEqual({
+      complete: true,
+      missing: [],
+      commands: {},
+    });
   });
 
   test("an empty host list is complete: a factory may declare no worker", () => {
     expect(assessCompleteness(parsed({ ...completeDocument(), hosts: [] }))).toEqual({
       complete: true,
       missing: [],
+      commands: {},
     });
   });
 
   test("an absent host list is still needed: an empty one declares no worker on purpose", () => {
     const { hosts: _hosts, ...document } = completeDocument();
-    expect(assessCompleteness(parsed(document))).toEqual({ complete: false, missing: ["hosts"] });
+    expect(assessCompleteness(parsed(document))).toEqual({
+      complete: false,
+      missing: ["hosts"],
+      commands: {},
+    });
   });
 
-  test("lists machine fields missing from a declared host", () => {
+  test("lists machine fields and the Paseo password missing from a declared host", () => {
     const document = { ...completeDocument(), hosts: [{ key: "a" }] };
     expect(assessCompleteness(parsed(document)).missing).toEqual([
       "hosts[0].instance_type",
       "hosts[0].root_volume_gib",
+      "hosts[0].paseo_password_secret",
     ]);
+  });
+
+  test("every host needs a Paseo password, named with the command that stores it", () => {
+    const complete = completeDocument();
+    const [host] = complete.hosts as Record<string, unknown>[];
+    const { paseo_password_secret: _password, ...passwordless } = host ?? {};
+    const document = { ...complete, hosts: [host, { ...passwordless, key: "builder-2" }] };
+    expect(assessCompleteness(parsed(document))).toEqual({
+      complete: false,
+      missing: ["hosts[1].paseo_password_secret"],
+      commands: {
+        "hosts[1].paseo_password_secret": "fffactory secret set paseo-password --host builder-2",
+      },
+    });
   });
 
   test("an enabled dispatch declaration requires every real schedule input", () => {

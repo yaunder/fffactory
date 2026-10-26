@@ -153,7 +153,8 @@ PATH`, such as `~/.fffactory/factory.json`) with a new permanent factory ID and
 this CLI's release as the pin, and contacts nothing.
 
 **Done when** it prints `Created PATH.`, `New factory ID: FACTORY_ID`, `Release
-pin: R` and the fields still needed.
+pin: R`, the fields still needed, and that every host needs a Paseo password
+before apply.
 
 **Otherwise:** rerunning on an existing document keeps every value and fills
 only what is missing (`Unchanged PATH: nothing to fill.`); an invalid document
@@ -191,7 +192,9 @@ fffactory validate
 ```
 
 **Done when** it prints `Valid factory.json (schema version 1).` and
-`Incomplete: 1 fields still needed:` naming only `tailscale.auth_key_secret`.
+`Incomplete: 2 fields still needed:` naming only `tailscale.auth_key_secret` and
+`hosts[0].paseo_password_secret`, the second with the `fffactory secret set
+paseo-password --host KEY` that step 6 runs.
 
 **Otherwise:** fix each `path: message` it prints to standard error (exit 1).
 Never put a key, password or token in factory.json: a secret field accepts
@@ -206,7 +209,8 @@ fffactory doctor --profile NAME
 ```
 
 **Done when** every check is ready except `factory.json`, which reports the
-document incomplete for `tailscale.auth_key_secret`; doctor exits 2.
+document missing 2 fields, `tailscale.auth_key_secret` and
+`hosts[0].paseo_password_secret`, as step 3 does; doctor exits 2.
 `fffactory doctor --json` gives the same report as a versioned document.
 
 **Otherwise:** follow each check's `Next:` line, then rerun doctor. The usual
@@ -326,8 +330,9 @@ client](docs/specs/secrets.md#the-tailscale-admin-client)).
 
 The Paseo password is the one every Paseo client of that worker types in
 [step 10](#10-enroll-paseo-clients): choose a strong, unique one and keep it in
-a password manager. factory.json does not require it, but the worker's Paseo
-daemon cannot start without it.
+a password manager. Every host needs one: its Paseo daemon cannot start
+without it, so `validate` reports factory.json incomplete until each host has
+one, naming the `secret set` command for it.
 
 **Done when** each `secret set` prints `Stored the … in Secrets Manager as NAME
 (a new secret).` and the field it set, `validate` prints `Complete: nothing

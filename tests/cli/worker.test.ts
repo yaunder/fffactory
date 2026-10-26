@@ -31,7 +31,14 @@ import {
   tailnetDevice,
   workAnswer,
 } from "../support/fake-workers";
-import { BUCKET, declaring, FACTORY, RELEASE, WORKER_TAG } from "../support/factory-world";
+import {
+  BUCKET,
+  declaring,
+  FACTORY,
+  paseoPasswordArn,
+  RELEASE,
+  WORKER_TAG,
+} from "../support/factory-world";
 import { MemoryInstanceStore } from "../support/memory-instance-store";
 import { MemoryLockStore } from "../support/memory-lock-store";
 import { fakeFactoryWorld } from "../support/fake-provisioner";
@@ -91,7 +98,7 @@ function withAdmin(): FactoryInstance {
 function workerTransport(options: Setup) {
   return fakeTransport({
     [HOSTNAME]: statusAnswers(
-      options.worker ?? readyWorker(FACTORY, KEY, RELEASE),
+      options.worker ?? readyWorker(FACTORY, KEY, RELEASE, paseoPasswordArn(KEY)),
       options.repositories ?? "synchronized",
       [],
       undefined,
@@ -994,7 +1001,14 @@ describe("fffactory worker terminate (worker-lifecycle §Terminate (remove))", (
     // A replacement of another size is a plain create, never refused as a removed key.
     cli.store.files[PATH] = JSON.stringify({
       ...written,
-      hosts: [{ key: "builder-3", instance_type: "m7i.2xlarge", root_volume_gib: 128 }],
+      hosts: [
+        {
+          key: "builder-3",
+          instance_type: "m7i.2xlarge",
+          root_volume_gib: 128,
+          paseo_password_secret: paseoPasswordArn("builder-3"),
+        },
+      ],
     });
     // Another plan ID than the first plan's, which is still saved.
     const randomBytes = (count: number) => new Uint8Array(count).fill(1);

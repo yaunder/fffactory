@@ -32,6 +32,11 @@ async function init(args: readonly string[], context: CliContext): Promise<numbe
   if (filled.includes("factory_id")) context.out(`  New factory ID: ${instance.factory_id}`);
   if (filled.includes("release")) context.out(`  Release pin: ${instance.release}`);
   printCompleteness(result.completeness, context.out);
+  // A declared host without a password is listed with its command; before any is, say so here.
+  if (result.completeness.missing.includes("hosts"))
+    context.out(
+      "Every host needs a Paseo password before apply: `fffactory secret set paseo-password --host KEY`.",
+    );
   return 0;
 }
 
@@ -45,7 +50,8 @@ export const initCommand: Command = {
     "the document file, as --instance does. Rerunning keeps every value already",
     "set and fills only missing fields; an invalid document is refused, not",
     "overwritten. init never contacts AWS or provisions anything. It lists the",
-    "fields still needed; run `fffactory validate` after filling them in.",
+    "fields still needed, among them each host's Paseo password, which apply",
+    "needs; run `fffactory validate` after filling them in.",
   ],
   run: init,
 };

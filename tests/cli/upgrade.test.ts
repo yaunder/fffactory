@@ -98,7 +98,7 @@ describe("fffactory upgrade (plan-apply §Upgrade)", () => {
       "  Workers          one at a time",
       "    ~ builder-1   install release 0.3.0 and host configuration, then verify",
       "  Control plane    before worker activation",
-      "    ~ builder-1   paseo-package, service-definition, listen-address",
+      "    ~ builder-1   paseo-package, service-definition, listen-address, password",
       "  Repositories     one worker at a time",
       "    ~ builder-1   reconcile 0 placed repositories as factory; preserve and report unmanaged checkouts",
       "  Dispatch         after every readiness gate",

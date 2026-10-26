@@ -134,8 +134,10 @@ fffactory doctor
 
 If you use the standard AWS credential chain, omit the profile export. The
 CLI checks the caller's account against your configuration before operating.
-At this point, `validate` should report only `tailscale.auth_key_secret`
-missing; `doctor` exits 2 until that is supplied. Resolve any other findings.
+At this point, `validate` should report only `tailscale.auth_key_secret` and
+`hosts[0].paseo_password_secret` missing, the second with the `fffactory
+secret set paseo-password --host builder-1` that stores it; `doctor` exits 2
+until both are supplied. Resolve any other findings.
 
 ### 2. Prepare access and store secrets
 

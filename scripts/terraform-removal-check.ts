@@ -99,17 +99,10 @@ const CASES: readonly RemovalCase[] = [
     ],
   },
   {
-    title: "a host without a Paseo password",
+    title: "a host sharing another host's Paseo password",
     hosts: "several",
     key: "builder-3" as HostKey,
     changes: [deletes("builder-3" as HostKey)],
-    verdicts: ALLOWED,
-  },
-  {
-    title: "a host sharing another host's Paseo password",
-    hosts: "several",
-    key: "builder-4" as HostKey,
-    changes: [deletes("builder-4" as HostKey)],
     verdicts: ALLOWED,
   },
   {
@@ -143,7 +136,7 @@ const CASES: readonly RemovalCase[] = [
     verdicts: [{ listed: "the state's", refused: moreThan("builder-1" as HostKey) }],
   },
   {
-    title: "a host without a Paseo password, with another host's password changed too",
+    title: "a host sharing another host's Paseo password, with a third host's password changed too",
     hosts: "several",
     key: "builder-3" as HostKey,
     edit: (document) => ({
@@ -201,19 +194,17 @@ function credentialSecrets(example: Json, factoryId: FactoryId): Json {
 
 /**
  * The fixture's factory.json: the example's, for `factoryId`, with several hosts (two with
- * their own Paseo passwords, one without, one sharing another's) or one with its own, and
- * every factory-wide credential reference, which no removal may change.
+ * their own Paseo passwords, one sharing another's) or one with its own, and every
+ * factory-wide credential reference, which no removal may change. Every host has a password:
+ * factory.json is incomplete, and never projected, without one.
  */
 export function fixtureDocument(context: RemovalCheckContext, hosts: RemovalCase["hosts"]): Json {
   const { example, factoryId } = context;
   const [template] = example.hosts as [Json];
-  const { paseo_password_secret: _, ...bare } = template;
-  const host = (key: string, secret?: string) => ({
-    ...bare,
+  const host = (key: string, secret: string) => ({
+    ...template,
     key,
-    ...(secret === undefined
-      ? {}
-      : { paseo_password_secret: passwordSecret(example, factoryId, secret) }),
+    paseo_password_secret: passwordSecret(example, factoryId, secret),
   });
   const bucket = `${factoryId}-${String((example.state_backend as Json).bucket).slice(String(example.factory_id).length + 1)}`;
   return {
@@ -227,8 +218,7 @@ export function fixtureDocument(context: RemovalCheckContext, hosts: RemovalCase
         : [
             host("builder-1", "builder-1"),
             host("builder-2", "builder-2"),
-            host("builder-3"),
-            host("builder-4", "builder-2"),
+            host("builder-3", "builder-2"),
           ],
   };
 }

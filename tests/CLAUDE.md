@@ -119,9 +119,11 @@ references, its control-plane part's SHA-256 apart), so a plan or `status` after
 the drift, or the clean rerun, a real worker would. `status`'s unit tests
 (`application/status.test.ts`) do not: they still digest with `FAKE_SHA256`, which gives
 every text the same constant, so they cannot see a projection that drifted. `declaring`
-takes a host with a Paseo password reference (`PASEO_PASSWORD_ARN`), `requestingDispatch`
-places a repository and requests dispatch on the host, and `currentWorker` is a worker
-already current for the plan. The control-plane and dispatch stages run against
+gives every host a Paseo password reference, as completeness requires: its own
+(`paseoPasswordArn`, builder-1's `PASEO_PASSWORD_ARN`) unless given another,
+`requestingDispatch` places a repository and requests dispatch on the host, and
+`currentWorker` is a worker already current for the plan, holding that reference unless
+given another, or `null` for none. The control-plane and dispatch stages run against
 `support/fake-control-plane.ts`: a `ControlPlane` answering health and agent activity as
 given, and a `WorkflowQueue` that counts adoption checks and records every projection
 reconciled, so a test can assert a skipped worker was sent nothing. Stopping dispatch runs

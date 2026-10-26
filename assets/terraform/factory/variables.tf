@@ -88,7 +88,7 @@ variable "tailscale_tag" {
 }
 
 variable "paseo_password_secret_arns" {
-  description = "factory.json's hosts[].paseo_password_secret, by host key, for hosts that declare one."
+  description = "factory.json's hosts[].paseo_password_secret, by host key: every host declares one."
   type        = map(string)
 
   validation {

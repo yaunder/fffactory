@@ -26,6 +26,18 @@ describe("fffactory validate", () => {
     expect(out).toContain("Complete: nothing further is needed.");
   });
 
+  test("a host without a Paseo password is incomplete, naming the command that stores it", async () => {
+    const example = await Bun.file("examples/factory.json").json();
+    const [{ paseo_password_secret: _password, ...host }] = example.hosts;
+    const document = JSON.stringify({ ...example, hosts: [host] });
+    const { context, out } = harness(new MemoryInstanceStore({ "/x/factory.json": document }));
+    expect(await run(["validate", "--instance", "/x/factory.json"], context)).toBe(0);
+    expect(out.slice(-2)).toEqual([
+      "Incomplete: 1 field still needed:",
+      "  hosts[0].paseo_password_secret: store it with `fffactory secret set paseo-password --host builder-1`",
+    ]);
+  });
+
   test("honours FFFACTORY_INSTANCE", async () => {
     const store = new MemoryInstanceStore({ "/env/factory.json": '{"schema_version": 1}' });
     const { context, out } = harness(store, { FFFACTORY_INSTANCE: "/env/factory.json" });

@@ -34,14 +34,18 @@ import {
 const EXAMPLE = JSON.parse(await Bun.file("examples/factory.json").text());
 const B1 = "example-builder-1";
 const B2 = "example-builder-2";
+const BUILDER_2 = {
+  key: "builder-2",
+  instance_type: "m7i.large",
+  root_volume_gib: 100,
+  paseo_password_secret:
+    "arn:aws:secretsmanager:us-east-1:123456789012:secret:example/builder-2/paseo-password-AbCdEf",
+};
 
 function instance(overrides: Record<string, unknown> = {}): FactoryInstance {
   const document = {
     ...EXAMPLE,
-    hosts: [
-      EXAMPLE.hosts[0],
-      { key: "builder-2", instance_type: "m7i.large", root_volume_gib: 100 },
-    ],
+    hosts: [EXAMPLE.hosts[0], BUILDER_2],
     ...overrides,
   };
   const parsed = parseFactoryInstance(document);
@@ -174,10 +178,7 @@ describe("factory status", () => {
       },
     });
     const configured = instance({
-      hosts: [
-        { ...EXAMPLE.hosts[0], dispatch },
-        { key: "builder-2", instance_type: "m7i.large", root_volume_gib: 100 },
-      ],
+      hosts: [{ ...EXAMPLE.hosts[0], dispatch }, BUILDER_2],
     });
     const { report: result } = await report(deps, configured);
     expect(byKey(result.workers)["builder-1"]).toMatchObject({
@@ -213,7 +214,7 @@ describe("factory status", () => {
             cwd: "/home/factory",
           },
         },
-        { key: "builder-2", instance_type: "m7i.large", root_volume_gib: 100 },
+        BUILDER_2,
       ],
     });
     const { report: result } = await report(deps, configured);
@@ -261,15 +262,7 @@ describe("factory status", () => {
       deps,
       instance({
         credentials: { github_token_secret: github },
-        hosts: [
-          EXAMPLE.hosts[0],
-          {
-            key: "builder-2",
-            instance_type: "m7i.large",
-            root_volume_gib: 100,
-            interactive_logins: ["github"],
-          },
-        ],
+        hosts: [EXAMPLE.hosts[0], { ...BUILDER_2, interactive_logins: ["github"] }],
       }),
     );
     const workers = byKey(outcome.report.workers);

@@ -62,7 +62,7 @@ Schema is [`schemas/factory.schema.json`](../../schemas/factory.schema.json), an
 | `repositories[]` | Repository inventory. Each entry requires `key`, `remote` (`https://github.com/OWNER/NAME`), `path` (relative checkout path; no empty, `.` or `..` segments) and `branch`. |
 | `hosts[]` | Stable hosts, possibly none. Each entry requires `key`. |
 | `hosts[].instance_type`, `hosts[].root_volume_gib` | Machine declaration: EC2 instance type; root volume of 8-16384 GiB. |
-| `hosts[].paseo_password_secret` | Secret reference to the host's Paseo password. |
+| `hosts[].paseo_password_secret` | Secret reference to the host's Paseo password, which every host needs ([control plane §The daemon password](control-plane.md#the-daemon-password)). |
 | `hosts[].repositories[]` | Repository placement: keys of declared repositories. |
 | `hosts[].interactive_logins[]` | Accounts kept on a human's login on this host, each at most once: `github`, `openai`, `anthropic`. See [API credentials](#api-credentials). |
 | `hosts[].dispatch` | Desired dispatch settings: `enabled` (boolean), `cron`, `timezone`, `provider`, `model`, `mode` (non-blank strings), and `cwd` (absolute path). When enabled, every schedule field is required; no runtime default is applied. |
@@ -180,17 +180,24 @@ Completeness is reported separately from validity. A valid document is complete
 when it has `release`, `factory_id`, `name`, `aws.account_id`, `aws.region`,
 `state_backend.bucket`, `network.vpc_cidr`, `network.public_subnet_cidr`,
 `network.availability_zone`, `tailscale.tag`, `tailscale.auth_key_secret`,
-`hosts`, and `instance_type` and `root_volume_gib` for every host. The report
-lists missing fields by path in that order. `hosts` may be an empty list: a
+`hosts`, and `instance_type`, `root_volume_gib` and `paseo_password_secret` for
+every host. The report lists missing fields by path in that order. A worker is
+ready only once its Paseo daemon runs, and the daemon never starts without a
+password ([control plane §The daemon password](control-plane.md#the-daemon-password)),
+so a host without one could be created but never made ready; the report names
+the command that stores it, `fffactory secret set paseo-password --host KEY`
+for that host's key. `hosts` may be an empty list: a
 factory may declare no worker, as
 [`fffactory worker terminate KEY`](worker-lifecycle.md#terminate-remove) leaves
 it after removing the last host, and its plan is then its shared
 infrastructure alone
 ([plan-apply §An empty factory](plan-apply.md#an-empty-factory)). An absent
 `hosts` is still reported missing, so a new document is not taken for a factory
-deliberately without workers. Repositories, dispatch settings, Paseo password
-references, `tailscale.admin_client_secret`, `credentials` and
-`interactive_logins` are optional for completeness.
+deliberately without workers. Repositories, dispatch settings,
+`tailscale.admin_client_secret`, `credentials` and `interactive_logins` are
+optional for completeness. `plan`, `apply`, `upgrade`, `status`, `teardown` and
+the `worker` commands refuse an incomplete document; `secret set` does not, as it
+is how a secret reference is filled in.
 
 ## `fffactory validate`
 
@@ -198,7 +205,9 @@ references, `tailscale.admin_client_secret`, `credentials` and
 resolved path and its discovery source.
 
 - Valid: prints the schema version and either `Complete` or the list of fields
-  still needed, and exits 0. An incomplete document still exits 0.
+  still needed, and exits 0. An incomplete document still exits 0. A field
+  that a command fills is listed with it, as
+  ``hosts[0].paseo_password_secret: store it with `fffactory secret set paseo-password --host builder-1` ``.
 - Invalid: prints `path: message` for every issue to standard error and exits 1.
 - No instance found, or the selected file cannot be read: prints the reason to
   standard error and exits 1.
@@ -248,7 +257,10 @@ Output, on standard output, exit 0:
 - `Created PATH.`, `Updated PATH.` or `Unchanged PATH: nothing to fill.`;
 - `New factory ID: …` and `Release pin: …` for whichever of those `init` just
   wrote. Values that were already in the file are never echoed;
-- the completeness report, as `fffactory validate` prints it.
+- the completeness report, as `fffactory validate` prints it;
+- while `hosts` is still missing, ``Every host needs a Paseo password before
+  apply: `fffactory secret set paseo-password --host KEY`.``: a declared host
+  without one is already listed with that command.
 
 ## Credentials
 

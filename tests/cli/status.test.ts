@@ -28,15 +28,20 @@ const EXAMPLE = JSON.parse(await Bun.file("examples/factory.json").text());
 const B1 = "example-builder-1";
 const B2 = "example-builder-2";
 const B1_PASEO_SECRET = EXAMPLE.hosts[0].paseo_password_secret as SecretReference;
+const B2_PASEO_SECRET =
+  "arn:aws:secretsmanager:us-east-1:123456789012:secret:example/builder-2/paseo-password-AbCdEf" as SecretReference;
+const BUILDER_2 = {
+  key: "builder-2",
+  instance_type: "m7i.large",
+  root_volume_gib: 100,
+  paseo_password_secret: B2_PASEO_SECRET,
+};
 const schemaAccepts = new Ajv2020({ allErrors: true, strict: true }).compile(schema);
 
 function store(overrides: Record<string, unknown> = {}) {
   const document = {
     ...EXAMPLE,
-    hosts: [
-      EXAMPLE.hosts[0],
-      { key: "builder-2", instance_type: "m7i.large", root_volume_gib: 100 },
-    ],
+    hosts: [EXAMPLE.hosts[0], BUILDER_2],
     ...overrides,
   };
   return new MemoryInstanceStore({ [NEAREST]: JSON.stringify(document) });
@@ -53,7 +58,7 @@ const RUNNING = fakeMachineInventory({
 function ready() {
   return fakeTransport({
     [B1]: statusAnswers(readyWorker("example", "builder-1", "0.1.0", B1_PASEO_SECRET)),
-    [B2]: statusAnswers(readyWorker("example", "builder-2", "0.1.0")),
+    [B2]: statusAnswers(readyWorker("example", "builder-2", "0.1.0", B2_PASEO_SECRET)),
   });
 }
 
@@ -378,7 +383,7 @@ describe("fffactory status, enrollment pending (readiness §Enrollment)", () => 
               verification: verification(B1, "pending"),
             },
           }),
-          [B2]: statusAnswers(readyWorker("example", "builder-2", "0.1.0")),
+          [B2]: statusAnswers(readyWorker("example", "builder-2", "0.1.0", B2_PASEO_SECRET)),
         }).transport,
       },
     );
@@ -432,15 +437,7 @@ describe("fffactory status, a delivered credential not accepted (readiness §Enr
     return harness(
       store({
         credentials,
-        hosts: [
-          EXAMPLE.hosts[0],
-          {
-            key: "builder-2",
-            instance_type: "m7i.large",
-            root_volume_gib: 100,
-            interactive_logins: ["github"],
-          },
-        ],
+        hosts: [EXAMPLE.hosts[0], { ...BUILDER_2, interactive_logins: ["github"] }],
       }),
       {},
       {
@@ -460,7 +457,7 @@ describe("fffactory status, a delivered credential not accepted (readiness §Enr
               }),
             },
           }),
-          [B2]: statusAnswers(readyWorker("example", "builder-2", "0.1.0")),
+          [B2]: statusAnswers(readyWorker("example", "builder-2", "0.1.0", B2_PASEO_SECRET)),
         }).transport,
       },
     );

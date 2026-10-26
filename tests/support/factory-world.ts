@@ -42,16 +42,23 @@ export const ASSETS_SHA256 = "b".repeat(64);
 const ARN =
   "arn:aws:secretsmanager:eu-west-2:123456789012:secret:fff-abcd1234/tailscale-auth-key-AbCdEf";
 
-/** A Paseo password's Secrets Manager reference: an ARN in the test account, never a value. */
-export const PASEO_PASSWORD_ARN =
-  "arn:aws:secretsmanager:eu-west-2:123456789012:secret:fff-abcd1234/paseo-password-builder-1-AbCdEf" as SecretReference;
+/** Host `key`'s Paseo password reference: an ARN in the test account, never a value. */
+export function paseoPasswordArn(key: string): SecretReference {
+  return `arn:aws:secretsmanager:eu-west-2:123456789012:secret:fff-abcd1234/${key}/paseo-password-AbCdEf` as SecretReference;
+}
 
-/** A declared host: its key, and the Paseo password reference it may carry. */
+/** builder-1's Paseo password reference. */
+export const PASEO_PASSWORD_ARN = paseoPasswordArn("builder-1");
+
+/** A declared host: its key, and the Paseo password reference it carries, by default its own. */
 export type DeclaredHost =
   | string
   | { readonly key: string; readonly paseo_password_secret?: SecretReference };
 
-/** A complete factory.json declaring `hosts`, each a key or a key with its password reference. */
+/**
+ * A complete factory.json declaring `hosts`, each a key or a key with its password reference.
+ * Every host has one, as completeness requires.
+ */
 export function declaring(...hosts: DeclaredHost[]): FactoryInstance {
   return {
     schema_version: 1,
@@ -67,12 +74,13 @@ export function declaring(...hosts: DeclaredHost[]): FactoryInstance {
     },
     tailscale: { tag: "tag:factory", auth_key_secret: ARN as never },
     hosts: hosts.map((host) => {
-      const { key, paseo_password_secret } = typeof host === "string" ? { key: host } : host;
+      const { key, paseo_password_secret = paseoPasswordArn(key) } =
+        typeof host === "string" ? { key: host } : host;
       return {
         key: key as HostKey,
         instance_type: "t3.large",
         root_volume_gib: 64,
-        ...(paseo_password_secret === undefined ? {} : { paseo_password_secret }),
+        paseo_password_secret,
       };
     }),
   };
@@ -191,11 +199,14 @@ export function workerFleet(
 
 /**
  * The inspection of `key`'s worker, ready on the release `planRequest` runs and holding the host
- * projection `declaring` gives it, with `paseoPasswordSecret` when one is declared: a worker
- * the plan finds current. Hold another reference, or none, to model drift.
+ * projection `declaring` gives it, its own Paseo password reference included: a worker the plan
+ * finds current. Hold another reference, or none (`null`), to model drift.
  */
-export function currentWorker(key: string, paseoPasswordSecret?: SecretReference): HostInspection {
-  const ready = readyWorker(FACTORY, key, RELEASE, paseoPasswordSecret);
+export function currentWorker(
+  key: string,
+  paseoPasswordSecret: SecretReference | null = paseoPasswordArn(key),
+): HostInspection {
+  const ready = readyWorker(FACTORY, key, RELEASE, paseoPasswordSecret ?? undefined);
   return { ...ready, release: { state: "active", version: RELEASE, sha256: ASSETS_SHA256 } };
 }
 

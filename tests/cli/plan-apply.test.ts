@@ -87,7 +87,7 @@ const STAGES = [
   "  Workers          one at a time",
   "    ~ builder-1   install release 0.3.0 and host configuration, then verify",
   "  Control plane    before worker activation",
-  "    ~ builder-1   paseo-package, service-definition, listen-address",
+  "    ~ builder-1   paseo-package, service-definition, listen-address, password",
   "  Repositories     one worker at a time",
   "    ~ builder-1   reconcile 0 placed repositories as factory; preserve and report unmanaged checkouts",
   "  Dispatch         after every readiness gate",
@@ -305,7 +305,7 @@ describe("fffactory plan (plan-apply §Plan)", () => {
     const stages = out.indexOf("  Control plane    before worker activation");
     expect(out.slice(stages, -SAVED.length)).toEqual([
       "  Control plane    before worker activation",
-      "    ~ builder-1   paseo-package, service-definition, listen-address",
+      "    ~ builder-1   paseo-package, service-definition, listen-address, password",
       "  Repositories     one worker at a time",
       "    ~ builder-1   reconcile 1 placed repository as factory; preserve and report unmanaged checkouts",
       "  Dispatch         after every readiness gate",
@@ -964,7 +964,7 @@ describe("fffactory apply (plan-apply §Apply)", () => {
         UNCHANGED,
         "  ! builder-1          skipped · Paseo maintenance is deferred while agents may be active",
         "    ! Control plane   deferred · Maintenance (paseo-package, service-definition, " +
-          `listen-address) was deferred while agents may be active on ${B1}; it stays on its ` +
+          `listen-address, password) was deferred while agents may be active on ${B1}; it stays on its ` +
           "complete current release",
         "    ✔ Repositories    synchronized",
         "    ↷ Dispatch        skipped",

@@ -19,8 +19,9 @@ The plan records, per worker, the inspection observation and every Paseo change
 it will make. A worker with no active release, or whose active release differs
 from the requested version or asset digest, needs `paseo-package` and
 `service-definition`. A host-projection digest mismatch needs the factory-owned
-Paseo settings (`listen-address`, and `password` when factory.json declares its
-secret reference). The digest planned against is that of the control-plane
+Paseo settings (`listen-address` and `password`: every host of a plannable
+factory.json declares its Paseo password reference,
+[§The daemon password](#the-daemon-password)). The digest planned against is that of the control-plane
 part of the projection the workers stage sends: all of it but its
 `credentials` ([host protocol §The host projection](host-protocol.md#the-host-projection)).
 It is compared with the worker's `configuration.control_plane_sha256`, or, on a
@@ -114,7 +115,8 @@ versioned JSON activity or action document.
   carries `paseo_password_secret`, install reads the password by that ARN and
   hashes it ([§The daemon password](#the-daemon-password)); it then sends the
   active release's `setup-host.sh` two lines on standard input, the ARN and the
-  hash, each empty for a host that declares no password. No configuration value
+  hash, each empty only for a projection delivered by hand without the
+  reference ([§The daemon password](#the-daemon-password)). No configuration value
   is an SSH command token.
 - `restart` is the fixed `systemctl restart paseo.service` action.
 
@@ -186,18 +188,21 @@ its environment.
 so no daemon, agent, tool or hook process has `PASEO_PASSWORD`. Its
 `ExecStartPre` refuses to start the daemon unless `config.json` holds a
 non-empty `daemon.auth.password`: Paseo without one would accept every client
-on the tailnet. A host whose factory.json declares no Paseo password keeps the
-behavior it had before the hash-only daemon: its daemon does not start, as when
-the wrapper that started it refused to without a secret reference. Setup
-therefore stores an empty reference and removes any `daemon.auth.password` from
-`config.json`, keeping the rest of `daemon.auth`, so `ExecStartPre` refuses.
-This covers a host whose `paseo_password_secret` was removed from factory.json:
-the changed projection plans `listen-address`, the install removes the hash
-written for the old password, and the restart that follows leaves the daemon
-stopped rather than running on a password fffactory no longer references
-(which `paseo-auth.sh`, with no reference, could not send). A password stored
-by hand with `paseo daemon set-password` is removed too: without a reference
-the daemon never ran on it before either.
+on the tailnet.
+
+So every host needs a Paseo password. Without the daemon, apply's restart,
+health probe and dispatch all fail, and the worker can never be ready
+([#91](https://github.com/yaunder/fffactory/issues/91)). factory.json is
+therefore incomplete while a host lacks `paseo_password_secret`, and no plan,
+apply or upgrade sends a projection without it
+([instance configuration §Completeness](instance-configuration.md#completeness)).
+A passwordless host is not a supported state. Only a projection that reaches
+`host apply` some other way, such as by hand, can still lack the reference; the
+install then fails safe: setup stores an empty reference and removes any
+`daemon.auth.password` from `config.json`, keeping the rest of `daemon.auth`, so
+`ExecStartPre` keeps the daemon stopped rather than running on a password
+fffactory does not reference (which `paseo-auth.sh`, with no reference, could
+not send), a password stored by hand with `paseo daemon set-password` included.
 
 `paseo-auth.sh` is only for fffactory's own Paseo CLI calls (activity, reload,
 the dispatch schedule and dispatch): it reads that one host's reference, fetches

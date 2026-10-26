@@ -317,7 +317,8 @@ on standard input and kept as `/var/lib/fffactory/host.json`:
 ```
 
 `paseo_password_secret` is present exactly when the host declares
-`hosts[].paseo_password_secret`: a validated Secrets Manager ARN, the
+`hosts[].paseo_password_secret`, as every host of a complete factory.json does
+([control plane §The daemon password](control-plane.md#the-daemon-password)): a validated Secrets Manager ARN, the
 reference the [control plane](control-plane.md) installs Paseo's password
 from, never the password it names. `credentials` holds the references of the
 API credentials delivered to the host

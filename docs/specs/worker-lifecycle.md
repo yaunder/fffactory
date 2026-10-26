@@ -244,7 +244,9 @@ only the Tailscale enrollment key and the factory-wide credential references
 factory.json sets. factory.json keeps `hosts: []` and its
 `repositories` inventory. To change the size of a single-worker factory,
 terminate the worker, then declare its replacement with the `instance_type`
-and `root_volume_gib` wanted, under a new key or the same one, and run
+and `root_volume_gib` wanted and a Paseo password, as every host needs
+([instance configuration §Completeness](instance-configuration.md#completeness)),
+under a new key or the same one, and run
 `fffactory apply`: Terraform no longer records the removed key, so either is a
 plain create, never refused as a removed host key
 ([provisioning §Stable host keys](provisioning.md#stable-host-keys)).
@@ -281,8 +283,9 @@ The removal, under the same lock and record:
      EC2 lists for it, may be destroyed`. The first names both instances in the
      EC2 console, the second the instances carrying the host key;
    - update `module.host_identity.aws_iam_role_policy.read_secrets`, the hosts'
-     secret-reading policy, in place, only when the removed host declares a
-     `paseo_password_secret` and the update only stops allowing it: every other
+     secret-reading policy, in place, only when no remaining host shares the
+     removed host's `paseo_password_secret` and the update only stops allowing
+     it: every other
      attribute as before, nothing unknown until apply, and the policy document
      (its statements' actions and resources compared as sets) as before less
      that one ARN. The credential references (`credentials.*_secret`) are
@@ -306,8 +309,8 @@ The removal, under the same lock and record:
    job) plans removals with the managed Terraform and the shipped modules from
    isolated fixtures, reaching no AWS account and reading no factory state. A
    fixture's state is synthesized from Terraform's own plans of the example
-   with several hosts (two with their own Paseo passwords, one without, one
-   sharing another's) or with one, and every credential reference: each resource as planned, its values unknown
+   with several hosts (two with their own Paseo passwords, one sharing
+   another's) or with one, and every credential reference: each resource as planned, its values unknown
    until apply filled with fake but well-formed IDs and ARNs, until Terraform
    plans no change for it. Each removal is planned as step 1 plans it (the
    recorded keys from the state's outputs, factory.json without the host
@@ -316,8 +319,8 @@ The removal, under the same lock and record:
    JSON plan judged by `removalPlanRefusal`. Removing a host with its own
    password plans exactly the instance's `delete` and the policy's in-place
    `update`, the policy then allowing the enrollment key, the remaining
-   hosts' passwords and the credential references; removing one without a
-   password, or sharing one, only the `delete`; removing the last host leaves
+   hosts' passwords and the credential references; removing one sharing its
+   password with a remaining host, only the `delete`; removing the last host leaves
    the policy allowing only the enrollment key and the credential references. Each is allowed. Refused: the same plan judged with another
    instance listed, or none, and removals planned together with another host's
    instance type, the subnet's CIDR block, another host's Paseo password or a
@@ -938,7 +941,7 @@ failures' words); `tests/cli/presentation/plan.test.ts` (the plan as shown);
 `scripts/terraform-check.ts` with `scripts/terraform-removal-check.ts` and
 `scripts/terraform-state-fixture.ts` (the rule against Terraform's real
 removal plans from synthesized fixture states: a host with its own password,
-without one, sharing one, and the last host allowed, each plan exactly the
+one sharing one, and the last host allowed, each plan exactly the
 removal's changes; another instance listed, none listed, and another host's
 instance type or Paseo password, or the network's change, planned together
 refused);
