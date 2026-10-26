@@ -24,6 +24,7 @@ import {
   accountExpectation,
   type CredentialSelection,
 } from "../domain/aws-account";
+import { workerActivity } from "../domain/control-plane";
 import type { HeldLock } from "../domain/factory-lock";
 import { hostProjectionSha256, projectHost, type Sha256 } from "../domain/host-projection";
 import type { RandomBytes } from "../domain/initialization";
@@ -147,7 +148,7 @@ export interface WorkerLifecycleDependencies {
   readonly control: MachineControl;
   readonly peers: TailnetPeers;
   readonly transport: HostTransport;
-  /** Reads stop's agent activity; without one, a running worker cannot be inspected. */
+  /** Reads stop's agents; without one, a running worker cannot be inspected. */
   readonly controlPlane: ControlPlane | undefined;
   readonly prompt: OperatorPrompt;
   /** Reads terminate's Tailscale admin client secret. */
@@ -862,15 +863,14 @@ async function stopInspection(
   const location = locateWorker(await deps.peers.view(), power.worker, power.tag, then);
   if (location.kind === "blocked")
     return { kind: "unlocated", tailnet: location.tailnet, verdict: location.verdict };
-  if (deps.controlPlane === undefined)
-    return {
-      kind: "activity",
-      activity: {
-        kind: "unknown",
-        reason: "this fffactory cannot reach the worker's control plane",
-      },
-    };
-  return { kind: "activity", activity: await deps.controlPlane.activeAgents(location.worker) };
+  return {
+    kind: "activity",
+    activity: workerActivity(
+      deps.controlPlane === undefined
+        ? { kind: "unknown", reason: "this fffactory cannot reach the worker's control plane" }
+        : await deps.controlPlane.agents(location.worker),
+    ),
+  };
 }
 
 /**

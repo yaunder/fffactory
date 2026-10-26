@@ -108,8 +108,8 @@ describe("end-to-end verification (dispatch §End-to-end verification)", () => {
 
   test("a worker whose maintenance was deferred stays on its release, named with the deferral's next action, never absent", () => {
     const hostname = "fff-abcd1234-builder-1";
-    const close = `Close the active agents on ${hostname}, then rerun \`fffactory apply\``;
-    const deferral = "Paseo maintenance is deferred while agents may be active";
+    const close = `Wait until no agent on ${hostname} is working or needs input, then rerun \`fffactory apply\``;
+    const deferral = "Paseo maintenance is deferred while agents may be busy";
     const skipped: WorkerOutcome = {
       ...identity("builder-1"),
       kind: "skipped",
@@ -121,7 +121,7 @@ describe("end-to-end verification (dispatch §End-to-end verification)", () => {
       kind: "deferred",
       pending: ["password"],
       reloaded: false,
-      summary: "Maintenance (password) was deferred while agents may be active",
+      summary: "Maintenance (password) was deferred while agents may be busy",
       nextAction: close,
     };
     const dispatch: DispatchOutcome = {

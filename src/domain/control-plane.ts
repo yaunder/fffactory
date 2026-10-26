@@ -1,5 +1,6 @@
 import {
   array,
+  type DocumentParse,
   HOST_PROTOCOL_VERSION,
   Invalid,
   oneOf,
@@ -31,7 +32,71 @@ export type WorkerAgents =
   | { readonly kind: "listed"; readonly agents: readonly Agent[] }
   | { readonly kind: "unknown"; readonly reason: string };
 
-export type AgentActivity =
+/**
+ * A worker's agents as the CLI read them: its adapter's answer, or `outdated`, an answer without
+ * the agent list from a worker whose release predates agent states, which the CLI refuses
+ * (`docs/specs/control-plane.md` §Agent states).
+ */
+export type AgentsObservation = WorkerAgents | { readonly kind: "outdated" };
+
+/** Why an outdated worker's agents are unknown. */
+export const OUTDATED_AGENTS = "its release predates fffactory's agent states";
+
+/**
+ * A worker's activity by the busy rule: `busy` while any agent is `working` or `needs_input`,
+ * counting each; `idle` when none is; `unknown` when its agents could not be read, and
+ * `outdated` too when its release answered without them.
+ */
+export type WorkerActivity =
+  | { readonly kind: "idle" }
+  | { readonly kind: "busy"; readonly working: number; readonly needsInput: number }
+  | { readonly kind: "unknown"; readonly reason: string; readonly outdated: boolean };
+
+/** Activity that keeps a worker from maintenance or removal: agents busy, or unreadable. */
+export type BlockingActivity = Exclude<WorkerActivity, { readonly kind: "idle" }>;
+
+/** The busy rule: only `working` and `needs_input` agents count; the other states never do. */
+export function workerActivity(agents: AgentsObservation): WorkerActivity {
+  switch (agents.kind) {
+    case "outdated":
+      return { kind: "unknown", reason: OUTDATED_AGENTS, outdated: true };
+    case "unknown":
+      return { kind: "unknown", reason: agents.reason, outdated: false };
+    case "listed": {
+      const count = (state: AgentState) =>
+        agents.agents.filter((agent) => agent.state === state).length;
+      const working = count("working");
+      const needsInput = count("needs_input");
+      return working + needsInput === 0 ? { kind: "idle" } : { kind: "busy", working, needsInput };
+    }
+  }
+}
+
+function agentCount(count: number): string {
+  return count === 1 ? "1 agent" : `${count} agents`;
+}
+
+/**
+ * How many agents are busy on `hostname`, and how, in fffactory's words: `2 agents are working
+ * and 1 needs input on HOSTNAME`.
+ */
+export function busyAgents(
+  activity: Extract<WorkerActivity, { readonly kind: "busy" }>,
+  hostname: string,
+): string {
+  const { working, needsInput } = activity;
+  const needing = `${needsInput === 1 ? "needs" : "need"} input`;
+  if (working === 0) return `${agentCount(needsInput)} ${needing} on ${hostname}`;
+  const workingWords = `${agentCount(working)} ${working === 1 ? "is" : "are"} working`;
+  if (needsInput === 0) return `${workingWords} on ${hostname}`;
+  return `${workingWords} and ${needsInput} ${needing} on ${hostname}`;
+}
+
+/**
+ * The activity document's `activity` field: the busy rule's verdict, `active` counting the busy
+ * agents. The CLI reads only the agents, and this field's reason when they could not be read.
+ */
+type ActivityField =
   | { readonly kind: "idle" }
   | { readonly kind: "active"; readonly count: number }
   | { readonly kind: "unknown"; readonly reason: string };
@@ -42,12 +107,9 @@ export type ControlPlaneAction =
 
 export interface ActivityDocument {
   readonly protocol_version: typeof HOST_PROTOCOL_VERSION;
-  readonly activity: AgentActivity;
-  /**
-   * The worker's agents, `null` exactly when `activity` is unknown. Absent from the answer of
-   * a worker on a release from before agent states.
-   */
-  readonly agents?: readonly Agent[] | null;
+  readonly activity: ActivityField;
+  /** The worker's agents, `null` exactly when `activity` is unknown. */
+  readonly agents: readonly Agent[] | null;
 }
 
 export interface ControlPlaneActionDocument {
@@ -55,18 +117,22 @@ export interface ControlPlaneActionDocument {
   readonly result: ControlPlaneAction;
 }
 
-/** The document's `activity` field, as before agent states: every listed agent counts. */
-export function agentActivity(agents: WorkerAgents): AgentActivity {
-  if (agents.kind === "unknown") return { kind: "unknown", reason: agents.reason };
-  return agents.agents.length === 0
-    ? { kind: "idle" }
-    : { kind: "active", count: agents.agents.length };
+function activityField(agents: WorkerAgents): ActivityField {
+  const activity = workerActivity(agents);
+  switch (activity.kind) {
+    case "idle":
+      return { kind: "idle" };
+    case "busy":
+      return { kind: "active", count: activity.working + activity.needsInput };
+    case "unknown":
+      return { kind: "unknown", reason: activity.reason };
+  }
 }
 
 export function activityJson(agents: WorkerAgents): string {
   const document: ActivityDocument = {
     protocol_version: HOST_PROTOCOL_VERSION,
-    activity: agentActivity(agents),
+    activity: activityField(agents),
     agents:
       agents.kind === "listed"
         ? agents.agents.map(({ id, state, dispatched }) => ({ id, state, dispatched }))
@@ -85,7 +151,7 @@ function reason(value: unknown, field: string): string {
   return value;
 }
 
-function readActivity(value: unknown): AgentActivity {
+function readActivity(value: unknown): ActivityField {
   const activity = record(value, "activity");
   if (activity.kind === "idle") return { kind: "idle" };
   if (activity.kind === "active") {
@@ -109,11 +175,14 @@ function readAgent(value: unknown, path: string): Agent {
   };
 }
 
-function readAgents(value: unknown, activity: AgentActivity): readonly Agent[] | null {
+function readAgents(value: unknown, activity: ActivityField): WorkerAgents {
   if ((value === null) !== (activity.kind === "unknown"))
     throw new Invalid("agents is null only when activity is unknown");
-  if (value === null) return null;
-  return array(value, "agents").map((agent, index) => readAgent(agent, `agents[${index}]`));
+  if (activity.kind === "unknown") return { kind: "unknown", reason: activity.reason };
+  return {
+    kind: "listed",
+    agents: array(value, "agents").map((agent, index) => readAgent(agent, `agents[${index}]`)),
+  };
 }
 
 function readAction(value: unknown): ControlPlaneAction {
@@ -124,17 +193,26 @@ function readAction(value: unknown): ControlPlaneAction {
   throw new Invalid("result.kind is not a known state");
 }
 
-export function parseActivityDocument(text: string) {
-  return parseVersioned(text, (document): ActivityDocument => {
+/** Reading an activity answer: the worker's agents, or why the answer was refused. */
+export type ActivityParse =
+  | DocumentParse<WorkerAgents>
+  /** A valid answer without `agents`, from a worker whose release predates agent states. */
+  | { readonly ok: false; readonly kind: "outdated" };
+
+/**
+ * Reads an activity document into the worker's agents, which alone the CLI decides from: the
+ * `activity` field is checked, and read only for its reason when the agents could not be read.
+ * An answer without `agents` is refused as `outdated`, never read by its count (D4).
+ */
+export function parseActivityDocument(text: string): ActivityParse {
+  const parsed = parseVersioned(text, (document) => {
     const activity = readActivity(document.activity);
-    // TODO(re-evaluate when #99 lands): refuse an answer without `agents`, an older worker's.
-    if (document.agents === undefined) return { protocol_version: HOST_PROTOCOL_VERSION, activity };
-    return {
-      protocol_version: HOST_PROTOCOL_VERSION,
-      activity,
-      agents: readAgents(document.agents, activity),
-    };
+    return document.agents === undefined ? undefined : readAgents(document.agents, activity);
   });
+  if (!parsed.ok) return parsed;
+  return parsed.document === undefined
+    ? { ok: false, kind: "outdated" }
+    : { ok: true, document: parsed.document };
 }
 
 export function parseControlPlaneActionDocument(text: string) {

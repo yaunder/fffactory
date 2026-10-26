@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import type { AgentActivity } from "../../src/application/control-plane";
+import { type AgentsObservation, OUTDATED_AGENTS } from "../../src/domain/control-plane";
 import type { HostCommandOutcome } from "../../src/application/host-transport";
 import { INSPECT_TIMEOUT_MS } from "../../src/application/inspect-worker";
 import type { MachineRequest } from "../../src/application/machine-control";
@@ -39,10 +39,11 @@ import {
   type ObservedMachineState,
   POWER_DEADLINE_MS,
   POWER_POLL_MS,
+  replaceOutdatedWorker,
 } from "../../src/domain/worker-lifecycle";
 import { sha256Text } from "../../src/infrastructure/release-tarball";
 import { FAKE_CALLER, fakeCallerIdentity } from "../support/doctor-fakes";
-import { fakeControlPlane } from "../support/fake-control-plane";
+import { agentsIn, fakeControlPlane } from "../support/fake-control-plane";
 import { fakePrompt, fakeSecretStore } from "../support/fake-secrets";
 import {
   type Answer,
@@ -87,7 +88,7 @@ interface WorldOptions {
   readonly inventory?: MachineInventory;
   readonly states?: readonly (ObservedMachineState | undefined)[];
   readonly request?: MachineRequest;
-  readonly activity?: AgentActivity;
+  readonly agents?: AgentsObservation;
   readonly noControlPlane?: boolean;
   readonly view?: PeerView | ((read: number) => PeerView);
   readonly worker?: Answer;
@@ -141,7 +142,7 @@ function world(options: WorldOptions = {}) {
     states: options.states ?? ["stopped"],
     ...(options.request ? { request: options.request } : {}),
   });
-  const controlPlane = fakeControlPlane("healthy", options.activity ?? { kind: "idle" });
+  const controlPlane = fakeControlPlane("healthy", options.agents ?? agentsIn());
   const tailnet = fakeTailnet(options.view ?? ONLINE);
   const transport = fakeTransport({
     [HOSTNAME]:
@@ -241,7 +242,7 @@ describe("fffactory worker stop (worker-lifecycle §Stop)", () => {
       instanceId: ID,
       changed: true,
     });
-    expect(w.controlPlane.calls).toEqual(["activeAgents"]);
+    expect(w.controlPlane.calls).toEqual(["agents"]);
     expect(w.control.calls).toEqual([`stop ${ID}`, `state ${ID}`, `state ${ID}`, `state ${ID}`]);
     expect(w.control.targets[0]).toEqual({
       credentials: { source: "--profile", profile: "factory" },
@@ -273,12 +274,12 @@ describe("fffactory worker stop (worker-lifecycle §Stop)", () => {
     ]);
   });
 
-  test("refuses while agents are active, before any EC2 mutation", async () => {
-    const w = world({ activity: { kind: "active", count: 2 } });
+  test("refuses while agents are busy, before any EC2 mutation", async () => {
+    const w = world({ agents: agentsIn("working", "working", "finished") });
     const result = await stopWorker(w.deps, request(w));
     expect(result).toMatchObject({
       kind: "refused",
-      refusal: { summary: `2 agents are active on ${HOSTNAME}: stopping it would end them` },
+      refusal: { summary: `2 agents are working on ${HOSTNAME}: stopping it would end them` },
     });
     expect(w.control.calls).toEqual([]);
     expect(records(w)[0]).toMatchObject({
@@ -301,29 +302,44 @@ describe("fffactory worker stop (worker-lifecycle §Stop)", () => {
     });
     expect(offline.controlPlane.calls).toEqual([]);
     const unreachable = world({
-      activity: { kind: "unknown", reason: "Paseo activity could not be read" },
+      agents: { kind: "unknown", reason: "Paseo activity could not be read" },
     });
     expect(await stopWorker(unreachable.deps, request(unreachable))).toMatchObject({
       kind: "refused",
       refusal: {
-        summary: `${HOSTNAME} could not be inspected for active agents: Paseo activity could not be read`,
+        summary: `${HOSTNAME} could not be inspected for busy agents: Paseo activity could not be read`,
       },
     });
     const none = world({ noControlPlane: true });
     expect(await stopWorker(none.deps, request(none))).toMatchObject({
       kind: "refused",
       refusal: {
-        summary: `${HOSTNAME} could not be inspected for active agents: this fffactory cannot reach the worker's control plane`,
+        summary: `${HOSTNAME} could not be inspected for busy agents: this fffactory cannot reach the worker's control plane`,
       },
     });
     for (const w of [offline, unreachable, none]) expect(w.control.calls).toEqual([]);
   });
 
+  test("stops a worker whose only agents are finished, failed or stopped: none is busy", async () => {
+    const w = world({ agents: agentsIn("finished", "failed", "stopped") });
+    expect(await stopWorker(w.deps, request(w))).toMatchObject({ kind: "done", changed: true });
+    expect(w.control.mutations()).toEqual([`stop ${ID}`]);
+  });
+
+  test("refuses a worker on a release from before agent states, naming its replacement", async () => {
+    const w = world({ agents: { kind: "outdated" } });
+    expect(await stopWorker(w.deps, request(w))).toMatchObject({
+      kind: "refused",
+      refusal: {
+        summary: `${HOSTNAME} could not be inspected for busy agents: ${OUTDATED_AGENTS}`,
+        nextAction: `${replaceOutdatedWorker({ key: KEY as HostKey, hostname: HOSTNAME })} Or pass --force to stop it uninspected.`,
+      },
+    });
+    expect(w.control.mutations()).toEqual([]);
+  });
+
   test("--force skips the gates, never the account check, the lock or the record", async () => {
-    for (const options of [
-      { activity: { kind: "active", count: 3 } as const },
-      { view: OFFLINE },
-    ]) {
+    for (const options of [{ agents: agentsIn("working", "needs_input") }, { view: OFFLINE }]) {
       const w = world(options);
       const result = await stopWorker(w.deps, request(w, { force: true }));
       expect(result).toMatchObject({ kind: "done", changed: true });
@@ -904,6 +920,20 @@ const SHUTTING_DOWN_QUESTION =
   `worker ${KEY} (${HOSTNAME})? Type the host key to confirm: `;
 
 describe("fffactory worker terminate --keep (worker-lifecycle §Terminate (keep))", () => {
+  test("terminates a worker whose only agents are finished, its work pushed, without --force (#92)", async () => {
+    // Finished dispatch and epic agents stay listed; by the busy rule they never refuse.
+    const w = world({ ...TERMINATING, agents: agentsIn("finished", "finished", "failed") });
+    expect(await terminateWorker(w.deps, terminating(w))).toMatchObject({
+      kind: "done",
+      changed: true,
+    });
+    expect(w.progress).not.toContainEqual({ kind: "forced", action: "terminate" });
+    // Its work was still inspected: the work gate is unchanged.
+    expect(w.transport.calls.map(({ command }) => command.join(" "))).toContain(
+      INSPECT_WORK_COMMAND.join(" "),
+    );
+  });
+
   test("terminates an idle running worker, waits for terminated, then deletes its tailnet device", async () => {
     const w = world({
       ...TERMINATING,
@@ -924,7 +954,7 @@ describe("fffactory worker terminate --keep (worker-lifecycle §Terminate (keep)
       devices: { kind: "listed", removed: ["nWorker1CNTRL"], failed: [], untagged: [] },
       leftover: undefined,
     });
-    expect(w.controlPlane.calls).toEqual(["activeAgents"]);
+    expect(w.controlPlane.calls).toEqual(["agents"]);
     // The last synchronization's result, then the work in every checkout as it is now.
     expect(w.transport.calls.map(({ command }) => command.join(" "))).toEqual([
       expect.stringContaining("repositories"),
@@ -1372,9 +1402,11 @@ describe("refusals before any mutation (worker-lifecycle §Terminate (keep))", (
 });
 
 describe("terminate's gates (worker-lifecycle §Gates (terminate))", () => {
-  test("active agents, unresolved or unmanaged checkouts, or a worker it cannot inspect refuse it", async () => {
+  test("busy agents, unresolved or unmanaged checkouts, or a worker it cannot inspect refuse it", async () => {
     const cases: WorldOptions[] = [
-      { activity: { kind: "active", count: 1 }, worker: CLEAN },
+      { agents: agentsIn("working"), worker: CLEAN },
+      { agents: agentsIn("needs_input"), worker: CLEAN },
+      { agents: { kind: "outdated" }, worker: CLEAN },
       { worker: statusAnswers(readyWorker(FACTORY, KEY, RELEASE), "unresolved") },
       { worker: statusAnswers(readyWorker(FACTORY, KEY, RELEASE), "synchronized", ["acme/old"]) },
       { worker: statusAnswers(readyWorker(FACTORY, KEY, RELEASE), "unreadable") },
@@ -1397,7 +1429,7 @@ describe("terminate's gates (worker-lifecycle §Gates (terminate))", () => {
 
   test("--force overrides them, never the confirmation, the lock or the record", async () => {
     for (const options of [
-      { activity: { kind: "active", count: 3 } as const },
+      { agents: agentsIn("working", "working", "working") },
       { view: OFFLINE },
       { worker: statusAnswers(readyWorker(FACTORY, KEY, RELEASE), "unresolved") },
     ]) {
@@ -1524,11 +1556,11 @@ describe("terminate's work inspection (worker-lifecycle §Gates (terminate))", (
       ...w.deps,
       controlPlane: {
         ...w.controlPlane.controlPlane,
-        activeAgents: async () => {
+        agents: async () => {
           order.push("activity started");
           await new Promise((resolve) => setTimeout(resolve, 5));
           order.push("activity read");
-          return { kind: "idle" };
+          return agentsIn();
         },
       },
       transport: {
@@ -1547,12 +1579,16 @@ describe("terminate's work inspection (worker-lifecycle §Gates (terminate))", (
   test("is never asked while the agent activity already refuses: the activator stays free", async () => {
     const cases: [Partial<WorldOptions>, string][] = [
       [
-        { activity: { kind: "active", count: 1 } },
-        `1 agent is active on ${HOSTNAME}: terminating it would end it`,
+        { agents: agentsIn("working") },
+        `1 agent is working on ${HOSTNAME}: terminating it would end it`,
       ],
       [
         { noControlPlane: true },
-        `${HOSTNAME} could not be inspected for active agents: this fffactory cannot reach the worker's control plane`,
+        `${HOSTNAME} could not be inspected for busy agents: this fffactory cannot reach the worker's control plane`,
+      ],
+      [
+        { agents: { kind: "outdated" } },
+        `${HOSTNAME} could not be inspected for busy agents: ${OUTDATED_AGENTS}`,
       ],
     ];
     for (const [options, summary] of cases) {
@@ -2570,13 +2606,13 @@ describe("fffactory worker terminate (worker-lifecycle §Terminate (remove))", (
   });
 
   test("its gates still refuse a busy running worker before anything is planned", async () => {
-    const w = world({ worker: CLEAN, activity: { kind: "active", count: 1 } });
+    const w = world({ worker: CLEAN, agents: agentsIn("needs_input") });
     expect(await terminateWorker(w.deps, removing(w))).toMatchObject({
       kind: "refused",
       refusal: {
         nextAction:
-          `Wait until no agent is active there, then rerun \`fffactory worker terminate ${KEY}\`, ` +
-          "or pass --force to terminate it anyway.",
+          "Wait until no agent there is working or needs input, then rerun " +
+          `\`fffactory worker terminate ${KEY}\`, or pass --force to terminate it anyway.`,
       },
     });
     expect(calls(w)).toEqual([]);

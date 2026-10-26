@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import type { AgentActivity } from "../../src/application/control-plane";
+import type { AgentsObservation } from "../../src/domain/control-plane";
 import type { HostCommandOutcome } from "../../src/application/host-transport";
 import type { MachineControl } from "../../src/application/machine-control";
 import { ProvisioningFailed } from "../../src/application/provisioner";
@@ -15,7 +15,7 @@ import {
 } from "../../src/infrastructure/ec2-machine-control";
 import { harness, TEST_NOW } from "../support/cli-harness";
 import { FAKE_CALLER, fakeCallerIdentity } from "../support/doctor-fakes";
-import { fakeControlPlane } from "../support/fake-control-plane";
+import { agentsIn, fakeControlPlane } from "../support/fake-control-plane";
 import { fakePrompt, fakeSecretStore } from "../support/fake-secrets";
 import {
   fakeMachineControl,
@@ -60,7 +60,7 @@ interface Setup {
     | "shutting-down"
     | "terminated"
   )[];
-  readonly activity?: AgentActivity;
+  readonly agents?: AgentsObservation;
   readonly view?: PeerView;
   readonly control?: MachineControl;
   readonly identity?: ReturnType<typeof fakeCallerIdentity>;
@@ -124,7 +124,7 @@ function setup(options: Setup = {}) {
     instanceIds: { [KEY]: ID },
   });
   const control = fakeMachineControl({ states: options.states ?? ["stopped"] });
-  const controlPlane = fakeControlPlane("healthy", options.activity ?? { kind: "idle" });
+  const controlPlane = fakeControlPlane("healthy", options.agents ?? agentsIn());
   const identity = options.identity ?? fakeCallerIdentity();
   const transport = workerTransport(options);
   const admin = fakeTailnetAdmin(
@@ -178,17 +178,17 @@ describe("fffactory worker stop (worker-lifecycle §Stop)", () => {
     expect(cli.lockStore.locks.size).toBe(0);
   });
 
-  test("refuses with active agents, naming the way on; --force overrides", async () => {
-    const refused = setup({ activity: { kind: "active", count: 1 } });
+  test("refuses with busy agents, naming the way on; --force overrides", async () => {
+    const refused = setup({ agents: agentsIn("needs_input") });
     expect(await run(["worker", "stop", KEY, "--yes"], refused.context)).toBe(1);
     expect(refused.err).toEqual([
-      `Refusing to stop the worker: 1 agent is active on ${HOSTNAME}: stopping it would end it`,
-      `Next: Wait until no agent is active there, then rerun \`fffactory worker stop ${KEY}\`, or pass --force to stop it anyway.`,
+      `Refusing to stop the worker: 1 agent needs input on ${HOSTNAME}: stopping it would end it`,
+      `Next: Wait until no agent there is working or needs input, then rerun \`fffactory worker stop ${KEY}\`, or pass --force to stop it anyway.`,
     ]);
     expect(refused.control.mutations()).toEqual([]);
-    const forced = setup({ activity: { kind: "active", count: 1 } });
+    const forced = setup({ agents: agentsIn("working") });
     expect(await run(["worker", "stop", KEY, "--yes", "--force"], forced.context)).toBe(0);
-    expect(forced.out).toContain("--force: the worker is not inspected for active agents.");
+    expect(forced.out).toContain("--force: the worker is not inspected for busy agents.");
     expect(forced.control.mutations()).toEqual([`stop ${ID}`]);
   });
 
@@ -601,12 +601,12 @@ describe("fffactory worker terminate --keep (worker-lifecycle §Terminate (keep)
     expect(cli.out.at(-1)).toStartWith("Operation record: s3://");
   });
 
-  test("active agents or unresolved checkouts refuse it; --force overrides", async () => {
-    const busy = setup({ ...TERMINATING, activity: { kind: "active", count: 1 } });
+  test("busy agents or unresolved checkouts refuse it; --force overrides", async () => {
+    const busy = setup({ ...TERMINATING, agents: agentsIn("working", "finished") });
     expect(await run(TERMINATE(), busy.context)).toBe(1);
     expect(busy.err).toEqual([
-      `Refusing to terminate the worker: 1 agent is active on ${HOSTNAME}: terminating it would end it`,
-      `Next: Wait until no agent is active there, then rerun \`fffactory worker terminate ${KEY} --keep\`, or pass --force to terminate it anyway.`,
+      `Refusing to terminate the worker: 1 agent is working on ${HOSTNAME}: terminating it would end it`,
+      `Next: Wait until no agent there is working or needs input, then rerun \`fffactory worker terminate ${KEY} --keep\`, or pass --force to terminate it anyway.`,
     ]);
     const dirty = setup({ ...TERMINATING, repositories: "unresolved" });
     expect(await run(TERMINATE(), dirty.context)).toBe(1);
@@ -614,10 +614,10 @@ describe("fffactory worker terminate --keep (worker-lifecycle §Terminate (keep)
       `Refusing to terminate the worker: Placed repositories on ${HOSTNAME} are unresolved: terminating it would lose their work`,
     );
     for (const cli of [busy, dirty]) expect(cli.control.mutations()).toEqual([]);
-    const forced = setup({ ...TERMINATING, activity: { kind: "active", count: 1 } });
+    const forced = setup({ ...TERMINATING, agents: agentsIn("working") });
     expect(await run(TERMINATE("--force"), forced.context)).toBe(0);
     expect(forced.out).toContain(
-      "--force: the worker is not inspected for active agents, current work or checkouts.",
+      "--force: the worker is not inspected for busy agents, current work or checkouts.",
     );
     expect(forced.control.mutations()).toEqual([`terminate ${ID}`]);
   });

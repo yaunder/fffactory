@@ -896,8 +896,8 @@ describe("the Result and its Next block (plan-apply §Apply)", () => {
   });
 
   test("deferred maintenance: one recovery instruction, though three stages name it", () => {
-    const close = `Close the active agents on ${host("builder-1")}, then rerun \`fffactory apply\``;
-    const deferral = "Paseo maintenance is deferred while agents may be active";
+    const close = `Wait until no agent on ${host("builder-1")} is working or needs input, then rerun \`fffactory apply\``;
+    const deferral = "Paseo maintenance is deferred while agents may be busy";
     const result = applied({
       workers: [{ ...worker("builder-1"), kind: "skipped", summary: deferral, nextAction: close }],
       repositories: [synchronized("builder-1")],
@@ -907,7 +907,7 @@ describe("the Result and its Next block (plan-apply §Apply)", () => {
           kind: "deferred",
           pending: ["password"],
           reloaded: false,
-          summary: "Maintenance (password) was deferred while agents may be active",
+          summary: "Maintenance (password) was deferred while agents may be busy",
           nextAction: close,
         },
       ],
@@ -925,7 +925,7 @@ describe("the Result and its Next block (plan-apply §Apply)", () => {
     expect(err).toEqual([]);
     expect(out.slice(3)).toEqual([
       `  ! builder-1          skipped · ${deferral}`,
-      "    ! Control plane   deferred · Maintenance (password) was deferred while agents may be active",
+      "    ! Control plane   deferred · Maintenance (password) was deferred while agents may be busy",
       "    ✔ Repositories    synchronized",
       "    ↷ Dispatch        skipped",
       "  ! Verification       The factory is not ready: 1 of 1 workers need attention",

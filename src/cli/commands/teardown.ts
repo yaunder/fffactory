@@ -38,7 +38,7 @@ const USAGE = [
   "It first shows what it will remove and keep: the factory, the destroy plan, the",
   "instances and VPCs, the devices and the secrets. You confirm by typing the",
   "factory ID at a terminal, or with --confirm FACTORY_ID. Once confirmed, it stops",
-  "dispatch on every running worker and inspects each once: active agents, work",
+  "dispatch on every running worker and inspects each once: busy agents, work",
   "not pushed to any remote, unresolved or unmanaged checkouts, or a worker that",
   "cannot be inspected refuse it, naming the worker. Teardown has no --force:",
   "remove such a worker first with `fffactory worker terminate KEY --force`. A",

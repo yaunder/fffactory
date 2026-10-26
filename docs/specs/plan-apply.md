@@ -293,11 +293,13 @@ skipped: no Terraform apply runs), `applyWorkers`
    or skipped with status's reason and next action. A worker whose machine this
    apply created is instead waited for while it boots
    ([below](#waiting-for-a-new-worker)). Before any upload, an existing worker
-   with approved Paseo maintenance is asked for agent activity. Active or
-   unknown activity defers it without upload or activation, leaving its
-   complete current release in place: it is skipped, `Paseo maintenance is
-   deferred while agents may be active` ([control plane §Pre-activation
-   deferral](control-plane.md#pre-activation-deferral)).
+   with approved Paseo maintenance is asked for its agents. Busy or unknown
+   activity by the [busy rule](control-plane.md#the-busy-rule) defers it
+   without upload or activation, leaving its complete current release in
+   place: it is skipped, `Paseo maintenance is deferred while agents may be
+   busy` ([control plane §Pre-activation
+   deferral](control-plane.md#pre-activation-deferral)). Finished agents never
+   defer it.
 3. The release tarball is uploaded and activated with its embedded digest and
    the host projection on standard input ([host protocol §apply](host-protocol.md#apply)):
    the one `projectHosts` builds from factory.json's hosts, Paseo secret

@@ -553,14 +553,27 @@ Before stopping a running worker, stop inspects it over the host protocol:
    uninspected.`` Status's next action for a missing worker is the
    [failed-first-boot](worker-bootstrap.md#failed-first-boot) recovery
    (terminating it), which stop leaves to status.
-2. Read its agent activity (`host control-plane activity`, the
-   [control plane](control-plane.md)'s `activeAgents`). Active agents refuse
-   the stop: `N agents are active on HOSTNAME: stopping it would end them`.
-   Activity that could not be read (SSH could not reach the worker, an
-   unreadable answer, no control plane) refuses it too.
+2. Read its agents (`host control-plane activity`, the
+   [control plane](control-plane.md)'s `agents`) and judge them by the
+   [busy rule](control-plane.md#the-busy-rule). Busy agents refuse the stop,
+   naming how many of each: `2 agents are working on HOSTNAME: stopping it
+   would end them` (`1 agent needs input on HOSTNAME: stopping it would end
+   it`; `1 agent is working and 1 needs input on HOSTNAME: ...`), next action
+   ``Wait until no agent there is working or needs input, then rerun
+   `fffactory worker stop KEY`, or pass --force to stop it anyway.`` Agents
+   that are only `finished`, `failed` or `stopped` never refuse it. Activity
+   that could not be read (SSH could not reach the worker, an unreadable
+   answer, no control plane) refuses it too, `HOSTNAME could not be inspected
+   for busy agents: REASON`. A worker on a release from before agent states,
+   which answers without its agents, is refused with that reason, `its release
+   predates fffactory's agent states`, and the detail `Its release answers
+   without its agents, so fffactory cannot tell whether any is busy.`; its next
+   action is the replacement apply names
+   ([control plane §Pre-activation deferral](control-plane.md#pre-activation-deferral)),
+   then `Or pass --force to stop it uninspected.`
 
 `--force` skips both: the worker is not inspected, and `--force: the worker is
-not inspected for active agents.` says so. It never skips the account check,
+not inspected for busy agents.` says so. It never skips the account check,
 the pin guard, the lock or the confirmation. Stopping an already stopped or
 stopping worker runs no gates.
 
@@ -587,9 +600,20 @@ and worktree on it ([host protocol §work inspect](host-protocol.md#work-inspect
    operator back to the command refused. The gate stays, though a worker whose
    [bootstrap failed](worker-bootstrap.md#failed-first-boot) is always refused
    by it: a missing device can also be tailnet policy hiding a live worker.
-2. Its agent activity: active agents refuse it, `N agents are active on
-   HOSTNAME: terminating it would end them`; activity that could not be read,
-   or no control plane, refuses it too.
+2. Its agents, by the [busy rule](control-plane.md#the-busy-rule), as stop
+   judges them: busy agents refuse it, `2 agents are working on HOSTNAME:
+   terminating it would end them`, next action ``Wait until no agent there is
+   working or needs input, then rerun `fffactory worker terminate KEY --keep`,
+   or pass --force to terminate it anyway.``; activity that could not be read,
+   or no control plane, refuses it too. A worker whose only agents are
+   `finished` (the dispatch and epic agents of a merged epic among them),
+   `failed` or `stopped` passes this gate, and with all its work pushed is
+   terminated without `--force`
+   ([#92](https://github.com/yaunder/fffactory/issues/92)): the work gate
+   below protects what an agent left. A worker on a release from before agent
+   states is refused as stop refuses it, but checked by hand as an older
+   activator is (step 3), its next action ending ``then terminate it with
+   --force: `fffactory worker terminate KEY --keep --force`.``
 3. Its current work (`sudo -n /usr/local/libexec/fffactory-activate work
    inspect`), asked only once the activity has been read, since the activator
    runs one operation at a time, and never when the activity already refused
@@ -661,7 +685,7 @@ and worktree on it ([host protocol §work inspect](host-protocol.md#work-inspect
 The gates are judged in that order, and the first that refuses is reported,
 but for a work inspection that could not be had, which lists the repository
 result's refusal too.
-`--force` skips the inspection: `--force: the worker is not inspected for active
+`--force` skips the inspection: `--force: the worker is not inspected for busy
 agents, current work or checkouts.` It never skips the account check, the pin guard, the
 lock, the admin client or the confirmation.
 
@@ -859,8 +883,9 @@ worker missing from the tailnet refused with stop's own next action, the
 confirmation rule and question, the waits' steps and failures, a request
 refused or unanswered),
 `tests/application/worker-lifecycle.test.ts` (a stop recorded step by step;
-active agents, an offline worker, unreadable activity and no control plane
-refused, and `--force` overriding them; undeclared key, incomplete
+busy agents, an offline worker, unreadable activity, a worker on a release from
+before agent states and no control plane refused, and `--force` overriding
+them; only finished, failed or stopped agents stopping it; undeclared key, incomplete
 factory.json, another account, a pin mismatch, a held lock, and none or several
 instances refused before any EC2 mutation; no-ops never calling EC2's mutating
 API; start waiting for running and the tailnet, then reporting readiness, a
@@ -900,7 +925,9 @@ refused client, all before any mutation; each gate refused and `--force`
 overriding it; a stopped worker passing uninspected; a machine already
 shutting down waited for once the typed key, asked before the wait, or
 `--confirm`, confirms it, declined or a wrong key deleting no device, and
-refused without a terminal; work made since the last synchronization refused,
+refused without a terminal; a worker whose only agents are finished terminated
+without `--force`, its work still inspected; work made since the last
+synchronization refused,
 with and without `--keep`, `--force` terminating it all the same; work that could
 not be inspected (an older activator, a timeout, a malformed answer, an unreadable
 worktree) refused; the work asked only once the activity is read, and not at all

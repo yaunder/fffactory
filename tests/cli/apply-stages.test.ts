@@ -251,8 +251,8 @@ describe("fffactory apply, phase-3 report (plan-apply §Apply)", () => {
 
   test("every repository, control-plane, dispatch and verification branch, each action once", () => {
     // builder-5's Paseo maintenance was deferred: the workers stage skipped it (#134).
-    const close = `Close the active agents on ${host("builder-5")}, then rerun \`fffactory apply\``;
-    const deferral = "Paseo maintenance is deferred while agents may be active";
+    const close = `Wait until no agent on ${host("builder-5")} is working or needs input, then rerun \`fffactory apply\``;
+    const deferral = "Paseo maintenance is deferred while agents may be busy";
     const workers: WorkerOutcome[] = [
       ...["builder-1", "builder-2", "builder-3", "builder-4"].map((key) => installed(key)),
       {
@@ -294,7 +294,7 @@ describe("fffactory apply, phase-3 report (plan-apply §Apply)", () => {
         kind: "deferred",
         pending: ["password"],
         reloaded: false,
-        summary: "Maintenance (password) was deferred while agents may be active",
+        summary: "Maintenance (password) was deferred while agents may be busy",
         nextAction: close,
       },
     ];
@@ -361,7 +361,7 @@ describe("fffactory apply, phase-3 report (plan-apply §Apply)", () => {
       "  ✔ builder-4          installed and verified · every account enrolled",
       "      Dispatch        not requested",
       `  ! builder-5          skipped · ${deferral}`,
-      "    ! Control plane   deferred · Maintenance (password) was deferred while agents may be active",
+      "    ! Control plane   deferred · Maintenance (password) was deferred while agents may be busy",
       "    ↷ Dispatch        skipped",
       `  ! Verification       ${verification.summary}`,
       `    Operation record   ${RECORD}`,

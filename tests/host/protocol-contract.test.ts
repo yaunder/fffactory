@@ -9,7 +9,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { inspectWork } from "../../src/application/inspect-work";
 import { inspectWorker } from "../../src/application/inspect-worker";
-import { activityJson, parseActivityDocument } from "../../src/domain/control-plane";
+import {
+  activityJson,
+  parseActivityDocument,
+  workerActivity,
+} from "../../src/domain/control-plane";
 import {
   dispatchProjectionJson,
   notRequestedDispatchProjection,
@@ -406,22 +410,20 @@ describe("host control-plane activity, both sides", () => {
     expect(`${activityJson(agents)}\n`).toBe(await fixture("activity-agents.json"));
   });
 
-  test("the CLI reads it back without loss, over the transport, as the activity it counts", async () => {
+  test("the CLI reads it back without loss, over the transport, into the busy rule's activity", async () => {
     const text = await fixture("activity-agents.json");
     const parsed = parseActivityDocument(text);
     if (!parsed.ok) throw new Error(`rejected: ${JSON.stringify(parsed)}`);
-    const agents = parsed.document.agents;
-    if (!agents) throw new Error("no agents");
-    expect(`${activityJson({ kind: "listed", agents })}\n`).toBe(text);
+    expect(`${activityJson(parsed.document)}\n`).toBe(text);
     const resolution = resolveWorker([peer(WORKER_HOSTNAME)], WORKER_HOSTNAME, TAG);
     if (resolution.kind !== "found") throw new Error("not found");
     const transport = fakeTransport({
       [WORKER_HOSTNAME]: { kind: "completed", exitCode: 0, stdout: text },
     });
-    expect(await paseoControlPlane(transport.transport).activeAgents(resolution.worker)).toEqual({
-      kind: "active",
-      count: 4,
-    });
+    const agents = await paseoControlPlane(transport.transport).agents(resolution.worker);
+    expect(agents).toEqual(parsed.document);
+    // One working and one needing input; the finished and stopped agents never count.
+    expect(workerActivity(agents)).toEqual({ kind: "busy", working: 1, needsInput: 1 });
   });
 
   test("an addition within the major version is ignored; another major is rejected", async () => {

@@ -690,10 +690,15 @@ start an agent by hand to work around a skip.
 Rerunning `fffactory apply` is safe: every stage converges what remains, and
 an up-to-date worker gets no Paseo lifecycle action. Paseo maintenance
 (`paseo-package`, `service-definition`, `listen-address`, `password`) restarts
-the daemon, which would end running agents, so when agents may be active apply
-defers it: the worker is `skipped` with `Paseo maintenance is deferred while
-agents may be active`, stays on its complete current release, and apply exits
-2. Close the active agents on HOSTNAME, then rerun `fffactory apply`. Live
+the daemon, which would end agents' turns, so while any agent is working or
+needs input, or fffactory cannot tell, apply defers it: the worker is `skipped`
+with `Paseo maintenance is deferred while agents may be busy`, stays on its
+complete current release, and apply exits 2 naming what to do, such as waiting
+until no agent on HOSTNAME is working or needs input, then rerunning `fffactory
+apply`. Finished agents never defer it. A worker on a release from before
+fffactory's agent states is deferred for good: apply names how to replace it
+(check its work by hand, `fffactory worker terminate KEY --keep --force`, then
+`fffactory apply`). Live
 changes such as the dispatch schedule or repositories never restart Paseo
 ([control plane §Pre-activation deferral](docs/specs/control-plane.md#pre-activation-deferral)).
 
@@ -761,7 +766,7 @@ fffactory teardown --confirm FACTORY_ID --profile NAME    # without one
 It shows what it removes and keeps, then stops dispatch, destroys every
 worker, the network and IAM, and deletes the factory's Tailscale devices, the
 secrets it owns (permanently, their absence confirmed), the local saved plans
-and the state bucket. Push or finish work on the workers first: active agents,
+and the state bucket. Push or finish work on the workers first: busy agents,
 unpushed work or unresolved checkouts refuse it, naming the worker, and it has
 no `--force` (remove such a worker first with `fffactory worker terminate KEY
 --force`). A stopped worker is not inspected, and anything unpushed on its disk

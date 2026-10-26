@@ -53,7 +53,7 @@ export interface StoppedDispatchWorker {
 /** Why the dispatch stage leaves a worker as it is, and the next action that completes it. */
 export interface DispatchSkip {
   /**
-   * `deferred`: the workers stage deferred its Paseo maintenance while agents may be active.
+   * `deferred`: the workers stage deferred its Paseo maintenance while agents may be busy.
    * `worker_skipped`: the workers stage skipped it for another reason (offline, an install still
    * running, ...). `unreachable`: it was installed, but the tailnet no longer locates it.
    */

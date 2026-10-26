@@ -51,7 +51,7 @@ release that changes how the daemon authenticates, as the hash-only daemon of
 worker the same way: its new release plans `paseo-package`,
 `service-definition`, `listen-address` and `password`, and the restart that
 follows the install starts the daemon on the hash, deferred while agents may be
-active.
+busy.
 
 The observation and changes are part of saved `plan.json`. Apply re-inspects
 existing workers under the factory lock before worker activation; a changed
@@ -75,25 +75,57 @@ reload and never restarts it. A maintenance change requires restart.
 ## Pre-activation deferral
 
 For an existing worker whose approved plan has maintenance, apply asks the
-current active release for agent activity **before** uploading or activating
-the requested worker release. Idle permits the rollout. Active or unknown
-activity defers that worker: there is no upload, activation, Paseo install or
-restart, and the worker remains on its complete current release. Unknown fails
-safe exactly like active, so apply words every deferral as agents that *may* be
-active (`maintenanceDeferral`, `src/domain/change-classification.ts`). The
-workers stage skips the worker, `Paseo maintenance is deferred while agents may
-be active`; the control-plane outcome is `deferred`, `Maintenance (CHANGES) was
-deferred while agents may be active on HOSTNAME; it stays on its complete
-current release`; both name the next action ``Close the active agents on
-HOSTNAME, then rerun `fffactory apply` ``. The dispatch stage sends the worker
-nothing, leaving its schedule as it is
-([dispatch §Skipped workers](dispatch.md#skipped-workers)), and the
-verification reports its release left as is, never absent: apply exits 2.
-A later idle apply plans from the old live state and completes the change.
+current active release for the worker's agents **before** uploading or
+activating the requested worker release, and judges them by the
+[busy rule](#the-busy-rule). Idle permits the rollout: a worker whose only
+agents are `finished`, `failed` or `stopped` gets its maintenance, and the
+restart that follows ends no turn. Busy or unknown activity defers that worker:
+there is no upload, activation, Paseo install or restart, and the worker
+remains on its complete current release. Unknown fails safe exactly like busy.
+The words are `maintenanceDeferral`'s (`src/domain/change-classification.ts`),
+whichever stage defers:
 
-Reload-safe changes may reload with active agents. An active agent with no
+| Activity | Control-plane outcome (`deferred`) | Next action |
+| --- | --- | --- |
+| Busy | `Maintenance (CHANGES) was deferred while 2 agents are working and 1 needs input on HOSTNAME; it stays on its complete current release` (how many of each, [§The busy rule](#the-busy-rule)) | ``Wait until no agent on HOSTNAME is working or needs input, then rerun `fffactory apply` `` |
+| Unknown | `Maintenance (CHANGES) was deferred while agents may be busy on HOSTNAME (REASON); it stays on its complete current release` | ``Check the worker with `fffactory status`, then rerun `fffactory apply` `` |
+| Unknown: a worker on a release from before agent states | The same, its reason `its release predates fffactory's agent states` | Replace the worker (D4), below |
+
+The workers stage skips the worker, `Paseo maintenance is deferred while
+agents may be busy`, with the deferral's own next action, so apply names it
+once. The dispatch stage sends the worker nothing, leaving its schedule as it
+is ([dispatch §Skipped workers](dispatch.md#skipped-workers)), and the
+verification reports its release left as is, never absent: apply exits 2.
+A later apply that finds it idle plans from the old live state and completes
+the change.
+
+A worker on a release from before agent states answers activity without its
+agents ([host protocol §The activity document](host-protocol.md#the-activity-document)),
+so fffactory cannot tell whether any is busy, and it never reads that answer's
+count. Its maintenance, the very upgrade that would fix this, is deferred,
+forever: the worker is replaced instead
+([#99](https://github.com/yaunder/fffactory/issues/99)). The next action checks
+it for unpushed work by hand, as for an
+[older activator](worker-lifecycle.md#gates-terminate), then terminates it
+keeping its host, which `fffactory apply` creates afresh on this release:
+``Log in as `factory` (`tailscale ssh factory@HOSTNAME`; tailnet SSH policy must
+let you log in as `factory`). In every checkout under /workspace/repos and
+~/.paseo/worktrees, and every worktree `git worktree list` shows, run `git
+status`, `git log --branches --not --remotes` and `git stash list`, and push or
+copy off what you need; then replace it: terminate it with --force, keeping its
+host, `fffactory worker terminate KEY --keep --force`, then run `fffactory
+apply`, which creates it afresh.`` (`replaceOutdatedWorker`,
+`src/domain/worker-lifecycle.ts`). `--keep` keeps the host in factory.json; a
+terminate without it would remove the worker for good
+([worker lifecycle §Terminate (keep)](worker-lifecycle.md#terminate-keep)).
+
+Reload-safe changes may reload with busy agents. A busy agent with no
 maintenance change causes no Paseo activity lookup or lifecycle action on an
-up-to-date rerun.
+up-to-date rerun. Tested in `tests/domain/change-classification.test.ts` (each
+activity's words), `tests/application/apply-control-plane.test.ts` and
+`tests/application/apply-factory-pipeline.test.ts` (a worker with only
+finished agents restarted; working, needing input, unknown and outdated
+deferred, every stage naming one next action).
 
 ## Agent states
 
@@ -138,16 +170,38 @@ first: a call that would start past it, or outlasts it, has failed.
 The activity document carries each agent's ID, state and whether dispatch
 launched it, and no Paseo status, field or label
 ([host protocol §The activity document](host-protocol.md#the-activity-document)).
-Its `activity` field is unchanged and still counts every listed agent, whatever
-its state, now background workspaces' too. Apply, the removal gates and the
-[pre-activation deferral](#pre-activation-deferral) still decide from that
-count, so a finished agent still defers maintenance and refuses removal, until
-[#99](https://github.com/yaunder/fffactory/issues/99) judges busy from the
-states. Nothing archives agents. Tested in `tests/host/control-plane.test.ts`
-(each status, a `running` agent with and without a pending permission, only
+Nothing archives agents: a finished agent stays listed, and dispatch's
+duplicate check relies on that. Tested in `tests/host/control-plane.test.ts` (each
+status, a `running` agent with and without a pending permission, only
 `running` agents inspected, an unknown status, a failed or unreadable list or
 inspection, the dispatched flag, the budget) and `tests/domain/control-plane.test.ts` (the
 document round-trips; every malformed agent rejected).
+
+### The busy rule
+
+A worker's activity is judged from its agents' states alone
+(`workerActivity`, `src/domain/control-plane.ts`):
+
+- **busy** while any agent is `working` or `needs_input`;
+- **idle** when none is: `finished`, `failed` and `stopped` agents never count,
+  however many stay listed;
+- **unknown** when its agents could not be read, with the reason, among them a
+  worker whose release answers without them (`outdated`).
+
+A `finished` agent may still be waiting for a reply; no runtime signal tells
+that from done, so it never blocks. The work gate protects what it left
+unpushed ([worker lifecycle §Gates (terminate)](worker-lifecycle.md#gates-terminate)).
+
+The [pre-activation deferral](#pre-activation-deferral) in apply and upgrade,
+and the removal gates of `worker stop`, `worker terminate` and `teardown`
+([worker lifecycle §Gates](worker-lifecycle.md#gates),
+[teardown §Gates](teardown.md#gates)) all judge by this rule; no code reads
+the document's `activity` count. Busy
+activity is named in fffactory's words, how many of each (`busyAgents`): `2
+agents are working on HOSTNAME`, `1 agent needs input on HOSTNAME`, `1 agent is
+working and 2 need input on HOSTNAME`. Tested in
+`tests/domain/control-plane.test.ts` (only finished, mixed, empty, unknown and
+outdated, and the words).
 
 ## Worker protocol and privilege boundary
 
@@ -291,7 +345,7 @@ existing worker reaches a new pin only through a release that carries it,
 applied by `fffactory upgrade` or `apply`: the release plans `paseo-package` and
 `service-definition`, both maintenance, so the
 [pre-activation deferral](#pre-activation-deferral) holds the rollout while
-agents may be active, and the restart that follows installation starts the new
+agents may be busy, and the restart that follows installation starts the new
 daemon.
 
 fffactory relies on these Paseo contracts, held by 0.13.2
@@ -374,8 +428,9 @@ one of the five statuses, and `agent inspect` with its `Id` and a
 | Concern | Layer | Where |
 | --- | --- | --- |
 | Change classification | domain | `src/domain/change-classification.ts` |
-| Agent states, protocol documents | domain | `src/domain/control-plane.ts` |
+| Agent states, the busy rule and its words, protocol documents | domain | `src/domain/control-plane.ts` |
 | Plan derivation | application | `src/application/plan-control-plane.ts` |
+| Deferral words | domain | `src/domain/change-classification.ts` (`maintenanceDeferral`, `preActivationDeferral`) |
 | Deferral and reconciliation | application | `src/application/apply-control-plane.ts`, `apply-factory.ts` |
 | Worker endpoint, the agent adapter (`paseoAgents`), password hash | host | `src/host/control-plane.ts`, `src/host/secret-value.ts` |
 | SSH adapter | infrastructure | `src/infrastructure/paseo-control-plane.ts` |

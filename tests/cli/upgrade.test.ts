@@ -7,7 +7,7 @@ import type { ReleaseCompatibility } from "../../src/domain/release-compatibilit
 import { newLockRecord } from "../../src/domain/factory-lock";
 import { harness, TEST_NOW } from "../support/cli-harness";
 import { fakeCallerIdentity } from "../support/doctor-fakes";
-import { fakeControlPlane, fakeWorkflowQueue } from "../support/fake-control-plane";
+import { agentsIn, fakeControlPlane, fakeWorkflowQueue } from "../support/fake-control-plane";
 import {
   BUCKET,
   declaring,
@@ -81,7 +81,7 @@ function cli(
   });
   const identity = fakeCallerIdentity();
   const fleet = options.fleet ?? workerFleet();
-  const paseo = fakeControlPlane("healthy", { kind: "idle" });
+  const paseo = fakeControlPlane("healthy", agentsIn());
   const queue = fakeWorkflowQueue();
   const context = harness(
     store,
@@ -180,16 +180,16 @@ describe("fffactory upgrade (plan-apply §Upgrade)", () => {
     const { context, out, err, pin, paseo } = cli({
       document: text("0.2.0", {}, requestingDispatch()),
       fleet: workerFleet(["builder-1"], { [B1]: current }),
-      controlPlane: fakeControlPlane("healthy", { kind: "active", count: 1 }).controlPlane,
+      controlPlane: fakeControlPlane("healthy", agentsIn("working")).controlPlane,
     });
     expect(await run(["upgrade"], context)).toBe(2);
     expect(err).toEqual([]);
     expect(out.slice(out.indexOf(RESULT))).toEqual([
       RESULT,
       "    Infrastructure     no changes",
-      "  ! builder-1          skipped · Paseo maintenance is deferred while agents may be active",
+      "  ! builder-1          skipped · Paseo maintenance is deferred while agents may be busy",
       "    ! Control plane   deferred · Maintenance (paseo-package, service-definition, " +
-        `listen-address, password) was deferred while agents may be active on ${B1}; ` +
+        `listen-address, password) was deferred while 1 agent is working on ${B1}; ` +
         "it stays on its complete current release",
       "    ✔ Repositories    synchronized",
       "    ↷ Dispatch        skipped",
@@ -197,7 +197,7 @@ describe("fffactory upgrade (plan-apply §Upgrade)", () => {
       expect.stringMatching(RECORD_LINE),
       "",
       NEXT,
-      `  builder-1: Close the active agents on ${B1}, then rerun \`fffactory apply\``,
+      `  builder-1: Wait until no agent on ${B1} is working or needs input, then rerun \`fffactory apply\``,
     ]);
     // The pin moved before the worker was skipped: apply by this release finishes it.
     expect(pin()).toBe("0.3.0");

@@ -247,8 +247,8 @@ describe("the dispatch stage (dispatch §Requested versus active)", () => {
   test.each<DispatchSkip>([
     {
       reason: "deferred",
-      summary: "Paseo maintenance is deferred while agents may be active",
-      nextAction: `Close the active agents on ${HOSTNAME}, then rerun \`fffactory apply\``,
+      summary: "Paseo maintenance is deferred while agents may be busy",
+      nextAction: `Wait until no agent on ${HOSTNAME} is working or needs input, then rerun \`fffactory apply\``,
     },
     {
       reason: "worker_skipped",

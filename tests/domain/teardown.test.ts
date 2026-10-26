@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { OUTDATED_AGENTS } from "../../src/domain/control-plane";
 import { isGeneratedFactoryId } from "../../src/domain/initialization";
 import type { FactoryId, HostKey, SecretReference } from "../../src/domain/instance";
 import { classifySecrets, type ListedSecret } from "../../src/domain/secrets";
@@ -526,15 +527,18 @@ describe("the confirmation (teardown §Confirmation)", () => {
 
 describe("the gates teardown judges each running worker by (teardown §Gates)", () => {
   const worker = { key: "builder-1" as HostKey, hostname: `${ID}-builder-1` };
-  const active = { kind: "activity", activity: { kind: "active", count: 2 } } as const;
+  const busy = {
+    kind: "activity",
+    activity: { kind: "busy", working: 1, needsInput: 1 },
+  } as const;
 
   test("refuses as terminate does, its next actions rerunning teardown or terminating first", () => {
-    expect(removalGate(active, worker, teardownGateActions(worker))).toEqual({
-      summary: `2 agents are active on ${worker.hostname}: terminating it would end them`,
+    expect(removalGate(busy, worker, teardownGateActions(worker))).toEqual({
+      summary: `1 agent is working and 1 needs input on ${worker.hostname}: terminating it would end them`,
       details: [],
       nextAction:
-        "Wait until no agent is active there, then rerun `fffactory teardown`. To remove the " +
-        "worker anyway, run `fffactory worker terminate builder-1 --force` first.",
+        "Wait until no agent there is working or needs input, then rerun `fffactory teardown`. " +
+        "To remove the worker anyway, run `fffactory worker terminate builder-1 --force` first.",
     });
     const unlocated = {
       kind: "unlocated",
@@ -552,11 +556,27 @@ describe("the gates teardown judges each running worker by (teardown §Gates)", 
     );
   });
 
+  test("a worker on a release from before agent states is checked by hand, then terminated first", () => {
+    const outdated = {
+      kind: "activity",
+      activity: { kind: "unknown", reason: OUTDATED_AGENTS, outdated: true },
+    } as const;
+    const refusal = removalGate(outdated, worker, teardownGateActions(worker));
+    expect(refusal?.summary).toBe(
+      `${worker.hostname} could not be inspected for busy agents: its release predates fffactory's agent states`,
+    );
+    expect(refusal?.nextAction).toEndWith(
+      "and push or copy off what you need; then terminate it with --force: " +
+        "`fffactory worker terminate builder-1 --force`, and rerun `fffactory teardown`.",
+    );
+  });
+
   test("a worker factory.json does not declare is removed in the EC2 console instead", () => {
     const actions = teardownGateActions(worker, "i-0123456789abcdef0");
-    expect(removalGate(active, worker, actions)?.nextAction).toBe(
-      "Wait until no agent is active there, then rerun `fffactory teardown`. To remove the " +
-        "worker anyway, terminate EC2 instance i-0123456789abcdef0 in the EC2 console first.",
+    expect(removalGate(busy, worker, actions)?.nextAction).toBe(
+      "Wait until no agent there is working or needs input, then rerun `fffactory teardown`. " +
+        "To remove the worker anyway, terminate EC2 instance i-0123456789abcdef0 in the EC2 " +
+        "console first.",
     );
     expect(actions.forced).toBe(
       "terminate EC2 instance i-0123456789abcdef0 in the EC2 console, and rerun `fffactory teardown`.",

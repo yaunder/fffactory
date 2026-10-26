@@ -816,7 +816,7 @@ not a work inspection.
 
 The CLI runs it only after reading the worker's agent activity, which goes
 through the same activator lock, and only when that activity does not already
-refuse terminate (agents active, or activity unreadable), which would hold the
+refuse terminate (agents busy, or activity unreadable), which would hold the
 activator for nothing. An unknown inspection refuses terminate; it never reads
 as no work. Nor does a checkout the worker did not find: every checkout
 factory.json places on the worker (`/workspace/repos/PATH`) must be reported,
@@ -842,7 +842,7 @@ error.
 ```json
 {
   "protocol_version": 1,
-  "activity": { "kind": "active", "count": 2 },
+  "activity": { "kind": "active", "count": 1 },
   "agents": [
     { "id": "4f1c2a9e-0b7d-4c3e-9a51-6d2e8f0b1c3a", "state": "needs_input", "dispatched": true },
     { "id": "9a8b7c6d-5e4f-4a3b-2c1d-0e9f8a7b6c5d", "state": "finished", "dispatched": false }
@@ -852,25 +852,30 @@ error.
 
 | Field | Meaning |
 | --- | --- |
-| `activity` | `{"kind": "idle"}` when no agent is listed; `{"kind": "active", "count"}`, counting every listed agent whatever its state; `{"kind": "unknown", "reason"}` when the agents could not be read, the reason in fffactory's words, at most 200 characters. |
+| `activity` | The [busy rule](control-plane.md#the-busy-rule)'s verdict: `{"kind": "idle"}` when no agent is `working` or `needs_input`; `{"kind": "active", "count"}`, counting those that are; `{"kind": "unknown", "reason"}` when the agents could not be read, the reason in fffactory's words, at most 200 characters. |
 | `agents` | Every listed agent, in the order listed: its `id` (letters, digits, `-` and `_`, starting with a letter or digit, at most 128), its `state` (`working`, `needs_input`, `finished`, `failed` or `stopped`, [control plane §Agent states](control-plane.md#agent-states)), and `dispatched`, true when dispatch launched it. `null` exactly when `activity` is unknown, so an unreadable worker never reads as one without agents. |
 
 No Paseo status, field or label appears in the document. `agents` is an
 addition ([#98](https://github.com/yaunder/fffactory/issues/98)), so the
-document keeps version 1, and `activity` is unchanged. A worker on an earlier
-release answers without `agents`. The CLI reads `agents` when present,
-rejecting one malformed, but decides only from `activity`, and still reads an
-answer without `agents`, until [#99](https://github.com/yaunder/fffactory/issues/99).
+document keeps version 1. Since [#99](https://github.com/yaunder/fffactory/issues/99)
+`activity` counts only busy agents rather than every listed one: its kinds are
+unchanged, so this too keeps version 1. The CLI decides from `agents` alone, by
+the busy rule; it checks `activity`'s form, and reads it only for its reason
+when `agents` is `null`, never for its count. A worker on a release from before
+agent states answers without `agents`: the CLI refuses that answer, its
+activity unknown and the worker to be replaced
+([control plane §Pre-activation deferral](control-plane.md#pre-activation-deferral)).
 
 ### The CLI side
 
 | Result of running it | Reads as |
 | --- | --- |
-| Exit 0 and a valid document | its `activity` |
+| Exit 0 and a valid document | its `agents`, or, when `null`, unknown for its `activity`'s reason |
+| Exit 0 and a valid document without `agents` | unknown and outdated: "its release predates fffactory's agent states" |
 | Exit 0 and output that is not a valid document, or another major version | unknown: "Paseo activity returned invalid data" |
 | Any other exit status, and every other transport outcome | unknown: "Paseo activity could not be read" |
 
-Unknown fails safe as active does ([control plane §Pre-activation deferral](control-plane.md#pre-activation-deferral)).
+Unknown fails safe as busy does ([control plane §Pre-activation deferral](control-plane.md#pre-activation-deferral)).
 
 ## Layer mapping
 
@@ -880,7 +885,7 @@ Unknown fails safe as active does ([control plane §Pre-activation deferral](con
 | Domain | `src/domain/host-protocol.ts` | The worker paths, the inspect document's types, `hostInspectionJson`, `parseHostInspection`, `RemoteCommand`, `INSPECT_COMMAND`, `UPLOAD_COMMAND` and `activateCommand`. Pure. |
 | Domain | `src/domain/work-inspection.ts` | The work inspection's document, `workInspectionJson`, `parseWorkInspection`, `INSPECT_WORK_COMMAND`, the printable path and branch rules, and `workFindings`. Pure. |
 | Domain | `src/domain/host-projection.ts` | The host projection, its canonical text and its parser. Pure. |
-| Domain | `src/domain/control-plane.ts` | fffactory's agent states, the activity and action documents, `activityJson`, `parseActivityDocument`. Pure. |
+| Domain | `src/domain/control-plane.ts` | fffactory's agent states, the busy rule (`workerActivity`), the activity and action documents, `activityJson`, `parseActivityDocument`. Pure. |
 | Domain | `src/domain/dispatch-projection.ts` | The dispatch projection, adoption and inspection documents, their parsers, and fixed inspect command. Pure. |
 | Domain | `src/domain/installation.ts` | `INSTALL_STEPS`, step results, the install state rule, the apply document and record, `Installation`, and reading the activator's answer. Pure. |
 | Domain | `src/domain/readiness.ts` | The verify document, enrollment states, and the next actions the CLI names ([readiness](readiness.md)). Pure. |
@@ -919,8 +924,8 @@ verify` over worker filesystems with scripted tools the same way:
 read back without loss and each activator answer into the expected worker
 outcome. `tests/host/fixtures/activity-agents.json` likewise: the worker's
 `host control-plane activity` produces it byte for byte from a scripted Paseo,
-and the CLI reads it back without loss, over the transport, into the activity
-it counts. The other direction, a document the CLI sends, is
+and the CLI reads it back without loss, over the transport, into the agents
+the busy rule judges. The other direction, a document the CLI sends, is
 `tests/host/fixtures/dispatch-not-requested.json`, the projection that stops
 dispatch ([dispatch §Stopping dispatch](dispatch.md#stopping-dispatch)): the
 CLI side builds it byte for byte, and the worker side parses it without loss.

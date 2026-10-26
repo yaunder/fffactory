@@ -4,7 +4,8 @@
  * EC2 inventory that state backs, the tailnet, Secrets Manager and scripted workers.
  */
 import { describe, expect, test } from "bun:test";
-import type { AgentActivity, ControlPlane } from "../../src/application/control-plane";
+import type { ControlPlane } from "../../src/application/control-plane";
+import { type AgentsObservation, OUTDATED_AGENTS } from "../../src/domain/control-plane";
 import type { MachineInventorySource } from "../../src/application/machine-inventory";
 import type { SecretListing } from "../../src/application/secret-store";
 import {
@@ -42,7 +43,7 @@ import {
 } from "../../src/domain/teardown";
 import type { PeerView, TailnetDevice } from "../../src/domain/tailnet";
 import { FAKE_CALLER, fakeCallerIdentity } from "../support/doctor-fakes";
-import { fakeControlPlane, fakeWorkflowQueue } from "../support/fake-control-plane";
+import { agentsIn, fakeControlPlane, fakeWorkflowQueue } from "../support/fake-control-plane";
 import { fakeFactoryWorld, NETWORK_VPC } from "../support/fake-provisioner";
 import { fakePrompt, fakeSecretStore, fakeSecretsManager } from "../support/fake-secrets";
 import {
@@ -113,7 +114,7 @@ function instanceOf(keys: readonly string[]): FactoryInstance {
 interface WorldOptions {
   /** The declared workers and their machines' EC2 states; every one provisioned. */
   readonly workers?: Readonly<Record<string, MachineState>>;
-  readonly activity?: AgentActivity;
+  readonly agents?: AgentsObservation;
   readonly view?: PeerView;
   readonly worker?: (key: string) => Answer;
   readonly prompt?: ReturnType<typeof fakePrompt>;
@@ -173,12 +174,12 @@ function world(options: WorldOptions = {}) {
       ]),
     ),
   );
-  const control = fakeControlPlane("healthy", options.activity ?? { kind: "idle" });
+  const control = fakeControlPlane("healthy", options.agents ?? agentsIn());
   const controlPlane: ControlPlane = {
     ...control.controlPlane,
-    activeAgents: async (worker) => {
+    agents: async (worker) => {
       events.push(`activity ${worker.hostname}`);
-      return control.controlPlane.activeAgents(worker);
+      return control.controlPlane.agents(worker);
     },
   };
   const queue = fakeWorkflowQueue(
@@ -392,6 +393,34 @@ describe("fffactory teardown: the happy path (teardown §Order)", () => {
     expect(w.prompt.asked).toEqual([]);
   });
 
+  test("removes a worker whose only agents are finished, its work pushed, without --force (#92)", async () => {
+    // Finished dispatch and epic agents stay listed; by the busy rule they never refuse.
+    const w = world({
+      workers: { "builder-1": "running" },
+      agents: agentsIn("finished", "finished", "failed", "stopped"),
+    });
+    expect(await teardownFactory(w.deps, request(w))).toMatchObject({ kind: "done" });
+    expectAllRemoved(w);
+  });
+
+  test("refuses a worker on a release from before agent states, checked by hand first", async () => {
+    const w = world({ workers: { "builder-1": "running" }, agents: { kind: "outdated" } });
+    const result = await teardownFactory(w.deps, request(w));
+    expect(result).toMatchObject({
+      kind: "refused",
+      refusals: [
+        {
+          summary: `${hostname("builder-1")} could not be inspected for busy agents: ${OUTDATED_AGENTS}`,
+          nextAction: expect.stringContaining(
+            "then terminate it with --force: `fffactory worker terminate builder-1 --force`, " +
+              "and rerun `fffactory teardown`.",
+          ),
+        },
+      ],
+    });
+    expectNothingRemoved(w);
+  });
+
   test("removes one running worker: dispatch stopped, inspected, destroyed, its device deleted", async () => {
     const w = world({ workers: { "builder-1": "running" } });
     const result = await teardownFactory(w.deps, request(w));
@@ -405,7 +434,7 @@ describe("fffactory teardown: the happy path (teardown §Order)", () => {
     expectAllRemoved(w);
     expectNothingAfterBucket(w);
     expect(w.queue.reconcile).toEqual([false]);
-    expect(w.control.calls).toEqual(["activeAgents"]);
+    expect(w.control.calls).toEqual(["agents"]);
     // The record was written at each step until the bucket went, and went with it.
     expect(w.lockStore.operationWrites.map(({ stages }) => stages[0]?.status)).toEqual([
       "authorizing",
@@ -671,22 +700,24 @@ describe("fffactory teardown: refusals delete nothing (teardown §Refusals)", ()
     expect(w.lockStore.buckets.has(BUCKET)).toBe(true);
   });
 
-  test("refuses active agents, naming the worker; dispatch is left stopped", async () => {
+  test("refuses busy agents, naming the worker and how many of each; dispatch is left stopped", async () => {
     const w = world({
       workers: { "builder-1": "running", "builder-2": "running" },
-      activity: { kind: "active", count: 1 },
+      agents: agentsIn("working", "needs_input", "finished"),
     });
     const result = await teardownFactory(w.deps, request(w));
     expect(result).toMatchObject({
       kind: "refused",
       refusals: [
         {
-          summary: `1 agent is active on ${hostname("builder-1")}: terminating it would end it`,
+          summary: `1 agent is working and 1 needs input on ${hostname("builder-1")}: terminating it would end them`,
           nextAction:
-            "Wait until no agent is active there, then rerun `fffactory teardown`. To remove " +
-            "the worker anyway, run `fffactory worker terminate builder-1 --force` first.",
+            "Wait until no agent there is working or needs input, then rerun `fffactory teardown`. " +
+            "To remove the worker anyway, run `fffactory worker terminate builder-1 --force` first.",
         },
-        { summary: `1 agent is active on ${hostname("builder-2")}: terminating it would end it` },
+        {
+          summary: `1 agent is working and 1 needs input on ${hostname("builder-2")}: terminating it would end them`,
+        },
       ],
       dispatchStopped: [hostname("builder-1"), hostname("builder-2")],
     });
@@ -2001,7 +2032,7 @@ describe("fffactory teardown: a rerun (teardown §Rerun)", () => {
     const w = world({ workers: { "builder-1": "running" } });
     const controlPlane: ControlPlane = {
       ...w.control.controlPlane,
-      activeAgents: async () => {
+      agents: async () => {
         throw new Error("the worker answered something fffactory cannot read");
       },
     };
@@ -2016,7 +2047,7 @@ describe("fffactory teardown: a rerun (teardown §Rerun)", () => {
   test("a plan directory that cannot be removed never turns a finished refusal into a failure", async () => {
     const w = world({
       workers: { "builder-1": "running" },
-      activity: { kind: "active", count: 1 },
+      agents: agentsIn("working"),
     });
     w.planStore.remove = async () => {
       throw new Error("ENOENT: the plan directory is gone");
@@ -2711,7 +2742,7 @@ describe("fffactory teardown: an interrupt keeps the lock at every step (teardow
   test.each([
     {
       ending: "refused",
-      options: { workers: { "builder-1": "running" }, activity: { kind: "active", count: 1 } },
+      options: { workers: { "builder-1": "running" }, agents: agentsIn("working") },
       confirm: FACTORY,
     },
     {
@@ -2893,7 +2924,7 @@ describe("fffactory teardown: an interrupt keeps the lock at every step (teardow
     let interrupted = false;
     const controlPlane: ControlPlane = {
       ...w.control.controlPlane,
-      activeAgents: async () => {
+      agents: async () => {
         interrupted = true;
         throw new Error("interrupted while reading the activity");
       },

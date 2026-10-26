@@ -80,7 +80,7 @@ schedule that was dispatching fine. Its reason (`DispatchSkip`,
 
 | Reason | When | Summary and next action |
 | --- | --- | --- |
-| `deferred` | Apply deferred its Paseo maintenance while agents may be active ([control plane §Pre-activation deferral](control-plane.md#pre-activation-deferral)), whatever else skipped it. | The deferral's, as the workers stage words it: `Paseo maintenance is deferred while agents may be active`, then ``Close the active agents on HOSTNAME, then rerun `fffactory apply` ``. |
+| `deferred` | Apply deferred its Paseo maintenance while agents may be busy ([control plane §Pre-activation deferral](control-plane.md#pre-activation-deferral)), whatever else skipped it. | The deferral's, as the workers stage words it: `Paseo maintenance is deferred while agents may be busy`, then the deferral's next action, such as ``Wait until no agent on HOSTNAME is working or needs input, then rerun `fffactory apply` ``. |
 | `worker_skipped` | The workers stage skipped it for another reason: offline, not found, an install still running on it, ... ([plan and apply §The workers stage](plan-apply.md#the-workers-stage)). | The workers stage's, such as `Offline in the tailnet`. |
 | `unreachable` | The workers stage installed it, but the tailnet no longer locates it. | The hostname-match rule's, as the workers stage words a skip. |
 
@@ -240,8 +240,8 @@ are said once, in the Next block
 ([plan and apply §What apply prints](plan-apply.md#what-apply-prints)):
 
 ```text
-  ! builder-1          skipped · Paseo maintenance is deferred while agents may be active
-    ! Control plane   deferred · Maintenance (paseo-package, service-definition, listen-address) was deferred while agents may be active on fff-abcd1234-builder-1; it stays on its complete current release
+  ! builder-1          skipped · Paseo maintenance is deferred while agents may be busy
+    ! Control plane   deferred · Maintenance (paseo-package, service-definition, listen-address) was deferred while 1 agent is working on fff-abcd1234-builder-1; it stays on its complete current release
     ✔ Repositories    synchronized
     ↷ Dispatch        skipped
   ! Verification       The factory is not ready: 1 of 1 workers need attention

@@ -79,9 +79,11 @@ import { rolloutResult, skipped, type WorkerIdentity, type WorkerOutcome } from 
 import {
   type ChangeType,
   classifyChange,
+  type Deferral,
   maintenanceDeferral,
   preActivationDeferral,
 } from "../domain/change-classification";
+import { workerActivity } from "../domain/control-plane";
 import { githubCredential, type PaseoHealth } from "../domain/dispatch-readiness";
 import { locateWorker, type TailnetLocation, thenRerunApply } from "../domain/status";
 import type { PeerView } from "../domain/tailnet";
@@ -694,7 +696,7 @@ async function workersStage(
     }
   }
   let activityView: PeerView | undefined;
-  const deferred = new Set<HostKey>();
+  const deferred = new Map<HostKey, Deferral>();
   const deferredControl: ControlPlaneOutcome[] = [];
   for (const plan of controlPlane) {
     if (
@@ -705,20 +707,22 @@ async function workersStage(
       continue;
     activityView ??= await deps.peers.view();
     const location = locateWorker(activityView, plan, tag);
-    const activity =
+    const activity = workerActivity(
       location.kind === "found" && deps.controlPlane !== undefined
-        ? await deps.controlPlane.activeAgents(location.worker)
-        : { kind: "unknown" as const, reason: "worker activity could not be read" };
+        ? await deps.controlPlane.agents(location.worker)
+        : { kind: "unknown", reason: "worker activity could not be read" },
+    );
     if (activity.kind !== "idle") {
-      deferred.add(plan.key);
       const pending = plan.changes.filter((change) => classifyChange(change) === "maintenance");
+      const deferral = maintenanceDeferral(plan, pending, activity);
+      deferred.set(plan.key, deferral);
       deferredControl.push({
         key: plan.key,
         hostname: plan.hostname,
         kind: "deferred",
         pending,
         reloaded: false,
-        ...maintenanceDeferral(plan.hostname, pending),
+        ...deferral,
       });
     }
   }
@@ -1167,11 +1171,12 @@ async function postWorkersStages(
     // TODO(re-evaluate when a worker the workers stage skipped for a reason other than deferral
     // fails an apply in the control-plane stage): skip the control-plane stage for every
     // workers-stage skip, as dispatch does, not only a deferral.
-    if (deferredControl.some((item) => item.key === worker.key)) {
+    const deferral = deferredControl.find((item) => item.key === worker.key);
+    if (deferral?.kind === "deferred") {
       if (workflowQueue !== undefined)
         dispatchWorkers.push({
           worker: { key: worker.key, hostname: worker.hostname },
-          skip: { reason: "deferred", ...preActivationDeferral(worker.hostname) },
+          skip: { reason: "deferred", ...preActivationDeferral(deferral) },
         });
       continue;
     }

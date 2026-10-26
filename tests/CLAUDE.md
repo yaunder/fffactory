@@ -124,8 +124,9 @@ gives every host a Paseo password reference, as completeness requires: its own
 `requestingDispatch` places a repository and requests dispatch on the host, and
 `currentWorker` is a worker already current for the plan, holding that reference unless
 given another, or `null` for none. The control-plane and dispatch stages run against
-`support/fake-control-plane.ts`: a `ControlPlane` answering health and agent activity as
-given, and a `WorkflowQueue` that counts adoption checks and records every projection
+`support/fake-control-plane.ts`: a `ControlPlane` answering health and the worker's agents as
+given (`agentsIn` lists one agent in each state named, `{ kind: "outdated" }` stands for a
+worker on a release from before agent states), and a `WorkflowQueue` that counts adoption checks and records every projection
 reconciled, so a test can assert a skipped worker was sent nothing. Stopping dispatch runs
 the real `WorkflowQueue` adapter over `fakeTransport`, the worker answering with
 `dispatchAnswer`. Nothing sleeps for

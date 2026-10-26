@@ -179,7 +179,9 @@ so no agent dispatch could start is missed by the inspection:
    restart.
 3. **Inspection.** Each running worker's agent activity and last repository
    result, then its current work (`inspectForRemoval`, shared with terminate),
-   judged by `removalGate`: active agents, work not pushed to any remote,
+   judged by `removalGate`: busy agents (by the
+   [busy rule](control-plane.md#the-busy-rule): a worker whose only agents
+   are `finished`, `failed` or `stopped` passes), work not pushed to any remote,
    unresolved or unmanaged checkouts, and a worker that cannot be located or
    inspected each refuse, naming the worker, in terminate's words. Every
    running worker is inspected, and every refusal reported.
@@ -197,10 +199,10 @@ the worker first, uninspected (`teardownGateActions`):
 
 | Gate | Next action |
 | --- | --- |
-| Active agents, unpushed work, unresolved checkouts | ``STEP, then rerun `fffactory teardown`. To remove the worker anyway, run `fffactory worker terminate KEY --force` first.`` |
+| Busy agents, unpushed work, unresolved checkouts | ``STEP, then rerun `fffactory teardown`. To remove the worker anyway, run `fffactory worker terminate KEY --force` first.`` |
 | Activity, checkouts or work that could not be inspected | The same, `uninspected` for `anyway` |
 | Not located in the tailnet | ``Check the worker with `fffactory status`, then rerun `fffactory teardown`. If it cannot be inspected, remove it uninspected: run `fffactory worker terminate KEY --force`, then rerun `fffactory teardown`.`` |
-| Unmanaged checkouts, or an older activator checked by hand | ``... then terminate it with --force: `fffactory worker terminate KEY --force`, and rerun `fffactory teardown`.`` |
+| Unmanaged checkouts, or an older activator or a release from before agent states checked by hand | ``... then terminate it with --force: `fffactory worker terminate KEY --force`, and rerun `fffactory teardown`.`` |
 
 A running worker whose key factory.json does not declare cannot be terminated
 with `fffactory worker terminate`: its next actions name the EC2 console
@@ -1008,7 +1010,8 @@ tagged secret kept; D9's devices; a device appearing after the review listed,
 not deleted; no device tag or malformed host key tag in the review or report;
 a root already absent, with no root output either; a saved plan's removal never failing a finished
 teardown; and each refusal
-deleting nothing and leaving the lock released: a held lock, active agents,
+deleting nothing and leaving the lock released: a held lock, busy agents, a
+worker on a release from before agent states,
 unmanaged checkouts, a worker not located, dispatch not stopped, a machine
 started, added or gone since the review, or not listed again, the guarded
 destroy plan, its exit code disagreeing, each listing that fails, the admin

@@ -32,7 +32,7 @@ import {
   type ActivationAnswer,
   readActivation,
 } from "../domain/installation";
-import { preActivationDeferral } from "../domain/change-classification";
+import { type Deferral, preActivationDeferral } from "../domain/change-classification";
 import type { HostKey, Release } from "../domain/instance";
 import {
   activationOutcome,
@@ -101,8 +101,8 @@ export interface WorkersStageRequest {
    * pipeline test's clean rerun after an apply catches one.
    */
   readonly projections: readonly HostProjection[];
-  /** Workers whose approved maintenance is deferred before release activation. */
-  readonly deferred?: ReadonlySet<HostKey>;
+  /** Workers whose approved maintenance is deferred before release activation, and how. */
+  readonly deferred?: ReadonlyMap<HostKey, Deferral>;
   /** The workers whose machine this apply's infrastructure stage created: their first boot is waited for. */
   readonly created: readonly HostKey[];
   /** The workers the approved plan skips because their machine is stopped: sent nothing. */
@@ -383,8 +383,8 @@ async function attempt(
 ): Promise<WorkerOutcome | Interruption> {
   if (request.stopped.includes(worker.key)) return stoppedOutcome(worker);
   const location = locateWorker(view, worker, request.tag, thenRerunApply);
-  if (request.deferred?.has(worker.key) === true)
-    return skipped(worker, preActivationDeferral(worker.hostname));
+  const deferral = request.deferred?.get(worker.key);
+  if (deferral !== undefined) return skipped(worker, preActivationDeferral(deferral));
   if (request.created.includes(worker.key))
     return awaitFirstBoot(deps, worker, location, delivery, request);
   // Missing for any other reason is not a first boot: skipped, never waited out.
