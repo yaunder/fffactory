@@ -1206,6 +1206,8 @@ describe("fffactory worker inspect (worker-lifecycle §Inspect)", () => {
       reason: "its release predates fffactory's agent states",
       agents: null,
     });
+    // Replaced, keeping its host, never removed from factory.json for good (D4).
+    expect(refused.next_action).toContain(`\`fffactory worker terminate ${KEY} --keep --force\``);
     expect(inspectionSchemaAccepts(document)).toBe(true);
     const accepts = (worker: unknown) =>
       inspectionSchemaAccepts({ ...document, workers: [worker] });

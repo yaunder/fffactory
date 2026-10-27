@@ -448,14 +448,17 @@ export function teardownGateActions(
     undeclared === undefined
       ? `run ${terminate}`
       : `terminate EC2 instance ${undeclared} in the EC2 console`;
+  const forced =
+    undeclared === undefined
+      ? `terminate it with --force: ${terminate}, and rerun ${TEARDOWN}.`
+      : `terminate EC2 instance ${undeclared} in the EC2 console, and rerun ${TEARDOWN}.`;
   return {
     orForce: (step, how) =>
       `${thenRerunTeardown(step)} To remove the worker ${how}, ${remove} first.`,
     unlocated: `${thenRerunTeardown(CHECK_STATUS)} If it cannot be inspected, remove it uninspected: ${thenRerunTeardown(remove)}`,
-    forced:
-      undeclared === undefined
-        ? `terminate it with --force: ${terminate}, and rerun ${TEARDOWN}.`
-        : `terminate EC2 instance ${undeclared} in the EC2 console, and rerun ${TEARDOWN}.`,
+    forced,
+    // The whole factory is going: an outdated worker is removed with it, never replaced.
+    outdated: forced,
   };
 }
 

@@ -767,10 +767,15 @@ not locate, ``Check the worker with `fffactory status`, then rerun `fffactory
 worker inspect KEY`. If the instance's EC2 console output shows its bootstrap
 failed, it never joined the tailnet: `fffactory worker terminate KEY --force`
 terminates it uninspected.``; and what terminate has checked by hand (an
-older activator, a release from before agent states, unmanaged checkouts) ends
-``then terminate it with --force: `fffactory worker terminate KEY
---force`.`` The verdict `not_inspected` with `forced`, `--force` having
-skipped the gates, is only a terminate record's
+older activator, unmanaged checkouts) ends ``then terminate it with --force:
+`fffactory worker terminate KEY --force`.`` A worker on a release from before
+agent states is checked by hand too, then replaced rather than removed for
+good, as apply's deferral and stop's refusal name it (D4,
+[control plane §Pre-activation deferral](control-plane.md#pre-activation-deferral)):
+its next action ends ``then replace it: terminate it with --force, keeping its
+host, `fffactory worker terminate KEY --keep --force`, then run `fffactory
+apply`, which creates it afresh.`` The verdict `not_inspected` with `forced`,
+`--force` having skipped the gates, is only a terminate record's
 ([Operation record](#operation-record)); inspect never reports it.
 
 The summaries name no command's flags, since terminate's and teardown's records
@@ -1205,9 +1210,10 @@ The D11 refusal of a host removed by hand naming the command:
 
 Inspect: `tests/domain/worker-removability.test.ts` (each verdict and reason,
 terminate's own summary and details for the same inspection, inspect's next
-actions, a refused machine's rerun, the exit code; a stopped, forced,
-shutting-down or absent machine not inspected; the same document whichever
-command's next actions judge it), `tests/domain/control-plane.test.ts`
+actions, a refused machine's rerun, the exit code; a release from before
+agent states replaced, keeping its host, where terminate's own next action
+follows what was typed; a stopped, forced, shutting-down or absent machine not
+inspected; the same document whichever command's next actions judge it), `tests/domain/control-plane.test.ts`
 (`agentActivity`), `tests/application/worker-removability.test.ts` (every
 declared worker in order, or KEY alone; a removable worker with its finished
 agents; busy agents refused, the work never asked for; unpushed work, and a

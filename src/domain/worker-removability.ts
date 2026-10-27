@@ -14,6 +14,7 @@ import {
   CHECK_STATUS,
   forcedUninspected,
   GONE,
+  outdatedReplacement,
   type Refusal,
   type RemovalGateActions,
   removalGate,
@@ -79,7 +80,8 @@ export function thenRerunInspect(key: HostKey): Then {
 
 /**
  * The next actions of terminate's gates when `worker inspect` reports them: inspect again, or
- * terminate the worker with `--force`, which removes its host.
+ * terminate the worker with `--force`, which removes its host; a worker on a release from before
+ * agent states is replaced instead, keeping its host (`outdatedReplacement`, D4).
  */
 export function inspectGateActions(key: HostKey): RemovalGateActions {
   const terminate = `\`${workerCommandLine("terminate", key)} --force\``;
@@ -91,6 +93,7 @@ export function inspectGateActions(key: HostKey): RemovalGateActions {
       `${thenRerunInspect(key)(CHECK_STATUS)} If the instance's EC2 console output shows its ` +
       `bootstrap failed, it never joined the tailnet: ${terminate} terminates it uninspected.`,
     forced: `terminate it with --force: ${terminate}.`,
+    outdated: outdatedReplacement(key),
   };
 }
 

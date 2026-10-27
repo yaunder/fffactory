@@ -261,14 +261,21 @@ export interface RemovalGateActions {
    * `--force`, or what stands for that, and what then. A complete sentence's end.
    */
   readonly forced: string;
+  /**
+   * What follows `then ` for a worker on a release from before agent states, checked by hand:
+   * `forced`, or, where nothing was typed to follow, its replacement (`outdatedReplacement`, D4).
+   */
+  readonly outdated: string;
 }
 
 /** The next actions of terminate's own gates: rerun it as run, or with `--force`. */
 export function terminateGateActions(command: TerminateCommand, key: HostKey): RemovalGateActions {
+  const forced = `terminate it with --force: \`${workerCommandLine(command, key)} --force\`.`;
   return {
     orForce: (step, how) => orForce(command, key, step, how),
     unlocated: terminateUnlocatedAction(command, key),
-    forced: `terminate it with --force: \`${workerCommandLine(command, key)} --force\`.`,
+    forced,
+    outdated: forced,
   };
 }
 
@@ -432,16 +439,20 @@ function checkByHand(then: string, worker: WorkerIdentity): string {
 }
 
 /**
- * How a worker on a release from before agent states is replaced (D4): checked by hand, then
- * terminated keeping its host, which `fffactory apply` then creates afresh on this release.
+ * What follows `then ` once a worker on a release from before agent states is checked by hand:
+ * terminated keeping its host, which `fffactory apply` then creates afresh on this release (D4).
  */
-export function replaceOutdatedWorker(worker: WorkerIdentity): string {
-  return checkByHand(
+export function outdatedReplacement(key: HostKey): string {
+  return (
     "replace it: terminate it with --force, keeping its host, " +
-      `\`${workerCommandLine("terminate-keep", worker.key)} --force\`, then run \`fffactory apply\`, ` +
-      "which creates it afresh.",
-    worker,
+    `\`${workerCommandLine("terminate-keep", key)} --force\`, then run \`fffactory apply\`, ` +
+    "which creates it afresh."
   );
+}
+
+/** How a worker on a release from before agent states is replaced (D4): checked by hand first. */
+export function replaceOutdatedWorker(worker: WorkerIdentity): string {
+  return checkByHand(outdatedReplacement(worker.key), worker);
 }
 
 /**
@@ -570,7 +581,7 @@ export function removalGate(
       return activityGate(
         GATE_WORDS.terminate.doing,
         actions,
-        checkByHand(actions.forced, worker),
+        checkByHand(actions.outdated, worker),
         inspection.activity,
         worker,
       );

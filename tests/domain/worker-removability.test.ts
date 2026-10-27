@@ -1,14 +1,16 @@
 import { describe, expect, test } from "bun:test";
-import type { Agent } from "../../src/domain/control-plane";
+import { type Agent, OUTDATED_AGENTS } from "../../src/domain/control-plane";
 import { HOST_PROTOCOL_VERSION } from "../../src/domain/host-protocol";
 import type { HostKey } from "../../src/domain/instance";
 import type { RepositoryObservation } from "../../src/domain/repository-placement";
 import type { WorkObservation } from "../../src/domain/work-inspection";
 import {
   powerStep,
+  replaceOutdatedWorker,
   selectMachine,
   type TerminateInspection,
   terminateGate,
+  terminateGateActions,
 } from "../../src/domain/worker-lifecycle";
 import { teardownGateActions } from "../../src/domain/teardown";
 import {
@@ -199,6 +201,26 @@ describe("worker inspect's verdict (worker-lifecycle §Inspect)", () => {
       work: { kind: "unknown", reason: "its activator predates it", unsupported: true },
     });
     expect(nextAction).toEndWith(`then terminate it with --force: ${TERMINATE_FORCE}.`);
+  });
+
+  test("a release from before agent states is replaced, never removed for good (D4)", () => {
+    const outdated: RemovalObservation = {
+      kind: "activity",
+      activity: { kind: "unknown", reason: OUTDATED_AGENTS, outdated: true },
+      agents: { kind: "outdated" },
+    };
+    expect(nextActionOf(outdated)).toBe(replaceOutdatedWorker(WORKER));
+    expect(nextActionOf(outdated)).toEndWith(
+      "`fffactory worker terminate builder-1 --keep --force`, then run `fffactory apply`, " +
+        "which creates it afresh.",
+    );
+    // Terminate follows what the operator typed; the document is the same whoever judged it.
+    const terminate = workerRemovability(WORKER, outdated, terminateGateActions("terminate", KEY));
+    expect(terminate.next_action).toEndWith(`then terminate it with --force: ${TERMINATE_FORCE}.`);
+    expect(terminate.inspection).toEqual(inspectionOf(outdated));
+    expect(workerRemovability(WORKER, outdated, teardownGateActions(WORKER)).inspection).toEqual(
+      inspectionOf(outdated),
+    );
   });
 
   test("a stopped machine is not inspected, as terminate passes it", () => {
