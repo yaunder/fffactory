@@ -15,7 +15,7 @@ all see the same login a human would have made. Decisions D1–D19 of
 characterized against gh 2.102.0 (not pinned: `packages.sh` installs whatever
 cli.github.com serves, and the recipe relies on its `auth status --json hosts`
 and `--active`) and the pinned Codex 0.163.0, Claude Code 2.1.302 and Paseo
-0.11.4.
+0.11.4. Paseo 0.13.2, pinned since, launches both providers the same way.
 
 Logging in by hand keeps working. An account is delivered to a host when
 factory.json references its credential and the host does not list it in

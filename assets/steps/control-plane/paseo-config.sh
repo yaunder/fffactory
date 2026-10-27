@@ -9,10 +9,11 @@ readonly paseo_config=${FACTORY_PASEO_CONFIG:-/home/factory/.paseo/config.json}
 readonly listen=${FACTORY_PASEO_LISTEN:-}
 # Whitespace-separated: the exact names Paseo accepts in a Host header besides the listen address.
 readonly hostnames=${FACTORY_PASEO_HOSTNAMES:-}
-# The bcrypt hash of the host's Paseo password, never the password; empty, for a host that
-# declares none, removes daemon.auth.password, so paseo.service's ExecStartPre keeps the daemon
-# stopped rather than running on a password fffactory no longer references. jq reads it from the
-# environment ($ENV), so it is never a command argument.
+# The bcrypt hash of the host's Paseo password, never the password. Empty only for a projection
+# delivered by hand without the password reference (every host declares one): it removes
+# daemon.auth.password, so paseo.service's ExecStartPre keeps the daemon stopped rather than
+# running on a password fffactory does not reference. jq reads it from the environment ($ENV),
+# so it is never a command argument.
 readonly password_hash=${FACTORY_PASEO_PASSWORD_HASH:-}
 
 fail() { printf 'fffactory Paseo config: %s\n' "$*" >&2; exit 1; }
@@ -33,6 +34,8 @@ fi
 config_next="$(mktemp "${paseo_config}.XXXXXX")"
 trap 'rm -f -- "${config_next}"' EXIT
 # daemon.hostnames is factory-owned: replaced, never merged, and never `true` (any host).
+# Dictation and voice mode are switched off: workers never use them, and either one has the
+# daemon download its local speech models (about 765 MB) at every start.
 printf '%s\n' "${current}" | jq --slurp --arg listen "${listen}" --arg hostnames "${hostnames}" '
   if length != 1 then error("config must be one JSON value") else .[0] end
   | if type != "object" then error("config root must be an object") else . end
@@ -48,5 +51,10 @@ printf '%s\n' "${current}" | jq --slurp --arg listen "${listen}" --arg hostnames
       .daemon.auth = ((.daemon.auth // {}) + {password: $ENV.FACTORY_PASEO_PASSWORD_HASH})
     elif .daemon.auth == null then .
     else del(.daemon.auth.password) end
+  | .features = (.features // {})
+  | if (.features | type) != "object" then error("features must be an object") else . end
+  | reduce ("dictation", "voiceMode") as $speech (.;
+      if (.features[$speech] // {} | type) != "object" then error("features.\($speech) must be an object")
+      else .features[$speech] = ((.features[$speech] // {}) + {enabled: false}) end)
 ' >"${config_next}" 2>/dev/null || fail 'the existing Paseo config is invalid' # jq's message can quote the config
 mv -f -- "${config_next}" "${paseo_config}"

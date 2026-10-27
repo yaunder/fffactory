@@ -19,8 +19,9 @@ The plan records, per worker, the inspection observation and every Paseo change
 it will make. A worker with no active release, or whose active release differs
 from the requested version or asset digest, needs `paseo-package` and
 `service-definition`. A host-projection digest mismatch needs the factory-owned
-Paseo settings (`listen-address`, and `password` when factory.json declares its
-secret reference). The digest planned against is that of the control-plane
+Paseo settings (`listen-address` and `password`: every host of a plannable
+factory.json declares its Paseo password reference,
+[§The daemon password](#the-daemon-password)). The digest planned against is that of the control-plane
 part of the projection the workers stage sends: all of it but its
 `credentials` ([host protocol §The host projection](host-protocol.md#the-host-projection)).
 It is compared with the worker's `configuration.control_plane_sha256`, or, on a
@@ -35,9 +36,9 @@ credential case of `tests/application/apply-factory-pipeline.test.ts`
 
 `listen-address` stands for every factory-owned daemon setting the release
 merges into `config.json` ([§Release-owned installation](#release-owned-installation)):
-the listen address, the disabled relay and the accepted hostnames
-(`daemon.hostnames`). They have no change of their own. Plan never reads
-`config.json`, so a change to how a release merges them reaches an existing
+the listen address, the disabled relay, the accepted hostnames
+(`daemon.hostnames`) and the speech switches. They have no change of their own.
+Plan never reads `config.json`, so a change to how a release merges them reaches an existing
 worker only through that new release: its version and asset digest plan
 `paseo-package` and `service-definition`, and its version, part of the
 projection, plans `listen-address`. All three are maintenance, so the
@@ -50,7 +51,7 @@ release that changes how the daemon authenticates, as the hash-only daemon of
 worker the same way: its new release plans `paseo-package`,
 `service-definition`, `listen-address` and `password`, and the restart that
 follows the install starts the daemon on the hash, deferred while agents may be
-active.
+busy.
 
 The observation and changes are part of saved `plan.json`. Apply re-inspects
 existing workers under the factory lock before worker activation; a changed
@@ -74,25 +75,141 @@ reload and never restarts it. A maintenance change requires restart.
 ## Pre-activation deferral
 
 For an existing worker whose approved plan has maintenance, apply asks the
-current active release for agent activity **before** uploading or activating
-the requested worker release. Idle permits the rollout. Active or unknown
-activity defers that worker: there is no upload, activation, Paseo install or
-restart, and the worker remains on its complete current release. Unknown fails
-safe exactly like active, so apply words every deferral as agents that *may* be
-active (`maintenanceDeferral`, `src/domain/change-classification.ts`). The
-workers stage skips the worker, `Paseo maintenance is deferred while agents may
-be active`; the control-plane outcome is `deferred`, `Maintenance (CHANGES) was
-deferred while agents may be active on HOSTNAME; it stays on its complete
-current release`; both name the next action ``Close the active agents on
-HOSTNAME, then rerun `fffactory apply` ``. The dispatch stage sends the worker
-nothing, leaving its schedule as it is
-([dispatch §Skipped workers](dispatch.md#skipped-workers)), and the
-verification reports its release left as is, never absent: apply exits 2.
-A later idle apply plans from the old live state and completes the change.
+current active release for the worker's agents **before** uploading or
+activating the requested worker release, and judges them by the
+[busy rule](#the-busy-rule). Idle permits the rollout: a worker whose only
+agents are `finished`, `failed` or `stopped` gets its maintenance, and the
+restart that follows ends no turn. Busy or unknown activity defers that worker:
+there is no upload, activation, Paseo install or restart, and the worker
+remains on its complete current release. Unknown fails safe exactly like busy.
+The words are `maintenanceDeferral`'s (`src/domain/change-classification.ts`),
+whichever stage defers:
 
-Reload-safe changes may reload with active agents. An active agent with no
+| Activity | Control-plane outcome (`deferred`) | Next action |
+| --- | --- | --- |
+| Busy | `Maintenance (CHANGES) was deferred while 2 agents are working and 1 needs input on HOSTNAME; it stays on its complete current release` (how many of each, [§The busy rule](#the-busy-rule)) | ``Wait until no agent on HOSTNAME is working or needs input, then rerun `fffactory apply` `` |
+| Unknown | `Maintenance (CHANGES) was deferred while agents may be busy on HOSTNAME (REASON); it stays on its complete current release` | ``Check the worker with `fffactory status`, then rerun `fffactory apply` `` |
+| Unknown: a worker on a release from before agent states | The same, its reason `its release predates fffactory's agent states` | Replace the worker (D4), below |
+
+The workers stage skips the worker, `Paseo maintenance is deferred while
+agents may be busy`, with the deferral's own next action, so apply names it
+once. The dispatch stage sends the worker nothing, leaving its schedule as it
+is ([dispatch §Skipped workers](dispatch.md#skipped-workers)), and the
+verification reports its release left as is, never absent: apply exits 2.
+A later apply that finds it idle plans from the old live state and completes
+the change.
+
+A worker on a release from before agent states answers activity without its
+agents ([host protocol §The activity document](host-protocol.md#the-activity-document)),
+so fffactory cannot tell whether any is busy, and it never reads that answer's
+count. Its maintenance, the very upgrade that would fix this, is deferred,
+forever: the worker is replaced instead
+([#99](https://github.com/yaunder/fffactory/issues/99)). The next action checks
+it for unpushed work by hand, as for an
+[older activator](worker-lifecycle.md#gates-terminate), then terminates it
+keeping its host, which `fffactory apply` creates afresh on this release:
+``Log in as `factory` (`tailscale ssh factory@HOSTNAME`; tailnet SSH policy must
+let you log in as `factory`). In every checkout under /workspace/repos and
+~/.paseo/worktrees, and every worktree `git worktree list` shows, run `git
+status`, `git log --branches --not --remotes` and `git stash list`, and push or
+copy off what you need; then replace it: terminate it with --force, keeping its
+host, `fffactory worker terminate KEY --keep --force`, then run `fffactory
+apply`, which creates it afresh.`` (`replaceOutdatedWorker`,
+`src/domain/worker-lifecycle.ts`). `--keep` keeps the host in factory.json; a
+terminate without it would remove the worker for good
+([worker lifecycle §Terminate (keep)](worker-lifecycle.md#terminate-keep)).
+
+Reload-safe changes may reload with busy agents. A busy agent with no
 maintenance change causes no Paseo activity lookup or lifecycle action on an
-up-to-date rerun.
+up-to-date rerun. Tested in `tests/domain/change-classification.test.ts` (each
+activity's words), `tests/application/apply-control-plane.test.ts` and
+`tests/application/apply-factory-pipeline.test.ts` (a worker with only
+finished agents restarted; working, needing input, unknown and outdated
+deferred, every stage naming one next action).
+
+## Agent states
+
+fffactory names a worker's agents in its own states, which name no Paseo
+concept ([#98](https://github.com/yaunder/fffactory/issues/98)):
+
+| State | The agent is |
+| --- | --- |
+| `working` | mid-task |
+| `needs_input` | blocked on a person approving something |
+| `finished` | done with its turn |
+| `failed` | stopped by an error in its turn |
+| `stopped` | not loaded |
+
+They are `AgentState` in `src/domain/control-plane.ts`. Only the worker's
+Paseo adapter (`paseoAgents`, `src/host/control-plane.ts`), which `host
+control-plane activity` and the dispatcher's `host agents`
+([host protocol §agents](host-protocol.md#agents)) run, knows Paseo's statuses;
+no dispatcher code reads one ([dispatch §Capacity](dispatch.md#capacity)). It lists every agent
+with `paseo ls --global --background --json`, then those dispatch launched
+with the same list and `--label factory-dispatch=true`, and translates each
+agent's status:
+
+| fffactory state | From Paseo |
+| --- | --- |
+| `working` | `initializing`, or `running` with no pending permission |
+| `needs_input` | `running` with a pending permission |
+| `finished` | `idle` |
+| `failed` | `error` |
+| `stopped` | `closed` |
+
+Paseo has no status for a permission wait: such an agent stays `running`. So
+the adapter inspects each `running` agent, and only those, with
+`paseo agent inspect ID --json`, whose `PendingPermissions` it reads. Any other
+status, an agent ID that is not a short token, and a list or an inspection that
+fails or cannot be read make the whole activity `unknown`, never a guess, in
+fffactory's words: `Paseo activity could not be read`, `Paseo activity was
+invalid`, `Paseo reported an agent status fffactory does not know`, `a Paseo
+agent could not be inspected` or `a Paseo agent's inspection was invalid`.
+Every Paseo call of one answer shares a 90-second budget, under the CLI's
+two-minute wait for it, so the worker answers, and frees the activator's lock,
+first: a call that would start past it, or outlasts it, has failed. `host
+agents` keeps the same budget, so a dispatch tick never hangs on Paseo.
+
+The activity document carries each agent's ID, state and whether dispatch
+launched it, and no Paseo status, field or label
+([host protocol §The activity document](host-protocol.md#the-activity-document)).
+Nothing archives agents: a finished agent stays listed, and dispatch's
+duplicate check relies on that. Tested in `tests/host/control-plane.test.ts` (each
+status, a `running` agent with and without a pending permission, only
+`running` agents inspected, an unknown status, a failed or unreadable list or
+inspection, the dispatched flag, the budget) and `tests/domain/control-plane.test.ts` (the
+document round-trips; every malformed agent rejected).
+
+### The busy rule
+
+A worker's activity is judged from its agents' states alone
+(`workerActivity`, `src/domain/control-plane.ts`):
+
+- **busy** while any agent is `working` or `needs_input`;
+- **idle** when none is: `finished`, `failed` and `stopped` agents never count,
+  however many stay listed;
+- **unknown** when its agents could not be read, with the reason, among them a
+  worker whose release answers without them (`outdated`).
+
+A `finished` agent may still be waiting for a reply; no runtime signal tells
+that from done, so it never blocks. The work gate protects what it left
+unpushed ([worker lifecycle §Gates (terminate)](worker-lifecycle.md#gates-terminate)).
+
+The [pre-activation deferral](#pre-activation-deferral) in apply and upgrade,
+and the removal gates of `worker stop`, `worker terminate` and `teardown`
+([worker lifecycle §Gates](worker-lifecycle.md#gates),
+[teardown §Gates](teardown.md#gates)) all judge by this rule, and dispatch's
+capacity check counts its own agents by the same states
+([dispatch §Capacity](dispatch.md#capacity)); no code reads the document's
+`activity` count. Busy
+activity is named in fffactory's words, how many of each (`busyAgents`): `2
+agents are working on HOSTNAME`, `1 agent needs input on HOSTNAME`, `1 agent is
+working and 2 need input on HOSTNAME`. [Status](status.md#workers) and
+[`worker inspect`](worker-lifecycle.md#inspect) report it with every agent's
+state, as one object (`agentActivity`): `state` (`busy`, `idle`, `unknown`),
+`reason` and `agents`. Tested in
+`tests/domain/control-plane.test.ts` (only finished, mixed, empty, unknown and
+outdated, the words, and the reported object).
 
 ## Worker protocol and privilege boundary
 
@@ -114,7 +231,8 @@ versioned JSON activity or action document.
   carries `paseo_password_secret`, install reads the password by that ARN and
   hashes it ([§The daemon password](#the-daemon-password)); it then sends the
   active release's `setup-host.sh` two lines on standard input, the ARN and the
-  hash, each empty for a host that declares no password. No configuration value
+  hash, each empty only for a projection delivered by hand without the
+  reference ([§The daemon password](#the-daemon-password)). No configuration value
   is an SSH command token.
 - `restart` is the fixed `systemctl restart paseo.service` action.
 
@@ -148,11 +266,14 @@ sets, in `config.json`:
 - `daemon.auth.password` to the password hash, when setup was given one,
   keeping the rest of `daemon.auth`. Without one, `daemon.auth.password` is
   removed, keeping the rest of `daemon.auth`, and a config without one is left
-  as it is ([§The daemon password](#the-daemon-password)).
+  as it is ([§The daemon password](#the-daemon-password));
+- `features.dictation.enabled` and `features.voiceMode.enabled` to `false`,
+  keeping the rest of `features` ([§The Paseo pin](#the-paseo-pin)).
 
 It keeps every other setting, sets `$schema` to Paseo's config schema and
 `version` to 1, and leaves the file `factory`'s, mode 0600. A config that is not one JSON object, or whose
-`daemon` or `daemon.auth` is not an object, fails setup and is left as it was, as
+`daemon`, `daemon.auth`, `features`, `features.dictation` or `features.voiceMode`
+is not an object, fails setup and is left as it was, as
 does a hash that is not a bcrypt hash (`$2a$`, `$2b$` or `$2y$`, a two-digit
 cost, 53 characters), which is never echoed. A rerun with the same inputs
 leaves the merged config unchanged; each install hashes the password afresh, so
@@ -186,18 +307,21 @@ its environment.
 so no daemon, agent, tool or hook process has `PASEO_PASSWORD`. Its
 `ExecStartPre` refuses to start the daemon unless `config.json` holds a
 non-empty `daemon.auth.password`: Paseo without one would accept every client
-on the tailnet. A host whose factory.json declares no Paseo password keeps the
-behavior it had before the hash-only daemon: its daemon does not start, as when
-the wrapper that started it refused to without a secret reference. Setup
-therefore stores an empty reference and removes any `daemon.auth.password` from
-`config.json`, keeping the rest of `daemon.auth`, so `ExecStartPre` refuses.
-This covers a host whose `paseo_password_secret` was removed from factory.json:
-the changed projection plans `listen-address`, the install removes the hash
-written for the old password, and the restart that follows leaves the daemon
-stopped rather than running on a password fffactory no longer references
-(which `paseo-auth.sh`, with no reference, could not send). A password stored
-by hand with `paseo daemon set-password` is removed too: without a reference
-the daemon never ran on it before either.
+on the tailnet.
+
+So every host needs a Paseo password. Without the daemon, apply's restart,
+health probe and dispatch all fail, and the worker can never be ready
+([#91](https://github.com/yaunder/fffactory/issues/91)). factory.json is
+therefore incomplete while a host lacks `paseo_password_secret`, and no plan,
+apply or upgrade sends a projection without it
+([instance configuration §Completeness](instance-configuration.md#completeness)).
+A passwordless host is not a supported state. Only a projection that reaches
+`host apply` some other way, such as by hand, can still lack the reference; the
+install then fails safe: setup stores an empty reference and removes any
+`daemon.auth.password` from `config.json`, keeping the rest of `daemon.auth`, so
+`ExecStartPre` keeps the daemon stopped rather than running on a password
+fffactory does not reference (which `paseo-auth.sh`, with no reference, could
+not send), a password stored by hand with `paseo daemon set-password` included.
 
 `paseo-auth.sh` is only for fffactory's own Paseo CLI calls (activity, reload,
 the dispatch schedule and dispatch): it reads that one host's reference, fetches
@@ -220,7 +344,7 @@ of dispatch scheduling.
 
 ## The Paseo pin
 
-`assets/steps/control-plane/versions.env` pins `@getpaseo/cli` 0.11.4 with its
+`assets/steps/control-plane/versions.env` pins `@getpaseo/cli` 0.13.2 with its
 npm registry integrity value. Setup downloads the package with `npm pack` as
 `factory`, refuses one whose integrity differs from the pin, installs it into
 `factory`'s npm prefix, and fails unless `paseo --version` then prints exactly
@@ -229,11 +353,12 @@ existing worker reaches a new pin only through a release that carries it,
 applied by `fffactory upgrade` or `apply`: the release plans `paseo-package` and
 `service-definition`, both maintenance, so the
 [pre-activation deferral](#pre-activation-deferral) holds the rollout while
-agents may be active, and the restart that follows installation starts the new
+agents may be busy, and the restart that follows installation starts the new
 daemon.
 
-fffactory relies on these Paseo contracts, held by 0.11.4
-([#46](https://github.com/yaunder/fffactory/issues/46)):
+fffactory relies on these Paseo contracts, held by 0.13.2
+([#46](https://github.com/yaunder/fffactory/issues/46), re-checked for 0.13.2 in
+[#97](https://github.com/yaunder/fffactory/issues/97)):
 
 - The service runs `paseo daemon run --home /home/factory/.paseo`. With a
   bcrypt hash in `config.json`'s `daemon.auth.password` (and no
@@ -241,7 +366,7 @@ fffactory relies on these Paseo contracts, held by 0.11.4
   requires the password it hashes: a CLI call sending a wrong one fails with
   `AUTH_FAILED`, and one sending none, or an HTTP request without one, is
   refused. Without a password it accepts every client. An agent's process gets
-  the daemon's whole environment, plus `PASEO_AGENT_ID` and a few others. 0.11.4 also writes a
+  the daemon's whole environment, plus `PASEO_AGENT_ID` and a few others. Paseo also writes a
   per-run `local-credential` file into its home, removed when it stops, which a
   CLI on the worker uses only when `PASEO_PASSWORD` is unset and it targets the
   daemon's own listen address. fffactory's calls
@@ -255,34 +380,67 @@ fffactory relies on these Paseo contracts, held by 0.11.4
   ([#71](https://github.com/yaunder/fffactory/issues/71)).
 - `GET /api/health` answers `200` without a password, and the `Host` rule
   of [§Release-owned installation](#release-owned-installation) is unchanged.
-- `paseo agent ls --json` prints a JSON array of the agents that are not
-  archived and sit in a workspace that is not archived, whatever their status.
-  Activity counts any entry as an active agent, so a worker is idle only when
-  the array is empty.
+- `paseo ls --global --json` (the same command as `paseo agent ls`) prints a
+  JSON array of the agents that are not archived, whatever their status: one object per
+  agent, with its `id` and `status`, one of `initializing`, `running`,
+  `idle`, `error` or `closed`, but neither its labels nor its pending
+  permissions. A permission wait is not a status: the agent stays `running`. From
+  0.12 the CLI reads the daemon's list page by page, so the array holds every
+  such agent, past the daemon's 200-row page. Also from 0.12, an agent or
+  `paseo workspace create --background` can create a *background workspace*,
+  and a workspace an agent in one creates is one too; `ls` hides their agents
+  unless given `--background`. Without `--global`, `ls` keeps only the agents
+  of active, non-archived workspaces. The [agent adapter](#agent-states) lists
+  with both.
+- `paseo agent inspect ID --json` prints one agent as an object whose `Id` is
+  its ID and whose `PendingPermissions` is an array, empty unless it waits on a
+  person approving something.
+- `paseo run --no-wait --json` launches an agent, prints its `agentId` on
+  standard output and returns without waiting for its turn; `--label key=value`
+  labels it, and `paseo ls --label key=value` keeps only the agents carrying
+  every label given. `run --background` is a deprecated alias of `--no-wait`
+  from 0.12, warns on standard error and is removed after 2027-04-01
+  ([dispatch §The dispatch programs and skill](dispatch.md#the-dispatch-programs-and-skill)).
 - `paseo daemon reload` reloads the configuration without restarting.
-- 0.11.4 has no migration of Paseo's persisted state from 0.9.1: a 0.9.1 home's
-  `config.json` and schedules load unchanged. It needs the same Node.js 22
-  runtime.
+- From 0.13 the daemon rewrites a stored `running` or `initializing` agent to
+  `closed` at startup, before any client connects: a restart never resumes a
+  turn, so an agent a crash, a kill or a restart interrupted no longer reads
+  `running`.
+- 0.13.2 needs no migration of Paseo's persisted state from 0.11.4: a 0.11.4
+  home's `config.json`, agents and schedules load unchanged, and a workspace
+  record without `background` is not a background workspace. It needs the same
+  Node.js 22 runtime.
 
-The daemon still downloads its local speech models at start: a background
-download of the speech-to-text and text-to-speech models into
-`~/.paseo/models/local-speech`, about 765 MB, that workers never use. Paseo
-supports turning it off: with `features.dictation.enabled` and
-`features.voiceMode.enabled` both `false` in `config.json` (or
-`PASEO_DICTATION_ENABLED` and `PASEO_VOICE_MODE_ENABLED` false in the daemon's
-environment) it requests no model and starts no download. The release sets
-neither yet: `paseo-config.sh` merges only the settings of
-[§Release-owned installation](#release-owned-installation).
+At start, with dictation or voice mode on, the daemon downloads its local
+speech-to-text and text-to-speech models into `~/.paseo/models/local-speech`,
+about 765 MB, that workers never use
+([#73](https://github.com/yaunder/fffactory/issues/73)). `paseo-config.sh`
+therefore merges `features.dictation.enabled` and `features.voiceMode.enabled`
+as `false` ([§Release-owned installation](#release-owned-installation)), with
+which 0.13.2 requests no model and starts no download. Paseo's equivalent
+environment variables (`PASEO_DICTATION_ENABLED`, `PASEO_VOICE_MODE_ENABLED`)
+are not used, so the setting lives in the release-owned config. Models a worker
+downloaded before are left where they are: nothing deletes them.
+
+`just paseo-check` (`tests/paseo/hash-only-daemon.sh`) also proves against the
+pin that `paseo --version` prints it, that the daemon on the merged config
+starts no speech-model download, that an agent launched with
+`run --no-wait --label factory-dispatch=true` is listed by
+`ls --global --background --label factory-dispatch=true`, and that
+`ls --global --background --json` lists it with an ID the adapter accepts and
+one of the five statuses, and `agent inspect` with its `Id` and a
+`PendingPermissions` array.
 
 ## Layer mapping
 
 | Concern | Layer | Where |
 | --- | --- | --- |
 | Change classification | domain | `src/domain/change-classification.ts` |
-| Protocol documents | domain | `src/domain/control-plane.ts` |
+| Agent states, the busy rule and its words, protocol documents | domain | `src/domain/control-plane.ts` |
 | Plan derivation | application | `src/application/plan-control-plane.ts` |
+| Deferral words | domain | `src/domain/change-classification.ts` (`maintenanceDeferral`, `preActivationDeferral`) |
 | Deferral and reconciliation | application | `src/application/apply-control-plane.ts`, `apply-factory.ts` |
-| Worker endpoint, password hash | host | `src/host/control-plane.ts`, `src/host/secret-value.ts` |
+| Worker endpoint, the agent adapter (`paseoAgents`), password hash | host | `src/host/control-plane.ts`, `src/host/secret-value.ts` |
 | SSH adapter | infrastructure | `src/infrastructure/paseo-control-plane.ts` |
 | Setup, config merge, auth, unit and pin | release assets | `assets/steps/control-plane/` |
 | The pin against the hash | check | `tests/paseo/hash-only-daemon.sh` (`just paseo-check`) |

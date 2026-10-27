@@ -113,7 +113,7 @@ describe("a worker's result row (plan and apply §Apply)", () => {
       kind: "deferred",
       pending: ["password"],
       reloaded: false,
-      summary: "Maintenance (password) was deferred while agents may be active",
+      summary: "Maintenance (password) was deferred while agents may be busy",
       nextAction: "Close the agents",
     };
     const unresolved: RepositoryOutcome = {
@@ -127,7 +127,7 @@ describe("a worker's result row (plan and apply §Apply)", () => {
       lines(workerRow(ENROLLED, { controlPlane: deferred, repositories: unresolved }, {})),
     ).toEqual([
       "! builder-1   installed and verified · every account enrolled",
-      "  ! Control plane   deferred · Maintenance (password) was deferred while agents may be active",
+      "  ! Control plane   deferred · Maintenance (password) was deferred while agents may be busy",
       "  ! Repositories    unresolved · 1 checkout is divergent",
     ]);
   });

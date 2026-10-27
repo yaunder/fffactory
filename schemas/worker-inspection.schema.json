@@ -1,0 +1,87 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/yaunder/factory/schemas/worker-inspection.schema.json",
+  "title": "fffactory worker inspect --json report, schema version 1",
+  "description": "Whether terminate would remove each worker without --force, judged by terminate's own gates. Each worker's inspection is the document removal records carry, byte for byte; its next_action is worker inspect's own. Consumers must ignore fields they do not know.",
+  "type": "object",
+  "required": ["schema_version", "release", "factory", "workers"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "release": { "$ref": "#/$defs/release" },
+    "factory": {
+      "type": "object",
+      "required": ["factory_id", "account_id", "region", "release"],
+      "properties": {
+        "factory_id": { "type": "string", "pattern": "^[a-z][a-z0-9-]{2,19}$" },
+        "account_id": { "type": "string", "pattern": "^\\d{12}$" },
+        "region": { "type": "string", "minLength": 1 },
+        "release": { "$ref": "#/$defs/release" }
+      }
+    },
+    "workers": { "type": "array", "items": { "$ref": "#/$defs/worker" } }
+  },
+  "$defs": {
+    "release": { "type": "string", "pattern": "^\\d+\\.\\d+\\.\\d+(-[0-9A-Za-z.-]+)?$" },
+    "worker": {
+      "description": "One worker: its inspection document, and worker inspect's next action, null unless the verdict is refused.",
+      "type": "object",
+      "required": ["inspection", "next_action"],
+      "properties": {
+        "inspection": { "$ref": "#/$defs/inspection" },
+        "next_action": { "type": ["string", "null"], "minLength": 1 }
+      },
+      "if": {
+        "properties": {
+          "inspection": { "type": "object", "properties": { "verdict": { "const": "refused" } } }
+        }
+      },
+      "then": { "properties": { "next_action": { "type": "string" } } },
+      "else": { "properties": { "next_action": { "type": "null" } } }
+    },
+    "inspection": {
+      "description": "One worker's removability, the document removal records carry: removable when terminate's gates pass, refused when they refuse it (a worker whose agents or work could not be read among them), not_inspected when they never run for it, not_inspected saying why. summary and details are the findings in fffactory's words. It names no next action, which is the judging command's.",
+      "type": "object",
+      "required": ["key", "hostname", "verdict", "not_inspected", "summary", "details", "activity"],
+      "properties": {
+        "key": { "type": "string", "pattern": "^[a-z][a-z0-9-]*$" },
+        "hostname": { "type": "string", "minLength": 1 },
+        "verdict": { "enum": ["removable", "refused", "not_inspected"] },
+        "not_inspected": {
+          "description": "Why the gates never ran: the machine is stopped, already being terminated or gone, or --force skipped them.",
+          "enum": ["stopped", "shutting_down", "absent", "forced", null]
+        },
+        "summary": { "type": "string", "minLength": 1 },
+        "details": { "type": "array", "items": { "type": "string" } },
+        "activity": { "$ref": "#/$defs/activity" }
+      },
+      "if": { "properties": { "verdict": { "const": "not_inspected" } } },
+      "then": { "properties": { "not_inspected": { "type": "string" } } },
+      "else": { "properties": { "not_inspected": { "type": "null" } } }
+    },
+    "activity": {
+      "description": "The worker's agents in fffactory's states, as the activity call alone read them: busy while any agent is working or needs input, idle when none is, unknown when they could not be read (reason says why) or were not read (reason null). Never the work inspection.",
+      "type": "object",
+      "required": ["state", "reason", "agents"],
+      "properties": {
+        "state": { "enum": ["busy", "idle", "unknown"] },
+        "reason": { "type": ["string", "null"], "minLength": 1, "maxLength": 200 },
+        "agents": { "type": ["array", "null"], "items": { "$ref": "#/$defs/agent" } }
+      },
+      "if": { "properties": { "state": { "const": "unknown" } } },
+      "then": { "properties": { "agents": { "type": "null" } } },
+      "else": { "properties": { "reason": { "type": "null" }, "agents": { "type": "array" } } }
+    },
+    "agent": {
+      "type": "object",
+      "required": ["id", "state", "dispatched"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$" },
+        "state": { "enum": ["working", "needs_input", "finished", "failed", "stopped"] },
+        "dispatched": {
+          "description": "Whether dispatch launched it.",
+          "type": "boolean"
+        }
+      }
+    }
+  }
+}

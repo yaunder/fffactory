@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # Proves, against the pinned Paseo, that the daemon a worker runs authenticates with only the
-# bcrypt hash fffactory writes, and that nothing it launches sees PASEO_PASSWORD
-# (docs/specs/control-plane.md §The Paseo pin):
+# bcrypt hash fffactory writes, that nothing it launches sees PASEO_PASSWORD, that it downloads
+# no speech model with the merged config, that it accepts factory-dispatch's launch and list
+# flags, and that it answers the agent list and inspection the worker's agent adapter reads
+# (docs/specs/control-plane.md §The Paseo pin, §Agent states):
 #
 #   tests/paseo/hash-only-daemon.sh            # just paseo-check
 #
@@ -67,7 +69,10 @@ PYTHON
     sleep 0.5
   done
   curl -fsS -o /dev/null "http://127.0.0.1:${port}/api/health" || fail 'the daemon never became healthy'
-  pass "Paseo $("${bin}/paseo" --version) is healthy"
+  # shellcheck disable=SC1091
+  source "${control_plane}/versions.env"
+  [[ $("${bin}/paseo" --version) == "${PASEO_VERSION}" ]] || fail "paseo --version is not ${PASEO_VERSION}"
+  pass "Paseo ${PASEO_VERSION} is healthy"
 
   # /proc holds only this namespace's processes: the daemon's whole tree (CLI, supervisor,
   # daemon, workers) and this check.
@@ -94,6 +99,12 @@ PYTHON
       "${control_plane}/paseo-auth.sh" "$@" --host "127.0.0.1:${port}"
   }
   mkdir -p "${work}/cli"
+  # Health answers before the daemon accepts clients, which it refuses (503) until it has started.
+  for _ in $(seq 120); do
+    out="$(as_factory aws-right agent ls --json 2>&1)" && break
+    [[ ${out} == *'Unexpected server response: 503'* ]] || break
+    sleep 0.5
+  done
   out="$(as_factory aws-right agent ls --json 2>&1)" || fail "the right password was refused: ${out}"
   [[ $(jq -r 'type' <<<"${out}") == array ]] || fail 'agent ls printed no array'
   pass 'the right password connects (paseo-auth.sh)'
@@ -108,8 +119,31 @@ PYTHON
   fi
   pass 'no password is refused'
 
-  out="$(as_factory aws-right run --provider claude --cwd "${home}" --background --json \
-    'Report your environment.' 2>&1)" || fail "the agent could not be started: ${out}"
+  # Launched and listed with the flags factory-dispatch uses; like it, read only standard output
+  # (0.12+ notes a created workspace on standard error).
+  out="$(as_factory aws-right run --provider claude --cwd "${home}" --no-wait --json \
+    --label factory-dispatch=true 'Report your environment.' 2>"${work}/run.err")" ||
+    fail "the agent could not be started: $(<"${work}/run.err")"
+  local agent_id
+  agent_id="$(jq -er '.agentId' <<<"${out}")" || fail "the agent's launch printed no agentId: ${out}"
+  out="$(as_factory aws-right ls --global --background --label factory-dispatch=true --json 2>&1)" ||
+    fail "the dispatcher's agent list failed: ${out}"
+  [[ $(jq -r '[.[].id] | join(" ")' <<<"${out}") == "${agent_id}" ]] ||
+    fail "the dispatcher's agent list does not show exactly the launched agent: ${out}"
+  pass "an agent launched with --no-wait is listed with ls --global --background"
+  # What the worker's agent adapter reads (control-plane.md §Agent states): each listed agent's
+  # id, a token its AGENT_ID rule accepts, and status, and an inspected agent's pending permissions.
+  out="$(as_factory aws-right ls --global --background --json 2>&1)" ||
+    fail "the adapter's agent list failed: ${out}"
+  jq -e --arg id "${agent_id}" '($id | test("^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")) and
+    [.[] | select(.id == $id) | .status
+    | IN("initializing", "running", "idle", "error", "closed")] == [true]' <<<"${out}" >/dev/null ||
+    fail "the agent list does not show the launched agent's id and a known status: ${out}"
+  out="$(as_factory aws-right agent inspect "${agent_id}" --json 2>&1)" ||
+    fail "the agent could not be inspected: ${out}"
+  jq -e --arg id "${agent_id}" '.Id == $id and (.PendingPermissions | type) == "array"' \
+    <<<"${out}" >/dev/null || fail "the agent's inspection lacks its Id or PendingPermissions: ${out}"
+  pass "ls lists each agent's id and status, and agent inspect its pending permissions"
   local launched=""
   for _ in $(seq 60); do
     launched="$(grep -l '^PASEO_AGENT_ID=' "${work}"/claude-env.* 2>/dev/null | head -n 1 || true)"
@@ -121,6 +155,14 @@ PYTHON
     fail "an agent's environment has PASEO_PASSWORD"
   fi
   pass "an agent's environment has no PASEO_PASSWORD"
+
+  # The merged speech switches: the daemon, healthy for a while now, has started no download of
+  # its local speech models.
+  if grep -rqs 'download for missing local speech models' "${work}/daemon.log" "${paseo_home}"/*.log ||
+    [[ -n $(ls -A "${paseo_home}/models/local-speech" 2>/dev/null) ]]; then
+    fail 'the daemon started downloading its speech models'
+  fi
+  pass 'the daemon downloads no speech model'
 
   kill "${daemon}"
   wait "${daemon}" 2>/dev/null || true
@@ -177,9 +219,8 @@ merge() {
     paseo-config "${control_plane}/paseo-config.sh"
 }
 merge "${hash}" "${work}/home/.paseo/config.json" || fail 'the config merge failed'
-# Workers never use speech; skipping it keeps the daemon from downloading its models.
-jq '.features = {dictation: {enabled: false}, voiceMode: {enabled: false}}' \
-  "${work}/home/.paseo/config.json" >"${work}/config.next" && mv "${work}/config.next" "${work}/home/.paseo/config.json"
+jq -e '.features.dictation.enabled == false and .features.voiceMode.enabled == false' \
+  "${work}/home/.paseo/config.json" >/dev/null || fail 'config.json leaves speech switched on'
 [[ $(jq -r '.daemon.auth.password' "${work}/home/.paseo/config.json") == "${hash}" ]] ||
   fail 'config.json does not hold the hash'
 if grep -qF -- "$(<"${work}/password")" "${work}/home/.paseo/config.json"; then

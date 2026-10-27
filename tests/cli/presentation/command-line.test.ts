@@ -1,5 +1,12 @@
 import { describe, expect, test } from "bun:test";
-import { fffactoryCommand, shellWord } from "../../../src/cli/presentation/command-line";
+import { stripVTControlCharacters } from "node:util";
+import { render } from "../../../src/cli/presentation/blocks";
+import {
+  fffactoryCommand,
+  shellWord,
+  withCommands,
+} from "../../../src/cli/presentation/command-line";
+import { ansiStyle } from "../../../src/cli/presentation/style";
 
 describe("the fffactory commands human output names (cli-output §Next)", () => {
   test("a plainly safe word is as it is; any other is single-quoted for a POSIX shell", () => {
@@ -22,5 +29,20 @@ describe("the fffactory commands human output names (cli-output §Next)", () => 
     expect(fffactoryCommand(["plan"], { instance: undefined, profile: undefined })).toBe(
       "fffactory plan",
     );
+  });
+});
+
+describe("fffactory's own words naming fffactory commands (cli-output §Next)", () => {
+  test("every fffactory command as inline code with the selection, other backticks kept", () => {
+    const lines = render(ansiStyle, [
+      {
+        kind: "text",
+        lines: [withCommands("Run `fffactory status`, then `ls`.", { instance: "a b" })],
+      },
+    ]);
+    expect(stripVTControlCharacters(lines[0] ?? "")).toBe(
+      "Run fffactory status --instance 'a b', then ls.",
+    );
+    expect(lines[0]).toContain("\x1b[36m");
   });
 });

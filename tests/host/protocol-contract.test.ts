@@ -10,6 +10,11 @@ import { join } from "node:path";
 import { inspectWork } from "../../src/application/inspect-work";
 import { inspectWorker } from "../../src/application/inspect-worker";
 import {
+  activityJson,
+  parseActivityDocument,
+  workerActivity,
+} from "../../src/domain/control-plane";
+import {
   dispatchProjectionJson,
   notRequestedDispatchProjection,
   parseDispatchProjection,
@@ -33,10 +38,13 @@ import {
   workInspectionJson,
 } from "../../src/domain/work-inspection";
 import { workerApplier } from "../../src/host/apply";
+import { workerControlPlane } from "../../src/host/control-plane";
 import { workerInspector } from "../../src/host/inspect";
 import { flockExclusive } from "../../src/host/install-lock";
 import { workerVerifier } from "../../src/host/verify";
 import { workerWork } from "../../src/host/work";
+import type { ProcessRunner } from "../../src/infrastructure/local-tool-probe";
+import { paseoControlPlane } from "../../src/infrastructure/paseo-control-plane";
 import { fakeTransport, peer, TAG } from "../support/fake-workers";
 import {
   applyingSystem,
@@ -358,6 +366,77 @@ describe("host work inspect, both sides", () => {
     expect(parseWorkInspection(JSON.stringify({ ...document, later: [1] })).ok).toBe(true);
     expect(
       parseWorkInspection(
+        JSON.stringify({ ...document, protocol_version: HOST_PROTOCOL_VERSION + 1 }),
+      ),
+    ).toEqual({ ok: false, kind: "unsupported_version", version: HOST_PROTOCOL_VERSION + 1 });
+  });
+});
+
+/**
+ * A worker's Paseo, as 0.13.2 answers: a dispatched agent waiting on a permission, an agent at
+ * work, a dispatched agent whose turn ended, and one not loaded.
+ */
+const PASEO: ProcessRunner = async (argv) => {
+  const rows = [
+    { id: "4f1c2a9e-0b7d-4c3e-9a51-6d2e8f0b1c3a", status: "running", dispatched: true },
+    { id: "7d3e5b1a-2c4f-4e6a-8b9c-0d1e2f3a4b5c", status: "running", dispatched: false },
+    { id: "9a8b7c6d-5e4f-4a3b-2c1d-0e9f8a7b6c5d", status: "idle", dispatched: true },
+    { id: "1b2c3d4e-5f6a-4b7c-8d9e-0f1a2b3c4d5e", status: "closed", dispatched: false },
+  ];
+  const json = (value: unknown) => ({
+    kind: "exited" as const,
+    exitCode: 0,
+    stdout: JSON.stringify(value),
+    stderr: "",
+  });
+  const ls = argv.indexOf("ls");
+  if (ls !== -1)
+    return json(
+      rows
+        .filter((row) => !argv.includes("--label") || row.dispatched)
+        .map(({ id, status }) => ({ id, name: "Work an epic", provider: "claude", status })),
+    );
+  const id = argv.at(-2);
+  return json({
+    Id: id,
+    Status: "running",
+    PendingPermissions: id === rows[0]?.id ? [{ id: "permission-1", tool: "Bash" }] : [],
+  });
+};
+
+describe("host control-plane activity, both sides", () => {
+  test("the worker produces activity-agents.json byte for byte from its Paseo", async () => {
+    const agents = await workerControlPlane(applyingSystem(root, PASEO)).activity();
+    expect(`${activityJson(agents)}\n`).toBe(await fixture("activity-agents.json"));
+  });
+
+  test("host agents, run as factory for the dispatcher, produces the same document", async () => {
+    const worker = { ...applyingSystem(root, PASEO), isRoot: () => false };
+    const agents = await workerControlPlane(worker).agents();
+    expect(`${activityJson(agents)}\n`).toBe(await fixture("activity-agents.json"));
+  });
+
+  test("the CLI reads it back without loss, over the transport, into the busy rule's activity", async () => {
+    const text = await fixture("activity-agents.json");
+    const parsed = parseActivityDocument(text);
+    if (!parsed.ok) throw new Error(`rejected: ${JSON.stringify(parsed)}`);
+    expect(`${activityJson(parsed.document)}\n`).toBe(text);
+    const resolution = resolveWorker([peer(WORKER_HOSTNAME)], WORKER_HOSTNAME, TAG);
+    if (resolution.kind !== "found") throw new Error("not found");
+    const transport = fakeTransport({
+      [WORKER_HOSTNAME]: { kind: "completed", exitCode: 0, stdout: text },
+    });
+    const agents = await paseoControlPlane(transport.transport).agents(resolution.worker);
+    expect(agents).toEqual(parsed.document);
+    // One working and one needing input; the finished and stopped agents never count.
+    expect(workerActivity(agents)).toEqual({ kind: "busy", working: 1, needsInput: 1 });
+  });
+
+  test("an addition within the major version is ignored; another major is rejected", async () => {
+    const document = JSON.parse(await fixture("activity-agents.json"));
+    expect(parseActivityDocument(JSON.stringify({ ...document, later: [1] })).ok).toBe(true);
+    expect(
+      parseActivityDocument(
         JSON.stringify({ ...document, protocol_version: HOST_PROTOCOL_VERSION + 1 }),
       ),
     ).toEqual({ ok: false, kind: "unsupported_version", version: HOST_PROTOCOL_VERSION + 1 });

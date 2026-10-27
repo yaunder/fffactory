@@ -12,6 +12,7 @@ import { nextActionFields } from "../../domain/readiness";
 import type { StatusReport, WorkerState, WorkerStatus } from "../../domain/status";
 import { sha256Text } from "../../infrastructure/release-tarball";
 import type { CliContext, Command } from "../context";
+import { agentsSummary } from "../presentation/agents";
 import { checkJson, checkLines } from "./doctor";
 import { loadInstance, printAccountRefusal } from "./selected-instance";
 
@@ -49,6 +50,17 @@ function workerJson(worker: WorkerStatus) {
         state,
         next_action: next_action === null ? null : nextActionFields(next_action),
       })) ?? null,
+    activity: worker.activity,
+  };
+}
+
+/** The factory a report is about, as status's and `worker inspect`'s JSON reports name it. */
+export function factoryJson(target: StatusTarget) {
+  return {
+    factory_id: target.factoryId,
+    account_id: target.accountId,
+    region: target.region,
+    release: target.release,
   };
 }
 
@@ -58,12 +70,7 @@ export function statusJson(target: StatusTarget, report: StatusReport, release: 
     schema_version: STATUS_JSON_SCHEMA_VERSION,
     release,
     status: report.status,
-    factory: {
-      factory_id: target.factoryId,
-      account_id: target.accountId,
-      region: target.region,
-      release: target.release,
-    },
+    factory: factoryJson(target),
     inventories: report.inventories.map(checkJson),
     workers: report.workers.map(workerJson),
   };
@@ -91,6 +98,7 @@ function workerLines(worker: WorkerStatus): string[] {
   return [
     `  ${LABELS[worker.status].padEnd(STATUS_WIDTH)}  ${worker.key} (${worker.hostname}): ${worker.summary}`,
     `${INDENT}Machine: ${machineText(worker)}; Tailscale: ${worker.tailnet}; Release: ${worker.release}; Repositories: ${worker.repositories}; Dispatch: ${worker.dispatch}${worker.dispatchBlockers?.length ? ` (${worker.dispatchBlockers.join(", ")})` : ""}`,
+    `${INDENT}Agents: ${agentsSummary(worker.activity)}`,
     ...worker.details.map((detail) => `${INDENT}  ${detail}`),
     ...(worker.nextAction === null ? [] : [`${INDENT}Next: ${worker.nextAction}`]),
   ];
@@ -172,6 +180,7 @@ async function status(args: readonly string[], context: CliContext): Promise<num
       machines: context.machines,
       peers: context.tailnet,
       transport: context.transport,
+      controlPlane: context.controlPlane,
       sha256: sha256Text,
     },
     { instance: loaded.instance, credentials },

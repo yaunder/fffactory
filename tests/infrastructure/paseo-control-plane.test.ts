@@ -56,11 +56,14 @@ describe("the Paseo control-plane adapter", () => {
     expect(await paseoControlPlane(down.transport).health(address())).toBe("unreachable");
   });
 
-  test("reads agent activity as the factory account, idle when none are listed", async () => {
+  test("reads the worker's agents as the factory account, none when none are listed", async () => {
     const { transport, commands } = fakeTransport(() =>
-      COMPLETED(0, activityJson({ kind: "idle" })),
+      COMPLETED(0, activityJson({ kind: "listed", agents: [] })),
     );
-    expect(await paseoControlPlane(transport).activeAgents(address())).toEqual({ kind: "idle" });
+    expect(await paseoControlPlane(transport).agents(address())).toEqual({
+      kind: "listed",
+      agents: [],
+    });
     expect(commands[0]).toEqual([
       "sudo",
       "-n",
@@ -70,28 +73,51 @@ describe("the Paseo control-plane adapter", () => {
     ] as unknown as RemoteCommand);
   });
 
-  test("counts listed agents as active, from an array or an { agents } object", async () => {
-    const array = fakeTransport(() => COMPLETED(0, activityJson({ kind: "active", count: 2 })));
-    expect(await paseoControlPlane(array.transport).activeAgents(address())).toEqual({
-      kind: "active",
-      count: 2,
-    });
-    const wrapped = fakeTransport(() => COMPLETED(0, activityJson({ kind: "active", count: 1 })));
-    expect(await paseoControlPlane(wrapped.transport).activeAgents(address())).toEqual({
-      kind: "active",
-      count: 1,
+  test("reads every listed agent in its state, which the busy rule then judges", async () => {
+    const agents = [
+      { id: "one", state: "working" as const, dispatched: true },
+      { id: "two", state: "finished" as const, dispatched: false },
+    ];
+    const listed = fakeTransport(() => COMPLETED(0, activityJson({ kind: "listed", agents })));
+    expect(await paseoControlPlane(listed.transport).agents(address())).toEqual({
+      kind: "listed",
+      agents,
     });
   });
 
-  test("unreadable or non-JSON agent output is unknown, which the stage treats as active", async () => {
+  test("agents the worker could not read are unknown, for its reason", async () => {
+    const unread = fakeTransport(() =>
+      COMPLETED(
+        0,
+        activityJson({ kind: "unknown", reason: "a Paseo agent could not be inspected" }),
+      ),
+    );
+    expect(await paseoControlPlane(unread.transport).agents(address())).toEqual({
+      kind: "unknown",
+      reason: "a Paseo agent could not be inspected",
+    });
+  });
+
+  test("refuses an older worker's answer without the agent list as outdated, never its count", async () => {
+    const older = fakeTransport(() =>
+      COMPLETED(0, JSON.stringify({ protocol_version: 1, activity: { kind: "idle" } })),
+    );
+    expect(await paseoControlPlane(older.transport).agents(address())).toEqual({
+      kind: "outdated",
+    });
+  });
+
+  test("unreadable or non-JSON agent output is unknown, which the stage treats as busy", async () => {
     const garbled = fakeTransport(() => COMPLETED(0, "not json"));
-    expect((await paseoControlPlane(garbled.transport).activeAgents(address())).kind).toBe(
-      "unknown",
-    );
+    expect(await paseoControlPlane(garbled.transport).agents(address())).toEqual({
+      kind: "unknown",
+      reason: "Paseo activity returned invalid data",
+    });
     const errored = fakeTransport(() => COMPLETED(1, ""));
-    expect((await paseoControlPlane(errored.transport).activeAgents(address())).kind).toBe(
-      "unknown",
-    );
+    expect(await paseoControlPlane(errored.transport).agents(address())).toEqual({
+      kind: "unknown",
+      reason: "Paseo activity could not be read",
+    });
   });
 
   test("reload runs the authenticated Paseo CLI and maps exit status", async () => {

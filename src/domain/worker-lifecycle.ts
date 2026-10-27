@@ -5,7 +5,13 @@
  * outcome, and the words of every refusal and next action. Pure:
  * `application/worker-lifecycle.ts` makes the observations and the calls.
  */
-import type { AgentActivity } from "./control-plane";
+import {
+  type Agent,
+  type AgentsObservation,
+  type BlockingActivity,
+  busyAgents,
+  type WorkerActivity,
+} from "./control-plane";
 import { type FactoryInstance, type HostKey, parseHostKey } from "./instance";
 import type { RepositoryObservation } from "./repository-placement";
 import { RUNTIME_ACCOUNT, RUNTIME_LOGIN_POLICY, runtimeLogin } from "./readiness";
@@ -121,13 +127,14 @@ export type MachineSelection =
  * The one instance carrying `key`: several, or an inventory that could not be read, is refused,
  * never guessed. None is refused too for stop and start, which have no machine to act on; to
  * terminate, it is a machine already gone (`absent`), as an interrupted terminate leaves it.
+ * A refusal's next action reruns `command`, unless `then` completes it otherwise (`worker inspect`).
  */
 export function selectMachine(
   inventory: MachineInventory,
   key: HostKey,
   command: WorkerCommand,
+  then: Then = thenRerunWorker(command, key),
 ): MachineSelection {
-  const then = thenRerunWorker(command, key);
   const refused = (summary: string, step: string, details: readonly string[] = []) =>
     ({ kind: "refused", refusal: refusal(summary, then(step), details) }) as const;
   if (inventory.kind === "unavailable")
@@ -185,13 +192,18 @@ const IN_PASSING: Readonly<Record<PowerAction, Partial<Record<MachineState, stri
   terminate: { pending: UNTIL_RUNNING, stopping: UNTIL_STOPPED },
 };
 
-export function powerStep(command: WorkerCommand, machine: Machine, key: HostKey): PowerStep {
+/** A refusal's next action reruns `command`, unless `then` completes it otherwise. */
+export function powerStep(
+  command: WorkerCommand,
+  machine: Machine,
+  key: HostKey,
+  then: Then = thenRerunWorker(command, key),
+): PowerStep {
   const { state, instanceId } = machine;
   const action = actionOf(command);
   if (state === TARGET_STATE[action]) return { kind: "done" };
   if (STEPS[action].act.includes(state)) return { kind: "act" };
   if (state === STEPS[action].await) return { kind: "await" };
-  const then = thenRerunWorker(command, key);
   const until = IN_PASSING[action][state];
   if (until !== undefined)
     return {
@@ -215,10 +227,10 @@ export function powerStep(command: WorkerCommand, machine: Machine, key: HostKey
 export type StopInspection =
   | { readonly kind: "forced" }
   | { readonly kind: "unlocated"; readonly tailnet: TailnetFact; readonly verdict: Verdict }
-  | { readonly kind: "activity"; readonly activity: AgentActivity };
+  | { readonly kind: "activity"; readonly activity: WorkerActivity };
 
 /** The actions whose gates inspect the worker first, and their words. */
-type GatedAction = Extract<PowerAction, "stop" | "terminate">;
+export type GatedAction = Extract<PowerAction, "stop" | "terminate">;
 
 /** The commands whose gates inspect the worker first. */
 type GatedCommand = Exclude<WorkerCommand, "start">;
@@ -249,14 +261,21 @@ export interface RemovalGateActions {
    * `--force`, or what stands for that, and what then. A complete sentence's end.
    */
   readonly forced: string;
+  /**
+   * What follows `then ` for a worker on a release from before agent states, checked by hand:
+   * `forced`, or, where nothing was typed to follow, its replacement (`outdatedReplacement`, D4).
+   */
+  readonly outdated: string;
 }
 
 /** The next actions of terminate's own gates: rerun it as run, or with `--force`. */
-function terminateActions(command: TerminateCommand, key: HostKey): RemovalGateActions {
+export function terminateGateActions(command: TerminateCommand, key: HostKey): RemovalGateActions {
+  const forced = `terminate it with --force: \`${workerCommandLine(command, key)} --force\`.`;
   return {
     orForce: (step, how) => orForce(command, key, step, how),
     unlocated: terminateUnlocatedAction(command, key),
-    forced: `terminate it with --force: \`${workerCommandLine(command, key)} --force\`.`,
+    forced,
+    outdated: forced,
   };
 }
 
@@ -273,7 +292,22 @@ function unlocatedGate(verdict: Verdict, worker: WorkerIdentity, nextAction: str
   );
 }
 
-const CHECK_STATUS = "Check the worker with `fffactory status`";
+export const CHECK_STATUS = "Check the worker with `fffactory status`";
+
+/** What `--force` skipped, for each action that has gates. */
+const UNINSPECTED: Readonly<Record<GatedAction, string>> = {
+  stop: "busy agents",
+  terminate: "busy agents, current work or checkouts",
+};
+
+/** `--force` skipped the gates of `action`: what the worker was not inspected for. */
+export function forcedUninspected(action: GatedAction): string {
+  return `--force: the worker is not inspected for ${UNINSPECTED[action]}.`;
+}
+
+/** Terminate passes a stopped machine uninspected, and says what that leaves unreported. */
+export const STOPPED_UNINSPECTED =
+  "The machine is stopped: the worker is not inspected, and unpushed work on its disk is not reported.";
 
 /**
  * Stop completes the tailnet's next action, except for a missing worker: status's recovery
@@ -297,36 +331,42 @@ function terminateUnlocatedAction(command: TerminateCommand, key: HostKey): stri
   );
 }
 
+/** Why a worker on a release from before agent states is refused. */
+const OUTDATED_DETAIL =
+  "Its release answers without its agents, so fffactory cannot tell whether any is busy.";
+
 /**
- * Active agents, or activity that could not be read, refuse the action, `doing` it (`stopping`,
- * `terminating`), each next action completed by `force`.
+ * Busy agents, or activity that could not be read, refuse the action, `doing` it (`stopping`,
+ * `terminating`), each next action completed by `actions.orForce`; a worker on a release from
+ * before agent states is checked by hand, then `outdated` (D4).
  */
 function activityGate(
   doing: string,
-  force: RemovalGateActions["orForce"],
-  activity: AgentActivity,
+  actions: Pick<RemovalGateActions, "orForce">,
+  outdated: string,
+  activity: WorkerActivity,
   worker: WorkerIdentity,
 ): Refusal | undefined {
   switch (activity.kind) {
     case "idle":
       return undefined;
-    case "active": {
-      const one = activity.count === 1;
+    case "busy": {
+      const one = activity.working + activity.needsInput === 1;
       return refusal(
-        `${activity.count} ${one ? "agent is" : "agents are"} active on ${worker.hostname}: ${doing} it would end ${one ? "it" : "them"}`,
-        force("Wait until no agent is active there", "anyway"),
+        `${busyAgents(activity, worker.hostname)}: ${doing} it would end ${one ? "it" : "them"}`,
+        actions.orForce("Wait until no agent there is working or needs input", "anyway"),
       );
     }
-    case "unknown":
-      return refusal(
-        `${worker.hostname} could not be inspected for active agents: ${activity.reason}`,
-        force(CHECK_STATUS, "uninspected"),
-      );
+    case "unknown": {
+      const summary = `${worker.hostname} could not be inspected for busy agents: ${activity.reason}`;
+      if (activity.outdated) return refusal(summary, outdated, [OUTDATED_DETAIL]);
+      return refusal(summary, actions.orForce(CHECK_STATUS, "uninspected"));
+    }
   }
 }
 
 /**
- * Stop's gates: active agents, or a running worker that cannot be inspected, refuse the stop;
+ * Stop's gates: busy agents, or a running worker that cannot be inspected, refuse the stop;
  * `--force` skips them. Undefined when stop may go on.
  */
 export function stopGate(inspection: StopInspection, worker: WorkerIdentity): Refusal | undefined {
@@ -342,31 +382,35 @@ export function stopGate(inspection: StopInspection, worker: WorkerIdentity): Re
     case "activity":
       return activityGate(
         GATE_WORDS.stop.doing,
-        (step, how) => orForce("stop", worker.key, step, how),
+        { orForce: (step, how) => orForce("stop", worker.key, step, how) },
+        `${replaceOutdatedWorker(worker)} Or pass --force to stop it uninspected.`,
         inspection.activity,
         worker,
       );
   }
 }
 
-/** Agent activity that refuses a gated action on its own: agents active, or unreadable. */
-export type RefusingActivity = Exclude<AgentActivity, { readonly kind: "idle" }>;
-
 /**
  * What terminate saw before acting: `--force` skipped the inspection, the machine is stopped
- * (never inspected), the tailnet did not locate the running worker, its agent activity when
- * that alone refuses (the work is then never asked for), or, the worker idle, its last
- * repository result, the current work in its checkouts and worktrees, and the checkouts
- * factory.json places there (`placed`, relative to the repository root), which the work
- * inspection must report.
+ * (never inspected), the tailnet did not locate the running worker, its activity when that
+ * alone refuses, agents busy or unreadable (the work is then never asked for), or, the worker
+ * idle, its agents, its last repository result, the current work in its checkouts and worktrees,
+ * and the checkouts factory.json places there (`placed`, relative to the repository root), which
+ * the work inspection must report. The agents are carried as read, for `worker inspect` to list.
  */
 export type TerminateInspection =
   | { readonly kind: "forced" }
   | { readonly kind: "stopped" }
   | { readonly kind: "unlocated"; readonly verdict: Verdict }
-  | { readonly kind: "activity"; readonly activity: RefusingActivity }
+  | {
+      readonly kind: "activity";
+      readonly activity: BlockingActivity;
+      readonly agents: AgentsObservation;
+    }
   | {
       readonly kind: "inspected";
+      /** Listed, none of them busy. */
+      readonly agents: readonly Agent[];
       readonly repositories: RepositoryObservation;
       readonly work: WorkObservation;
       readonly placed: readonly string[];
@@ -381,16 +425,34 @@ function bounded(lines: readonly string[]): string[] {
 }
 
 /**
- * What a worker whose activator predates the work inspection is checked for by hand, as the
- * runtime account that owns its checkouts, before `--force`: what the inspection reads.
+ * What a worker is checked for by hand, as the runtime account that owns its checkouts, when
+ * fffactory cannot inspect it (its activator predates the work inspection, or its release
+ * predates agent states), before `then`: what the work inspection reads.
  */
-function checkByHand(actions: RemovalGateActions, worker: WorkerIdentity): string {
+function checkByHand(then: string, worker: WorkerIdentity): string {
   return (
     `Log in as \`${RUNTIME_ACCOUNT}\` (\`${runtimeLogin(worker.hostname)}\`; ${RUNTIME_LOGIN_POLICY}). ` +
     `In every checkout under ${WORK_ROOTS.repositories} and ~/.paseo/worktrees, and every ` +
     "worktree `git worktree list` shows, run `git status`, `git log --branches --not " +
-    `--remotes\` and \`git stash list\`, and push or copy off what you need; then ${actions.forced}`
+    `--remotes\` and \`git stash list\`, and push or copy off what you need; then ${then}`
   );
+}
+
+/**
+ * What follows `then ` once a worker on a release from before agent states is checked by hand:
+ * terminated keeping its host, which `fffactory apply` then creates afresh on this release (D4).
+ */
+export function outdatedReplacement(key: HostKey): string {
+  return (
+    "replace it: terminate it with --force, keeping its host, " +
+    `\`${workerCommandLine("terminate-keep", key)} --force\`, then run \`fffactory apply\`, ` +
+    "which creates it afresh."
+  );
+}
+
+/** How a worker on a release from before agent states is replaced (D4): checked by hand first. */
+export function replaceOutdatedWorker(worker: WorkerIdentity): string {
+  return checkByHand(outdatedReplacement(worker.key), worker);
 }
 
 /**
@@ -409,7 +471,7 @@ function uninspectedWork(
   // TODO(re-evaluate when base migration lands in M3): deliver the work-inspecting activator to
   // existing workers so terminate need not rely on a manual check and --force.
   if (work.unsupported)
-    return refusal(summary, checkByHand(actions, worker), [
+    return refusal(summary, checkByHand(actions.forced, worker), [
       "A worker's activator is installed at its first boot and never updated: this worker's predates this release.",
       ...known,
     ]);
@@ -487,7 +549,7 @@ function checkoutGate(
 }
 
 /**
- * Terminate's gates: active agents, work in its checkouts or worktrees not pushed to any remote,
+ * Terminate's gates: busy agents, work in its checkouts or worktrees not pushed to any remote,
  * unresolved or unmanaged checkouts, or a running worker that cannot be inspected refuse it;
  * `--force` skips them. A stopped machine passes uninspected: nothing runs on it, and unpushed
  * work on its disk goes unreported (an accepted risk). Undefined when terminate may go on.
@@ -497,7 +559,7 @@ export function terminateGate(
   worker: WorkerIdentity,
   command: TerminateCommand,
 ): Refusal | undefined {
-  return removalGate(inspection, worker, terminateActions(command, worker.key));
+  return removalGate(inspection, worker, terminateGateActions(command, worker.key));
 }
 
 /**
@@ -516,7 +578,13 @@ export function removalGate(
     case "unlocated":
       return unlocatedGate(inspection.verdict, worker, actions.unlocated);
     case "activity":
-      return activityGate(GATE_WORDS.terminate.doing, actions.orForce, inspection.activity, worker);
+      return activityGate(
+        GATE_WORDS.terminate.doing,
+        actions,
+        checkByHand(actions.outdated, worker),
+        inspection.activity,
+        worker,
+      );
     case "inspected": {
       const persisted = checkoutGate(inspection.repositories, worker, actions);
       return workGate(inspection, worker, actions, persisted) ?? persisted;
@@ -565,7 +633,7 @@ const VERBS: Readonly<Record<PowerAction, { readonly name: string; readonly doin
 
 const TYPE_KEY = "Type the host key to confirm: ";
 
-const GONE = "No EC2 instance carries its key: its machine is already gone.";
+export const GONE = "No EC2 instance carries its key: its machine is already gone.";
 
 /**
  * The question asked before acting on the machine located. Terminate removing the host says so.

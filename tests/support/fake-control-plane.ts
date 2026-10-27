@@ -3,18 +3,31 @@
  * `docs/specs/dispatch.md`), as in-memory fakes that answer as given and record every call, so
  * a test can tell what apply asked a worker's Paseo and dispatch, and what it never asked.
  */
-import type { AgentActivity, ControlPlane } from "../../src/application/control-plane";
+import type { ControlPlane } from "../../src/application/control-plane";
+import type { AgentState, AgentsObservation, WorkerAgents } from "../../src/domain/control-plane";
 import type { WorkflowAdoption, WorkflowQueue } from "../../src/application/workflow-queue";
 import type { DispatchInspection } from "../../src/domain/dispatch-projection";
 import type { HostProjection } from "../../src/domain/host-projection";
 
+/** A worker listing one agent in each of `states`, the first dispatched. */
+export function agentsIn(...states: AgentState[]): WorkerAgents {
+  return {
+    kind: "listed",
+    agents: states.map((state, index) => ({
+      id: `agent-${index + 1}`,
+      state,
+      dispatched: index === 0,
+    })),
+  };
+}
+
 /**
- * A control plane answering `health` and `activeAgents` as given. It records every call in
- * `calls`, and in `installed` the projection each `install` received.
+ * A control plane answering `health` and `agents` as given. It records every call in `calls`,
+ * and in `installed` the projection each `install` received.
  */
 export function fakeControlPlane(
   health: "healthy" | "unhealthy" | "unreachable",
-  activity: AgentActivity,
+  agents: AgentsObservation,
 ) {
   const calls: string[] = [];
   const installed: HostProjection[] = [];
@@ -23,9 +36,9 @@ export function fakeControlPlane(
       calls.push("health");
       return health;
     },
-    activeAgents: async () => {
-      calls.push("activeAgents");
-      return activity;
+    agents: async () => {
+      calls.push("agents");
+      return agents;
     },
     install: async (_worker, projection) => {
       calls.push("install");

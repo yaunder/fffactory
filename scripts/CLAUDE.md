@@ -19,8 +19,9 @@
   allowing only the Tailscale enrollment key; and with every credential reference set, the
   hosts' policy allowing exactly the enrollment key, the Paseo password and those references.
 - `terraform-check.ts` last checks `worker terminate`'s scoped removal rule against real
-  Terraform removal plans (`terraform-removal-check.ts`): states for several hosts and for
-  one, synthesized offline by `terraform-state-fixture.ts` (each `-refresh=false` plan's
+  Terraform removal plans (`terraform-removal-check.ts`): states for several hosts (two with
+  their own Paseo passwords, one sharing another's) and for one, every host with a password
+  as completeness requires, synthesized offline by `terraform-state-fixture.ts` (each `-refresh=false` plan's
   resources written into a local state, unknown values filled with fake but well-formed IDs,
   until Terraform plans no resource change; that last plan, changing only outputs, applied
   with no API call), each removal planned as fffactory plans it but with `-refresh=false`,

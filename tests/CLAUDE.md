@@ -83,7 +83,12 @@ records every call, so a test can assert EC2 was never asked to change anything
 recording every call and the secret each `open` got, and `fake-secrets.ts`'s
 `fakeSecretStore` reading the admin client by its ARN. Terminate's work inspection answers
 through the same scripted transport: `statusAnswers` answers it, by default with no work, or
-with `workAnswer`'s document or any outcome a test gives. Terminate removing the host plans and
+with `workAnswer`'s document or any outcome a test gives. `worker inspect` runs terminate's
+inspection over the same fakes, and a test asserts it took no lock and asked EC2 and the admin
+client nothing. Terminate's and teardown's records are compared with `worker inspect`'s
+documents (`printedBy`), each run in its own world built with the same options, so neither
+asks the other's fakes anything. The CLI harness wires no `controlPlane` unless a test gives one: status then
+reports every worker's activity unknown, and its tests give `fakeControlPlane` for agents. Terminate removing the host plans and
 applies against `fakeFactoryWorld` (whose network exists once it is given hosts or applied,
 and stays when its last host is removed, as an empty factory's does; which plans deleting a
 provisioned key no longer declared,
@@ -119,11 +124,14 @@ references, its control-plane part's SHA-256 apart), so a plan or `status` after
 the drift, or the clean rerun, a real worker would. `status`'s unit tests
 (`application/status.test.ts`) do not: they still digest with `FAKE_SHA256`, which gives
 every text the same constant, so they cannot see a projection that drifted. `declaring`
-takes a host with a Paseo password reference (`PASEO_PASSWORD_ARN`), `requestingDispatch`
-places a repository and requests dispatch on the host, and `currentWorker` is a worker
-already current for the plan. The control-plane and dispatch stages run against
-`support/fake-control-plane.ts`: a `ControlPlane` answering health and agent activity as
-given, and a `WorkflowQueue` that counts adoption checks and records every projection
+gives every host a Paseo password reference, as completeness requires: its own
+(`paseoPasswordArn`, builder-1's `PASEO_PASSWORD_ARN`) unless given another,
+`requestingDispatch` places a repository and requests dispatch on the host, and
+`currentWorker` is a worker already current for the plan, holding that reference unless
+given another, or `null` for none. The control-plane and dispatch stages run against
+`support/fake-control-plane.ts`: a `ControlPlane` answering health and the worker's agents as
+given (`agentsIn` lists one agent in each state named, `{ kind: "outdated" }` stands for a
+worker on a release from before agent states), and a `WorkflowQueue` that counts adoption checks and records every projection
 reconciled, so a test can assert a skipped worker was sent nothing. Stopping dispatch runs
 the real `WorkflowQueue` adapter over `fakeTransport`, the worker answering with
 `dispatchAnswer`. Nothing sleeps for

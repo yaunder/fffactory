@@ -33,7 +33,7 @@ export interface FactoryVariables {
   readonly tailscale_auth_key_secret_arn: string;
   /** The tag every host advertises when it enrolls in Tailscale. */
   readonly tailscale_tag: string;
-  /** By host key, for hosts that declare a Paseo password reference. */
+  /** Each host's Paseo password reference, by host key: completeness requires one. */
   readonly paseo_password_secret_arns: Readonly<Record<string, string>>;
   /**
    * factory.json's `credentials` references, by field name: factory-wide, so every host's
@@ -94,9 +94,7 @@ export function projectFactoryVariables(
       tailscale_auth_key_secret_arn: complete.tailscale.auth_key_secret as string,
       tailscale_tag: complete.tailscale.tag as string,
       paseo_password_secret_arns: Object.fromEntries(
-        hosts.flatMap((host) =>
-          host.paseo_password_secret === undefined ? [] : [[host.key, host.paseo_password_secret]],
-        ),
+        hosts.map((host) => [host.key, host.paseo_password_secret as string]),
       ),
       credential_secret_arns: Object.fromEntries(
         Object.values(CREDENTIAL_SECRET_FIELDS).flatMap((field) => {

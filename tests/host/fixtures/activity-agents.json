@@ -1,0 +1,29 @@
+{
+  "protocol_version": 1,
+  "activity": {
+    "kind": "active",
+    "count": 2
+  },
+  "agents": [
+    {
+      "id": "4f1c2a9e-0b7d-4c3e-9a51-6d2e8f0b1c3a",
+      "state": "needs_input",
+      "dispatched": true
+    },
+    {
+      "id": "7d3e5b1a-2c4f-4e6a-8b9c-0d1e2f3a4b5c",
+      "state": "working",
+      "dispatched": false
+    },
+    {
+      "id": "9a8b7c6d-5e4f-4a3b-2c1d-0e9f8a7b6c5d",
+      "state": "finished",
+      "dispatched": true
+    },
+    {
+      "id": "1b2c3d4e-5f6a-4b7c-8d9e-0f1a2b3c4d5e",
+      "state": "stopped",
+      "dispatched": false
+    }
+  ]
+}

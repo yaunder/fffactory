@@ -24,7 +24,7 @@ import {
 } from "../support/doctor-fakes";
 import type { ControlPlane } from "../../src/application/control-plane";
 import type { WorkflowQueue } from "../../src/application/workflow-queue";
-import { fakeControlPlane, fakeWorkflowQueue } from "../support/fake-control-plane";
+import { agentsIn, fakeControlPlane, fakeWorkflowQueue } from "../support/fake-control-plane";
 import {
   BUCKET,
   declaring,
@@ -87,7 +87,7 @@ const STAGES = [
   "  Workers          one at a time",
   "    ~ builder-1   install release 0.3.0 and host configuration, then verify",
   "  Control plane    before worker activation",
-  "    ~ builder-1   paseo-package, service-definition, listen-address",
+  "    ~ builder-1   paseo-package, service-definition, listen-address, password",
   "  Repositories     one worker at a time",
   "    ~ builder-1   reconcile 0 placed repositories as factory; preserve and report unmanaged checkouts",
   "  Dispatch         after every readiness gate",
@@ -305,7 +305,7 @@ describe("fffactory plan (plan-apply §Plan)", () => {
     const stages = out.indexOf("  Control plane    before worker activation");
     expect(out.slice(stages, -SAVED.length)).toEqual([
       "  Control plane    before worker activation",
-      "    ~ builder-1   paseo-package, service-definition, listen-address",
+      "    ~ builder-1   paseo-package, service-definition, listen-address, password",
       "  Repositories     one worker at a time",
       "    ~ builder-1   reconcile 1 placed repository as factory; preserve and report unmanaged checkouts",
       "  Dispatch         after every readiness gate",
@@ -657,7 +657,7 @@ describe("fffactory apply (plan-apply §Apply)", () => {
     const { context, out, err, prompt, lockStore, terraform } = cli({
       interactive: true,
       answers: ["yes"],
-      controlPlane: fakeControlPlane("healthy", { kind: "idle" }).controlPlane,
+      controlPlane: fakeControlPlane("healthy", agentsIn()).controlPlane,
       workflowQueue: fakeWorkflowQueue().queue,
     });
     lockStore.buckets.add(BUCKET);
@@ -852,7 +852,7 @@ describe("fffactory apply (plan-apply §Apply)", () => {
       declared: [],
       interactive: true,
       answers: ["yes"],
-      controlPlane: fakeControlPlane("healthy", { kind: "idle" }).controlPlane,
+      controlPlane: fakeControlPlane("healthy", agentsIn()).controlPlane,
       workflowQueue: queue.queue,
     });
     expect(await run(["apply"], context)).toBe(0);
@@ -952,7 +952,7 @@ describe("fffactory apply (plan-apply §Apply)", () => {
         answers: ["yes"],
         document: REQUESTING,
         fleet: workerFleet(["builder-1"], { [B1]: stale }),
-        controlPlane: fakeControlPlane("healthy", { kind: "active", count: 1 }).controlPlane,
+        controlPlane: fakeControlPlane("healthy", agentsIn("working")).controlPlane,
         workflowQueue: fakeWorkflowQueue().queue,
       });
       expect(await run(["apply"], context)).toBe(2);
@@ -962,9 +962,9 @@ describe("fffactory apply (plan-apply §Apply)", () => {
       expect(out.slice(out.indexOf(RESULT))).toEqual([
         RESULT,
         UNCHANGED,
-        "  ! builder-1          skipped · Paseo maintenance is deferred while agents may be active",
+        "  ! builder-1          skipped · Paseo maintenance is deferred while agents may be busy",
         "    ! Control plane   deferred · Maintenance (paseo-package, service-definition, " +
-          `listen-address) was deferred while agents may be active on ${B1}; it stays on its ` +
+          `listen-address, password) was deferred while 1 agent is working on ${B1}; it stays on its ` +
           "complete current release",
         "    ✔ Repositories    synchronized",
         "    ↷ Dispatch        skipped",
@@ -972,7 +972,7 @@ describe("fffactory apply (plan-apply §Apply)", () => {
         expect.stringMatching(RECORD_LINE),
         "",
         NEXT,
-        `  builder-1: Close the active agents on ${B1}, then rerun \`fffactory apply\``,
+        `  builder-1: Wait until no agent on ${B1} is working or needs input, then rerun \`fffactory apply\``,
       ]);
       expect(out.some((line) => line.includes("failed") || line.includes("absent"))).toBe(false);
     });
@@ -986,7 +986,7 @@ describe("fffactory apply (plan-apply §Apply)", () => {
         fleet: workerFleet(["builder-1"], {}, () =>
           peers(peer(B1, { tags: [WORKER_TAG], online: false })),
         ),
-        controlPlane: fakeControlPlane("healthy", { kind: "idle" }).controlPlane,
+        controlPlane: fakeControlPlane("healthy", agentsIn()).controlPlane,
         workflowQueue: fakeWorkflowQueue().queue,
       });
       expect(await run(["apply"], context)).toBe(2);

@@ -4,7 +4,8 @@
  * EC2 inventory that state backs, the tailnet, Secrets Manager and scripted workers.
  */
 import { describe, expect, test } from "bun:test";
-import type { AgentActivity, ControlPlane } from "../../src/application/control-plane";
+import type { ControlPlane } from "../../src/application/control-plane";
+import { type AgentsObservation, OUTDATED_AGENTS } from "../../src/domain/control-plane";
 import type { MachineInventorySource } from "../../src/application/machine-inventory";
 import type { SecretListing } from "../../src/application/secret-store";
 import {
@@ -14,6 +15,7 @@ import {
   teardownFactory,
 } from "../../src/application/teardown-factory";
 import type { WorkflowQueue } from "../../src/application/workflow-queue";
+import { inspectRemovability } from "../../src/application/worker-removability";
 import { newLockRecord } from "../../src/domain/factory-lock";
 import type {
   FactoryId,
@@ -42,7 +44,7 @@ import {
 } from "../../src/domain/teardown";
 import type { PeerView, TailnetDevice } from "../../src/domain/tailnet";
 import { FAKE_CALLER, fakeCallerIdentity } from "../support/doctor-fakes";
-import { fakeControlPlane, fakeWorkflowQueue } from "../support/fake-control-plane";
+import { agentsIn, fakeControlPlane, fakeWorkflowQueue } from "../support/fake-control-plane";
 import { fakeFactoryWorld, NETWORK_VPC } from "../support/fake-provisioner";
 import { fakePrompt, fakeSecretStore, fakeSecretsManager } from "../support/fake-secrets";
 import {
@@ -57,7 +59,15 @@ import {
   statusAnswers,
   tailnetDevice,
 } from "../support/fake-workers";
-import { BUCKET, declaring, FACTORY, NOW, RELEASE, WORKER_TAG } from "../support/factory-world";
+import {
+  BUCKET,
+  declaring,
+  FACTORY,
+  NOW,
+  PASEO_PASSWORD_ARN,
+  RELEASE,
+  WORKER_TAG,
+} from "../support/factory-world";
 import { MemoryLockStore, READY_BUCKET } from "../support/memory-lock-store";
 import { MemoryPlanStore } from "../support/memory-plan-store";
 
@@ -87,6 +97,10 @@ const OWNED = [
   secret(`${FACTORY}/tailscale-auth-key`),
   secret(`${FACTORY}/tailscale-admin-client`),
 ];
+/** Host `key`'s Paseo password, as `secret set` stores it and `declaring` refers to it. */
+const password = (key: string) => secret(`${FACTORY}/${key}/paseo-password`);
+/** The secrets a factory declaring `keys` owns: its own, and each host's Paseo password. */
+const ownedBy = (keys: readonly string[]) => [...OWNED, ...keys.map(password)];
 
 /** factory.json declaring `keys`, with the admin client and a harness credential source. */
 function instanceOf(keys: readonly string[]): FactoryInstance {
@@ -101,7 +115,7 @@ function instanceOf(keys: readonly string[]): FactoryInstance {
 interface WorldOptions {
   /** The declared workers and their machines' EC2 states; every one provisioned. */
   readonly workers?: Readonly<Record<string, MachineState>>;
-  readonly activity?: AgentActivity;
+  readonly agents?: AgentsObservation;
   readonly view?: PeerView;
   readonly worker?: (key: string) => Answer;
   readonly prompt?: ReturnType<typeof fakePrompt>;
@@ -161,12 +175,12 @@ function world(options: WorldOptions = {}) {
       ]),
     ),
   );
-  const control = fakeControlPlane("healthy", options.activity ?? { kind: "idle" });
+  const control = fakeControlPlane("healthy", options.agents ?? agentsIn());
   const controlPlane: ControlPlane = {
     ...control.controlPlane,
-    activeAgents: async (worker) => {
+    agents: async (worker) => {
       events.push(`activity ${worker.hostname}`);
-      return control.controlPlane.activeAgents(worker);
+      return control.controlPlane.agents(worker);
     },
   };
   const queue = fakeWorkflowQueue(
@@ -182,7 +196,7 @@ function world(options: WorldOptions = {}) {
   // Secrets Manager as a world, so a rerun sees what the run before it deleted.
   const secrets = fakeSecretsManager({
     values: { [ADMIN_ARN]: ADMIN_SECRET },
-    secrets: options.listing?.kind === "listed" ? options.listing.secrets : OWNED,
+    secrets: options.listing?.kind === "listed" ? options.listing.secrets : ownedBy(keys),
     ...(options.listing?.kind === "failed" ? { listing: options.listing } : {}),
   });
   const admin = fakeTailnetAdmin({
@@ -270,7 +284,7 @@ function expectAllRemoved(w: World) {
   expect(w.admin.devices().filter(({ hostName }) => hostName.startsWith(`${FACTORY}-`))).toEqual(
     [],
   );
-  for (const { arn: owned } of OWNED) {
+  for (const { arn: owned } of ownedBy(w.keys)) {
     expect(w.secrets.calls).toContain(`remove ${owned}`);
     expect(w.secrets.calls).toContain(`exists ${owned}`);
   }
@@ -304,7 +318,8 @@ function expectNothingOwned(w: World, admin: ReturnType<typeof fakeTailnetAdmin>
   expect(w.lockStore.locks.size).toBe(0);
 }
 
-const OWNED_NAMES = OWNED.map(({ name }) => name);
+/** The names of the secrets `w`'s factory owns, as its Secrets Manager lists them by default. */
+const ownedNames = (w: World) => ownedBy(w.keys).map(({ name }) => name);
 
 /** Why an admin client Secrets Manager still finds may not be readable: it is pending deletion. */
 const PENDING_DELETION =
@@ -365,7 +380,7 @@ describe("fffactory teardown: the happy path (teardown §Order)", () => {
         machines: [],
         devices: { removed: [], possible: [], untagged: [] },
         secrets: {
-          removed: OWNED.map(({ name }) => name),
+          removed: ownedNames(w),
           kept: { tagged: [], referenced: [SOURCE_ARN] },
         },
         bucket: { name: BUCKET, outcome: "deleted" },
@@ -377,6 +392,34 @@ describe("fffactory teardown: the happy path (teardown §Order)", () => {
     const [plan] = w.terraform.calls.filter(({ call }) => call === "plan");
     expect(plan?.request).toMatchObject({ destroy: true, stateLock: true });
     expect(w.prompt.asked).toEqual([]);
+  });
+
+  test("removes a worker whose only agents are finished, its work pushed, without --force (#92)", async () => {
+    // Finished dispatch and epic agents stay listed; by the busy rule they never refuse.
+    const w = world({
+      workers: { "builder-1": "running" },
+      agents: agentsIn("finished", "finished", "failed", "stopped"),
+    });
+    expect(await teardownFactory(w.deps, request(w))).toMatchObject({ kind: "done" });
+    expectAllRemoved(w);
+  });
+
+  test("refuses a worker on a release from before agent states, checked by hand first", async () => {
+    const w = world({ workers: { "builder-1": "running" }, agents: { kind: "outdated" } });
+    const result = await teardownFactory(w.deps, request(w));
+    expect(result).toMatchObject({
+      kind: "refused",
+      refusals: [
+        {
+          summary: `${hostname("builder-1")} could not be inspected for busy agents: ${OUTDATED_AGENTS}`,
+          nextAction: expect.stringContaining(
+            "then terminate it with --force: `fffactory worker terminate builder-1 --force`, " +
+              "and rerun `fffactory teardown`.",
+          ),
+        },
+      ],
+    });
+    expectNothingRemoved(w);
   });
 
   test("removes one running worker: dispatch stopped, inspected, destroyed, its device deleted", async () => {
@@ -392,7 +435,7 @@ describe("fffactory teardown: the happy path (teardown §Order)", () => {
     expectAllRemoved(w);
     expectNothingAfterBucket(w);
     expect(w.queue.reconcile).toEqual([false]);
-    expect(w.control.calls).toEqual(["activeAgents"]);
+    expect(w.control.calls).toEqual(["agents"]);
     // The record was written at each step until the bucket went, and went with it.
     expect(w.lockStore.operationWrites.map(({ stages }) => stages[0]?.status)).toEqual([
       "authorizing",
@@ -401,6 +444,8 @@ describe("fffactory teardown: the happy path (teardown §Order)", () => {
       "stopping_dispatch",
       // Each worker's dispatch, as stopping it ended.
       "stopping_dispatch",
+      "inspecting",
+      // Each running worker's inspection, once every one is inspected.
       "inspecting",
       "applying",
       "verifying",
@@ -635,6 +680,102 @@ describe("fffactory teardown: the happy path (teardown §Order)", () => {
   });
 });
 
+/**
+ * What `worker inspect --json` prints of each declared worker in a world made with `options`:
+ * its own world, so teardown's is asked nothing by it.
+ */
+async function printedBy(options: WorldOptions) {
+  const w = world(options);
+  const removability = await inspectRemovability(w.deps, {
+    instance: instanceOf(w.keys),
+    key: undefined,
+    credentials: { source: "--profile", profile: "factory" },
+  });
+  if (removability.kind !== "inspected") throw new Error(`not inspected: ${removability.kind}`);
+  return removability.workers.map(({ inspection }) => inspection);
+}
+
+/** The first record written with inspections, and its stage's status then. */
+const firstInspected = (w: World) => {
+  const record = w.lockStore.operationWrites.find((written) => written.inspections !== undefined);
+  return { status: record?.stages[0]?.status, inspections: record?.inspections };
+};
+
+describe("fffactory teardown: its record carries each inspection (teardown §Operation record)", () => {
+  test("one per running worker, as worker inspect prints it, written with the inspecting step before the destroy", async () => {
+    const options: WorldOptions = {
+      workers: { "builder-1": "running", "builder-2": "running", "builder-3": "stopped" },
+    };
+    const w = world(options);
+    expect((await teardownFactory(w.deps, request(w))).kind).toBe("done");
+    // builder-3, stopped, passes uninspected: only the running workers are recorded.
+    const documents = await printedBy(options);
+    expect(documents.map(({ verdict }) => verdict)).toEqual([
+      "removable",
+      "removable",
+      "not_inspected",
+    ]);
+    expect(firstInspected(w)).toEqual({
+      status: "inspecting",
+      inspections: documents.slice(0, 2).map((document) => ({ forced: false, document })),
+    });
+    const statuses = w.lockStore.operationWrites.map(({ stages }) => stages[0]?.status);
+    const inspected = w.lockStore.operationWrites.findIndex(({ inspections }) => inspections);
+    expect(statuses.indexOf("applying")).toBeGreaterThan(inspected);
+  });
+
+  test("a refusal among them is recorded with the rest, to the record's end", async () => {
+    const options: WorldOptions = {
+      workers: { "builder-1": "running", "builder-2": "running" },
+      worker: (key) =>
+        statusAnswers(
+          readyWorker(FACTORY, key, RELEASE),
+          "synchronized",
+          key === "builder-2" ? ["/workspace/repos/scratch"] : [],
+        ),
+    };
+    const w = world(options);
+    expect((await teardownFactory(w.deps, request(w))).kind).toBe("refused");
+    const documents = await printedBy(options);
+    expect(documents.map(({ verdict }) => verdict)).toEqual(["removable", "refused"]);
+    const recorded = records(w)[0];
+    expect(recorded).toMatchObject({ status: "refused" });
+    // Byte for byte as `worker inspect --json` prints each.
+    expect(JSON.stringify(recorded?.inspections, null, 2)).toBe(
+      JSON.stringify(
+        documents.map((document) => ({ forced: false, document })),
+        null,
+        2,
+      ),
+    );
+  });
+
+  test("none before every running worker is inspected: refused by changed machines, there are none", async () => {
+    const w = world({ workers: { "builder-1": "running" } });
+    const machines = changingMachines(w.deps.machines, () => ({ kind: "machines", machines: [] }));
+    expect((await teardownFactory({ ...w.deps, machines }, request(w))).kind).toBe("refused");
+    for (const written of w.lockStore.operationWrites)
+      expect(Object.keys(written)).not.toContain("inspections");
+  });
+
+  test("a final write that fails leaves the refusal as it was, the inspections already recorded", async () => {
+    const w = world({ workers: { "builder-1": "running" }, agents: agentsIn("working") });
+    const write = w.lockStore.writeOperation.bind(w.lockStore);
+    w.lockStore.writeOperation = async (bucket, record) => {
+      if (record.finished_at !== null) throw new Error("S3 PutObject failed: AccessDenied");
+      await write(bucket, record);
+    };
+    expect(await teardownFactory(w.deps, request(w))).toMatchObject({
+      kind: "refused",
+      recordFailure: "S3 PutObject failed: AccessDenied",
+    });
+    expect(records(w)[0]).toMatchObject({
+      status: "running",
+      inspections: [{ forced: false, document: { verdict: "refused" } }],
+    });
+  });
+});
+
 describe("fffactory teardown: refusals delete nothing (teardown §Refusals)", () => {
   test("refuses a held lock, showing its holder, never breaking it", async () => {
     const w = world({ workers: { "builder-1": "running" } });
@@ -658,22 +799,24 @@ describe("fffactory teardown: refusals delete nothing (teardown §Refusals)", ()
     expect(w.lockStore.buckets.has(BUCKET)).toBe(true);
   });
 
-  test("refuses active agents, naming the worker; dispatch is left stopped", async () => {
+  test("refuses busy agents, naming the worker and how many of each; dispatch is left stopped", async () => {
     const w = world({
       workers: { "builder-1": "running", "builder-2": "running" },
-      activity: { kind: "active", count: 1 },
+      agents: agentsIn("working", "needs_input", "finished"),
     });
     const result = await teardownFactory(w.deps, request(w));
     expect(result).toMatchObject({
       kind: "refused",
       refusals: [
         {
-          summary: `1 agent is active on ${hostname("builder-1")}: terminating it would end it`,
+          summary: `1 agent is working and 1 needs input on ${hostname("builder-1")}: terminating it would end them`,
           nextAction:
-            "Wait until no agent is active there, then rerun `fffactory teardown`. To remove " +
-            "the worker anyway, run `fffactory worker terminate builder-1 --force` first.",
+            "Wait until no agent there is working or needs input, then rerun `fffactory teardown`. " +
+            "To remove the worker anyway, run `fffactory worker terminate builder-1 --force` first.",
         },
-        { summary: `1 agent is active on ${hostname("builder-2")}: terminating it would end it` },
+        {
+          summary: `1 agent is working and 1 needs input on ${hostname("builder-2")}: terminating it would end them`,
+        },
       ],
       dispatchStopped: [hostname("builder-1"), hostname("builder-2")],
     });
@@ -1115,7 +1258,7 @@ describe("fffactory teardown: what stops the run once the destroy applied", () =
         details: [
           "EC2 instance i-0stray (running)",
           "Remains: tailnet devices n0CNTRL",
-          `Remains: owned secrets ${OWNED.map(({ name }) => name).join(", ")}`,
+          `Remains: owned secrets ${ownedNames(w).join(", ")}`,
           "Remains: the local saved plans",
           `Remains: the state bucket ${BUCKET}`,
         ],
@@ -1278,7 +1421,7 @@ describe("fffactory teardown: failures (teardown §Refusals)", () => {
           "Deleting device n0CNTRL failed: Tailscale answered HTTP 500",
           "The admin client was kept, so a rerun can delete them.",
           "Remains: tailnet devices n0CNTRL",
-          `Remains: owned secrets ${OWNED.map(({ name }) => name).join(", ")}`,
+          `Remains: owned secrets ${ownedNames(w).join(", ")}`,
           "Remains: the local saved plans",
           `Remains: the state bucket ${BUCKET}`,
         ],
@@ -1339,7 +1482,7 @@ describe("fffactory teardown: failures (teardown §Refusals)", () => {
         details: [
           `${FACTORY}/tailscale-auth-key: Secrets Manager DeleteSecret failed: AccessDeniedException`,
           `${FACTORY}/tailscale-admin-client: Secrets Manager DeleteSecret failed: AccessDeniedException`,
-          `Remains: owned secrets ${OWNED.map(({ name }) => name).join(", ")}`,
+          `Remains: owned secrets ${ownedNames(w).join(", ")}`,
           "Remains: the local saved plans",
           `Remains: the state bucket ${BUCKET}`,
         ],
@@ -1418,7 +1561,7 @@ describe("fffactory teardown: each failure point lists what remains, and a rerun
       remaining: {
         state: true,
         devices: ["n0CNTRL"],
-        secrets: OWNED_NAMES,
+        secrets: ownedNames(w),
         plans: true,
         bucket: BUCKET,
       },
@@ -1439,7 +1582,7 @@ describe("fffactory teardown: each failure point lists what remains, and a rerun
       report: {
         infrastructure: "destroyed",
         devices: { removed: ["n0CNTRL"] },
-        secrets: { removed: OWNED_NAMES, absent: [] },
+        secrets: { removed: ownedNames(w), absent: [] },
       },
     });
     expectNothingOwned(w);
@@ -1451,7 +1594,7 @@ describe("fffactory teardown: each failure point lists what remains, and a rerun
     const leftover = {
       kind: "partial",
       stoppedAt: "leftovers",
-      remaining: { state: false, devices: ["n0CNTRL"], secrets: OWNED_NAMES, plans: true },
+      remaining: { state: false, devices: ["n0CNTRL"], secrets: ownedNames(w), plans: true },
       refusal: {
         nextAction:
           "Check them in the EC2 console and remove those that are this factory's yourself, then rerun `fffactory teardown`.",
@@ -1531,7 +1674,7 @@ describe("fffactory teardown: each failure point lists what remains, and a rerun
         infrastructure: "absent",
         changes: [],
         devices: { removed: ["n0CNTRL"] },
-        secrets: { removed: OWNED_NAMES, absent: [] },
+        secrets: { removed: ownedNames(w), absent: [] },
       },
     });
     // The output-only plan was applied, its outputs deleted, and nothing left recorded.
@@ -1607,7 +1750,7 @@ describe("fffactory teardown: each failure point lists what remains, and a rerun
     expect(await teardownFactory(deps, request(w))).toMatchObject({
       kind: "partial",
       stoppedAt: "devices",
-      remaining: { devices: ["n0CNTRL"], secrets: OWNED_NAMES, plans: true, bucket: BUCKET },
+      remaining: { devices: ["n0CNTRL"], secrets: ownedNames(w), plans: true, bucket: BUCKET },
     });
     expect(w.secrets.calls.filter((call) => call.startsWith("remove"))).toEqual([]);
     delete failing.n0CNTRL;
@@ -1632,7 +1775,7 @@ describe("fffactory teardown: each failure point lists what remains, and a rerun
       case: "denied",
       fail: (w: World) => w.secrets.removeFails.set(AUTH_ARN, DENIED),
       reason: "Secrets Manager DeleteSecret failed: AccessDeniedException",
-      listing: OWNED,
+      listing: ownedBy(["builder-1"]),
     },
     {
       case: "still pending, its restore refused",
@@ -1642,13 +1785,17 @@ describe("fffactory teardown: each failure point lists what remains, and a rerun
           reason: "Secrets Manager RestoreSecret failed: AccessDeniedException",
         }),
       reason: "Secrets Manager RestoreSecret failed: AccessDeniedException",
-      listing: [{ ...(OWNED[0] as ListedSecret), pendingDeletion: true }, OWNED[1] as ListedSecret],
+      listing: [
+        { ...(OWNED[0] as ListedSecret), pendingDeletion: true },
+        OWNED[1] as ListedSecret,
+        password("builder-1"),
+      ],
     },
     {
       case: "still found at the deadline",
       fail: (w: World) => w.secrets.lingering.add(AUTH_ARN),
       reason: "Secrets Manager still finds it 60 s after its deletion",
-      listing: OWNED,
+      listing: ownedBy(["builder-1"]),
     },
   ])(
     "a secret that remains ($case) keeps the bucket; the rerun, its admin client gone, finishes",
@@ -1684,7 +1831,10 @@ describe("fffactory teardown: each failure point lists what remains, and a rerun
           infrastructure: "absent",
           devices: { removed: [], possible: [], untagged: [] },
           devicesUnchecked: DEVICES_NOT_CHECKED,
-          secrets: { removed: [`${FACTORY}/tailscale-auth-key`], absent: [ADMIN_ARN] },
+          secrets: {
+            removed: [`${FACTORY}/tailscale-auth-key`],
+            absent: [ADMIN_ARN, PASEO_PASSWORD_ARN],
+          },
         },
       });
       expect(w.progress.slice(progress)).toContainEqual(
@@ -1776,7 +1926,7 @@ describe("fffactory teardown: each failure point lists what remains, and a rerun
       report: {
         infrastructure: "absent",
         devicesUnchecked: DEVICES_NOT_CHECKED,
-        secrets: { removed: [], absent: [AUTH_ARN, ADMIN_ARN] },
+        secrets: { removed: [], absent: [AUTH_ARN, ADMIN_ARN, PASEO_PASSWORD_ARN] },
       },
     });
     expectNothingOwned(w);
@@ -1795,7 +1945,10 @@ describe("fffactory teardown: each failure point lists what remains, and a rerun
       kind: "done",
       report: {
         devicesUnchecked: undefined,
-        secrets: { removed: [`${FACTORY}/tailscale-admin-client`], absent: [AUTH_ARN] },
+        secrets: {
+          removed: [`${FACTORY}/tailscale-admin-client`],
+          absent: [AUTH_ARN, PASEO_PASSWORD_ARN],
+        },
       },
     });
     expect(w.admin.calls.filter((call) => call === "devices").length).toBeGreaterThan(2);
@@ -1834,7 +1987,7 @@ describe("fffactory teardown: each failure point lists what remains, and a rerun
         report: {
           infrastructure: "absent",
           devicesUnchecked: DEVICES_NOT_CHECKED,
-          secrets: { removed: [], absent: [AUTH_ARN, ADMIN_ARN] },
+          secrets: { removed: [], absent: [AUTH_ARN, ADMIN_ARN, PASEO_PASSWORD_ARN] },
         },
       });
       expectNothingOwned(w);
@@ -1978,7 +2131,7 @@ describe("fffactory teardown: a rerun (teardown §Rerun)", () => {
     const w = world({ workers: { "builder-1": "running" } });
     const controlPlane: ControlPlane = {
       ...w.control.controlPlane,
-      activeAgents: async () => {
+      agents: async () => {
         throw new Error("the worker answered something fffactory cannot read");
       },
     };
@@ -1993,7 +2146,7 @@ describe("fffactory teardown: a rerun (teardown §Rerun)", () => {
   test("a plan directory that cannot be removed never turns a finished refusal into a failure", async () => {
     const w = world({
       workers: { "builder-1": "running" },
-      activity: { kind: "active", count: 1 },
+      agents: agentsIn("working"),
     });
     w.planStore.remove = async () => {
       throw new Error("ENOENT: the plan directory is gone");
@@ -2374,7 +2527,11 @@ describe("fffactory teardown: a reference ListSecrets does not list (secrets §L
     w.secrets.unlisted.add(AUTH_ARN);
     const result = await teardownFactory(w.deps, request(w));
     expect(reportedSecrets(result)).toEqual({
-      removed: [`${FACTORY}/tailscale-admin-client`, `${FACTORY}/tailscale-auth-key`],
+      removed: [
+        `${FACTORY}/tailscale-admin-client`,
+        `${FACTORY}/builder-1/paseo-password`,
+        `${FACTORY}/tailscale-auth-key`,
+      ],
       absent: [],
       kept: { tagged: [], referenced: [SOURCE_ARN] },
     });
@@ -2384,6 +2541,7 @@ describe("fffactory teardown: a reference ListSecrets does not list (secrets §L
         secrets: {
           owned: [
             { name: `${FACTORY}/tailscale-admin-client`, arn: ADMIN_ARN },
+            { name: `${FACTORY}/builder-1/paseo-password`, arn: PASEO_PASSWORD_ARN },
             { name: `${FACTORY}/tailscale-auth-key`, arn: AUTH_ARN },
           ],
         },
@@ -2408,7 +2566,7 @@ describe("fffactory teardown: a reference ListSecrets does not list (secrets §L
     };
     const result = await teardownFactory(w.deps, request(w, { instance }));
     expect(reportedSecrets(result)).toEqual({
-      removed: OWNED_NAMES,
+      removed: ownedNames(w),
       absent: [],
       kept: { tagged: [{ name: tagged.name, arn: tagged.arn }], referenced: [handMade.arn] },
     });
@@ -2556,7 +2714,10 @@ describe("fffactory teardown: a reference ListSecrets does not list (secrets §L
       kind: "done",
       report: {
         devicesUnchecked: DEVICES_NOT_CHECKED,
-        secrets: { removed: [`${FACTORY}/tailscale-auth-key`], absent: [ADMIN_ARN] },
+        secrets: {
+          removed: [`${FACTORY}/tailscale-auth-key`],
+          absent: [ADMIN_ARN, PASEO_PASSWORD_ARN],
+        },
       },
     });
     expectNothingOwned(w);
@@ -2604,7 +2765,9 @@ describe("fffactory teardown: an interrupt keeps the lock at every step (teardow
     if (!after(step, "verifying")) expect(w.terraform.world.hosts.size).toBe(1);
     const removes = (calls: readonly string[]) => calls.filter((call) => call.startsWith("remove"));
     expect(removes(w.admin.calls).length).toBe(after(step, "removing_secrets") ? 1 : 0);
-    expect(removes(w.secrets.calls).length).toBe(after(step, "removing_plans") ? 2 : 0);
+    expect(removes(w.secrets.calls).length).toBe(
+      after(step, "removing_plans") ? ownedNames(w).length : 0,
+    );
     expect(w.planStore.calls.some((call) => call.startsWith("removeAll"))).toBe(
       after(step, "deleting_bucket"),
     );
@@ -2678,7 +2841,7 @@ describe("fffactory teardown: an interrupt keeps the lock at every step (teardow
   test.each([
     {
       ending: "refused",
-      options: { workers: { "builder-1": "running" }, activity: { kind: "active", count: 1 } },
+      options: { workers: { "builder-1": "running" }, agents: agentsIn("working") },
       confirm: FACTORY,
     },
     {
@@ -2860,7 +3023,7 @@ describe("fffactory teardown: an interrupt keeps the lock at every step (teardow
     let interrupted = false;
     const controlPlane: ControlPlane = {
       ...w.control.controlPlane,
-      activeAgents: async () => {
+      agents: async () => {
         interrupted = true;
         throw new Error("interrupted while reading the activity");
       },
@@ -2931,7 +3094,7 @@ describe("fffactory teardown: no state bucket (teardown §No state bucket)", () 
         devices: { removed: [], possible: [], untagged: [] },
         devicesUnchecked: undefined,
         secrets: {
-          removed: OWNED_NAMES,
+          removed: ownedNames(w),
           absent: [],
           kept: { tagged: [], referenced: [SOURCE_ARN] },
         },
@@ -2966,7 +3129,7 @@ describe("fffactory teardown: no state bucket (teardown §No state bucket)", () 
           removed: ["n0CNTRL"],
           untagged: [{ id: "nU", hostname: hostname("builder-1") }],
         },
-        secrets: { removed: OWNED_NAMES },
+        secrets: { removed: ownedNames(w) },
         withoutLock: ranWithoutLock(BUCKET),
       },
     });
@@ -2986,7 +3149,7 @@ describe("fffactory teardown: no state bucket (teardown §No state bucket)", () 
           untagged: [{ id: "nU", hostname: hostname("builder-1") }],
         },
         secrets: expect.objectContaining({
-          owned: OWNED.map(({ name, arn: a }) => ({ name, arn: a })),
+          owned: ownedBy(w.keys).map(({ name, arn: a }) => ({ name, arn: a })),
         }),
         bucket: { name: BUCKET, outcome: "not_found" },
         withoutLock: ranWithoutLock(BUCKET),
@@ -3200,7 +3363,7 @@ describe("fffactory teardown: no state bucket (teardown §No state bucket)", () 
         devicesUnchecked: DEVICES_NOT_CHECKED,
         secrets: {
           removed: [],
-          absent: [AUTH_ARN, ADMIN_ARN],
+          absent: [AUTH_ARN, ADMIN_ARN, PASEO_PASSWORD_ARN],
           kept: { tagged: [], referenced: [SOURCE_ARN] },
         },
         bucket: { name: BUCKET, outcome: "not_found" },
@@ -3232,7 +3395,7 @@ describe("fffactory teardown: no state bucket (teardown §No state bucket)", () 
     expect(partial).toMatchObject({
       kind: "partial",
       stoppedAt: "devices",
-      remaining: { devices: ["n0CNTRL"], secrets: OWNED_NAMES, plans: true, bucket: undefined },
+      remaining: { devices: ["n0CNTRL"], secrets: ownedNames(w), plans: true, bucket: undefined },
       operation: undefined,
       recordFailure: undefined,
     });

@@ -418,6 +418,8 @@ export function parseFactoryInstance(document: unknown): InstanceParse {
 export interface CompletenessReport {
   readonly complete: boolean;
   readonly missing: readonly string[];
+  /** The command that fills a missing field, by its path, for the fields one fills. */
+  readonly commands: Readonly<Record<string, string>>;
 }
 
 const REQUIRED_FOR_COMPLETENESS: readonly (readonly [string, (i: FactoryInstance) => unknown])[] = [
@@ -434,35 +436,56 @@ const REQUIRED_FOR_COMPLETENESS: readonly (readonly [string, (i: FactoryInstance
   ["tailscale.auth_key_secret", (i) => i.tailscale?.auth_key_secret],
 ];
 
-const REQUIRED_HOST_FIELDS = ["instance_type", "root_volume_gib"] as const;
+/**
+ * A worker is ready only once its Paseo daemon runs, and the daemon never starts without a
+ * password, so every host needs one (`docs/specs/control-plane.md` §The daemon password).
+ */
+const REQUIRED_HOST_FIELDS = ["instance_type", "root_volume_gib", "paseo_password_secret"] as const;
+
+/** A missing field, and the command that fills it when one does. */
+interface MissingField {
+  readonly path: string;
+  readonly command?: string;
+}
 
 /**
  * The host fields still needed: `hosts` itself while it is absent, then each declared host's
- * machine and enabled dispatch fields. An empty list is complete: a factory may declare no
- * worker, as when `fffactory worker terminate` removed its last one.
+ * machine fields, Paseo password and enabled dispatch fields. An empty list is complete: a
+ * factory may declare no worker, as when `fffactory worker terminate` removed its last one.
  */
-function missingHostFields(hosts: readonly Host[] | undefined): string[] {
-  if (!hosts) return ["hosts"];
+function missingHostFields(hosts: readonly Host[] | undefined): MissingField[] {
+  if (!hosts) return [{ path: "hosts" }];
   const dispatchFields = ["cron", "timezone", "provider", "model", "mode", "cwd"] as const;
   return hosts.flatMap((host, index) => [
-    ...REQUIRED_HOST_FIELDS.filter((field) => host[field] === undefined).map((field) =>
-      fieldPath(itemPath("hosts", index), field),
-    ),
+    ...REQUIRED_HOST_FIELDS.filter((field) => host[field] === undefined).map((field) => ({
+      path: fieldPath(itemPath("hosts", index), field),
+      ...(field === "paseo_password_secret"
+        ? { command: `fffactory secret set paseo-password --host ${host.key}` }
+        : {}),
+    })),
     ...(host.dispatch?.enabled === true
       ? dispatchFields
           .filter((field) => host.dispatch?.[field] === undefined)
-          .map((field) => fieldPath(fieldPath(itemPath("hosts", index), "dispatch"), field))
+          .map((field) => ({
+            path: fieldPath(fieldPath(itemPath("hosts", index), "dispatch"), field),
+          }))
       : []),
   ]);
 }
 
 /** Lists the fields a valid, possibly partial, instance still needs before it can be planned. */
 export function assessCompleteness(instance: FactoryInstance): CompletenessReport {
-  const missing = [
+  const fields: MissingField[] = [
     ...REQUIRED_FOR_COMPLETENESS.filter(([, read]) => read(instance) === undefined).map(
-      ([path]) => path,
+      ([path]) => ({ path }),
     ),
     ...missingHostFields(instance.hosts),
   ];
-  return { complete: missing.length === 0, missing };
+  return {
+    complete: fields.length === 0,
+    missing: fields.map(({ path }) => path),
+    commands: Object.fromEntries(
+      fields.flatMap(({ path, command }) => (command === undefined ? [] : [[path, command]])),
+    ),
+  };
 }

@@ -179,7 +179,9 @@ so no agent dispatch could start is missed by the inspection:
    restart.
 3. **Inspection.** Each running worker's agent activity and last repository
    result, then its current work (`inspectForRemoval`, shared with terminate),
-   judged by `removalGate`: active agents, work not pushed to any remote,
+   judged by `removalGate`: busy agents (by the
+   [busy rule](control-plane.md#the-busy-rule): a worker whose only agents
+   are `finished`, `failed` or `stopped` passes), work not pushed to any remote,
    unresolved or unmanaged checkouts, and a worker that cannot be located or
    inspected each refuse, naming the worker, in terminate's words. Every
    running worker is inspected, and every refusal reported.
@@ -197,10 +199,10 @@ the worker first, uninspected (`teardownGateActions`):
 
 | Gate | Next action |
 | --- | --- |
-| Active agents, unpushed work, unresolved checkouts | ``STEP, then rerun `fffactory teardown`. To remove the worker anyway, run `fffactory worker terminate KEY --force` first.`` |
+| Busy agents, unpushed work, unresolved checkouts | ``STEP, then rerun `fffactory teardown`. To remove the worker anyway, run `fffactory worker terminate KEY --force` first.`` |
 | Activity, checkouts or work that could not be inspected | The same, `uninspected` for `anyway` |
 | Not located in the tailnet | ``Check the worker with `fffactory status`, then rerun `fffactory teardown`. If it cannot be inspected, remove it uninspected: run `fffactory worker terminate KEY --force`, then rerun `fffactory teardown`.`` |
-| Unmanaged checkouts, or an older activator checked by hand | ``... then terminate it with --force: `fffactory worker terminate KEY --force`, and rerun `fffactory teardown`.`` |
+| Unmanaged checkouts, or an older activator or a release from before agent states checked by hand | ``... then terminate it with --force: `fffactory worker terminate KEY --force`, and rerun `fffactory teardown`.`` |
 
 A running worker whose key factory.json does not declare cannot be terminated
 with `fffactory worker terminate`: its next actions name the EC2 console
@@ -618,7 +620,8 @@ the lock is taken and again at each step. Its `operation` is `teardown`, and
 it has one stage, `teardown`, which goes `authorizing`, `inventorying`,
 `planning`, `awaiting_approval` (only when asked), `stopping_dispatch` (written
 again with `dispatch` once each running worker's dispatch is stopped:
-`not_requested`, or `failed` with its reason), `inspecting`, `applying`,
+`not_requested`, or `failed` with its reason), `inspecting` (written again
+with `inspections` once every running worker is inspected), `applying`,
 `verifying`, `removing_devices`, `removing_secrets`, `removing_plans` and
 `deleting_bucket`. It ends `refused`, `declined`, `failed` or `partial`, with
 the operation's status alike and `failure` naming why. An interrupted teardown
@@ -644,6 +647,26 @@ these are the only records fffactory reads to decide anything
 
 ```json
 { "operation": "teardown", "stages": [{ "name": "teardown", "status": "applying" }], "host_keys": ["builder-1", "old-1"], "...": "as every record" }
+```
+
+Teardown's record also carries `inspections` (D13, [epic
+#94](https://github.com/yaunder/fffactory/issues/94)): one per running worker
+the [gates](#gates) inspected, in the order inspected, refusals included, each
+as a terminate's record carries its `inspection` ([worker lifecycle
+§Operation record](worker-lifecycle.md#operation-record)): `forced`, always
+`false`, as teardown has no `--force`, and `document`, exactly the inspection
+document `worker inspect --json` prints for the same inspection, `removable`
+or `refused` with the gate's findings. It is written once every running worker
+is inspected, before any refusal ends the record or the destroy begins; a
+stopped worker, which passes uninspected, gets none, so a teardown with no
+running worker records `inspections: []`. It is absent before
+then: a teardown declined, interrupted during the inspection, or refused
+before it (dispatch not stopped, the machines changed since the review)
+carries none. A record whose final write fails keeps the outcome, as every
+record's does.
+
+```json
+{ "operation": "teardown", "stages": [{ "name": "teardown", "status": "refused" }], "inspections": [{ "forced": false, "document": { "key": "builder-1", "hostname": "fff-abcd1234-builder-1", "verdict": "refused", "not_inspected": null, "summary": "1 agent is working on fff-abcd1234-builder-1: terminating it would end it", "details": [], "activity": { "state": "busy", "reason": null, "agents": [{ "id": "agent-1", "state": "working", "dispatched": true }] } } }], "...": "as every record" }
 ```
 
 Without a state bucket there is no record at all
@@ -961,7 +984,8 @@ names.
 | Domain | `src/domain/teardown.ts` | The guarded destroy plan's rule and its consistency with the exit code (`destroyPlanRefusal`, `destroyPlanMismatch`), `VpcInventory`; the devices teardown deletes and lists (`selectFactoryDevices`, `FactoryDevices`); the kept secrets' groups (`keptSecrets`), the factory's names (`underFactoryNames`), the references under them to look up (`unlistedReferences`) and the refusal of one that cannot be (`secretUnresolved`); the confirmation rule (`teardownConfirmation`, `typedIdConfirms`) and question; the gates' next actions (`teardownGateActions`) and the review invalidated by changed machines (`machinesChanged`); the review and report (`TeardownReview`, `TeardownReport`), carrying only what may be printed (`ShownMachine`, `ShownDevice`, `ShownSecret`); the steps (`TeardownStep`), where a partial teardown stopped (`TeardownStop`) and what remains of each kind (`remainingAt`, `TeardownRemaining`, `stoppedPartWay`); an interruption's words (`interruptedTeardown`, its lock `none` without a state bucket); the state bucket's outcome (`TeardownBucket`); without a state bucket, why it runs without the lock (`ranWithoutLock`), what it leaves to the operator outside EC2 (`checkOutsideEc2`) and its refusals (`taggedWithoutBucket`, `bucketAppeared`); the words of every refusal and of the report's advice. Pure. |
 | Domain | `src/domain/initialization.ts` | `isGeneratedFactoryId`. |
 | Domain | `src/domain/worker-lifecycle.ts` | `removalGate` and `RemovalGateActions`: terminate's gates, their next actions completed by the command refused. |
-| Domain | `src/domain/operation.ts` | `TEARDOWN_OPERATION` and the teardown stage's statuses; its record remembering host keys (`startTeardownOperation`, `withHostKeys`) and reading them back from the records under `operationsPrefix`, bounded by the last apply or upgrade that may have changed the factory (`rememberedHostKeys`, `StoredOperation`). |
+| Domain | `src/domain/worker-removability.ts` | `workerRemovability`: the inspection document the record carries, as `worker inspect --json` prints it. |
+| Domain | `src/domain/operation.ts` | `TEARDOWN_OPERATION` and the teardown stage's statuses; its record carrying each running worker's inspection (`InspectionRecord`, `withInspections`); its record remembering host keys (`startTeardownOperation`, `withHostKeys`) and reading them back from the records under `operationsPrefix`, bounded by the last apply or upgrade that may have changed the factory (`rememberedHostKeys`, `StoredOperation`). |
 | Domain | `src/domain/secrets.ts` | `classifySecrets`, which judges listed and described secrets alike, and `refersTo`. |
 | Application | `src/application/teardown-factory.ts` | `teardownFactory`: the order above, under the lock and its record, the lock and record never touched once the bucket is gone; without a state bucket, the same steps from the admin session on without them (`withoutBucket`, `cleanUp`, a `TeardownLog` that writes nothing), the secrets listed then each reference under `<id>/` not listed looked up (`resolvedSecrets`), the factory rechecked once confirmed (`stillWithoutBucket`); how far it got and what is left (`Progress`), every ending (`refusedUnder`, `failedUnder`, `partialUnder`, `interruptedUnder`), the interrupt checked once the run returns. |
 | Application | `src/application/worker-removal.ts` | Shared with `worker terminate`: `inspectForRemoval`, `openTailnetAdmin`, `deleteDevices`. |
@@ -972,7 +996,7 @@ names.
 | Infrastructure | `src/infrastructure/aws-s3-lock-store.ts` | `readOperations`: ListObjectsV2 under the operation records' prefix, page by page, then GetObject of each, a few at a time, each with its own deadline. |
 | Infrastructure | `src/infrastructure/tailscale-api-admin.ts` | `tailscaleApiBase`: Tailscale's API, or the loopback stand-in `FFFACTORY_TAILSCALE_API` names, read only run from source ([worker lifecycle §Tailnet device removal](worker-lifecycle.md#tailnet-device-removal)). |
 | CLI adapter | `src/cli/commands/teardown.ts` | `fffactory teardown`: its arguments, refused unechoed; the use case wired to the context; the review and each step streamed; the account check's refusal; the exit code (0 done, 2 partial, 1 otherwise; 128 + N by `src/cli/interrupts.ts`); `waitsOnInterrupt`. |
-| CLI adapter | `src/cli/presentation/teardown.ts` | The review (`teardownReviewBlocks`), each step (`teardownProgressLine`), and every outcome as one report on one stream (`teardownOutcome`), with `withCommands` for fffactory's words that name commands. |
+| CLI adapter | `src/cli/presentation/teardown.ts` | The review (`teardownReviewBlocks`), each step (`teardownProgressLine`), and every outcome as one report on one stream (`teardownOutcome`), with `withCommands` (`src/cli/presentation/command-line.ts`) for fffactory's words that name commands. |
 
 Tests: `tests/domain/teardown.test.ts` (device selection: known keys exactly
 and ignoring case, untagged look-alikes listed, a generated ID's other tagged
@@ -1002,13 +1026,18 @@ remains),
 running worker, and two with one stopped, each ending with no instance,
 network, state, device, owned secret, plan or bucket, its referenced sources
 kept, and nothing written or released after the bucket's deletion; the record
-step by step; the review and the typed ID at a terminal; dispatch stopped on
+step by step; its inspections, one per running worker and none for a stopped
+one, identical to `worker inspect`'s documents, written at `inspecting` before
+the destroy, a refusal among them kept to the record's end, none when the
+machines changed before the inspection, and a final write that fails leaving
+the refusal and the inspections already written; the review and the typed ID at a terminal; dispatch stopped on
 every running worker before the first inspection; a `fffv/*` source and a
 tagged secret kept; D9's devices; a device appearing after the review listed,
 not deleted; no device tag or malformed host key tag in the review or report;
 a root already absent, with no root output either; a saved plan's removal never failing a finished
 teardown; and each refusal
-deleting nothing and leaving the lock released: a held lock, active agents,
+deleting nothing and leaving the lock released: a held lock, busy agents, a
+worker on a release from before agent states,
 unmanaged checkouts, a worker not located, dispatch not stopped, a machine
 started, added or gone since the review, or not listed again, the guarded
 destroy plan, its exit code disagreeing, each listing that fails, the admin

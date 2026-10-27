@@ -21,10 +21,12 @@ import type { HostKey } from "../../domain/instance";
 import { ADMIN_CONSOLE, type Verdict } from "../../domain/status";
 import {
   type DeviceRemoval,
+  forcedUninspected,
   ONLINE_DEADLINE_MS,
   POWER_DEADLINE_MS,
   type PowerAction,
   type Refusal,
+  STOPPED_UNINSPECTED,
   TARGET_STATE,
   unconfirmable,
   type WorkerCommand,
@@ -35,12 +37,14 @@ import type { CliContext, Command } from "../context";
 import { printDiagnostics } from "../diagnostics";
 import { describeRemovalPlan } from "../presentation/plan";
 import { terraformDirectory } from "./planning";
+import { inspectWorkers } from "./worker-inspect";
 import { loadInstance, printAccountRefusal } from "./selected-instance";
 
 const USAGE = [
   "Usage: fffactory worker stop KEY [--force] [--yes] [--instance PATH] [--profile NAME]",
   "       fffactory worker start KEY [--yes] [--instance PATH] [--profile NAME]",
   "       fffactory worker terminate KEY [--keep] [--force] [--confirm KEY] [--instance PATH] [--profile NAME]",
+  "       fffactory worker inspect [KEY] [--json] [--instance PATH] [--profile NAME]",
   "",
   "Powers the EC2 instance of the worker factory.json declares as host KEY off or",
   "on, under the factory-wide lock and with a record of the operation in the state",
@@ -76,12 +80,25 @@ const USAGE = [
   "terminal, or with --confirm KEY. A device it could not delete is reported, and",
   "exits 2: the terminate stands.",
   "",
-  "Refused, changing nothing, when KEY is not a host factory.json declares, the",
-  "credentials belong to another account, this fffactory is not the release",
-  "factory.json pins, another operation holds the lock, or several EC2 instances",
-  "(for stop and start, none or several) carry the factory ID and host key tags.",
-  "Interrupting it leaves the factory locked, with its record: once fffactory has",
-  "exited, break the lock with `fffactory lock break`, then rerun the command.",
+  "Inspect tells, changing nothing, whether terminate would remove each worker",
+  "(or KEY alone) without --force: it runs terminate's own inspection and gates,",
+  "with no lock and no confirmation, and reports each worker removable, refused",
+  "(with the findings terminate would refuse it with, and the next step) or not",
+  "inspected (a stopped machine, one already being terminated, or none), and its",
+  "agents by state, finished ones too: the conversations a terminate would end.",
+  "--json prints a versioned document instead. Like status, it checks the account",
+  "but needs no particular release, not even the one factory.json pins. It",
+  "exits 2 when any worker is refused, a running one whose agents or work could",
+  "not be read among them; 0 when none is, workers not inspected never counting;",
+  "and 1 when it cannot inspect at all.",
+  "",
+  "Stop, start and terminate are refused, changing nothing, when KEY is not a host",
+  "factory.json declares, the credentials belong to another account, this",
+  "fffactory is not the release factory.json pins, another operation holds the",
+  "lock, or several EC2 instances (for stop and start, none or several) carry the",
+  "factory ID and host key tags. Interrupting one leaves the factory locked, with",
+  "its record: once fffactory has exited, break the lock with `fffactory lock",
+  "break`, then rerun the command.",
   "",
   "  --force          stop and terminate: act without inspecting the worker (ends any",
   "                   agents; terminate also loses unpushed work).",
@@ -89,13 +106,14 @@ const USAGE = [
   "  --keep           terminate: keep the host in factory.json, so apply creates it",
   "                   afresh.",
   "  --confirm KEY    terminate: confirm without asking, naming the host key.",
+  "  --json           inspect: print a versioned JSON report instead of text.",
   "  --instance PATH  Select the instance, as for `fffactory validate`.",
   "  --profile NAME   Use this AWS profile. Otherwise AWS_PROFILE, or else the",
   "                   standard AWS credential chain.",
   "",
-  "Exits 0 once the worker is stopped, started (even when it is not ready),",
-  "terminated or removed, 2 when it is terminated but a tailnet device remains,",
-  "and 1 when refused, declined or failed.",
+  "Stop, start and terminate exit 0 once the worker is stopped, started (even when",
+  "it is not ready), terminated or removed, 2 when it is terminated but a tailnet",
+  "device remains, and 1 when refused, declined or failed.",
 ];
 
 /** How each action is told: its verb, its participles, and its progress. */
@@ -110,12 +128,6 @@ const WORDS: Readonly<
   terminate: { verb: "terminate", done: "Terminated", past: "terminated", doing: "Terminating" },
 };
 
-/** What `--force` skipped, for each action that has gates: start has none. */
-const UNINSPECTED: Readonly<Record<Exclude<PowerAction, "start">, string>> = {
-  stop: "active agents",
-  terminate: "active agents, current work or checkouts",
-};
-
 function progressLines(event: PowerProgress): readonly string[] {
   return event.kind === "removal_plan" ? describeRemovalPlan(event) : [progressLine(event)];
 }
@@ -127,9 +139,9 @@ function progressLine(event: Exclude<PowerProgress, { readonly kind: "removal_pl
     case "located":
       return `Worker ${event.key} (${event.hostname}): EC2 instance ${event.instanceId} is ${event.state}.`;
     case "forced":
-      return `--force: the worker is not inspected for ${UNINSPECTED[event.action]}.`;
+      return forcedUninspected(event.action);
     case "uninspected_stopped":
-      return "The machine is stopped: the worker is not inspected, and unpushed work on its disk is not reported.";
+      return STOPPED_UNINSPECTED;
     case "requested":
       return `${WORDS[event.action].doing} EC2 instance ${event.instanceId}; ${wait(event.action)}`;
     case "awaiting":
@@ -490,13 +502,15 @@ function isAction(action: string | undefined): action is PowerAction {
 async function worker(args: readonly string[], context: CliContext): Promise<number> {
   const [action, ...rest] = args;
   if (isAction(action)) return power(action, rest, context);
-  context.err(`fffactory worker: expected a subcommand: ${ACTIONS.join(", ")}`);
+  if (action === "inspect") return inspectWorkers(rest, context);
+  context.err(`fffactory worker: expected a subcommand: ${[...ACTIONS, "inspect"].join(", ")}`);
   for (const line of USAGE) context.err(line);
   return 1;
 }
 
 export const workerCommand: Command = {
-  summary: "Stop, start or terminate a worker, removing its host, under the factory-wide lock",
+  summary:
+    "Stop, start or terminate a worker under the factory-wide lock, or inspect it (read-only)",
   usage: USAGE,
   run: worker,
   waitsOnInterrupt: true,

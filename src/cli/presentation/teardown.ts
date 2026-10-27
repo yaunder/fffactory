@@ -34,33 +34,15 @@ import {
   type Next,
   type Report,
   type Row,
-  type Span,
   step,
   verbatim,
 } from "./blocks";
-import { fffactoryCommand, type Selection } from "./command-line";
+import { type Selection, withCommands } from "./command-line";
 import { lockRefusalReport } from "./lock";
 import { changeLine, planRefusalReport, targetRows } from "./plan";
 
 /** What a refusal of teardown is called, as `plan` and `apply` call theirs. */
 const ACTION = "remove the factory";
-
-/**
- * fffactory's own words with every `fffactory` command they name in backticks as inline code,
- * repeating the instance and profile in `selection`; any other backticks stay inline code.
- */
-export function withCommands(text: string, selection: Selection): Inline {
-  const spans: Span[] = [];
-  let from = 0;
-  for (const match of text.matchAll(/`fffactory ([^`]+)`/g)) {
-    spans.push(text.slice(from, match.index));
-    const words = (match[1] as string).split(" ");
-    spans.push({ text: fffactoryCommand(words, selection), tone: "code" });
-    from = match.index + match[0].length;
-  }
-  spans.push(text.slice(from));
-  return spans.filter((span) => span !== "");
-}
 
 /** Data in a line, never read for inline code. */
 const shown = (text: string): Inline => [verbatim(text)];

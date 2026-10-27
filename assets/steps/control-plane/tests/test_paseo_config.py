@@ -15,6 +15,8 @@ LISTEN = "100.106.58.123:6767"
 SHORT_HOSTNAME = "fff-r29c2un6-builder-1"
 DNS_NAME = "fff-r29c2un6-builder-1.taila910dc.ts.net"
 SCHEMA = "https://paseo.sh/schemas/paseo.config.v1.json"
+# Workers never use Paseo's dictation or voice mode, so the daemon downloads no speech model.
+SPEECH_OFF = {"dictation": {"enabled": False}, "voiceMode": {"enabled": False}}
 # bcrypt hashes as Paseo's own set-password writes them (bcryptjs, cost 12); never a password.
 HASH = "$2b$12$h5b4I7b2Fz0bHCm7UssJA.VS1FTMOJTN61tONuTJ0oFXl0ZQkZ8dq"
 OTHER_HASH = "$2a$12$R9h/cIPz0gi.URNNX3kh2OPST9/PgBkqquzi.Ss7KIUgO2t0jWMUW"
@@ -45,6 +47,7 @@ class PaseoConfigTest(unittest.TestCase):
             "version": 1,
             "daemon": {"listen": LISTEN, "relay": {"enabled": False},
                        "hostnames": [SHORT_HOSTNAME, DNS_NAME]},
+            "features": SPEECH_OFF,
         })
         self.assertEqual(stat.S_IMODE(self.config.stat().st_mode), 0o600)
         self.assertEqual([path.name for path in self.root.iterdir()], ["config.json"])
@@ -78,7 +81,39 @@ class PaseoConfigTest(unittest.TestCase):
             "daemon": {"listen": LISTEN, "logLevel": "debug",
                        "relay": {"enabled": False, "endpoint": "relay.example.com"},
                        "hostnames": [SHORT_HOSTNAME, DNS_NAME]},
+            "features": SPEECH_OFF,
         })
+
+    def test_speech_is_switched_off_keeping_every_other_feature_setting(self):
+        self.config.write_text(json.dumps({
+            "features": {"dictation": {"enabled": True, "stt": {"provider": "openai"}},
+                         "voiceMode": {"llm": {"provider": "claude"}},
+                         "other": {"enabled": True}},
+        }))
+        self.assertEqual(self.merged()["features"], {
+            "dictation": {"enabled": False, "stt": {"provider": "openai"}},
+            "voiceMode": {"enabled": False, "llm": {"provider": "claude"}},
+            "other": {"enabled": True},
+        })
+
+    def test_a_rerun_over_existing_feature_settings_leaves_the_config_unchanged(self):
+        self.config.write_text(json.dumps({
+            "features": {"dictation": {"enabled": True, "stt": {"provider": "openai"}}},
+        }))
+        self.merged()
+        first = self.config.read_bytes()
+        self.merged()
+        self.assertEqual(self.config.read_bytes(), first)
+
+    def test_a_feature_setting_that_is_not_an_object_fails_and_is_left_as_it_was(self):
+        for features in ([], "off", {"dictation": True}, {"voiceMode": []}):
+            with self.subTest(features=features):
+                text = json.dumps({"features": features})
+                self.config.write_text(text)
+                result = self.merge()
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("the existing Paseo config is invalid", result.stderr)
+                self.assertEqual(self.config.read_text(), text)
 
     def test_an_invalid_config_fails_and_is_left_as_it_was(self):
         for text in ("[]", '{"daemon": []}', "", "not json", "{} {}"):
@@ -112,6 +147,7 @@ class PaseoConfigTest(unittest.TestCase):
             "daemon": {"logLevel": "debug", "auth": {"password": HASH, "other": 1},
                        "listen": LISTEN, "relay": {"enabled": False},
                        "hostnames": [SHORT_HOSTNAME, DNS_NAME]},
+            "features": SPEECH_OFF,
         })
         self.assertEqual(stat.S_IMODE(self.config.stat().st_mode), 0o600)
 
@@ -139,6 +175,7 @@ class PaseoConfigTest(unittest.TestCase):
             "daemon": {"logLevel": "debug", "auth": {"other": 1},
                        "listen": LISTEN, "relay": {"enabled": False},
                        "hostnames": [SHORT_HOSTNAME, DNS_NAME]},
+            "features": SPEECH_OFF,
         })
 
     def test_without_a_hash_a_config_with_no_daemon_password_is_unchanged(self):

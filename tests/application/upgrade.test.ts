@@ -155,7 +155,7 @@ describe("fffactory upgrade (plan-apply §Upgrade)", () => {
           {
             ...builder,
             observation: "no-release",
-            changes: ["paseo-package", "service-definition", "listen-address"],
+            changes: ["paseo-package", "service-definition", "listen-address", "password"],
           },
         ],
         dispatch: [{ ...builder, requested: false, schedule: null }],

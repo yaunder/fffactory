@@ -4,13 +4,14 @@
  * running worker its gates judge (`removalGate`), the factory's Tailscale admin session, and
  * deleting tailnet devices. Each caller words its own refusals and records its own steps.
  */
+import { workerActivity } from "../domain/control-plane";
 import type { SecretMaterial } from "../domain/secrets";
 import type { Then } from "../domain/status";
 import { locateWorker } from "../domain/status";
 import type { TailnetDevice } from "../domain/tailnet";
 import type { WorkerIdentity } from "../domain/rollout";
 import type { TerminateInspection } from "../domain/worker-lifecycle";
-import type { ControlPlane } from "./control-plane";
+import { type ControlPlane, readAgents } from "./control-plane";
 import type { Interrupted } from "./factory-lock";
 import type { HostTransport } from "./host-transport";
 import { inspectRepositories } from "./inspect-repositories";
@@ -22,7 +23,7 @@ import type { TailnetPeers } from "./tailnet-peers";
 export interface RemovalInspectionDependencies {
   readonly peers: TailnetPeers;
   readonly transport: HostTransport;
-  /** Reads the agent activity; without one, a running worker cannot be inspected. */
+  /** Reads the worker's agents; without one, a running worker cannot be inspected. */
   readonly controlPlane: ControlPlane | undefined;
   readonly interrupted: Interrupted;
 }
@@ -40,9 +41,9 @@ function reasonOf(error: unknown): string {
 }
 
 /**
- * The running worker's agent activity and last repository result, then its current work: only
- * once the activity is read, since both go through the activator, which runs one operation at a
- * time, and only when the activity does not already refuse, which would leave the activator
+ * The running worker's activity by the busy rule and its last repository result, then its current
+ * work: only once the activity is read, since both go through the activator, which runs one
+ * operation at a time, and only when the activity does not already refuse, which would leave the activator
  * held for nothing (`INSPECT_WORK_TIMEOUT_MS`). A worker the tailnet does not locate is
  * `unlocated`, its verdict's next action completed by `then`. Undefined once interrupted, which
  * asks the worker nothing more.
@@ -54,19 +55,17 @@ export async function inspectForRemoval(
 ): Promise<TerminateInspection | undefined> {
   const location = locateWorker(await deps.peers.view(), target.worker, target.tag, then);
   if (location.kind === "blocked") return { kind: "unlocated", verdict: location.verdict };
-  const [activity, repositories] = await Promise.all([
-    deps.controlPlane === undefined
-      ? {
-          kind: "unknown" as const,
-          reason: "this fffactory cannot reach the worker's control plane",
-        }
-      : deps.controlPlane.activeAgents(location.worker),
+  const [agents, repositories] = await Promise.all([
+    readAgents(deps.controlPlane, location.worker),
     inspectRepositories(deps.transport, location.worker),
   ]);
   if (deps.interrupted()) return undefined;
-  if (activity.kind !== "idle") return { kind: "activity", activity };
+  const activity = workerActivity(agents);
+  if (activity.kind !== "idle") return { kind: "activity", activity, agents };
+  // Idle by the busy rule: the agents were listed.
+  const listed = agents.kind === "listed" ? agents.agents : [];
   const work = await inspectWork(deps.transport, location.worker);
-  return { kind: "inspected", repositories, work, placed: target.placed };
+  return { kind: "inspected", agents: listed, repositories, work, placed: target.placed };
 }
 
 export interface TailnetAdminDependencies {

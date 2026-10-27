@@ -130,7 +130,7 @@ if [[ ${matches} == false && ${mode} == apply ]]; then
       --mode "$(jq -r .mode <<<"${desired}")" \
       --cwd "${cwd}" "$(jq -r .prompt <<<"${desired}")" --json >/dev/null
   else
-    # Paseo 0.11.4 clears limits in place (0.9.1 misread its negated flags as values).
+    # Paseo 0.11.4 and later clear limits in place (0.9.1 misread its negated flags as values).
     # Only a limit that is set is cleared, so an ordinary update sends neither flag.
     clear_limits=()
     [[ $(jq -r '.maxRuns != null' <<<"${current}") == true ]] && clear_limits+=(--no-max-runs)

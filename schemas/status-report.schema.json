@@ -64,7 +64,8 @@
         "installation",
         "enrollment",
         "repositories",
-        "dispatch"
+        "dispatch",
+        "activity"
       ],
       "properties": {
         "key": { "type": "string", "pattern": "^[a-z][a-z0-9-]*$" },
@@ -163,9 +164,35 @@
           "description": "Each account's enrollment as the last install's verification found it, with the steps fffactory names for it; null when there is none. Paseo clients are not listed until Paseo runs on workers.",
           "type": ["array", "null"],
           "items": { "$ref": "#/$defs/enrollment" }
-        }
+        },
+        "activity": { "$ref": "#/$defs/activity" }
       },
       "$ref": "#/$defs/verdict"
+    },
+    "activity": {
+      "description": "The worker's agents in fffactory's states, as the activity call alone read them: busy while any agent is working or needs input, idle when none is, unknown when they could not be read (reason says why) or were not read (reason null). Never the work inspection.",
+      "type": "object",
+      "required": ["state", "reason", "agents"],
+      "properties": {
+        "state": { "enum": ["busy", "idle", "unknown"] },
+        "reason": { "type": ["string", "null"], "minLength": 1, "maxLength": 200 },
+        "agents": { "type": ["array", "null"], "items": { "$ref": "#/$defs/agent" } }
+      },
+      "if": { "properties": { "state": { "const": "unknown" } } },
+      "then": { "properties": { "agents": { "type": "null" } } },
+      "else": { "properties": { "reason": { "type": "null" }, "agents": { "type": "array" } } }
+    },
+    "agent": {
+      "type": "object",
+      "required": ["id", "state", "dispatched"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$" },
+        "state": { "enum": ["working", "needs_input", "finished", "failed", "stopped"] },
+        "dispatched": {
+          "description": "Whether dispatch launched it.",
+          "type": "boolean"
+        }
+      }
     },
     "enrollment": {
       "type": "object",

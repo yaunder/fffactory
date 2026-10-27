@@ -57,7 +57,7 @@ describe("fffactory plan (plan-apply §Plan)", () => {
           {
             ...BUILDER_1,
             observation: "no-release",
-            changes: ["paseo-package", "service-definition", "listen-address"],
+            changes: ["paseo-package", "service-definition", "listen-address", "password"],
           },
         ],
         dispatch: [{ ...BUILDER_1, requested: false, schedule: null }],
@@ -84,7 +84,7 @@ describe("fffactory plan (plan-apply §Plan)", () => {
             key: "builder-1" as HostKey,
             hostname: "fff-abcd1234-builder-1",
             observation: "no-release",
-            changes: ["paseo-package", "service-definition", "listen-address"],
+            changes: ["paseo-package", "service-definition", "listen-address", "password"],
           },
         ],
         dispatch: [
@@ -142,7 +142,10 @@ describe("fffactory plan (plan-apply §Plan)", () => {
         workers: [BUILDER_1],
         repositories: [{ ...BUILDER_1, placed: [] }],
         controlPlane: [
-          { ...BUILDER_1, changes: ["paseo-package", "service-definition", "listen-address"] },
+          {
+            ...BUILDER_1,
+            changes: ["paseo-package", "service-definition", "listen-address", "password"],
+          },
         ],
         dispatch: [{ ...BUILDER_1, requested: false, schedule: null }],
         stopped: [],

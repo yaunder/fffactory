@@ -1,7 +1,8 @@
 # src/host: the worker side of the host protocol
 
 What `fffactory host <subcommand>` does on a worker, where the operator's fffactory runs it
-over SSH as `fffactory-admin` (`docs/specs/host-protocol.md`). Rules:
+over SSH as `fffactory-admin`, all but `host agents`, which the dispatcher runs as `factory`
+(`docs/specs/host-protocol.md`). Rules:
 
 - Read the worker through a `WorkerSystem`, never fixed paths or `process`: its `root`
   (`/` on a worker) prefixes every path in `WORKER_PATHS`, so tests lay out a worker in a
@@ -31,10 +32,21 @@ over SSH as `fffactory-admin` (`docs/specs/host-protocol.md`). Rules:
   `runuser` and `env -i`; neither the operator nor `factory` receives broader sudo.
 - `host control-plane` runs only through the activator's fixed `activity`, `install`,
   `reload` and `restart` actions and shares that lock. Activity and reload drop to
-  `factory`; install reads the host projection from standard input, reads the Paseo password
+  `factory`. Activity runs `paseoAgents`, the one place Paseo's agent statuses are known: it
+  translates them into `domain/control-plane.ts`'s `AgentState`, inspects only `running`
+  agents, and answers `unknown` for anything it cannot read, all its calls within one budget
+  (`ACTIVITY_BUDGET_MS`) under the CLI's wait; no Paseo status, field or label
+  reaches its document. It takes a `PaseoCommand`, so another caller can run Paseo its own
+  way; install reads the host projection from standard input, reads the Paseo password
   by its reference as root and hashes it (bcryptjs at Paseo's cost), and invokes only the
   active release's setup program, the reference and the hash on its standard input; the
   password reaches only the hash function. Restart is the fixed Paseo systemd action.
+- `host agents --json` is the one subcommand neither the operator's fffactory nor the
+  activator runs: the worker's dispatcher runs it as `factory` for its capacity check, so a
+  dispatch tick never waits on the install lock. It refuses root, runs `paseoAgents` through
+  the active release's auth wrapper itself in `factory`'s clean environment
+  (`FACTORY_ENV`), within the activity's budget, prints the activity document, and exits 1
+  when the agents are unknown, so dispatch fails safe.
 - `secret-value.ts` reads a delivered secret by its ARN with `/usr/bin/aws` as root, for the
   `credentials` step and the control-plane install: a `SecretMaterial`, or why not in
   fffactory's words (the AWS error's name at most).

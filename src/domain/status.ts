@@ -4,6 +4,7 @@
  * ready, and the report's status. Pure: `application/status.ts` makes the observations.
  */
 import { type CheckResult, type CheckStatus, failed, ready, worstStatus } from "./check-result";
+import type { AgentActivity } from "./control-plane";
 import {
   HOST_PROTOCOL_VERSION,
   type HostInspection,
@@ -123,6 +124,8 @@ export interface WorkerStatus extends WorkerFacts, Verdict {
     | "unreadable"
     | "unknown";
   readonly dispatchBlockers: readonly DispatchGate[] | null;
+  /** Its agents in their states, as the activity call alone read them; unknown when not read. */
+  readonly activity: AgentActivity;
 }
 
 export interface StatusReport {

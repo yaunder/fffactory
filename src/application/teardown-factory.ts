@@ -42,6 +42,7 @@ import {
 import {
   type DispatchRecord,
   finishOperation,
+  type InspectionRecord,
   type OperationRecord,
   type OperationStatus,
   operationKey,
@@ -52,6 +53,7 @@ import {
   TEARDOWN_OPERATION,
   withDispatch,
   withHostKeys,
+  withInspections,
   withStage,
 } from "../domain/operation";
 import {
@@ -135,6 +137,7 @@ import {
   type UnresolvedSecret,
 } from "../domain/teardown";
 import { type Refusal, removalGate } from "../domain/worker-lifecycle";
+import { workerRemovability } from "../domain/worker-removability";
 import type { OperationLocation } from "./apply-factory";
 import { stateBucketState } from "./bootstrap-backend";
 import type { CallerIdentity } from "./caller-identity";
@@ -461,6 +464,8 @@ interface TeardownLog {
    */
   readonly stage: (status: TeardownStep, keys?: readonly string[]) => Promise<void>;
   readonly dispatch: (outcomes: readonly DispatchOutcome[]) => Promise<void>;
+  /** Writes each running worker's inspection, at the step reached (`inspecting`). */
+  readonly inspections: (inspections: readonly InspectionRecord[]) => Promise<void>;
   /** Ends the record; resolves to why its write failed, if it did. */
   readonly finish: (
     status: StageStatus,
@@ -520,6 +525,7 @@ function teardownLog(
       }
     },
     dispatch: (outcomes) => write(withDispatch(record, outcomes, clock())),
+    inspections: (inspections) => write(withInspections(record, inspections, clock())),
     finish: (status, outcome, failure) =>
       write(
         finishOperation(
@@ -538,6 +544,7 @@ function teardownLog(
  */
 function locklessLog(deps: TeardownDependencies): TeardownLog {
   let reached: TeardownStep = "authorizing";
+  const writesNothing = async () => undefined;
   return {
     locked: false,
     location: undefined,
@@ -546,12 +553,13 @@ function locklessLog(deps: TeardownDependencies): TeardownLog {
     gone: () => false,
     deleted: () => undefined,
     seal: () => undefined,
-    start: async () => undefined,
+    start: writesNothing,
     stage: async (status) => {
       if (!deps.interrupted()) reached = status;
     },
-    dispatch: async () => undefined,
-    finish: async () => undefined,
+    dispatch: writesNothing,
+    inspections: writesNothing,
+    finish: writesNothing,
   };
 }
 
@@ -1380,9 +1388,11 @@ async function gated(
   const changed = await machinesRechecked(deps, teardown, run.inventory.machines);
   if (deps.interrupted()) return interruptedUnder(log, progress);
   if (changed !== undefined) return refusedUnder(log, progress, [changed]);
-  const refusals = await gateRefusals(deps, teardown, run.inventory.machines, running);
-  if (refusals === undefined || deps.interrupted()) return interruptedUnder(log, progress);
-  if (refusals.length > 0) return refusedUnder(log, progress, refusals);
+  const gates = await runningGates(deps, teardown, run.inventory.machines, running);
+  if (gates === undefined || deps.interrupted()) return interruptedUnder(log, progress);
+  await log.inspections(gates.inspections);
+  if (deps.interrupted()) return interruptedUnder(log, progress);
+  if (gates.refusals.length > 0) return refusedUnder(log, progress, gates.refusals);
   return destroy(deps, teardown, log, run);
 }
 
@@ -1447,12 +1457,24 @@ function passStopped(deps: TeardownDependencies, teardown: Teardown, machines: r
   }
 }
 
-/** One running worker's fresh inspection, judged by `removalGate`; undefined once interrupted. */
+/** What the gates made of the running workers: their refusals, and each one's inspection. */
+interface Gates {
+  readonly refusals: readonly Refusal[];
+  readonly inspections: readonly InspectionRecord[];
+}
+
+/**
+ * One running worker's fresh inspection, judged by `removalGate`, and as its record carries it:
+ * the document `worker inspect --json` prints for it, never forced, as teardown has no `--force`.
+ * Undefined once interrupted.
+ */
 async function gateOf(
   deps: TeardownDependencies,
   teardown: Teardown,
   each: RunningWorker,
-): Promise<{ readonly refusal: Refusal | undefined } | undefined> {
+): Promise<
+  { readonly refusal: Refusal | undefined; readonly inspection: InspectionRecord } | undefined
+> {
   const repositories = teardown.request.instance.repositories ?? [];
   const placed = each.host === undefined ? [] : placedRepositories(repositories, each.host);
   const inspection = await inspectForRemoval(
@@ -1461,27 +1483,34 @@ async function gateOf(
     thenRerunTeardown,
   );
   if (inspection === undefined) return undefined;
-  return { refusal: removalGate(inspection, each.worker, actionsFor(each)) };
+  const actions = actionsFor(each);
+  const { inspection: document } = workerRemovability(each.worker, inspection, actions);
+  return {
+    refusal: removalGate(inspection, each.worker, actions),
+    inspection: { forced: false, document },
+  };
 }
 
 /**
- * Each running worker's fresh inspection (`inspectForRemoval`), judged by `removalGate`; a
- * stopped one passes uninspected. Undefined once interrupted.
+ * Each running worker's fresh inspection (`inspectForRemoval`), judged by `removalGate`, in the
+ * order inspected; a stopped one passes uninspected. Undefined once interrupted.
  */
-async function gateRefusals(
+async function runningGates(
   deps: TeardownDependencies,
   teardown: Teardown,
   machines: readonly Machine[],
   running: readonly RunningWorker[],
-): Promise<Refusal[] | undefined> {
+): Promise<Gates | undefined> {
   passStopped(deps, teardown, machines);
   const refusals: Refusal[] = [];
+  const inspections: InspectionRecord[] = [];
   for (const each of running) {
     const gate = await gateOf(deps, teardown, each);
     if (gate === undefined) return undefined;
     if (gate.refusal !== undefined) refusals.push(gate.refusal);
+    inspections.push(gate.inspection);
   }
-  return refusals;
+  return { refusals, inspections };
 }
 
 /** Applies exactly the approved destroy plan, then proves that nothing tagged remains (D12). */

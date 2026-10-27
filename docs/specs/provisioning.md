@@ -414,7 +414,7 @@ state. Secrets appear only as the references factory.json holds.
 | `availability_zone`, `vpc_cidr`, `public_subnet_cidr` | `network.*` |
 | `tailscale_auth_key_secret_arn` | `tailscale.auth_key_secret` |
 | `tailscale_tag` | `tailscale.tag` |
-| `paseo_password_secret_arns` | `hosts[].paseo_password_secret`, by host key, for hosts that declare one |
+| `paseo_password_secret_arns` | `hosts[].paseo_password_secret`, by host key: every host declares one |
 | `credential_secret_arns` | `credentials.github_token_secret`, `credentials.anthropic_api_key_secret`, `credentials.openai_api_key_secret`, by field name, for each one set; empty for none. Factory-wide: `interactive_logins` does not narrow it |
 | `hosts` | `hosts[]` by host key: `instance_type` and `root_volume_gib`; empty for a factory that declares no host |
 

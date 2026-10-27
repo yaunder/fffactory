@@ -34,7 +34,12 @@ import type { BucketDeletion, LockAfterDeletion } from "./state-bucket-deletion"
 import { ADMIN_CONSOLE, type Machine, type MachineState } from "./status";
 import { selectWorkerDevices, type TailnetDevice } from "./tailnet";
 import { isRecord } from "./validation";
-import { type Refusal, type RemovalGateActions, TRUST_CREDENTIALS } from "./worker-lifecycle";
+import {
+  CHECK_STATUS,
+  type Refusal,
+  type RemovalGateActions,
+  TRUST_CREDENTIALS,
+} from "./worker-lifecycle";
 
 /** The command every next action of teardown's reruns. */
 const TEARDOWN = "`fffactory teardown`";
@@ -428,8 +433,6 @@ export function teardownQuestion(factoryId: FactoryId, withoutBucket = false): s
   );
 }
 
-const CHECK_STATUS = "Check the worker with `fffactory status`";
-
 /**
  * The next actions of a gate that refuses teardown for `worker` (`removalGate`): rerun teardown,
  * or remove the worker first, uninspected. A worker factory.json declares is removed with
@@ -445,14 +448,17 @@ export function teardownGateActions(
     undeclared === undefined
       ? `run ${terminate}`
       : `terminate EC2 instance ${undeclared} in the EC2 console`;
+  const forced =
+    undeclared === undefined
+      ? `terminate it with --force: ${terminate}, and rerun ${TEARDOWN}.`
+      : `terminate EC2 instance ${undeclared} in the EC2 console, and rerun ${TEARDOWN}.`;
   return {
     orForce: (step, how) =>
       `${thenRerunTeardown(step)} To remove the worker ${how}, ${remove} first.`,
     unlocated: `${thenRerunTeardown(CHECK_STATUS)} If it cannot be inspected, remove it uninspected: ${thenRerunTeardown(remove)}`,
-    forced:
-      undeclared === undefined
-        ? `terminate it with --force: ${terminate}, and rerun ${TEARDOWN}.`
-        : `terminate EC2 instance ${undeclared} in the EC2 console, and rerun ${TEARDOWN}.`,
+    forced,
+    // The whole factory is going: an outdated worker is removed with it, never replaced.
+    outdated: forced,
   };
 }
 

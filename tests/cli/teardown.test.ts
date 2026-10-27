@@ -18,7 +18,7 @@ import {
 } from "../../src/domain/teardown";
 import { harness } from "../support/cli-harness";
 import { fakeCallerIdentity } from "../support/doctor-fakes";
-import { fakeControlPlane, fakeWorkflowQueue } from "../support/fake-control-plane";
+import { agentsIn, fakeControlPlane, fakeWorkflowQueue } from "../support/fake-control-plane";
 import { fakeFactoryWorld } from "../support/fake-provisioner";
 import { fakePrompt, fakeSecretsManager } from "../support/fake-secrets";
 import {
@@ -114,7 +114,7 @@ function world(
       tailnetAdmin: admin.admin,
       tailnet: fakeTailnet().tailnet,
       transport: fakeTransport().transport,
-      controlPlane: fakeControlPlane("healthy", { kind: "idle" }).controlPlane,
+      controlPlane: fakeControlPlane("healthy", agentsIn()).controlPlane,
       workflowQueue: fakeWorkflowQueue().queue,
       prompt: prompt.prompt,
     },

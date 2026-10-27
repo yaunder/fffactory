@@ -153,7 +153,8 @@ PATH`, such as `~/.fffactory/factory.json`) with a new permanent factory ID and
 this CLI's release as the pin, and contacts nothing.
 
 **Done when** it prints `Created PATH.`, `New factory ID: FACTORY_ID`, `Release
-pin: R` and the fields still needed.
+pin: R`, the fields still needed, and that every host needs a Paseo password
+before apply.
 
 **Otherwise:** rerunning on an existing document keeps every value and fills
 only what is missing (`Unchanged PATH: nothing to fill.`); an invalid document
@@ -191,7 +192,9 @@ fffactory validate
 ```
 
 **Done when** it prints `Valid factory.json (schema version 1).` and
-`Incomplete: 1 fields still needed:` naming only `tailscale.auth_key_secret`.
+`Incomplete: 2 fields still needed:` naming only `tailscale.auth_key_secret` and
+`hosts[0].paseo_password_secret`, the second with the `fffactory secret set
+paseo-password --host KEY` that step 6 runs.
 
 **Otherwise:** fix each `path: message` it prints to standard error (exit 1).
 Never put a key, password or token in factory.json: a secret field accepts
@@ -206,7 +209,8 @@ fffactory doctor --profile NAME
 ```
 
 **Done when** every check is ready except `factory.json`, which reports the
-document incomplete for `tailscale.auth_key_secret`; doctor exits 2.
+document missing 2 fields, `tailscale.auth_key_secret` and
+`hosts[0].paseo_password_secret`, as step 3 does; doctor exits 2.
 `fffactory doctor --json` gives the same report as a versioned document.
 
 **Otherwise:** follow each check's `Next:` line, then rerun doctor. The usual
@@ -326,8 +330,9 @@ client](docs/specs/secrets.md#the-tailscale-admin-client)).
 
 The Paseo password is the one every Paseo client of that worker types in
 [step 10](#10-enroll-paseo-clients): choose a strong, unique one and keep it in
-a password manager. factory.json does not require it, but the worker's Paseo
-daemon cannot start without it.
+a password manager. Every host needs one: its Paseo daemon cannot start
+without it, so `validate` reports factory.json incomplete until each host has
+one, naming the `secret set` command for it.
 
 **Done when** each `secret set` prints `Stored the … in Secrets Manager as NAME
 (a new secret).` and the field it set, `validate` prints `Complete: nothing
@@ -660,8 +665,8 @@ dispatch agent's timeline names the exact reason
 - one of its tasks is not open, or an open pull request mentions it;
 - a task depends on an open issue outside the epic;
 - an `epic/<id>` branch already exists on the remote;
-- the host is at its cap of running agents: wait for the running agent to
-  finish, or answer its permission request;
+- the host is at its cap: an agent dispatch started is working or needs
+  input. Wait for it to finish its turn, or answer its permission request;
 - a Paseo agent already dispatched for the epic still exists: the epic stays
   skipped while it does;
 - the repository fails the FFFlow adoption check, or its checkout is not
@@ -675,6 +680,10 @@ dispatch agent's timeline names the exact reason
   the cause remains. A checkout that is only behind is fast-forwarded, not
   skipped.
 
+A run whose worker cannot read its own agents (`fffactory host agents`, run
+by the dispatcher) fails before it starts anything, its error naming why
+([dispatch §Capacity](docs/specs/dispatch.md#capacity)).
+
 Resolve the cause; the next scheduled run considers the epic again. Never
 start an agent by hand to work around a skip.
 
@@ -685,10 +694,15 @@ start an agent by hand to work around a skip.
 Rerunning `fffactory apply` is safe: every stage converges what remains, and
 an up-to-date worker gets no Paseo lifecycle action. Paseo maintenance
 (`paseo-package`, `service-definition`, `listen-address`, `password`) restarts
-the daemon, which would end running agents, so when agents may be active apply
-defers it: the worker is `skipped` with `Paseo maintenance is deferred while
-agents may be active`, stays on its complete current release, and apply exits
-2. Close the active agents on HOSTNAME, then rerun `fffactory apply`. Live
+the daemon, which would end agents' turns, so while any agent is working or
+needs input, or fffactory cannot tell, apply defers it: the worker is `skipped`
+with `Paseo maintenance is deferred while agents may be busy`, stays on its
+complete current release, and apply exits 2 naming what to do, such as waiting
+until no agent on HOSTNAME is working or needs input, then rerunning `fffactory
+apply`. Finished agents never defer it. A worker on a release from before
+fffactory's agent states is deferred for good: apply names how to replace it
+(check its work by hand, `fffactory worker terminate KEY --keep --force`, then
+`fffactory apply`). Live
 changes such as the dispatch schedule or repositories never restart Paseo
 ([control plane §Pre-activation deferral](docs/specs/control-plane.md#pre-activation-deferral)).
 
@@ -756,11 +770,14 @@ fffactory teardown --confirm FACTORY_ID --profile NAME    # without one
 It shows what it removes and keeps, then stops dispatch, destroys every
 worker, the network and IAM, and deletes the factory's Tailscale devices, the
 secrets it owns (permanently, their absence confirmed), the local saved plans
-and the state bucket. Push or finish work on the workers first: active agents,
+and the state bucket. Push or finish work on the workers first: busy agents,
 unpushed work or unresolved checkouts refuse it, naming the worker, and it has
 no `--force` (remove such a worker first with `fffactory worker terminate KEY
---force`). A stopped worker is not inspected, and anything unpushed on its disk
-is destroyed.
+--force`). `fffactory worker inspect` shows beforehand, changing nothing,
+which workers terminate's gates would refuse and why, and the agents a removal
+would end ([worker lifecycle
+§Inspect](docs/specs/worker-lifecycle.md#inspect)). A stopped worker is not
+inspected, and anything unpushed on its disk is destroyed.
 
 **Done when** it prints `✔ Removed factory ID: nothing it owns remains`,
 exiting 0. An interrupt during the state bucket's last deletion can print that

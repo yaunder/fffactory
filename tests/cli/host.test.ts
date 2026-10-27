@@ -9,7 +9,7 @@ import {
 } from "../../src/domain/installation";
 import { verificationJson } from "../../src/domain/readiness";
 import { repositoryInspectionJson } from "../../src/domain/repository-placement";
-import { activityJson, controlPlaneActionJson } from "../../src/domain/control-plane";
+import { type Agent, activityJson, controlPlaneActionJson } from "../../src/domain/control-plane";
 import { dispatchAdoptionJson, dispatchInspectionJson } from "../../src/domain/dispatch-projection";
 import { type WorkInspection, workInspectionJson } from "../../src/domain/work-inspection";
 import { harness } from "../support/cli-harness";
@@ -71,6 +71,7 @@ describe("fffactory host inspect", () => {
     );
     expect(out).toContain("       fffactory host dispatch (adoption | reconcile | inspect)");
     expect(out).toContain("       fffactory host work inspect");
+    expect(out).toContain("       fffactory host agents --json");
   });
 });
 
@@ -148,13 +149,13 @@ describe("fffactory host control-plane", () => {
   test("prints only versioned endpoint documents and propagates failures", async () => {
     const worker = fakeWorker(inspection(HOST), {
       isRoot: () => true,
-      activity: async () => ({ kind: "active", count: 2 }),
+      activity: async () => ({ kind: "listed", agents: AGENTS }),
       install: async () => ({ kind: "done" }),
       reload: async () => ({ kind: "failed", reason: "Paseo reload exited 1" }),
     });
     const active = harness(new MemoryInstanceStore(), {}, { worker });
     expect(await run(["host", "control-plane", "activity"], active.context)).toBe(0);
-    expect(active.out).toEqual([activityJson({ kind: "active", count: 2 })]);
+    expect(active.out).toEqual([activityJson({ kind: "listed", agents: AGENTS })]);
     const install = harness(new MemoryInstanceStore(), {}, { worker });
     expect(await run(["host", "control-plane", "install"], install.context)).toBe(0);
     expect(install.out).toEqual([controlPlaneActionJson({ kind: "done" })]);
@@ -175,6 +176,53 @@ describe("fffactory host control-plane", () => {
       expect(await run(args, context)).toBe(1);
       expect(out).toEqual([]);
     }
+  });
+});
+
+describe("fffactory host agents (host protocol §agents)", () => {
+  test("prints the worker's agents as the activity document, as factory, exit 0", async () => {
+    const worker = fakeWorker(inspection(HOST), {
+      agents: async () => ({ kind: "listed", agents: AGENTS }),
+    });
+    const cli = harness(new MemoryInstanceStore(), {}, { worker });
+    expect(await run(["host", "agents", "--json"], cli.context)).toBe(0);
+    expect(cli.err).toEqual([]);
+    expect(cli.out).toEqual([activityJson({ kind: "listed", agents: AGENTS })]);
+  });
+
+  test("exits 1 with the document and its reason on one line when the agents could not be read, so dispatch fails safe", async () => {
+    const unknown = { kind: "unknown" as const, reason: "Paseo activity could not be read" };
+    const worker = fakeWorker(inspection(HOST), { agents: async () => unknown });
+    const cli = harness(new MemoryInstanceStore(), {}, { worker });
+    expect(await run(["host", "agents", "--json"], cli.context)).toBe(1);
+    expect(cli.out).toEqual([activityJson(unknown)]);
+    expect(cli.err).toEqual(["fffactory host agents: Paseo activity could not be read"]);
+  });
+
+  test("refuses root, needs --json and takes nothing else", async () => {
+    for (const [args, root] of [
+      [["host", "agents", "--json"], true],
+      [["host", "agents"], false],
+      [["host", "agents", "--json", "extra"], false],
+    ] as const) {
+      let read = false;
+      const worker = fakeWorker(inspection(HOST), {
+        isRoot: () => root,
+        agents: async () => {
+          read = true;
+          return { kind: "listed", agents: [] };
+        },
+      });
+      const cli = harness(new MemoryInstanceStore(), {}, { worker });
+      expect(await run([...args], cli.context)).toBe(1);
+      expect({ out: cli.out, read }).toEqual({ out: [], read: false });
+    }
+    const worker = fakeWorker(inspection(HOST), { isRoot: () => true });
+    const cli = harness(new MemoryInstanceStore(), {}, { worker });
+    await run(["host", "agents", "--json"], cli.context);
+    expect(cli.err).toEqual([
+      "fffactory host agents: run it as factory, never root; the dispatcher runs it",
+    ]);
   });
 });
 
@@ -207,6 +255,10 @@ describe("fffactory host repositories", () => {
 });
 
 const HOST = "fff-aaaa1111-builder-1";
+const AGENTS: readonly Agent[] = [
+  { id: "one", state: "needs_input", dispatched: true },
+  { id: "two", state: "finished", dispatched: false },
+];
 
 function applied(state: "succeeded" | "failed"): HostApplyResult {
   const steps = pendingSteps().map((step) => ({ ...step, status: "succeeded" as const }));

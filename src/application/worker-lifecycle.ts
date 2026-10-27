@@ -24,6 +24,7 @@ import {
   accountExpectation,
   type CredentialSelection,
 } from "../domain/aws-account";
+import { workerActivity } from "../domain/control-plane";
 import type { HeldLock } from "../domain/factory-lock";
 import { hostProjectionSha256, projectHost, type Sha256 } from "../domain/host-projection";
 import type { RandomBytes } from "../domain/initialization";
@@ -53,11 +54,13 @@ import {
 } from "../domain/host-removal";
 import {
   finishOperation,
+  type InspectionRecord,
   type OperationRecord,
   type OperationStatus,
   operationKey,
   type StageStatus,
   startStageOperation,
+  withInspection,
   withMachine,
   withStage,
 } from "../domain/operation";
@@ -106,15 +109,17 @@ import {
   TARGET_STATE,
   type TerminateInspection,
   terminateGate,
+  terminateGateActions,
   thenRerunWorker,
   typedKeyConfirms,
   waitStep,
   type WorkerCommand,
   WORKER_OPERATIONS,
 } from "../domain/worker-lifecycle";
+import { type RemovalObservation, workerRemovability } from "../domain/worker-removability";
 import type { OperationLocation } from "./apply-factory";
 import type { CallerIdentity } from "./caller-identity";
-import type { ControlPlane } from "./control-plane";
+import { type ControlPlane, readAgents } from "./control-plane";
 import {
   acquireFactoryLock,
   type FactoryLock,
@@ -147,7 +152,7 @@ export interface WorkerLifecycleDependencies {
   readonly control: MachineControl;
   readonly peers: TailnetPeers;
   readonly transport: HostTransport;
-  /** Reads stop's agent activity; without one, a running worker cannot be inspected. */
+  /** Reads stop's agents; without one, a running worker cannot be inspected. */
   readonly controlPlane: ControlPlane | undefined;
   readonly prompt: OperatorPrompt;
   /** Reads terminate's Tailscale admin client secret. */
@@ -514,6 +519,9 @@ function powerLog(deps: WorkerLifecycleDependencies, power: Power, lock: Factory
     stage: (status: StageStatus) => write(withStage(record, stage, status, clock())),
     machine: (instanceId: string, state: ObservedMachineState) =>
       write(withMachine(record, { ...power.worker, instance_id: instanceId, state }, clock())),
+    /** Terminate's inspection of the worker, at the step reached. */
+    inspection: (inspection: InspectionRecord) =>
+      write(withInspection(record, inspection, clock())),
     /** Ends the record; resolves to why its write failed, if it did. */
     finish: (status: StageStatus, outcome: Exclude<OperationStatus, "running">, failure?: string) =>
       write(
@@ -680,6 +688,8 @@ async function awaitUnderWay(
   progress: Progress,
   machine: Machine,
 ): Promise<WorkerPower> {
+  // Terminate only waits for a machine already being terminated: no gate runs for it.
+  await recordInspection(power, log, { kind: "shutting_down" });
   const admin = await adminFor(deps, power, log);
   if (deps.interrupted()) return interruptedUnder(log, progress);
   if (admin.kind === "refused") return refusedUnder(log, admin.refusal);
@@ -862,21 +872,15 @@ async function stopInspection(
   const location = locateWorker(await deps.peers.view(), power.worker, power.tag, then);
   if (location.kind === "blocked")
     return { kind: "unlocated", tailnet: location.tailnet, verdict: location.verdict };
-  if (deps.controlPlane === undefined)
-    return {
-      kind: "activity",
-      activity: {
-        kind: "unknown",
-        reason: "this fffactory cannot reach the worker's control plane",
-      },
-    };
-  return { kind: "activity", activity: await deps.controlPlane.activeAgents(location.worker) };
+  return {
+    kind: "activity",
+    activity: workerActivity(await readAgents(deps.controlPlane, location.worker)),
+  };
 }
 
 /**
- * Terminate's gates (`docs/specs/worker-lifecycle.md` §Gates (terminate)): a stopped machine
- * passes uninspected; a running worker is located in the tailnet, and its agent activity, last
- * repository result and current work read, unless `--force` skips them. Undefined when
+ * Terminate's gates (`docs/specs/worker-lifecycle.md` §Gates (terminate)) over what it observed
+ * of the worker (`terminateObservation`), recorded first (`recordInspection`). Undefined when
  * terminate may go on, or once interrupted.
  */
 async function terminateGates(
@@ -885,22 +889,49 @@ async function terminateGates(
   log: PowerLog,
   machine: Machine,
 ): Promise<Refusal | undefined> {
+  const observed = await terminateObservation(deps, power, log, machine);
+  if (observed === undefined) return undefined;
+  await recordInspection(power, log, observed);
+  return terminateGate(observed, power.worker, power.command as TerminateCommand);
+}
+
+/**
+ * What terminate's gates judge: a stopped machine passes uninspected; a running worker is
+ * located in the tailnet, and its agent activity, last repository result and current work read,
+ * unless `--force` skips them. Undefined once interrupted.
+ */
+async function terminateObservation(
+  deps: WorkerLifecycleDependencies,
+  power: Power,
+  log: PowerLog,
+  machine: Machine,
+): Promise<TerminateInspection | undefined> {
   if (machine.state === "stopped") {
     // Accepted risk: unpushed work on a stopped worker's disk goes unreported.
     deps.progress({ kind: "uninspected_stopped" });
-    return terminateGate({ kind: "stopped" }, power.worker, power.command as TerminateCommand);
+    return { kind: "stopped" };
   }
   if (power.request.force) {
     deps.progress({ kind: "forced", action: "terminate" });
-    return terminateGate({ kind: "forced" }, power.worker, power.command as TerminateCommand);
+    return { kind: "forced" };
   }
   await log.stage("inspecting");
   // TODO(re-evaluate when dispatch gains a pause): pause dispatch on the worker before this
   // inspection, as for stop: until then an agent dispatch starts between the check and the
   // terminate ends with the machine (an accepted race, epic #5).
-  const inspection = await terminateInspection(deps, power);
-  if (inspection === undefined) return undefined;
-  return terminateGate(inspection, power.worker, power.command as TerminateCommand);
+  return terminateInspection(deps, power);
+}
+
+/**
+ * Records terminate's inspection of the worker (§Operation record): whether `--force` was given,
+ * and the inspection document `worker inspect --json` prints for what it `observed`. Stop and
+ * start record none.
+ */
+async function recordInspection(power: Power, log: PowerLog, observed: RemovalObservation) {
+  if (power.action !== "terminate") return;
+  const actions = terminateGateActions(power.command as TerminateCommand, power.worker.key);
+  const { inspection } = workerRemovability(power.worker, observed, actions);
+  return log.inspection({ forced: power.request.force, document: inspection });
 }
 
 /** The running worker's fresh inspection (`inspectForRemoval`); undefined once interrupted. */
@@ -1237,6 +1268,7 @@ async function terminateAbsent(
   progress: Progress,
 ): Promise<WorkerPower> {
   deps.progress({ kind: "absent", ...power.worker });
+  await recordInspection(power, log, { kind: "absent" });
   const admin = await adminFor(deps, power, log);
   if (deps.interrupted()) return interruptedUnder(log, progress);
   if (admin.kind === "refused") return refusedUnder(log, admin.refusal);
