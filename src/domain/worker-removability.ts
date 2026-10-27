@@ -146,8 +146,8 @@ function judged(
         ...identity,
         verdict: "removable",
         summary:
-          `${worker.hostname} can be terminated without --force: no agent is working or needs ` +
-          "input, and no work or checkout would be lost",
+          `${worker.hostname} can be terminated: no agent is working or needs input, and no ` +
+          "work or checkout would be lost",
         details: [],
         activity,
       },

@@ -99,8 +99,8 @@ describe("worker inspect's verdict (worker-lifecycle §Inspect)", () => {
         verdict: "removable",
         not_inspected: null,
         summary:
-          "fff-abcd1234-builder-1 can be terminated without --force: no agent is working or " +
-          "needs input, and no work or checkout would be lost",
+          "fff-abcd1234-builder-1 can be terminated: no agent is working or needs input, and " +
+          "no work or checkout would be lost",
         details: [],
         activity: { state: "idle", reason: null, agents: FINISHED },
       },

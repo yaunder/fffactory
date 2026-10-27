@@ -15,6 +15,7 @@ import { namespaced } from "./resource-naming";
 import type { WorkerOutcome } from "./rollout";
 import type { DispatchGate } from "./dispatch-readiness";
 import { isRecord } from "./validation";
+import type { RemovalInspection } from "./worker-removability";
 
 export const OPERATION_SCHEMA_VERSION = 1;
 
@@ -189,6 +190,16 @@ export interface MachineRecord {
   readonly state: string;
 }
 
+/**
+ * A removal's inspection of one worker, as its record carries it: whether `--force` was given,
+ * and the inspection document as `worker inspect --json` prints it for the same inspection,
+ * embedded unchanged (`docs/specs/worker-lifecycle.md` §Operation record).
+ */
+export interface InspectionRecord {
+  readonly forced: boolean;
+  readonly document: RemovalInspection;
+}
+
 export interface OperationRecord {
   readonly schema_version: typeof OPERATION_SCHEMA_VERSION;
   /** The ID of the lock the operation holds: one lock, one operation. */
@@ -222,6 +233,17 @@ export interface OperationRecord {
    * any, which remembers none.
    */
   readonly host_keys?: readonly HostKey[];
+  /**
+   * Terminate's alone: its inspection of the worker, written once its gates are judged, or once
+   * it knows they never run (`withInspection`). Absent until then, and from a terminate refused by
+   * its machine before.
+   */
+  readonly inspection?: InspectionRecord;
+  /**
+   * Teardown's alone: its inspection of each running worker, refusals included, written with its
+   * `inspecting` step once every one is inspected (`withInspections`). Absent until then.
+   */
+  readonly inspections?: readonly InspectionRecord[];
 }
 
 /** Where the factory's operation records are kept in the state bucket: the prefix of their keys. */
@@ -415,6 +437,24 @@ export function withHostKeys(
   });
   const host_keys = [...new Set([...(record.host_keys ?? []), ...wellFormed])];
   return { ...record, host_keys, updated_at: now.toISOString() };
+}
+
+/** The terminate record with its inspection of the worker. */
+export function withInspection(
+  record: OperationRecord,
+  inspection: InspectionRecord,
+  now: Date,
+): OperationRecord {
+  return { ...record, inspection, updated_at: now.toISOString() };
+}
+
+/** The teardown record with its inspection of each running worker. */
+export function withInspections(
+  record: OperationRecord,
+  inspections: readonly InspectionRecord[],
+  now: Date,
+): OperationRecord {
+  return { ...record, inspections: [...inspections], updated_at: now.toISOString() };
 }
 
 /** An object read back from under the factory's operation records' prefix, and its text. */

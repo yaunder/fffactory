@@ -755,7 +755,7 @@ Each worker gets a verdict and its findings, in fffactory's words:
 
 | Verdict | When | Summary and details | Next action |
 | --- | --- | --- | --- |
-| `removable` | Terminate's gates pass it. | `HOSTNAME can be terminated without --force: no agent is working or needs input, and no work or checkout would be lost` | None. |
+| `removable` | Terminate's gates pass it. | `HOSTNAME can be terminated: no agent is working or needs input, and no work or checkout would be lost` | None. |
 | `refused` | A gate refuses it, a running worker cannot be inspected (the tailnet does not locate it, or its agents, current work or checkouts cannot be read), or its machine's state or the EC2 inventory refuses it. | The refusal terminate would print, word for word: `1 agent is working on HOSTNAME: terminating it would end it`, `HOSTNAME holds work not pushed to any remote: terminating it would lose it` and each checkout or worktree holding some, and so on. | Inspect's own, below. |
 | `not_inspected` | The gates never run for it: `stopped`, `shutting_down` or `absent`. | `The machine is stopped: the worker is not inspected, and unpushed work on its disk is not reported.`; `The machine is already being terminated: the worker is not inspected.`; `No EC2 instance carries its key: its machine is already gone.` | None. |
 
@@ -770,9 +770,14 @@ terminates it uninspected.``; and what terminate has checked by hand (an
 older activator, a release from before agent states, unmanaged checkouts) ends
 ``then terminate it with --force: `fffactory worker terminate KEY
 --force`.`` The verdict `not_inspected` with `forced`, `--force` having
-skipped the gates, is a removal record's
-([#102](https://github.com/yaunder/fffactory/issues/102)); inspect never
-reports it.
+skipped the gates, is only a terminate record's
+([Operation record](#operation-record)); inspect never reports it.
+
+The summaries name no command's flags, since terminate's and teardown's records
+carry the same document ([teardown §Operation record](teardown.md#operation-record)),
+and teardown has no `--force`: a `removable` worker's summary says it `can be
+terminated`, as teardown terminates its machine too. Only `forced`'s summary
+names `--force`, and only a terminate given it records that.
 
 Each worker also lists its agents as terminate's inspection read them through
 the activity call ([control plane §Agent states](control-plane.md#agent-states)):
@@ -792,7 +797,7 @@ fffactory worker inspect · release 0.3.0
 Instance  ~/factory/.fffactory/factory.json (nearest .fffactory/factory.json)
 
 ── Workers ──────────────────────────────────────────
-  ✔ builder-1   removable · fff-abcd1234-builder-1 can be terminated without --force: no agent is working or needs input, and no work or checkout would be lost
+  ✔ builder-1   removable · fff-abcd1234-builder-1 can be terminated: no agent is working or needs input, and no work or checkout would be lost
     Agents   1 finished (idle)
       finished   agent-1 (dispatched)
 
@@ -839,10 +844,9 @@ nothing else. Its structure is published as
 The `inspection` object names no next action: the next action is the judging
 command's (inspect reruns `fffactory worker inspect KEY`, terminate and
 teardown rerun themselves), while the verdict, findings and agents are the
-worker's. A removal's record is to carry that `inspection` object as it is
-([#102](https://github.com/yaunder/fffactory/issues/102)), so for the same
-inspection the record's document and `worker inspect --json`'s `inspection`
-are identical. Adding a field or a value keeps `schema_version`; consumers
+worker's. A removal's record carries that `inspection` object as it is
+([Operation record](#operation-record)), so for the same inspection the
+record's document and `worker inspect --json`'s `inspection` are identical. Adding a field or a value keeps `schema_version`; consumers
 ignore what they do not know. Removing, renaming or redefining a field needs a
 new version.
 
@@ -955,6 +959,35 @@ names why, in fffactory's words. A record whose final write fails does not
 change the outcome: `The operation record could not be finished: REASON` on
 standard error.
 
+A `worker-terminate` record also carries `inspection` (D13, [epic
+#94](https://github.com/yaunder/fffactory/issues/94)), so a caller can tell
+from the record alone whether the gates ran and what they found:
+
+- `forced`: whether `--force` was given;
+- `document`: the worker's inspection document, exactly as `worker inspect
+  --json` prints it for the same inspection ([JSON, schema version
+  1](#json-schema-version-1): `key`, `hostname`, `verdict`, `not_inspected`,
+  `summary`, `details`, `activity`), built by the same code
+  (`workerRemovability`). It is embedded unchanged, `forced` beside it rather
+  than inside, so a reader of either takes it by the same schema
+  (`$defs/inspection`).
+
+It is written once terminate knows whether its gates run and what they found,
+at the step reached: for a running worker, written again at `inspecting` once
+the inspection is judged, `removable` or `refused` with the gate's findings
+(an interrupted inspection writes none); without the gates, at `locating`,
+`not_inspected` with why: `forced` (a running worker, `--force` given),
+`stopped`, `shutting_down` (a machine already being terminated, only waited
+for) or `absent` (its machine already gone). The gates never run for the last
+three anyway, so given `--force` they say `forced: true` beside their own
+reason. A terminate refused by its machine before
+that (no single instance, `pending` or `stopping`) carries none, its `failure`
+naming why. Stop's record carries none: it has no work gate.
+
+```json
+{ "operation": "worker-terminate", "stages": [{ "name": "terminate", "status": "terminated" }], "inspection": { "forced": true, "document": { "key": "builder-1", "hostname": "fff-abcd1234-builder-1", "verdict": "not_inspected", "not_inspected": "forced", "summary": "--force: the worker is not inspected for busy agents, current work or checkouts.", "details": [], "activity": { "state": "unknown", "reason": null, "agents": null } } }, "...": "as every record" }
+```
+
 ## Interruption
 
 `worker` waits on an interrupt (`waitsOnInterrupt`,
@@ -1027,19 +1060,19 @@ what status prints of a worker.
 
 | Layer | Module | Responsibility |
 | --- | --- | --- |
-| Domain | `src/domain/worker-lifecycle.ts` | The host key check, the one target machine, what each EC2 state means for an action (`powerStep`), the gates of stop and terminate (`stopGate`, `terminateGate`, the stopped pass, the current work and the repository result; `removalGate` judges them with the next actions `RemovalGateActions` completes, terminate's own, [teardown](teardown.md)'s or inspect's; terminate's inspection carries the agents it read, `TerminateInspection`), selecting the machine and judging its state with another command's rerun (`selectMachine`, `powerStep`, inspect's), the confirmation rules (y/N, the typed key, `--confirm`), the admin client's refusals, the device removal's outcome (`deviceRemovalRefusal`), the waits' bounds and steps, the words of every refusal and next action. Pure. |
+| Domain | `src/domain/worker-lifecycle.ts` | The host key check, the one target machine, what each EC2 state means for an action (`powerStep`), the gates of stop and terminate (`stopGate`, `terminateGate`, the stopped pass, the current work and the repository result; `removalGate` judges them with the next actions `RemovalGateActions` completes, terminate's own (`terminateGateActions`), [teardown](teardown.md)'s or inspect's; terminate's inspection carries the agents it read, `TerminateInspection`), selecting the machine and judging its state with another command's rerun (`selectMachine`, `powerStep`, inspect's), the confirmation rules (y/N, the typed key, `--confirm`), the admin client's refusals, the device removal's outcome (`deviceRemovalRefusal`), the waits' bounds and steps, the words of every refusal and next action. Pure. |
 | Domain | `src/domain/worker-removability.ts` | Inspect's verdict and its inspection document, free of next actions (`RemovalInspection`: removable, refused or not inspected and why, from terminate's inspection or what its machine decides, judged by `removalGate`), with a refusal's next action beside it, completed by the judging command's `RemovalGateActions` (`WorkerRemovability`, `workerRemovability`), inspect's next actions (`inspectGateActions`, `thenRerunInspect`) and its exit code (`removalExitCode`). Pure. |
 | Domain | `src/domain/control-plane.ts` | `agentActivity`: a worker's agents as inspect and status report them. Pure. |
 | Domain | `src/domain/work-inspection.ts` | The work inspection's document, its parser, the fixed command, and what counts as unresolved work (`workFindings`). Pure. |
 | Domain | `src/domain/host-removal.ts` | Terminate's removal: factory.json without the host by own entries (`withoutHost`; the last host leaves `hosts` empty), the scoped removal rule over Terraform's JSON plan (`removalPlanRefusal`, the secret-reading policy's allowed update included), and the words of its refusals and failures. Pure; the removal plan as shown is the CLI's. |
 | Domain | `src/domain/plan.ts`, `src/domain/stable-host-keys.ts` | The D11 refusal of a host removed by hand, naming `fffactory worker terminate KEY`. |
 | Domain | `src/domain/tailnet.ts` | `selectWorkerDevices`: the devices terminate deletes (the reported hostname, never the MagicDNS label, and the factory's tag) and the untagged ones it reports. |
-| Domain | `src/domain/operation.ts` | `startStageOperation`, `withMachine` and the lifecycle stage's statuses. |
+| Domain | `src/domain/operation.ts` | `startStageOperation`, `withMachine`, terminate's inspection beside `forced` (`InspectionRecord`, `withInspection`) and the lifecycle stage's statuses. |
 | Domain | `src/domain/status.ts`, `src/domain/rollout.ts` | The `stopped` machine's verdict, `stopped`, and its next action, `fffactory worker start KEY`; a failed first boot's next action, `fffactory worker terminate KEY --keep --force`. |
 | Application | `src/application/machine-control.ts` | The `MachineControl` port: `stop`, `start`, `terminate`, `state`. |
 | Application | `src/application/tailnet-admin.ts` | The `TailnetAdmin` port: `open` (the client secret for a session), the session's `devices` and `remove`. |
 | Application | `src/application/secret-store.ts` | `SecretStore.read`: the admin client's secret, as `SecretMaterial`. |
-| Application | `src/application/worker-lifecycle.ts` | `stopWorker`, `startWorker`, `terminateWorker`: the order above, under the lock and its record; terminate's inspection, admin session and device deletion are `inspectForRemoval`, `openTailnetAdmin` and `deleteDevices` (`src/application/worker-removal.ts`), shared with [teardown](teardown.md); the inspection reuses `inspectRepositories`, then reads the current work with `inspectWork` (`src/application/inspect-work.ts`); its removal plans and applies over `Provisioner` (the factory root, `planInfrastructure`'s target and projection), keeps its plan file in `PlanStore`, and writes factory.json through `InstanceStore`. |
+| Application | `src/application/worker-lifecycle.ts` | `stopWorker`, `startWorker`, `terminateWorker`: the order above, under the lock and its record; terminate's inspection, admin session and device deletion are `inspectForRemoval`, `openTailnetAdmin` and `deleteDevices` (`src/application/worker-removal.ts`), shared with [teardown](teardown.md), and its record's inspection is `workerRemovability`'s document (`recordInspection`); the inspection reuses `inspectRepositories`, then reads the current work with `inspectWork` (`src/application/inspect-work.ts`); its removal plans and applies over `Provisioner` (the factory root, `planInfrastructure`'s target and projection), keeps its plan file in `PlanStore`, and writes factory.json through `InstanceStore`. |
 | Application | `src/application/worker-removability.ts` | `inspectRemovability`: inspect's order above, lock-free, over `inspectForRemoval` and the EC2 inventory read once; the agents through `readAgents` (`src/application/control-plane.ts`). |
 | Infrastructure | `src/infrastructure/ec2-machine-control.ts` | `ec2MachineControl` over `StopInstances`, `StartInstances`, `TerminateInstances` and `DescribeInstances` (AWS SDK for JavaScript v3, imported on first use), each call within 15 s (`EC2_CONTROL_TIMEOUT_MS`), failures by error name, a request past its deadline `unanswered`. |
 | Infrastructure | `src/infrastructure/aws-secrets-manager-store.ts` | `GetSecretValue` by ARN, within 30 s. |
@@ -1092,7 +1125,13 @@ activator exit, an answer for another worker, never quoted),
 the admin client missing, an undeclared key, another account, a pin mismatch, a
 held lock, a wrong `--confirm`, a wrong typed key, an unreadable secret and a
 refused client, all before any mutation; each gate refused and `--force`
-overriding it; a stopped worker passing uninspected; a machine already
+overriding it; a stopped worker passing uninspected; the record's inspection,
+identical to `worker inspect`'s document for the same world: removable,
+refused by busy agents, unpushed work or the tailnet, written again at
+`inspecting`; forced, `not_inspected` and never `inspecting`; stopped,
+shutting down or gone, with `--force` or without; none for a machine refused
+before the gates or in stop's record; a final write that fails leaving the
+refusal and the inspection already written; a machine already
 shutting down waited for once the typed key, asked before the wait, or
 `--confirm`, confirms it, declined or a wrong key deleting no device, and
 refused without a terminal; a worker whose only agents are finished terminated

@@ -1065,7 +1065,7 @@ const inspectionSchemaAccepts = new Ajv2020({ allErrors: true, strict: true }).c
   inspectionSchema,
 );
 const REMOVABLE_SUMMARY =
-  `${HOSTNAME} can be terminated without --force: no agent is working or needs input, and no ` +
+  `${HOSTNAME} can be terminated: no agent is working or needs input, and no ` +
   "work or checkout would be lost";
 
 describe("fffactory worker inspect (worker-lifecycle §Inspect)", () => {

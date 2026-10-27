@@ -264,7 +264,7 @@ export interface RemovalGateActions {
 }
 
 /** The next actions of terminate's own gates: rerun it as run, or with `--force`. */
-function terminateActions(command: TerminateCommand, key: HostKey): RemovalGateActions {
+export function terminateGateActions(command: TerminateCommand, key: HostKey): RemovalGateActions {
   return {
     orForce: (step, how) => orForce(command, key, step, how),
     unlocated: terminateUnlocatedAction(command, key),
@@ -548,7 +548,7 @@ export function terminateGate(
   worker: WorkerIdentity,
   command: TerminateCommand,
 ): Refusal | undefined {
-  return removalGate(inspection, worker, terminateActions(command, worker.key));
+  return removalGate(inspection, worker, terminateGateActions(command, worker.key));
 }
 
 /**

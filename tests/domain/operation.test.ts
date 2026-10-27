@@ -18,6 +18,8 @@ import {
   TEARDOWN_OPERATION,
   withDispatch,
   withHostKeys,
+  withInspection,
+  withInspections,
   withMachine,
   withVerification,
   WORKERS_STAGE,
@@ -26,6 +28,7 @@ import {
   withWorkers,
 } from "../../src/domain/operation";
 import type { WorkerOutcome } from "../../src/domain/rollout";
+import { inspectGateActions, workerRemovability } from "../../src/domain/worker-removability";
 import { verification } from "../support/fake-workers";
 
 const LOCK = newLockRecord({
@@ -504,5 +507,75 @@ describe("a teardown's remembered host keys (teardown §Operation record)", () =
         records.map((record) => stored(record, operationKey(record))),
       ),
     ).toEqual({ kind: "remembered", keys: [] });
+  });
+});
+
+describe("a removal's inspections (worker-lifecycle and teardown §Operation record)", () => {
+  const WORKER = { key: "builder-1" as HostKey, hostname: "fff-abcd1234-builder-1" };
+  const OTHER = { key: "builder-2" as HostKey, hostname: "fff-abcd1234-builder-2" };
+  /** The inspection document `worker inspect --json` prints for `worker` as `observed`. */
+  const printed = (worker: typeof WORKER, observed: Parameters<typeof workerRemovability>[1]) =>
+    workerRemovability(worker, observed, inspectGateActions(worker.key)).inspection;
+  const busy = {
+    kind: "activity",
+    activity: { kind: "busy", working: 1, needsInput: 0 },
+    agents: { kind: "listed", agents: [{ id: "agent-1", state: "working", dispatched: true }] },
+  } as const;
+
+  test("a stop's record carries none: it has no work gate", () => {
+    const started = startStageOperation({ ...LOCK, operation: "worker-stop" }, "stop", "locating");
+    expect(Object.keys(started)).not.toContain("inspection");
+    expect(Object.keys(started)).not.toContain("inspections");
+  });
+
+  test("a terminate's carries whether --force was given, beside the document inspect prints", () => {
+    const started = startStageOperation(
+      { ...LOCK, operation: "worker-terminate" },
+      "terminate",
+      "inspecting",
+    );
+    expect(Object.keys(started)).not.toContain("inspection");
+    const forced = withInspection(
+      started,
+      { forced: true, document: printed(WORKER, { kind: "forced" }) },
+      LATER,
+    );
+    expect(forced.inspection).toEqual({
+      forced: true,
+      document: {
+        key: WORKER.key,
+        hostname: WORKER.hostname,
+        verdict: "not_inspected",
+        not_inspected: "forced",
+        summary: "--force: the worker is not inspected for busy agents, current work or checkouts.",
+        details: [],
+        activity: { state: "unknown", reason: null, agents: null },
+      },
+    });
+    expect(forced.updated_at).toBe(LATER.toISOString());
+    const refused = withInspection(
+      started,
+      { forced: false, document: printed(WORKER, busy) },
+      LATER,
+    );
+    // Written as JSON, the document is byte for byte what `worker inspect --json` prints.
+    const written = JSON.parse(serializeOperation(refused)).inspection;
+    expect(written.forced).toBe(false);
+    expect(JSON.stringify(written.document, null, 2)).toBe(
+      JSON.stringify(printed(WORKER, busy), null, 2),
+    );
+  });
+
+  test("a teardown's carries one per running worker, refusals included, in the order inspected", () => {
+    const started = startTeardownOperation({ ...LOCK, operation: TEARDOWN_OPERATION });
+    expect(Object.keys(started)).not.toContain("inspections");
+    const inspections = [
+      { forced: false, document: printed(WORKER, busy) },
+      { forced: false, document: printed(OTHER, { kind: "stopped" }) },
+    ];
+    const recorded = withInspections(started, inspections, LATER);
+    expect(recorded.inspections).toEqual(inspections);
+    expect(recorded.updated_at).toBe(LATER.toISOString());
+    expect(withInspections(started, [], LATER).inspections).toEqual([]);
   });
 });

@@ -81,7 +81,7 @@ describe("worker inspect's report (worker-lifecycle §Inspect)", () => {
   test("each worker's verdict and findings, its agents by state, a tally, and the next actions", () => {
     expect(plain([REMOVABLE, BUSY, GONE])).toEqual([
       rule("Workers"),
-      "  ✔ builder-1   removable · fff-abcd1234-builder-1 can be terminated without --force: no agent is working or needs input, and no work or checkout would be lost",
+      "  ✔ builder-1   removable · fff-abcd1234-builder-1 can be terminated: no agent is working or needs input, and no work or checkout would be lost",
       "    Agents   1 finished (idle)",
       "      finished   agent-1 (dispatched)",
       "",

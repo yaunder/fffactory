@@ -15,6 +15,7 @@ import {
   teardownFactory,
 } from "../../src/application/teardown-factory";
 import type { WorkflowQueue } from "../../src/application/workflow-queue";
+import { inspectRemovability } from "../../src/application/worker-removability";
 import { newLockRecord } from "../../src/domain/factory-lock";
 import type {
   FactoryId,
@@ -444,6 +445,8 @@ describe("fffactory teardown: the happy path (teardown §Order)", () => {
       // Each worker's dispatch, as stopping it ended.
       "stopping_dispatch",
       "inspecting",
+      // Each running worker's inspection, once every one is inspected.
+      "inspecting",
       "applying",
       "verifying",
       "removing_devices",
@@ -674,6 +677,102 @@ describe("fffactory teardown: the happy path (teardown §Order)", () => {
     });
     expect(destroyed(w)).toEqual([]);
     expect(w.lockStore.buckets.has(BUCKET)).toBe(false);
+  });
+});
+
+/**
+ * What `worker inspect --json` prints of each declared worker in a world made with `options`:
+ * its own world, so teardown's is asked nothing by it.
+ */
+async function printedBy(options: WorldOptions) {
+  const w = world(options);
+  const removability = await inspectRemovability(w.deps, {
+    instance: instanceOf(w.keys),
+    key: undefined,
+    credentials: { source: "--profile", profile: "factory" },
+  });
+  if (removability.kind !== "inspected") throw new Error(`not inspected: ${removability.kind}`);
+  return removability.workers.map(({ inspection }) => inspection);
+}
+
+/** The first record written with inspections, and its stage's status then. */
+const firstInspected = (w: World) => {
+  const record = w.lockStore.operationWrites.find((written) => written.inspections !== undefined);
+  return { status: record?.stages[0]?.status, inspections: record?.inspections };
+};
+
+describe("fffactory teardown: its record carries each inspection (teardown §Operation record)", () => {
+  test("one per running worker, as worker inspect prints it, written with the inspecting step before the destroy", async () => {
+    const options: WorldOptions = {
+      workers: { "builder-1": "running", "builder-2": "running", "builder-3": "stopped" },
+    };
+    const w = world(options);
+    expect((await teardownFactory(w.deps, request(w))).kind).toBe("done");
+    // builder-3, stopped, passes uninspected: only the running workers are recorded.
+    const documents = await printedBy(options);
+    expect(documents.map(({ verdict }) => verdict)).toEqual([
+      "removable",
+      "removable",
+      "not_inspected",
+    ]);
+    expect(firstInspected(w)).toEqual({
+      status: "inspecting",
+      inspections: documents.slice(0, 2).map((document) => ({ forced: false, document })),
+    });
+    const statuses = w.lockStore.operationWrites.map(({ stages }) => stages[0]?.status);
+    const inspected = w.lockStore.operationWrites.findIndex(({ inspections }) => inspections);
+    expect(statuses.indexOf("applying")).toBeGreaterThan(inspected);
+  });
+
+  test("a refusal among them is recorded with the rest, to the record's end", async () => {
+    const options: WorldOptions = {
+      workers: { "builder-1": "running", "builder-2": "running" },
+      worker: (key) =>
+        statusAnswers(
+          readyWorker(FACTORY, key, RELEASE),
+          "synchronized",
+          key === "builder-2" ? ["/workspace/repos/scratch"] : [],
+        ),
+    };
+    const w = world(options);
+    expect((await teardownFactory(w.deps, request(w))).kind).toBe("refused");
+    const documents = await printedBy(options);
+    expect(documents.map(({ verdict }) => verdict)).toEqual(["removable", "refused"]);
+    const recorded = records(w)[0];
+    expect(recorded).toMatchObject({ status: "refused" });
+    // Byte for byte as `worker inspect --json` prints each.
+    expect(JSON.stringify(recorded?.inspections, null, 2)).toBe(
+      JSON.stringify(
+        documents.map((document) => ({ forced: false, document })),
+        null,
+        2,
+      ),
+    );
+  });
+
+  test("none before every running worker is inspected: refused by changed machines, there are none", async () => {
+    const w = world({ workers: { "builder-1": "running" } });
+    const machines = changingMachines(w.deps.machines, () => ({ kind: "machines", machines: [] }));
+    expect((await teardownFactory({ ...w.deps, machines }, request(w))).kind).toBe("refused");
+    for (const written of w.lockStore.operationWrites)
+      expect(Object.keys(written)).not.toContain("inspections");
+  });
+
+  test("a final write that fails leaves the refusal as it was, the inspections already recorded", async () => {
+    const w = world({ workers: { "builder-1": "running" }, agents: agentsIn("working") });
+    const write = w.lockStore.writeOperation.bind(w.lockStore);
+    w.lockStore.writeOperation = async (bucket, record) => {
+      if (record.finished_at !== null) throw new Error("S3 PutObject failed: AccessDenied");
+      await write(bucket, record);
+    };
+    expect(await teardownFactory(w.deps, request(w))).toMatchObject({
+      kind: "refused",
+      recordFailure: "S3 PutObject failed: AccessDenied",
+    });
+    expect(records(w)[0]).toMatchObject({
+      status: "running",
+      inspections: [{ forced: false, document: { verdict: "refused" } }],
+    });
   });
 });
 
