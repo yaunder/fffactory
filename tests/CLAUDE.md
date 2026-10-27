@@ -83,7 +83,10 @@ records every call, so a test can assert EC2 was never asked to change anything
 recording every call and the secret each `open` got, and `fake-secrets.ts`'s
 `fakeSecretStore` reading the admin client by its ARN. Terminate's work inspection answers
 through the same scripted transport: `statusAnswers` answers it, by default with no work, or
-with `workAnswer`'s document or any outcome a test gives. Terminate removing the host plans and
+with `workAnswer`'s document or any outcome a test gives. `worker inspect` runs terminate's
+inspection over the same fakes, and a test asserts it took no lock and asked EC2 and the admin
+client nothing. The CLI harness wires no `controlPlane` unless a test gives one: status then
+reports every worker's activity unknown, and its tests give `fakeControlPlane` for agents. Terminate removing the host plans and
 applies against `fakeFactoryWorld` (whose network exists once it is given hosts or applied,
 and stays when its last host is removed, as an empty factory's does; which plans deleting a
 provisioned key no longer declared,

@@ -773,8 +773,11 @@ secrets it owns (permanently, their absence confirmed), the local saved plans
 and the state bucket. Push or finish work on the workers first: busy agents,
 unpushed work or unresolved checkouts refuse it, naming the worker, and it has
 no `--force` (remove such a worker first with `fffactory worker terminate KEY
---force`). A stopped worker is not inspected, and anything unpushed on its disk
-is destroyed.
+--force`). `fffactory worker inspect` shows beforehand, changing nothing,
+which workers terminate's gates would refuse and why, and the agents a removal
+would end ([worker lifecycle
+§Inspect](docs/specs/worker-lifecycle.md#inspect)). A stopped worker is not
+inspected, and anything unpushed on its disk is destroyed.
 
 **Done when** it prints `✔ Removed factory ID: nothing it owns remains`,
 exiting 0. An interrupt during the state bucket's last deletion can print that

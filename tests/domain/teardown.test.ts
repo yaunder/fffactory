@@ -530,6 +530,13 @@ describe("the gates teardown judges each running worker by (teardown §Gates)", 
   const busy = {
     kind: "activity",
     activity: { kind: "busy", working: 1, needsInput: 1 },
+    agents: {
+      kind: "listed",
+      agents: [
+        { id: "agent-1", state: "working", dispatched: true },
+        { id: "agent-2", state: "needs_input", dispatched: false },
+      ],
+    },
   } as const;
 
   test("refuses as terminate does, its next actions rerunning teardown or terminating first", () => {
@@ -560,6 +567,7 @@ describe("the gates teardown judges each running worker by (teardown §Gates)", 
     const outdated = {
       kind: "activity",
       activity: { kind: "unknown", reason: OUTDATED_AGENTS, outdated: true },
+      agents: { kind: "outdated" },
     } as const;
     const refusal = removalGate(outdated, worker, teardownGateActions(worker));
     expect(refusal?.summary).toBe(

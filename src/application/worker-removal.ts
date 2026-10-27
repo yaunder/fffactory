@@ -11,7 +11,7 @@ import { locateWorker } from "../domain/status";
 import type { TailnetDevice } from "../domain/tailnet";
 import type { WorkerIdentity } from "../domain/rollout";
 import type { TerminateInspection } from "../domain/worker-lifecycle";
-import type { ControlPlane } from "./control-plane";
+import { type ControlPlane, readAgents } from "./control-plane";
 import type { Interrupted } from "./factory-lock";
 import type { HostTransport } from "./host-transport";
 import { inspectRepositories } from "./inspect-repositories";
@@ -56,19 +56,16 @@ export async function inspectForRemoval(
   const location = locateWorker(await deps.peers.view(), target.worker, target.tag, then);
   if (location.kind === "blocked") return { kind: "unlocated", verdict: location.verdict };
   const [agents, repositories] = await Promise.all([
-    deps.controlPlane === undefined
-      ? {
-          kind: "unknown" as const,
-          reason: "this fffactory cannot reach the worker's control plane",
-        }
-      : deps.controlPlane.agents(location.worker),
+    readAgents(deps.controlPlane, location.worker),
     inspectRepositories(deps.transport, location.worker),
   ]);
   if (deps.interrupted()) return undefined;
   const activity = workerActivity(agents);
-  if (activity.kind !== "idle") return { kind: "activity", activity };
+  if (activity.kind !== "idle") return { kind: "activity", activity, agents };
+  // Idle by the busy rule: the agents were listed.
+  const listed = agents.kind === "listed" ? agents.agents : [];
   const work = await inspectWork(deps.transport, location.worker);
-  return { kind: "inspected", repositories, work, placed: target.placed };
+  return { kind: "inspected", agents: listed, repositories, work, placed: target.placed };
 }
 
 export interface TailnetAdminDependencies {

@@ -72,6 +72,32 @@ export function workerActivity(agents: AgentsObservation): WorkerActivity {
   }
 }
 
+/**
+ * A worker's activity as status and `worker inspect` report it, in fffactory's words: the busy
+ * rule's verdict (`unknown` too when its agents were not read at all), why its agents could not
+ * be read, and each agent in its state when they were listed.
+ */
+export interface AgentActivity {
+  readonly state: WorkerActivity["kind"];
+  /** Why the agents could not be read; null when they were listed, or not read at all. */
+  readonly reason: string | null;
+  readonly agents: readonly Agent[] | null;
+}
+
+/** The activity of a worker whose agents read as `agents`, or were not read (`undefined`). */
+export function agentActivity(agents: AgentsObservation | undefined): AgentActivity {
+  if (agents === undefined) return { state: "unknown", reason: null, agents: null };
+  const activity = workerActivity(agents);
+  return {
+    state: activity.kind,
+    reason: activity.kind === "unknown" ? activity.reason : null,
+    agents:
+      agents.kind === "listed"
+        ? agents.agents.map(({ id, state, dispatched }) => ({ id, state, dispatched }))
+        : null,
+  };
+}
+
 function agentCount(count: number): string {
   return count === 1 ? "1 agent" : `${count} agents`;
 }

@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   activityJson,
+  agentActivity,
   AGENT_STATES,
   type AgentState,
   type AgentsObservation,
@@ -22,7 +23,7 @@ const AGENTS = [
 ];
 
 /** A worker listing one agent in each of `states`. */
-function listing(...states: AgentState[]): WorkerAgents {
+function listing(...states: AgentState[]): Extract<WorkerAgents, { readonly kind: "listed" }> {
   return {
     kind: "listed",
     agents: states.map((state, index) => ({ id: `agent-${index}`, state, dispatched: true })),
@@ -95,6 +96,46 @@ describe("the busy rule (control-plane §Agent states)", () => {
       );
     },
   );
+});
+
+describe("a worker's activity as status and worker inspect report it (control-plane §Agent states)", () => {
+  test("listed agents: the busy rule's verdict and every agent in its state", () => {
+    expect(agentActivity({ kind: "listed", agents: AGENTS })).toEqual({
+      state: "busy",
+      reason: null,
+      agents: AGENTS,
+    });
+    expect(agentActivity(listing("finished", "stopped"))).toEqual({
+      state: "idle",
+      reason: null,
+      agents: listing("finished", "stopped").agents,
+    });
+    expect(agentActivity(listing())).toEqual({ state: "idle", reason: null, agents: [] });
+  });
+
+  test("agents that could not be read are unknown, saying why, and list none", () => {
+    expect(agentActivity({ kind: "unknown", reason: "Paseo activity could not be read" })).toEqual({
+      state: "unknown",
+      reason: "Paseo activity could not be read",
+      agents: null,
+    });
+    expect(agentActivity({ kind: "outdated" })).toEqual({
+      state: "unknown",
+      reason: OUTDATED_AGENTS,
+      agents: null,
+    });
+  });
+
+  test("agents not read at all are unknown, without a reason", () => {
+    expect(agentActivity(undefined)).toEqual({ state: "unknown", reason: null, agents: null });
+  });
+
+  test("copies each agent by its own fields alone", () => {
+    const extra = { id: "e1c7", state: "working" as const, dispatched: false, title: "x" };
+    expect(agentActivity({ kind: "listed", agents: [extra] }).agents).toEqual([
+      { id: "e1c7", state: "working", dispatched: false },
+    ]);
+  });
 });
 
 describe("control-plane protocol documents", () => {

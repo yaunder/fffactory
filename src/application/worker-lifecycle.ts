@@ -115,7 +115,7 @@ import {
 } from "../domain/worker-lifecycle";
 import type { OperationLocation } from "./apply-factory";
 import type { CallerIdentity } from "./caller-identity";
-import type { ControlPlane } from "./control-plane";
+import { type ControlPlane, readAgents } from "./control-plane";
 import {
   acquireFactoryLock,
   type FactoryLock,
@@ -865,11 +865,7 @@ async function stopInspection(
     return { kind: "unlocated", tailnet: location.tailnet, verdict: location.verdict };
   return {
     kind: "activity",
-    activity: workerActivity(
-      deps.controlPlane === undefined
-        ? { kind: "unknown", reason: "this fffactory cannot reach the worker's control plane" }
-        : await deps.controlPlane.agents(location.worker),
-    ),
+    activity: workerActivity(await readAgents(deps.controlPlane, location.worker)),
   };
 }
 

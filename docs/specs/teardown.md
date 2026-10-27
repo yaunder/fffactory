@@ -974,7 +974,7 @@ names.
 | Infrastructure | `src/infrastructure/aws-s3-lock-store.ts` | `readOperations`: ListObjectsV2 under the operation records' prefix, page by page, then GetObject of each, a few at a time, each with its own deadline. |
 | Infrastructure | `src/infrastructure/tailscale-api-admin.ts` | `tailscaleApiBase`: Tailscale's API, or the loopback stand-in `FFFACTORY_TAILSCALE_API` names, read only run from source ([worker lifecycle §Tailnet device removal](worker-lifecycle.md#tailnet-device-removal)). |
 | CLI adapter | `src/cli/commands/teardown.ts` | `fffactory teardown`: its arguments, refused unechoed; the use case wired to the context; the review and each step streamed; the account check's refusal; the exit code (0 done, 2 partial, 1 otherwise; 128 + N by `src/cli/interrupts.ts`); `waitsOnInterrupt`. |
-| CLI adapter | `src/cli/presentation/teardown.ts` | The review (`teardownReviewBlocks`), each step (`teardownProgressLine`), and every outcome as one report on one stream (`teardownOutcome`), with `withCommands` for fffactory's words that name commands. |
+| CLI adapter | `src/cli/presentation/teardown.ts` | The review (`teardownReviewBlocks`), each step (`teardownProgressLine`), and every outcome as one report on one stream (`teardownOutcome`), with `withCommands` (`src/cli/presentation/command-line.ts`) for fffactory's words that name commands. |
 
 Tests: `tests/domain/teardown.test.ts` (device selection: known keys exactly
 and ignoring case, untagged look-alikes listed, a generated ID's other tagged

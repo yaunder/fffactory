@@ -6,6 +6,7 @@ import { run } from "../../src/cli/run";
 import type { SecretReference } from "../../src/domain/instance";
 import { harness } from "../support/cli-harness";
 import { fakeCallerIdentity } from "../support/doctor-fakes";
+import { agentsIn, fakeControlPlane } from "../support/fake-control-plane";
 import {
   statusAnswers,
   fakeMachineInventory,
@@ -62,7 +63,10 @@ function ready() {
   });
 }
 
-/** builder-1 offline in the tailnet, builder-2 ready: the fixture's scenario. */
+/** A worker's control plane: one agent working, two finished. */
+const BUSY = fakeControlPlane("healthy", agentsIn("working", "finished", "finished")).controlPlane;
+
+/** builder-1 offline in the tailnet, builder-2 ready and busy: the fixture's scenario. */
 function offlineScenario() {
   return harness(
     store(),
@@ -71,6 +75,7 @@ function offlineScenario() {
       machines: RUNNING,
       tailnet: fakeTailnet(peers(peer(B1, { online: false }), peer(B2))).tailnet,
       transport: ready().transport,
+      controlPlane: BUSY,
     },
   );
 }
@@ -249,9 +254,11 @@ describe("fffactory status human output", () => {
         "Workers:",
         `  not ready  builder-1 (${B1}): Offline in the tailnet`,
         "             Machine: running (i-0000000000000000a); Tailscale: offline; Release: unknown; Repositories: unknown; Dispatch: unknown",
+        "             Agents: unknown",
         "             Next: Check that the instance is running and that Tailscale is up on it, then rerun `fffactory status`.",
         `  ready      builder-2 (${B2}): Ready on release 0.1.0`,
         "             Machine: running (i-0000000000000000b); Tailscale: online; Release: 0.1.0; Repositories: synchronized; Dispatch: not_requested",
+        "             Agents: 1 working, 2 finished (busy)",
         "",
         "Not ready: 1 of 4 entries needs attention.",
       ].join("\n"),
@@ -304,6 +311,7 @@ describe("fffactory status, a stopped worker (status §Workers)", () => {
         }).machines,
         tailnet: fakeTailnet(peers(peer(B1, { online: false }), peer(B2))).tailnet,
         transport: transport.transport,
+        controlPlane: fakeControlPlane("healthy", agentsIn("finished")).controlPlane,
       },
     );
     return { ...scenario, transport };
@@ -312,13 +320,15 @@ describe("fffactory status, a stopped worker (status §Workers)", () => {
   test("exits 0, shows it stopped with the start command and never connects to it", async () => {
     const { context, out, transport } = stoppedScenario();
     expect(await run(["status"], context)).toBe(0);
-    expect(out.slice(-8)).toEqual([
+    expect(out.slice(-10)).toEqual([
       "Workers:",
       `  stopped    builder-1 (${B1}): Stopped`,
       "             Machine: stopped (i-0000000000000000a); Tailscale: not_checked; Release: unknown; Repositories: unknown; Dispatch: unknown",
+      "             Agents: unknown",
       "             Next: Start it with `fffactory worker start builder-1`, then rerun `fffactory status`.",
       `  ready      builder-2 (${B2}): Ready on release 0.1.0`,
       "             Machine: running (i-0000000000000000b); Tailscale: online; Release: 0.1.0; Repositories: synchronized; Dispatch: not_requested",
+      "             Agents: 1 finished (idle)",
       "",
       "Ready: 1 of 2 workers is ready; 1 is stopped.",
     ]);
@@ -515,6 +525,7 @@ describe("fffactory status --json", () => {
         machines: RUNNING,
         tailnet: fakeTailnet(peers(peer(B1, { online: false }), peer(B2))).tailnet,
         transport: ready().transport,
+        controlPlane: BUSY,
         styles: { out: ansiStyle, err: ansiStyle },
       },
     );

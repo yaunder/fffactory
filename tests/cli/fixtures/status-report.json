@@ -50,7 +50,12 @@
         "state": "unknown",
         "blockers": null
       },
-      "enrollment": null
+      "enrollment": null,
+      "activity": {
+        "state": "unknown",
+        "reason": null,
+        "agents": null
+      }
     },
     {
       "key": "builder-2",
@@ -94,7 +99,28 @@
           "state": "enrolled",
           "next_action": null
         }
-      ]
+      ],
+      "activity": {
+        "state": "busy",
+        "reason": null,
+        "agents": [
+          {
+            "id": "agent-1",
+            "state": "working",
+            "dispatched": true
+          },
+          {
+            "id": "agent-2",
+            "state": "finished",
+            "dispatched": false
+          },
+          {
+            "id": "agent-3",
+            "state": "finished",
+            "dispatched": false
+          }
+        ]
+      }
     }
   ]
 }

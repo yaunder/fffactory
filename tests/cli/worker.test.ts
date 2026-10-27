@@ -1,4 +1,7 @@
 import { describe, expect, test } from "bun:test";
+import Ajv2020 from "ajv/dist/2020";
+import statusSchema from "../../schemas/status-report.schema.json";
+import inspectionSchema from "../../schemas/worker-inspection.schema.json";
 import type { AgentsObservation } from "../../src/domain/control-plane";
 import type { HostCommandOutcome } from "../../src/application/host-transport";
 import type { MachineControl } from "../../src/application/machine-control";
@@ -468,7 +471,9 @@ describe("fffactory worker arguments", () => {
   test("needs a subcommand", async () => {
     const cli = setup();
     expect(await run(["worker"], cli.context)).toBe(1);
-    expect(cli.err[0]).toBe("fffactory worker: expected a subcommand: stop, start, terminate");
+    expect(cli.err[0]).toBe(
+      "fffactory worker: expected a subcommand: stop, start, terminate, inspect",
+    );
   });
 
   test("needs exactly one KEY", async () => {
@@ -1052,5 +1057,255 @@ describe("fffactory worker terminate (worker-lifecycle §Terminate (remove))", (
       "Interrupted: the factory stays locked, with a record of this operation. Once fffactory " +
         "has exited, break the lock with `fffactory lock break`.",
     ]);
+  });
+});
+
+const rule = (title: string) => `── ${title} ${"─".repeat(Math.max(2, 49 - title.length))}`;
+const inspectionSchemaAccepts = new Ajv2020({ allErrors: true, strict: true }).compile(
+  inspectionSchema,
+);
+const REMOVABLE_SUMMARY =
+  `${HOSTNAME} can be terminated without --force: no agent is working or needs input, and no ` +
+  "work or checkout would be lost";
+
+describe("fffactory worker inspect (worker-lifecycle §Inspect)", () => {
+  test("reports each worker's verdict and agents, exit 0, taking no lock and changing nothing", async () => {
+    const cli = setup({ agents: agentsIn("finished") });
+    const untouched = JSON.stringify(cli.lockStore);
+    expect(await run(["worker", "inspect"], cli.context)).toBe(0);
+    expect(cli.err).toEqual([]);
+    expect(cli.out).toEqual([
+      "fffactory worker inspect · release 0.3.0",
+      `Instance  ${PATH} (nearest .fffactory/factory.json)`,
+      "",
+      rule("Workers"),
+      `  ✔ builder-1   removable · ${REMOVABLE_SUMMARY}`,
+      "    Agents   1 finished (idle)",
+      "      finished   agent-1 (dispatched)",
+      "",
+      "  ↷ builder-2   not inspected · No EC2 instance carries its key: its machine is already gone.",
+      "",
+      "✔ 1 removable, 1 not inspected",
+    ]);
+    expect(JSON.stringify(cli.lockStore)).toBe(untouched);
+    expect(cli.control.mutations()).toEqual([]);
+    expect(cli.admin.calls).toEqual([]);
+  });
+
+  test("a refused worker exits 2, its next action repeating the instance given", async () => {
+    const cli = setup({ agents: agentsIn("working", "finished") });
+    expect(await run(["worker", "inspect", KEY, "--instance", PATH], cli.context)).toBe(2);
+    expect(cli.out.slice(3)).toEqual([
+      rule("Workers"),
+      `  ! builder-1   refused · 1 agent is working on ${HOSTNAME}: terminating it would end it`,
+      "    Agents   1 working, 1 finished (busy)",
+      "      working    agent-1 (dispatched)",
+      "      finished   agent-2",
+      "",
+      "! 1 refused",
+      "",
+      rule("Next"),
+      "  builder-1: Wait until no agent there is working or needs input, then rerun " +
+        `\`fffactory worker inspect builder-1 --instance ${PATH}\`, or terminate it anyway with ` +
+        `\`fffactory worker terminate builder-1 --force --instance ${PATH}\`.`,
+    ]);
+  });
+
+  test("unpushed work refuses it, listed where terminate would list it", async () => {
+    const cli = setup({
+      work: workAnswer(HOSTNAME, [
+        {
+          path: "/workspace/repos/acme/widget",
+          state: "inspected",
+          unpushed_commits: 0,
+          unpushed_branches: [],
+          stashes: 1,
+          worktrees: [],
+        },
+      ]),
+    });
+    expect(await run(["worker", "inspect", KEY], cli.context)).toBe(2);
+    expect(cli.out).toContain(
+      `  ! builder-1   refused · ${HOSTNAME} holds work not pushed to any remote: terminating it would lose it`,
+    );
+    expect(cli.out).toContain("    /workspace/repos/acme/widget: 1 stash entry");
+  });
+
+  test("a stopped worker is not inspected, as terminate passes it, and keeps exit 0", async () => {
+    const cli = setup({ state: "stopped" });
+    expect(await run(["worker", "inspect", KEY], cli.context)).toBe(0);
+    expect(cli.out).toContain(
+      "  ◼ builder-1   not inspected · The machine is stopped: the worker is not inspected, and unpushed work on its disk is not reported.",
+    );
+    expect(cli.controlPlane.calls).toEqual([]);
+    expect(cli.transport.calls).toEqual([]);
+  });
+
+  test("--json prints the versioned inspection document, and only it, on standard output", async () => {
+    const cli = setup({ agents: agentsIn("working") });
+    expect(await run(["worker", "inspect", "--json"], cli.context)).toBe(2);
+    expect(cli.out).toHaveLength(1);
+    expect(cli.err).toEqual([
+      "fffactory worker inspect · release 0.3.0",
+      `Instance  ${PATH} (nearest .fffactory/factory.json)`,
+    ]);
+    const document = JSON.parse(cli.out[0] ?? "");
+    expect(inspectionSchemaAccepts(document)).toBe(true);
+    expect(document).toEqual({
+      schema_version: 1,
+      release: "0.3.0",
+      factory: {
+        factory_id: FACTORY,
+        account_id: "123456789012",
+        region: "eu-west-2",
+        release: RELEASE,
+      },
+      workers: [
+        {
+          inspection: {
+            key: KEY,
+            hostname: HOSTNAME,
+            verdict: "refused",
+            not_inspected: null,
+            summary: `1 agent is working on ${HOSTNAME}: terminating it would end it`,
+            details: [],
+            activity: {
+              state: "busy",
+              reason: null,
+              agents: [{ id: "agent-1", state: "working", dispatched: true }],
+            },
+          },
+          next_action:
+            "Wait until no agent there is working or needs input, then rerun " +
+            "`fffactory worker inspect builder-1`, or terminate it anyway with " +
+            "`fffactory worker terminate builder-1 --force`.",
+        },
+        {
+          inspection: {
+            key: "builder-2",
+            hostname: `${FACTORY}-builder-2`,
+            verdict: "not_inspected",
+            not_inspected: "absent",
+            summary: "No EC2 instance carries its key: its machine is already gone.",
+            details: [],
+            activity: { state: "unknown", reason: null, agents: null },
+          },
+          next_action: null,
+        },
+      ],
+    });
+  });
+
+  test("every verdict and reason validates against the schema; a mismatch does not", async () => {
+    const cli = setup({ agents: { kind: "outdated" }, state: "running" });
+    expect(await run(["worker", "inspect", "--json"], cli.context)).toBe(2);
+    const document = JSON.parse(cli.out[0] ?? "");
+    const [refused, absent] = document.workers;
+    expect(refused.inspection.activity).toEqual({
+      state: "unknown",
+      reason: "its release predates fffactory's agent states",
+      agents: null,
+    });
+    expect(inspectionSchemaAccepts(document)).toBe(true);
+    const accepts = (worker: unknown) =>
+      inspectionSchemaAccepts({ ...document, workers: [worker] });
+    // A next action exactly when refused.
+    expect(
+      accepts({ ...refused, inspection: { ...refused.inspection, verdict: "removable" } }),
+    ).toBe(false);
+    expect(accepts({ ...refused, next_action: null })).toBe(false);
+    expect(accepts({ ...absent, next_action: "Rerun it." })).toBe(false);
+    // Why a worker was not inspected, exactly when it was not.
+    expect(accepts({ ...absent, inspection: { ...absent.inspection, not_inspected: null } })).toBe(
+      false,
+    );
+    // The document alone, its next action inside it, is not a worker: the action is inspect's.
+    expect(accepts({ next_action: refused.next_action, ...refused.inspection })).toBe(false);
+  });
+
+  test("its agents are reported as status reports them: one schema definition", () => {
+    expect(inspectionSchema.$defs.activity).toEqual(statusSchema.$defs.activity);
+    expect(inspectionSchema.$defs.agent).toEqual(statusSchema.$defs.agent);
+  });
+
+  test("needs no particular release, not even the one factory.json pins", async () => {
+    const cli = setup({ instance: { ...declaring(KEY), release: "0.2.0" as Release } });
+    expect(await run(["worker", "inspect", KEY], cli.context)).toBe(0);
+    expect(cli.err).toEqual([]);
+    expect(cli.out).toContain(`  ✔ builder-1   removable · ${REMOVABLE_SUMMARY}`);
+  });
+
+  test("interrupted, it prints no report", async () => {
+    const cli = setup();
+    const context = { ...cli.context, interrupted: () => true };
+    expect(await run(["worker", "inspect"], context)).toBe(1);
+    expect(cli.out.slice(2)).toEqual([]);
+    expect(cli.err).toEqual([]);
+  });
+});
+
+describe("fffactory worker inspect's refusals (worker-lifecycle §Inspect)", () => {
+  test("a KEY factory.json does not declare, before anything reaches AWS", async () => {
+    const cli = setup();
+    expect(await run(["worker", "inspect", "builder-9"], cli.context)).toBe(1);
+    expect(cli.err).toEqual([
+      "",
+      "✖ Refusing to inspect the worker: factory.json declares no host builder-9",
+      "  Declared hosts: builder-1, builder-2",
+      "",
+      rule("Next"),
+      "  Name a host factory.json declares (hosts[].key)",
+    ]);
+    expect(cli.identity.requests).toEqual([]);
+  });
+
+  test("an argument that is not a host key is never echoed", async () => {
+    const cli = setup();
+    const pasted = "tskey-auth-kExample1CNTRL-secretvalue";
+    expect(await run(["worker", "inspect", pasted], cli.context)).toBe(1);
+    expect(cli.err).toContain(
+      "✖ Refusing to inspect the worker: The KEY argument is not a host key",
+    );
+    expect(all(cli)).not.toContain(pasted);
+  });
+
+  test("another account, an incomplete factory.json, and bad arguments exit 1", async () => {
+    const other = setup({
+      identity: fakeCallerIdentity({
+        kind: "caller",
+        caller: { account: "210987654321", arn: "arn:aws:iam::210987654321:user/other" },
+      }),
+    });
+    expect(await run(["worker", "inspect"], other.context)).toBe(1);
+    expect(other.err[0]).toStartWith("Refusing to inspect the workers: ");
+    const { aws: _aws, ...incomplete } = declaring(KEY);
+    const unready = setup({ instance: incomplete as FactoryInstance });
+    expect(await run(["worker", "inspect"], unready.context)).toBe(1);
+    expect(unready.err).toContain("✖ Refusing to inspect the workers: factory.json is not ready:");
+    expect(unready.err).toContain("  aws.account_id: is required to inspect a worker");
+    const cli = setup();
+    expect(await run(["worker", "inspect", KEY, "builder-2"], cli.context)).toBe(1);
+    expect(cli.err.at(-1)).toBe("fffactory worker inspect: expected at most one host KEY");
+    expect(await run(["worker", "inspect", "--profile", ""], cli.context)).toBe(1);
+    expect(cli.err.at(-1)).toBe("fffactory worker inspect: --profile needs a profile name");
+    expect(await run(["worker", "inspect", "--force"], cli.context)).toBe(1);
+    expect(cli.identity.requests).toEqual([]);
+  });
+
+  test("is in the usage", async () => {
+    const cli = setup();
+    expect(await run(["worker", "--help"], cli.context)).toBe(0);
+    expect(cli.out).toContain(
+      "       fffactory worker inspect [KEY] [--json] [--instance PATH] [--profile NAME]",
+    );
+  });
+
+  test("the usage scopes the release pin, the lock and their exit codes to the others", async () => {
+    const cli = setup();
+    expect(await run(["worker", "--help"], cli.context)).toBe(0);
+    const usage = cli.out.join("\n");
+    expect(usage).toContain("Stop, start and terminate are refused, changing nothing,");
+    expect(usage).toContain("Interrupting one leaves the factory locked");
+    expect(usage).toContain("Stop, start and terminate exit 0 once the worker is stopped,");
   });
 });

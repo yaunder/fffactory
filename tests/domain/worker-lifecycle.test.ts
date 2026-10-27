@@ -29,6 +29,7 @@ import {
   requestUnanswered,
   selectMachine,
   stopGate,
+  type TerminateInspection,
   terminateGate,
   thenRerunWorker,
   typedKeyConfirms,
@@ -53,6 +54,27 @@ function unreadable(reason: string): BlockingActivity {
 
 /** An activity answer without the agent list, from a worker on a release before agent states. */
 const OUTDATED: BlockingActivity = { kind: "unknown", reason: OUTDATED_AGENTS, outdated: true };
+
+/** Terminate's inspection of a worker whose `activity` refuses, with agents read to match. */
+function blocking(activity: BlockingActivity): TerminateInspection {
+  if (activity.kind === "busy")
+    return {
+      kind: "activity",
+      activity,
+      agents: {
+        kind: "listed",
+        agents: [
+          ...Array.from({ length: activity.working }, () => "working" as const),
+          ...Array.from({ length: activity.needsInput }, () => "needs_input" as const),
+        ].map((state, index) => ({ id: `agent-${index + 1}`, state, dispatched: false })),
+      },
+    };
+  return {
+    kind: "activity",
+    activity,
+    agents: activity.outdated ? { kind: "outdated" } : { kind: "unknown", reason: activity.reason },
+  };
+}
 
 function machine(state: Machine["state"], hostKey = "builder-1", instanceId = ID): Machine {
   return { instanceId, state, hostKey };
@@ -540,6 +562,7 @@ describe("terminate's gates (worker-lifecycle §Gates (terminate))", () => {
       terminateGate(
         {
           kind: "inspected",
+          agents: [],
           placed: [],
           repositories: synchronized(),
           work: work([widget({ untracked_files: 1 })]),
@@ -562,6 +585,7 @@ describe("terminate's gates (worker-lifecycle §Gates (terminate))", () => {
       terminateGate(
         {
           kind: "inspected",
+          agents: [],
           placed: [],
           repositories: synchronized(),
           work: { kind: "unknown", reason: "no answer within 2 min", unsupported: false },
@@ -584,6 +608,7 @@ describe("terminate's gates (worker-lifecycle §Gates (terminate))", () => {
       terminateGate(
         {
           kind: "inspected",
+          agents: [],
           placed: [],
           repositories: synchronized(),
           work: {
@@ -616,6 +641,7 @@ describe("terminate's gates (worker-lifecycle §Gates (terminate))", () => {
       terminateGate(
         {
           kind: "inspected",
+          agents: [],
           placed: [],
           repositories,
           work: {
@@ -641,6 +667,7 @@ describe("terminate's gates (worker-lifecycle §Gates (terminate))", () => {
       terminateGate(
         {
           kind: "inspected",
+          agents: [],
           placed: [],
           repositories: synchronized(["acme/a"]),
           work: { kind: "unknown", reason: "no answer within 2 min", unsupported: false },
@@ -660,6 +687,7 @@ describe("terminate's gates (worker-lifecycle §Gates (terminate))", () => {
       terminateGate(
         {
           kind: "inspected",
+          agents: [],
           placed: ["acme/widget", "a/b/c/d/e"],
           repositories: synchronized(),
           work: work([widget()]),
@@ -680,6 +708,7 @@ describe("terminate's gates (worker-lifecycle §Gates (terminate))", () => {
       terminateGate(
         {
           kind: "inspected",
+          agents: [],
           placed: ["acme/widget"],
           repositories: synchronized(),
           work: work([widget()]),
@@ -696,6 +725,7 @@ describe("terminate's gates (worker-lifecycle §Gates (terminate))", () => {
       terminateGate(
         {
           kind: "inspected",
+          agents: [],
           placed: [],
           repositories: synchronized(),
           work: work([unreadable], false),
@@ -723,6 +753,7 @@ describe("terminate's gates (worker-lifecycle §Gates (terminate))", () => {
     const refusal = terminateGate(
       {
         kind: "inspected",
+        agents: [],
         placed: [],
         repositories: synchronized(),
         work: work([widget({ state: "unreadable" }), ...many]),
@@ -742,14 +773,15 @@ describe("terminate's gates (worker-lifecycle §Gates (terminate))", () => {
 
   test("busy agents are named alone, and work before the repository result", () => {
     // Activity that already refuses is all there is: the work is never asked for then.
-    expect(
-      terminateGate({ kind: "activity", activity: busy(1) }, WORKER, "terminate-keep")?.summary,
-    ).toBe("1 agent is working on fff-abcd1234-builder-1: terminating it would end it");
+    expect(terminateGate(blocking(busy(1)), WORKER, "terminate-keep")?.summary).toBe(
+      "1 agent is working on fff-abcd1234-builder-1: terminating it would end it",
+    );
     const dirty = work([widget({ tracked_changes: 1 })]);
     expect(
       terminateGate(
         {
           kind: "inspected",
+          agents: [],
           placed: [],
           repositories: {
             protocol_version: HOST_PROTOCOL_VERSION,
@@ -773,7 +805,7 @@ describe("terminate's gates (worker-lifecycle §Gates (terminate))", () => {
     ] satisfies RepositoryObservation[])
       expect(
         terminateGate(
-          { kind: "inspected", placed: [], repositories, work: NO_WORK },
+          { kind: "inspected", agents: [], placed: [], repositories, work: NO_WORK },
           WORKER,
           "terminate-keep",
         ),
@@ -786,9 +818,7 @@ describe("terminate's gates (worker-lifecycle §Gates (terminate))", () => {
   });
 
   test("refuse while agents are busy: terminating would end them", () => {
-    expect(
-      terminateGate({ kind: "activity", activity: busy(2) }, WORKER, "terminate-keep"),
-    ).toEqual({
+    expect(terminateGate(blocking(busy(2)), WORKER, "terminate-keep")).toEqual({
       summary: "2 agents are working on fff-abcd1234-builder-1: terminating it would end them",
       details: [],
       nextAction:
@@ -802,6 +832,7 @@ describe("terminate's gates (worker-lifecycle §Gates (terminate))", () => {
       terminateGate(
         {
           kind: "inspected",
+          agents: [],
           placed: [],
           repositories: {
             protocol_version: HOST_PROTOCOL_VERSION,
@@ -825,6 +856,7 @@ describe("terminate's gates (worker-lifecycle §Gates (terminate))", () => {
       terminateGate(
         {
           kind: "inspected",
+          agents: [],
           placed: [],
           repositories: synchronized(["acme/a", "acme/b"]),
           work: NO_WORK,
@@ -843,9 +875,7 @@ describe("terminate's gates (worker-lifecycle §Gates (terminate))", () => {
 
   test("refuse a worker on a release from before agent states: it is checked by hand, then forced", () => {
     // The same hand check as an older activator's: terminate is what replacing it starts with.
-    expect(
-      terminateGate({ kind: "activity", activity: OUTDATED }, WORKER, "terminate-keep"),
-    ).toEqual({
+    expect(terminateGate(blocking(OUTDATED), WORKER, "terminate-keep")).toEqual({
       summary:
         "fff-abcd1234-builder-1 could not be inspected for busy agents: its release predates fffactory's agent states",
       details: [OUTDATED_DETAIL],
@@ -856,10 +886,7 @@ describe("terminate's gates (worker-lifecycle §Gates (terminate))", () => {
   test("refuse a worker whose activity or repository result could not be read", () => {
     expect(
       terminateGate(
-        {
-          kind: "activity",
-          activity: unreadable("Paseo activity could not be read"),
-        },
+        blocking(unreadable("Paseo activity could not be read")),
         WORKER,
         "terminate-keep",
       ),
@@ -877,7 +904,7 @@ describe("terminate's gates (worker-lifecycle §Gates (terminate))", () => {
     ] satisfies RepositoryObservation[])
       expect(
         terminateGate(
-          { kind: "inspected", placed: [], repositories, work: NO_WORK },
+          { kind: "inspected", agents: [], placed: [], repositories, work: NO_WORK },
           WORKER,
           "terminate-keep",
         ),

@@ -204,9 +204,12 @@ capacity check counts its own agents by the same states
 `activity` count. Busy
 activity is named in fffactory's words, how many of each (`busyAgents`): `2
 agents are working on HOSTNAME`, `1 agent needs input on HOSTNAME`, `1 agent is
-working and 2 need input on HOSTNAME`. Tested in
+working and 2 need input on HOSTNAME`. [Status](status.md#workers) and
+[`worker inspect`](worker-lifecycle.md#inspect) report it with every agent's
+state, as one object (`agentActivity`): `state` (`busy`, `idle`, `unknown`),
+`reason` and `agents`. Tested in
 `tests/domain/control-plane.test.ts` (only finished, mixed, empty, unknown and
-outdated, and the words).
+outdated, the words, and the reported object).
 
 ## Worker protocol and privilege boundary
 

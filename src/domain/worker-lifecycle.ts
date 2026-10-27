@@ -5,7 +5,13 @@
  * outcome, and the words of every refusal and next action. Pure:
  * `application/worker-lifecycle.ts` makes the observations and the calls.
  */
-import { type BlockingActivity, busyAgents, type WorkerActivity } from "./control-plane";
+import {
+  type Agent,
+  type AgentsObservation,
+  type BlockingActivity,
+  busyAgents,
+  type WorkerActivity,
+} from "./control-plane";
 import { type FactoryInstance, type HostKey, parseHostKey } from "./instance";
 import type { RepositoryObservation } from "./repository-placement";
 import { RUNTIME_ACCOUNT, RUNTIME_LOGIN_POLICY, runtimeLogin } from "./readiness";
@@ -121,13 +127,14 @@ export type MachineSelection =
  * The one instance carrying `key`: several, or an inventory that could not be read, is refused,
  * never guessed. None is refused too for stop and start, which have no machine to act on; to
  * terminate, it is a machine already gone (`absent`), as an interrupted terminate leaves it.
+ * A refusal's next action reruns `command`, unless `then` completes it otherwise (`worker inspect`).
  */
 export function selectMachine(
   inventory: MachineInventory,
   key: HostKey,
   command: WorkerCommand,
+  then: Then = thenRerunWorker(command, key),
 ): MachineSelection {
-  const then = thenRerunWorker(command, key);
   const refused = (summary: string, step: string, details: readonly string[] = []) =>
     ({ kind: "refused", refusal: refusal(summary, then(step), details) }) as const;
   if (inventory.kind === "unavailable")
@@ -185,13 +192,18 @@ const IN_PASSING: Readonly<Record<PowerAction, Partial<Record<MachineState, stri
   terminate: { pending: UNTIL_RUNNING, stopping: UNTIL_STOPPED },
 };
 
-export function powerStep(command: WorkerCommand, machine: Machine, key: HostKey): PowerStep {
+/** A refusal's next action reruns `command`, unless `then` completes it otherwise. */
+export function powerStep(
+  command: WorkerCommand,
+  machine: Machine,
+  key: HostKey,
+  then: Then = thenRerunWorker(command, key),
+): PowerStep {
   const { state, instanceId } = machine;
   const action = actionOf(command);
   if (state === TARGET_STATE[action]) return { kind: "done" };
   if (STEPS[action].act.includes(state)) return { kind: "act" };
   if (state === STEPS[action].await) return { kind: "await" };
-  const then = thenRerunWorker(command, key);
   const until = IN_PASSING[action][state];
   if (until !== undefined)
     return {
@@ -218,7 +230,7 @@ export type StopInspection =
   | { readonly kind: "activity"; readonly activity: WorkerActivity };
 
 /** The actions whose gates inspect the worker first, and their words. */
-type GatedAction = Extract<PowerAction, "stop" | "terminate">;
+export type GatedAction = Extract<PowerAction, "stop" | "terminate">;
 
 /** The commands whose gates inspect the worker first. */
 type GatedCommand = Exclude<WorkerCommand, "start">;
@@ -273,7 +285,22 @@ function unlocatedGate(verdict: Verdict, worker: WorkerIdentity, nextAction: str
   );
 }
 
-const CHECK_STATUS = "Check the worker with `fffactory status`";
+export const CHECK_STATUS = "Check the worker with `fffactory status`";
+
+/** What `--force` skipped, for each action that has gates. */
+const UNINSPECTED: Readonly<Record<GatedAction, string>> = {
+  stop: "busy agents",
+  terminate: "busy agents, current work or checkouts",
+};
+
+/** `--force` skipped the gates of `action`: what the worker was not inspected for. */
+export function forcedUninspected(action: GatedAction): string {
+  return `--force: the worker is not inspected for ${UNINSPECTED[action]}.`;
+}
+
+/** Terminate passes a stopped machine uninspected, and says what that leaves unreported. */
+export const STOPPED_UNINSPECTED =
+  "The machine is stopped: the worker is not inspected, and unpushed work on its disk is not reported.";
 
 /**
  * Stop completes the tailnet's next action, except for a missing worker: status's recovery
@@ -360,17 +387,23 @@ export function stopGate(inspection: StopInspection, worker: WorkerIdentity): Re
  * What terminate saw before acting: `--force` skipped the inspection, the machine is stopped
  * (never inspected), the tailnet did not locate the running worker, its activity when that
  * alone refuses, agents busy or unreadable (the work is then never asked for), or, the worker
- * idle, its last repository result, the current work in its checkouts and worktrees, and the
- * checkouts factory.json places there (`placed`, relative to the repository root), which the
- * work inspection must report.
+ * idle, its agents, its last repository result, the current work in its checkouts and worktrees,
+ * and the checkouts factory.json places there (`placed`, relative to the repository root), which
+ * the work inspection must report. The agents are carried as read, for `worker inspect` to list.
  */
 export type TerminateInspection =
   | { readonly kind: "forced" }
   | { readonly kind: "stopped" }
   | { readonly kind: "unlocated"; readonly verdict: Verdict }
-  | { readonly kind: "activity"; readonly activity: BlockingActivity }
+  | {
+      readonly kind: "activity";
+      readonly activity: BlockingActivity;
+      readonly agents: AgentsObservation;
+    }
   | {
       readonly kind: "inspected";
+      /** Listed, none of them busy. */
+      readonly agents: readonly Agent[];
       readonly repositories: RepositoryObservation;
       readonly work: WorkObservation;
       readonly placed: readonly string[];
@@ -589,7 +622,7 @@ const VERBS: Readonly<Record<PowerAction, { readonly name: string; readonly doin
 
 const TYPE_KEY = "Type the host key to confirm: ";
 
-const GONE = "No EC2 instance carries its key: its machine is already gone.";
+export const GONE = "No EC2 instance carries its key: its machine is already gone.";
 
 /**
  * The question asked before acting on the machine located. Terminate removing the host says so.

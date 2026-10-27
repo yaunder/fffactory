@@ -14,7 +14,10 @@ import {
 } from "../../src/domain/instance";
 import type { MachineInventory, WorkerStatus } from "../../src/domain/status";
 import type { PeerView } from "../../src/domain/tailnet";
+import type { AgentsObservation } from "../../src/domain/control-plane";
+import { INSPECT_WORK_COMMAND } from "../../src/domain/work-inspection";
 import { fakeCallerIdentity } from "../support/doctor-fakes";
+import { agentsIn, fakeControlPlane } from "../support/fake-control-plane";
 import {
   type Answer,
   statusAnswers,
@@ -70,25 +73,29 @@ function world({
   },
   caller,
   sha256 = FAKE_SHA256,
+  agents = agentsIn("finished"),
 }: {
   inventory?: MachineInventory;
   view?: PeerView;
   script?: Record<string, Answer>;
   caller?: CallerObservation;
   sha256?: (text: string) => string;
+  agents?: AgentsObservation;
 } = {}) {
   const identity = fakeCallerIdentity(caller);
   const machines = fakeMachineInventory(inventory);
   const tailnet = fakeTailnet(view);
   const transport = fakeTransport(script);
+  const controlPlane = fakeControlPlane("healthy", agents);
   const deps: StatusDependencies = {
     identity: identity.identity,
     machines: machines.machines,
     peers: tailnet.tailnet,
     transport: transport.transport,
+    controlPlane: controlPlane.controlPlane,
     sha256,
   };
-  return { deps, identity, machines, tailnet, transport };
+  return { deps, identity, machines, tailnet, transport, controlPlane };
 }
 
 async function report(deps: StatusDependencies, of: FactoryInstance = instance()) {
@@ -130,6 +137,79 @@ describe("factory status", () => {
       [B2, [...INSPECT_REPOSITORIES_COMMAND], INSPECT_REPOSITORIES_TIMEOUT_MS],
       [B2, [...INSPECT_DISPATCH_COMMAND], 120_000],
     ]);
+  });
+
+  test("reports each reached worker's agents in their states, read after dispatch, never the work", async () => {
+    const order: string[] = [];
+    const { deps, transport } = world({ agents: agentsIn("working", "finished", "finished") });
+    const traced: StatusDependencies = {
+      ...deps,
+      transport: {
+        run: (worker, command, options) => {
+          if (command.includes("dispatch")) order.push(`dispatch ${worker.hostname}`);
+          return deps.transport.run(worker, command, options);
+        },
+      },
+      controlPlane: {
+        ...(deps.controlPlane as NonNullable<StatusDependencies["controlPlane"]>),
+        agents: (worker) => {
+          order.push(`agents ${worker.hostname}`);
+          return (deps.controlPlane as NonNullable<StatusDependencies["controlPlane"]>).agents(
+            worker,
+          );
+        },
+      },
+    };
+    const outcome = await report(traced);
+    const [builder1] = outcome.report.workers;
+    expect(builder1?.activity).toEqual({
+      state: "busy",
+      reason: null,
+      agents: [
+        { id: "agent-1", state: "working", dispatched: true },
+        { id: "agent-2", state: "finished", dispatched: false },
+        { id: "agent-3", state: "finished", dispatched: false },
+      ],
+    });
+    // Dispatch and activity both go through the worker's activator, which runs one at a time.
+    for (const hostname of [B1, B2])
+      expect(order.filter((step) => step.endsWith(hostname))).toEqual([
+        `dispatch ${hostname}`,
+        `agents ${hostname}`,
+      ]);
+    expect(
+      transport.calls.some(({ command }) =>
+        INSPECT_WORK_COMMAND.every((word, index) => command[index] === word),
+      ),
+    ).toBe(false);
+    // Activity is reported, never judged: a busy worker is still ready.
+    expect(builder1?.status).toBe("ready");
+  });
+
+  test("a worker not reached has unknown activity, and its control plane is never asked", async () => {
+    const { deps, controlPlane } = world({ view: peers(peer(B1, { online: false })) });
+    const outcome = await report(deps);
+    expect(outcome.report.workers.map((worker) => worker.activity)).toEqual([
+      { state: "unknown", reason: null, agents: null },
+      { state: "unknown", reason: null, agents: null },
+    ]);
+    expect(controlPlane.calls).toEqual([]);
+  });
+
+  test("activity that could not be read is unknown, saying why; without a control plane too", async () => {
+    const outdated = await report(world({ agents: { kind: "outdated" } }).deps);
+    expect(outdated.report.workers[0]?.activity).toEqual({
+      state: "unknown",
+      reason: "its release predates fffactory's agent states",
+      agents: null,
+    });
+    const { deps } = world();
+    const unwired = await report({ ...deps, controlPlane: undefined });
+    expect(unwired.report.workers[0]?.activity).toEqual({
+      state: "unknown",
+      reason: "this fffactory cannot reach the worker's control plane",
+      agents: null,
+    });
   });
 
   test("compares each worker's configuration with the projection apply would send it", async () => {

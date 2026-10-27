@@ -34,7 +34,12 @@ import type { BucketDeletion, LockAfterDeletion } from "./state-bucket-deletion"
 import { ADMIN_CONSOLE, type Machine, type MachineState } from "./status";
 import { selectWorkerDevices, type TailnetDevice } from "./tailnet";
 import { isRecord } from "./validation";
-import { type Refusal, type RemovalGateActions, TRUST_CREDENTIALS } from "./worker-lifecycle";
+import {
+  CHECK_STATUS,
+  type Refusal,
+  type RemovalGateActions,
+  TRUST_CREDENTIALS,
+} from "./worker-lifecycle";
 
 /** The command every next action of teardown's reruns. */
 const TEARDOWN = "`fffactory teardown`";
@@ -427,8 +432,6 @@ export function teardownQuestion(factoryId: FactoryId, withoutBucket = false): s
     "can be recovered. Type the factory ID to confirm: "
   );
 }
-
-const CHECK_STATUS = "Check the worker with `fffactory status`";
 
 /**
  * The next actions of a gate that refuses teardown for `worker` (`removalGate`): rerun teardown,

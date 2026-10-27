@@ -4,15 +4,13 @@
  * what the domain hands it.
  */
 import { describe, expect, test } from "bun:test";
-import { stripVTControlCharacters } from "node:util";
 import { render, renderInSection } from "../../../src/cli/presentation/blocks";
-import { ansiStyle, plainStyle } from "../../../src/cli/presentation/style";
+import { plainStyle } from "../../../src/cli/presentation/style";
 import {
   type ReportedTeardown,
   teardownOutcome,
   teardownProgressLine,
   teardownReviewBlocks,
-  withCommands,
 } from "../../../src/cli/presentation/teardown";
 import { unreadyBucket } from "../../../src/domain/backend-bootstrap";
 import type { FactoryId, HostKey, Release, SecretReference } from "../../../src/domain/instance";
@@ -553,21 +551,6 @@ describe("interrupted (teardown §Interruption)", () => {
     expect(outcome({ kind: "interrupted", locked: false }).lines).toEqual([
       "✖ Interrupted before the factory was locked: it is not locked, and nothing was removed",
     ]);
-  });
-});
-
-describe("withCommands", () => {
-  test("every fffactory command as inline code with the selection, other backticks kept", () => {
-    const lines = render(ansiStyle, [
-      {
-        kind: "text",
-        lines: [withCommands("Run `fffactory status`, then `ls`.", { instance: "a b" })],
-      },
-    ]);
-    expect(stripVTControlCharacters(lines[0] ?? "")).toBe(
-      "Run fffactory status --instance 'a b', then ls.",
-    );
-    expect(lines[0]).toContain("\x1b[36m");
   });
 });
 

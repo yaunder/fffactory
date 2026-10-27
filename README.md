@@ -301,7 +301,8 @@ is skipped, see [Mark an epic ready](MACHINE_ONBOARDING.md#12-mark-an-epic-ready
 | `fffactory doctor` | Check workstation prerequisites and configuration. |
 | `fffactory plan` | Review proposed changes without applying them. |
 | `fffactory apply` | Review and apply a plan under the factory-wide lock. |
-| `fffactory status` | Read worker readiness and dispatch state. |
+| `fffactory status` | Read worker readiness, dispatch state and each worker's agents (working, needing input, finished, failed, stopped). |
+| `fffactory worker inspect [KEY]` | See, changing nothing, whether `fffactory worker terminate` would remove each worker without `--force`: its verdict, what terminate would refuse it for, and every agent a removal would end. `--json` prints a versioned document; exits 2 when any worker would be refused. |
 | `fffactory worker stop\|start KEY` | Stop an idle worker's instance to save compute, or start it again. |
 | `fffactory worker terminate KEY` | Remove a worker: a reviewed Terraform plan destroys its instance, factory.json no longer declares it, and its Tailscale devices are deleted. The last worker too: the factory keeps its network and state until `fffactory teardown`, and a replacement of another size is declared and created with `fffactory apply`. With `--keep`, destroy only the instance and devices, keeping the host so the next `fffactory apply` creates it afresh. Needs the Tailscale admin client (`fffactory secret set tailscale-admin-client`). |
 | `fffactory upgrade` | Use a newer release to review and apply a release-pin change. |

@@ -7,6 +7,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test
 import { chmod, mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { activityJson } from "../../src/domain/control-plane";
 import { hostInspectionJson } from "../../src/domain/host-protocol";
 import { dispatchInspectionJson } from "../../src/domain/dispatch-projection";
 import type { SecretReference } from "../../src/domain/instance";
@@ -58,8 +59,9 @@ function tailscaleStatus(online: boolean, tags: readonly string[] = [TAG]): stri
 
 /**
  * A private directory of stand-ins: `tailscale` prints `peerView`; `ssh` records its
- * arguments, environment and the known_hosts file it was given, then prints `answer` and
- * exits with `exit`, writing `stderr` to standard error.
+ * arguments, environment and the known_hosts file it was given, then prints `answer` (or the
+ * repository, dispatch or activity answer, for those commands) and exits with `exit`, writing
+ * `stderr` to standard error.
  */
 async function standIns(
   name: string,
@@ -73,6 +75,7 @@ async function standIns(
       blockers: [],
       changed: false,
     }),
+    activityAnswer = activityJson({ kind: "listed", agents: [] }),
     exit = 0,
     stderr = "",
   }: {
@@ -80,6 +83,7 @@ async function standIns(
     answer?: string;
     repositoryAnswer?: string;
     dispatchAnswer?: string;
+    activityAnswer?: string;
     exit?: number;
     stderr?: string;
   },
@@ -93,10 +97,11 @@ async function standIns(
   await writeFile(join(directory, "answer"), answer);
   await writeFile(join(directory, "repository-answer"), repositoryAnswer);
   await writeFile(join(directory, "dispatch-answer"), dispatchAnswer);
+  await writeFile(join(directory, "activity-answer"), activityAnswer);
   const scripts = {
     tailscale: `cat '${directory}/peers.json'`,
     ssh: [
-      `case " $* " in *" host repositories --json ") suffix=-repositories; answer=repository-answer ;; *" dispatch inspect ") suffix=-dispatch; answer=dispatch-answer ;; *) suffix=; answer=answer ;; esac`,
+      `case " $* " in *" host repositories --json ") suffix=-repositories; answer=repository-answer ;; *" dispatch inspect ") suffix=-dispatch; answer=dispatch-answer ;; *" control-plane activity ") suffix=-activity; answer=activity-answer ;; *) suffix=; answer=answer ;; esac`,
       `printf '%s\\n' "$@" > '${log}/args'\${suffix}`,
       `env > '${log}/env'`,
       'for arg in "$@"; do',
@@ -222,11 +227,23 @@ describe("fffactory status executable", () => {
         state: "synchronized",
         unmanaged: [],
       }),
+      activityAnswer: activityJson({
+        kind: "listed",
+        agents: [{ id: "a7e3", state: "finished", dispatched: true }],
+      }),
     });
     const result = await status(tools);
     expect(result.stderr).toBe(`Instance: ${EXAMPLE} (--instance)\n`);
     expect(result.code).toBe(0);
-    expect(result.report.workers[0]).toMatchObject({ status: "ready", release: "0.1.0" });
+    expect(result.report.workers[0]).toMatchObject({
+      status: "ready",
+      release: "0.1.0",
+      activity: {
+        state: "idle",
+        reason: null,
+        agents: [{ id: "a7e3", state: "finished", dispatched: true }],
+      },
+    });
     const args = (await readFile(join(tools.log, "args"), "utf8")).trimEnd().split("\n");
     expect(args.slice(0, 3)).toEqual(["-F", "/dev/null", "-o"]);
     expect(args).toContain("StrictHostKeyChecking=yes");
@@ -264,6 +281,19 @@ describe("fffactory status executable", () => {
       "/usr/local/libexec/fffactory-activate",
       "dispatch",
       "inspect",
+    ]);
+    const activityArgs = (await readFile(join(tools.log, "args-activity"), "utf8"))
+      .trimEnd()
+      .split("\n");
+    expect(activityArgs.slice(-8)).toEqual([
+      "fffactory-admin",
+      "--",
+      "100.64.0.10",
+      "sudo",
+      "-n",
+      "/usr/local/libexec/fffactory-activate",
+      "control-plane",
+      "activity",
     ]);
     expect(await readFile(join(tools.log, "known_hosts"), "utf8")).toBe(`${WORKER} ${HOST_KEY}\n`);
     const env = await readFile(join(tools.log, "env"), "utf8");

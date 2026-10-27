@@ -33,3 +33,16 @@ export interface ControlPlane {
 
 /** Paseo's health on a worker as the adapter found it. */
 export type ControlPlaneHealth = "healthy" | "unhealthy" | "unreachable";
+
+/** Why a worker's agents cannot be read when this fffactory has no control plane to ask. */
+const NO_CONTROL_PLANE = "this fffactory cannot reach the worker's control plane";
+
+/** The worker's agents through `controlPlane`; unknown when there is none to ask. */
+export function readAgents(
+  controlPlane: ControlPlane | undefined,
+  worker: WorkerAddress,
+): Promise<AgentsObservation> {
+  if (controlPlane === undefined)
+    return Promise.resolve({ kind: "unknown", reason: NO_CONTROL_PLANE });
+  return controlPlane.agents(worker);
+}
