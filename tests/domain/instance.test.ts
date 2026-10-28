@@ -420,6 +420,92 @@ describe("parseFactoryInstance", () => {
     });
   });
 
+  describe("log archive", () => {
+    const inRegion = (region: string, enabled: unknown) => ({
+      schema_version: 1,
+      aws: { account_id: "123456789012", region },
+      log_archive: { enabled },
+    });
+
+    test.each([true, false])("accepts enabled %p", (enabled) => {
+      expect(parsed({ ...completeDocument(), log_archive: { enabled } }).log_archive).toEqual({
+        enabled,
+      });
+    });
+
+    test("rejects an enabled flag that is not a boolean", () => {
+      expect(issuesFor({ schema_version: 1, log_archive: { enabled: "true" } })).toEqual([
+        { path: "log_archive.enabled", message: "must be a boolean" },
+      ]);
+    });
+
+    test("requires the enabled flag of a declared archive", () => {
+      expect(issuesFor({ schema_version: 1, log_archive: {} })).toEqual([
+        { path: "log_archive.enabled", message: "is required" },
+      ]);
+    });
+
+    test("rejects a configured bucket: the archive's name is derived, never chosen", () => {
+      expect(
+        issuesFor({ schema_version: 1, log_archive: { enabled: true, bucket: "logs" } }),
+      ).toEqual([{ path: "log_archive.bucket", message: "is not a recognized field" }]);
+    });
+
+    test("rejects a log archive that is not an object", () => {
+      expect(issuesFor({ schema_version: 1, log_archive: true })).toEqual([
+        { path: "log_archive", message: "must be an object" },
+      ]);
+    });
+
+    test.each(["me-south-1", "me-central-1"])(
+      "refuses an enabled archive in %s, which lacks the account-regional namespace",
+      (region) => {
+        expect(issuesFor(inRegion(region, true))).toEqual([
+          {
+            path: "log_archive.enabled",
+            message: `must not be true in ${region}: S3's account-regional namespace, which names the log archive, is not available there`,
+          },
+        ]);
+      },
+    );
+
+    describe("its derived bucket name within S3's 63 characters", () => {
+      // A 20-character factory ID leaves 21 for the Region: 20 + "-logs-" + 12 + "-" + 21 + "-an".
+      const named = (region: string, enabled: unknown) => ({
+        ...inRegion(region, enabled),
+        factory_id: "a".repeat(20),
+      });
+      const longest = `us-${"a".repeat(16)}-1`;
+      const tooLong = `us-${"a".repeat(17)}-1`;
+
+      test("accepts an enabled archive whose name is exactly 63 characters", () => {
+        expect(longest).toHaveLength(21);
+        expect(parseFactoryInstance(named(longest, true)).valid).toBe(true);
+      });
+
+      test("refuses an enabled archive whose name would exceed them", () => {
+        expect(issuesFor(named(tooLong, true))).toEqual([
+          {
+            path: "log_archive.enabled",
+            message:
+              "must not be true while the log archive's bucket name, <factory_id>-logs-<aws.account_id>-<aws.region>-an, would be 64 characters, beyond S3's 63",
+          },
+        ]);
+      });
+
+      test("accepts a disabled archive however long the name would be", () => {
+        expect(parseFactoryInstance(named(tooLong, false)).valid).toBe(true);
+      });
+    });
+
+    test("accepts a disabled archive in a Region without the namespace, and one with no Region yet", () => {
+      expect(parseFactoryInstance(inRegion("me-south-1", false)).valid).toBe(true);
+      expect(
+        parseFactoryInstance({ schema_version: 1, log_archive: { enabled: true } }).valid,
+      ).toBe(true);
+    });
+  });
+
   describe("repositories", () => {
     const repository = (key: string, path: string) => ({
       key,
@@ -573,6 +659,13 @@ describe("assessCompleteness", () => {
       missing: [],
       commands: {},
     });
+  });
+
+  test("the log archive is optional, enabled or not", () => {
+    for (const enabled of [true, false]) {
+      const document = { ...completeDocument(), log_archive: { enabled } };
+      expect(assessCompleteness(parsed(document)).complete).toBe(true);
+    }
   });
 
   test("credential references and interactive logins are optional", () => {

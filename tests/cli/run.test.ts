@@ -55,6 +55,25 @@ describe("fffactory validate", () => {
     expect(err.some((line) => line.startsWith("  factory_id: must be"))).toBe(true);
   });
 
+  test.each(["me-south-1", "me-central-1"])(
+    "refuses log_archive.enabled in %s, naming the Region (instance-configuration §Log archive)",
+    async (region) => {
+      const document = JSON.stringify({
+        schema_version: 1,
+        factory_id: "fff-abcd1234",
+        aws: { account_id: "123456789012", region },
+        log_archive: { enabled: true },
+      });
+      const { context, err } = harness(new MemoryInstanceStore({ [NEAREST]: document }));
+      expect(await run(["validate"], context)).toBe(1);
+      expect(err).toEqual([
+        `Instance: ${NEAREST} (nearest .fffactory/factory.json)`,
+        "Invalid factory.json:",
+        `  log_archive.enabled: must not be true in ${region}: S3's account-regional namespace, which names the log archive, is not available there`,
+      ]);
+    },
+  );
+
   test("fails with an initialization instruction when no instance exists", async () => {
     const { context, err } = harness(new MemoryInstanceStore());
     expect(await run(["validate"], context)).toBe(1);

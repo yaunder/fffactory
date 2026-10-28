@@ -457,6 +457,23 @@ describe("fffactory plan (plan-apply §Plan)", () => {
     ]);
   });
 
+  test("log_archive.enabled in a Region without the account-regional namespace is refused before AWS (instance-configuration §Log archive)", async () => {
+    const document = text(["builder-1"], { log_archive: { enabled: true } }).replaceAll(
+      "eu-west-2",
+      "me-south-1",
+    );
+    const { context, err, identity, terraform, lockStore, assets } = cli({ document });
+    expect(await run(["plan"], context)).toBe(1);
+    expect(err).toEqual([
+      "Invalid factory.json:",
+      "  log_archive.enabled: must not be true in me-south-1: S3's account-regional namespace, which names the log archive, is not available there",
+    ]);
+    expect(identity.requests).toEqual([]);
+    expect(terraform.calls).toEqual([]);
+    expect(lockStore.calls).toEqual([]);
+    expect(assets.materialized).toEqual([]);
+  });
+
   test("D11: removing a provisioned host key by hand is refused, naming `fffactory worker terminate`", async () => {
     const { context, err, planStore } = cli({ hosts: ["builder-1", "builder-2"] });
     expect(await run(["plan"], context)).toBe(1);

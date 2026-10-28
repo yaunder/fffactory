@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/yaunder/factory/schemas/factory.schema.json",
   "title": "FFFactory instance (factory.json) schema version 1",
-  "description": "Structural rules for .fffactory/factory.json. Every field but schema_version may be absent; fffactory validate reports completeness separately and also rejects duplicate host keys, duplicate repositories, undeclared repository placement and secrets outside the factory Region and account.",
+  "description": "Structural rules for .fffactory/factory.json. Every field but schema_version may be absent; fffactory validate reports completeness separately and also rejects duplicate host keys, duplicate repositories, undeclared repository placement, secrets outside the factory Region and account, and an enabled log archive in a Region without S3's account-regional namespace.",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema_version"],
@@ -29,6 +29,15 @@
       "additionalProperties": false,
       "properties": {
         "bucket": { "type": "string", "pattern": "^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$" }
+      }
+    },
+    "log_archive": {
+      "description": "The worker log archive. Absent, the factory has none. Its bucket is derived, <factory_id>-logs-<account_id>-<region>-an, never configured.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled"],
+      "properties": {
+        "enabled": { "type": "boolean" }
       }
     },
     "network": {
