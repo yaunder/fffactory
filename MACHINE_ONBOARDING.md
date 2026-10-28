@@ -87,14 +87,20 @@ chain. Every such command first refuses unless the caller is in factory.json's
   (the VPC, subnet, internet gateway, route table, security group and
   instances, and `DescribeVpcs`, `DescribeInstances`), SSM `GetParameter` (only
   the public Amazon Linux image parameter), IAM (the hosts' role, instance
-  profile and inline policy, and passing the role to EC2), S3 (creating and
+  profile and inline policies, and passing the role to EC2), S3 (creating and
   configuring the state bucket, and reading and writing its state, lock and
-  operation objects), Secrets Manager (`CreateSecret`, `PutSecretValue`, with
+  operation objects; with `log_archive.enabled`, also creating the log archive
+  bucket, `CreateBucket` in S3's account-regional namespace, setting its ABAC
+  (`PutBucketAbac`), versioning, public access block, ownership controls,
+  encryption and bucket policy, and reading them back, `HeadBucket`,
+  `GetBucketOwnershipControls` and `GetBucketAbac` among the reads
+  ([provisioning §Log archive readiness](docs/specs/provisioning.md#log-archive-readiness))),
+  Secrets Manager (`CreateSecret`, `PutSecretValue`, with
   tags, and `GetSecretValue` for the admin client) and Service Quotas
   (`GetServiceQuota`, `GetAWSDefaultServiceQuota`).
   Removing workers and the factory also calls EC2 `TerminateInstances` and the
   other deletes Terraform's destroy needs, IAM's deletes of the hosts' role,
-  policy and instance profile, Secrets Manager `ListSecrets`, `RestoreSecret`,
+  policies and instance profile, Secrets Manager `ListSecrets`, `RestoreSecret`,
   `DeleteSecret` and `DescribeSecret`, and S3 `ListBucketVersions`,
   `DeleteObject`, `DeleteObjectVersion` and `DeleteBucket`
   ([teardown §Permissions](docs/specs/teardown.md#permissions)).

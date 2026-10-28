@@ -104,9 +104,12 @@ bucket meant to keep workers' logs after the workers, and the factory, are
 gone. Absent or `false`, the factory has none. `log_archive` holds only
 `enabled`, and requires it. The field is optional, so schema version 1 is
 kept, and `fffactory init` never writes it: init fills only what fffactory
-generates, never an operator's choice. Nothing plans, creates or writes the
-archive yet; enabling it already lets each host's role write new objects under
-its own prefix of the bucket ([provisioning §Log archive access](provisioning.md#log-archive-access)).
+generates, never an operator's choice. Enabling it makes `fffactory plan` and
+`apply` create the archive when it is missing, in the factory's reviewed plan
+([plan and apply §The infrastructure stage](plan-apply.md#the-infrastructure-stage)),
+and lets each host's role write new objects under its own prefix of the bucket
+([provisioning §Log archive access](provisioning.md#log-archive-access)).
+fffactory itself writes nothing in the archive yet.
 
 The archive's bucket name is derived, never configured:
 `<factory_id>-logs-<aws.account_id>-<aws.region>-an`, such as

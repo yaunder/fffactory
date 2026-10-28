@@ -41,8 +41,10 @@ Shipped in the release bundle and run only by the managed Terraform through the
 - `backend/` and `archive/` keep no state: each plan starts empty, so they only create their
   bucket, which carries `prevent_destroy`. `archive/` is the log archive (`modules/log-archive`):
   S3's account-regional namespace, ABAC on so tag-conditioned grants work, the TLS-only Deny
-  alone, and no lifecycle rule, Object Lock or KMS key. Its settings cannot change once created
-  (`TODO(re-evaluate when retention or bucket settings must change)` in `archive/main.tf`).
+  alone, and no lifecycle rule, Object Lock or KMS key. `plan` and `apply` plan it create-only
+  only while the archive is missing, and apply applies it before the factory root. Its settings
+  cannot change once created (`TODO(re-evaluate when retention or bucket settings must change)`
+  in `archive/main.tf`).
 - `hosts` may be empty: a factory whose last host `fffactory worker terminate` removed keeps
   its network, state and host identity, whose policy then allows only the Tailscale enrollment
   key and the factory-wide credential references (`credential_secret_arns`). No validation may require a host; `guardrails.test.ts` checks it and

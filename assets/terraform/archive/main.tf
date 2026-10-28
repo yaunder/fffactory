@@ -1,6 +1,7 @@
 # The factory's log archive bucket, for a factory.json enabling `log_archive`. Like backend/,
 # this root keeps no state: each plan starts empty, so it can only create the bucket, and
-# nothing destroys it. Nothing plans it yet; apply creates the missing archive from #113.
+# nothing destroys it. plan and apply plan it, create-only, when the archive is missing, and
+# apply applies it before the factory root.
 #
 # TODO(re-evaluate when retention or bucket settings must change): without state, an existing
 # archive cannot be reconfigured, only created. Changing its settings needs the bucket imported

@@ -246,7 +246,7 @@ account, Region and tailnet (D5), so every factory keeps to its own namespace.
 | --- | --- |
 | `factory/` (root) | The factory: `network`, `host-identity` and `hosts`, and the current Amazon Linux 2023 x86-64 image from the public SSM parameter `/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64`. Its state lives in the S3 backend: the bucket comes from the backend settings, the key is `factory/terraform.tfstate`, encrypted, with S3 native locking (`use_lockfile`). |
 | `backend/` (root) | The state bucket's definition, `state-bucket`, planned and applied only by [backend bootstrap](#backend-bootstrap). It has no backend of its own. |
-| `archive/` (root) | The log archive's definition, `log-archive`, for a factory.json enabling it ([instance configuration §Log archive](instance-configuration.md#log-archive)). Like `backend/`, it keeps no state: each plan starts empty, so it can only create the bucket, and no command destroys it. Nothing plans it yet: apply creates a missing archive from [#113](https://github.com/yaunder/fffactory/issues/113). An existing archive's settings cannot be changed through it, marked `TODO(re-evaluate when retention or bucket settings must change)` in `archive/main.tf`. |
+| `archive/` (root) | The log archive's definition, `log-archive`, for a factory.json enabling it ([instance configuration §Log archive](instance-configuration.md#log-archive)). Like `backend/`, it keeps no state: each plan starts empty, so it can only create the bucket, and no command destroys it. `plan` and `apply` plan and apply it, create-only, in the infrastructure stage when the archive is missing ([Log archive readiness](#log-archive-readiness), [plan and apply §The infrastructure stage](plan-apply.md#the-infrastructure-stage)). An existing archive's settings cannot be changed through it, marked `TODO(re-evaluate when retention or bucket settings must change)` in `archive/main.tf`. |
 | `modules/network` | The factory VPC (DNS support and hostnames on), its internet gateway, one public subnet in `network.availability_zone` that assigns no public IPs by default, a route table with a default route to the gateway, and the hosts' security group: no ingress, all egress (hosts are reached over Tailscale). |
 | `modules/host-identity` | The hosts' IAM role, assumable only by EC2, its instance profile, and one inline policy allowing `secretsmanager:GetSecretValue` on exactly the workers' secret references factory.json declares (`tailscale.auth_key_secret`, `hosts[].paseo_password_secret`, `credentials.*_secret`), never the operator's Tailscale admin client. One role serves every host, so each may read every host's Paseo password and every credential reference, whichever hosts keep an account on a human's login; narrowing it is an open question ([#64](https://github.com/yaunder/fffactory/issues/64)). With the log archive enabled, a second inline policy lets each host write new objects under its own prefix of the archive bucket, and nothing else of it ([Log archive access](#log-archive-access)); without it there is no such policy. Hosts can mutate nothing else: they can neither read, overwrite nor delete the archive. |
 | `modules/hosts` | One EC2 instance per stable host key, none for a factory that declares no host: `hosts[].instance_type`, an encrypted gp3 root volume of `hosts[].root_volume_gib` deleted with the instance, a public IP, IMDSv2 only with a hop limit of 1 and instance tags in metadata, the security group and instance profile above. Its user data is the worker bootstrap, `bootstrap/user-data.sh.tftpl` rendered with the host's namespaced hostname, the Region, the Tailscale reference and tag, and the activator ([worker bootstrap](worker-bootstrap.md)). It changes neither `ami` nor `user_data` of a running host: a newer image or bootstrap template never replaces a host. |
@@ -298,8 +298,8 @@ conditions compare the whole factory ID, so they are unaffected.
 When factory.json enables the log archive, the hosts' role `<id>-host` carries
 the inline policy `<id>-write-archive`, for the bucket `archiveBucketName`
 derives (`<archive>` below). The bucket need not exist for the policy to
-apply; [#113](https://github.com/yaunder/fffactory/issues/113) creates it. As
-AWS receives it:
+apply; apply creates a missing archive before the factory root
+([Log archive readiness](#log-archive-readiness)). As AWS receives it:
 
 ```json
 {
@@ -730,6 +730,79 @@ the bootstrap and stops
 `fffactory plan` plans a missing bucket's bootstrap with
 `planBackendBootstrap`, applying nothing, and saves it as that bootstrap plan
 ([plan and apply §Plan](plan-apply.md#plan)).
+
+### Log archive readiness
+
+With `log_archive.enabled`, `plan` and `apply` (and `upgrade`, through apply's
+infrastructure stage) check the log archive the way backend bootstrap checks
+the state bucket, through the same `LockStore` port (`bucketExists` and
+`archiveReadiness`, `src/application/log-archive.ts`), with the state bucket's
+account, Region and credentials. fffactory asks only whether the archive exists
+and how it is set: it writes no object in it.
+
+1. S3 `HeadBucket`, with `ExpectedBucketOwner` set to the factory's account:
+
+   | S3 answers | Means |
+   | --- | --- |
+   | 200 | The archive exists: nothing is planned for it, if it is ready (below). |
+   | 404 | It does not: the `archive` root module plans it, create-only, into `archive.tfplan`. |
+   | 403 | Refused: `The log archive B is not accessible in account A: these credentials may not reach it (S3 answered 403)`. Its name is in S3's account-regional namespace, so no other account can hold it. |
+   | 301 | Refused: `The log archive B exists outside the factory Region R (S3 answered 301)`. |
+
+   Any other failure fails the command, naming the call: `S3 HeadBucket on the
+   log archive failed: CODE`.
+2. An existing archive must carry every setting the `log-archive` module
+   applies that S3 can report, read with `GetBucketVersioning`,
+   `GetPublicAccessBlock`, `GetBucketOwnershipControls`,
+   `GetBucketEncryption`, `GetBucketAbac` and `GetBucketPolicy` (each with
+   `ExpectedBucketOwner`): versioning `Enabled`, all four public access block
+   settings on, object ownership `BucketOwnerEnforced`, default encryption
+   rules that are all SSE-S3 (`AES256`; S3 encrypts every new bucket by
+   default, so any rule alone would prove nothing), ABAC `Enabled`, and the
+   TLS-only policy statement the state bucket's check reads
+   (`deniesInsecureTransport`). S3's answer that a setting was never made
+   (`NoSuchPublicAccessBlockConfiguration`,
+   `OwnershipControlsNotFoundError`,
+   `ServerSideEncryptionConfigurationNotFoundError`, `NoSuchBucketPolicy`, an
+   ABAC status that is not `Enabled`) counts as lacking it; any other failure
+   fails the command. Not checked: the account-regional namespace itself,
+   which the name proves, `prevent_destroy`, a Terraform setting S3 does not
+   know, and the bucket's tags. An archive lacking any setting is refused
+   before anything is planned or saved, as an unready state bucket is, on
+   standard error:
+
+   ```text
+   ✖ The log archive fff-abcd1234-logs-123456789012-eu-west-2-an exists, but without every setting fffactory gives it. It lacks:
+     attribute-based access control
+
+   ── Next ─────────────────────────────────────────────
+     If another apply is still creating it, wait for that to finish, then retry.
+
+     Otherwise complete the bucket with these AWS CLI commands, using credentials for account 123456789012, then retry:
+       $ aws s3api put-bucket-abac --region eu-west-2 --bucket fff-abcd1234-logs-123456789012-eu-west-2-an --expected-bucket-owner 123456789012 --abac-status Status=Enabled
+   ```
+
+   Each lacking setting is listed (versioning with its state; `public access
+   block`; `bucket-owner-enforced object ownership`; `SSE-S3 default
+   encryption`; `attribute-based access control`; `TLS-only bucket policy`),
+   in that order, with the one command that applies it as the module does, and
+   the state bucket's warning when the policy command is among them. fffactory
+   cannot finish the archive itself: the `archive` root keeps no state, and its
+   plan would create a bucket that exists. Marked `TODO(re-evaluate when
+   retention or bucket settings must change)` in
+   `src/cli/presentation/plan.ts`, as in `archive/main.tf`.
+
+A missing archive's plan is read back with `showPlan` and judged by the same
+create-only rule as backend bootstrap's (`createOnlyRefusal`,
+`src/domain/backend-bootstrap.ts`). Unlike the state bucket's, it is not
+approved on its own: the lock lives in the state bucket, not the archive, so
+the archive is created under the factory lock, in the factory's one reviewed
+plan, applied before the factory root once approved, and checked missing again
+right before its apply ([plan and apply §Apply](plan-apply.md#apply)). Two
+applies cannot race to create it: the factory lock serialises them, and a
+saved plan creating an archive that exists by its apply is stale. A ready
+archive is left alone, so a factory applied again after teardown, which keeps
+the archive ([teardown](teardown.md)), adopts it.
 
 ## Lock
 
@@ -1199,17 +1272,18 @@ The operator's credentials need, beyond the lock's:
 | Application | `src/application/project-terraform-inputs.ts` | factory.json projected into each root module's variables. |
 | Infrastructure | `src/infrastructure/terraform/resource-names.ts` | `NAMED_RESOURCES`, and the namespacing check over a Terraform JSON plan. |
 | Infrastructure | `assets/terraform/` | The Terraform modules and their provider lockfiles. |
-| Domain | `src/domain/backend-bootstrap.ts` | The create-only rule (`bootstrapPlanVerdict`, each offending change as a `ResourceChange`) and `BootstrapContext`; the state bucket's readiness rule, its TLS-only policy and its check, and `UnreadyBucket` (where the bucket is, what S3 reports and each setting it lacks). Pure; no text layout. |
+| Domain | `src/domain/backend-bootstrap.ts` | The create-only rule (`bootstrapPlanVerdict`, each offending change as a `ResourceChange`, and `createOnlyRefusal`, the read-back's verdict as `UnexpectedPlan`s, for backend bootstrap's and the log archive's plans) and `BootstrapContext`; the state bucket's readiness rule, its TLS-only policy and its check, the log archive's readiness rule (`ArchiveReadiness`, `missingArchiveHardening`, `unreadyArchive`), and `UnreadyBucket` (where the bucket is, what S3 reports and each setting it lacks). Pure; no text layout. |
 | Domain | `src/domain/factory-lock.ts` | The lock record, its key and break-log key, parsing, staleness (`isStale`, `lockAge`, `formatDuration`), and the break confirmation rule (`confirmsBreak`). Pure; no text layout. |
 | Domain | `src/domain/teardown.ts` | The guarded destroy plan's rule (`destroyPlanRefusal`, each refusal a summary, details and next action) and `VpcInventory`; the rest of teardown's rules are [teardown](teardown.md)'s. Pure. |
 | Infrastructure | `src/infrastructure/ec2-inventory.ts` | `ec2MachineInventory`'s `listVpcs`: the factory's tagged VPCs from `DescribeVpcs`, paged, within one deadline, a VPC without a well-formed ID or a failure `unavailable`. |
 | Domain | `src/domain/state-bucket-deletion.ts` | `DELETE_OBJECTS_LIMIT`, the order the bucket is emptied in, page by page with the lock's versions set aside (`deletionBatches`), then the lock's, in batches of their own, those no longer current oldest first and the current one alone and last (`lockBatches`), and how deleting it ended (`BucketDeletion`, and what became of the lock, `LockAfterDeletion`). Pure. |
 | CLI adapter | `src/cli/presentation/lock.ts` | The holder lines (`describeHeldLock`) and the lock refusal: `lockRefusalReport` in blocks for plan, apply and upgrade, and the unstyled `lockRefusal` the worker commands still print. |
 | Application | `src/application/bootstrap-backend.ts` | `bootstrapBackend` and `beginFactoryOperation`: the bootstrap plan approved as a `PlanReview`, an unready bucket returned as its `UnreadyBucket`; and `applySavedBootstrap`, a saved bootstrap plan's exact apply, its review shown as the same `PlanReview`. |
-| CLI adapter | `src/cli/presentation/plan.ts` | The bootstrap plan as shown (`bootstrapSection`), and as `plan` saves it (`savedBootstrapPlanReport`), and the unready bucket's refusal (`planRefusalReport`): what it lacks, the AWS CLI commands that complete it, and the warning that `put-bucket-policy` replaces the whole policy. |
+| CLI adapter | `src/cli/presentation/plan.ts` | The bootstrap plan as shown (`bootstrapSection`), and as `plan` saves it (`savedBootstrapPlanReport`), and the unready state bucket's and log archive's refusals (`planRefusalReport`): what it lacks, the AWS CLI commands that complete it, and the warning that `put-bucket-policy` replaces the whole policy. |
+| Application | `src/application/log-archive.ts` | The log archive's readiness (`archiveOf`, `archiveState`) and its create-only plan (`planArchive`, `archivePlanFile`, `readBackArchivePlan`), for the infrastructure stage. |
 | Application | `src/application/factory-lock.ts` | `stateBucketOf`, `lockHolder`, `acquireFactoryLock`, `releaseFactoryLock`, `settleFactoryLock`, `withFactoryLock`, `breakFactoryLock`. |
-| Application | `src/application/lock-store.ts`, `src/application/approval.ts`, `src/application/operator-prompt.ts` | The `LockStore`, `Approval` and `OperatorPrompt` ports. |
-| Infrastructure | `src/infrastructure/aws-s3-lock-store.ts` | `s3LockStore`: HeadBucket, the bucket's versioning, public access block, encryption and policy, conditional PutObject, GetObject and DeleteObject by version, PutObject of [operation records](plan-apply.md#operation-records), their ListObjectsV2 and GetObject for teardown ([teardown §Devices](teardown.md#devices)), and HeadObject of the Terraform state; and the bucket's deletion, ListObjectVersions page by page, each page's DeleteObjects by version before the next, then the lock's, and DeleteBucket, each failure `remains` by name and a 404 `absent`; always with `ExpectedBucketOwner`. |
+| Application | `src/application/lock-store.ts`, `src/application/approval.ts`, `src/application/operator-prompt.ts` | The `LockStore` (the state bucket, and the log archive's existence and readiness: `FactoryBucket`, `ArchiveBucket`), `Approval` and `OperatorPrompt` ports. |
+| Infrastructure | `src/infrastructure/aws-s3-lock-store.ts` | `s3LockStore`: HeadBucket, the bucket's versioning, public access block, encryption and policy (and for the log archive its ownership controls and ABAC status too), conditional PutObject, GetObject and DeleteObject by version, PutObject of [operation records](plan-apply.md#operation-records), their ListObjectsV2 and GetObject for teardown ([teardown §Devices](teardown.md#devices)), and HeadObject of the Terraform state; and the bucket's deletion, ListObjectVersions page by page, each page's DeleteObjects by version before the next, then the lock's, and DeleteBucket, each failure `remains` by name and a 404 `absent`; always with `ExpectedBucketOwner`. |
 | Infrastructure | `src/infrastructure/aws-session.ts` | One deadline per port call, and AWS failures described by name and code. |
 | Infrastructure | `src/infrastructure/terminal-prompt.ts` | `terminalPrompt`: echoed and hidden questions on standard error, standard input; at a terminal both are read in raw mode, so Ctrl-C cancels a question rather than interrupting `fffactory`, and an echoed answer is echoed by the prompt. |
 | CLI adapter | `src/cli/main.ts` | Wires `managedTerraform()` as doctor's probe and the provisioner's installer, `terraformProvisioner`, `s3LockStore()`, `terminalPrompt(process.stdin, process.stderr)`, the host name and the clock, and `interruptible` (`src/cli/interrupts.ts`): on interrupt, says so on standard error, marks the command interrupted and stops running tools, waits up to `RETURN_GRACE_MS` for a command that waits on an interrupt (`waitsOnInterrupt`) to return, and kills them on a second signal. |
@@ -1294,10 +1368,13 @@ tag filters, another factory's and an untagged VPC left out).
 First apply and lock: `tests/domain/backend-bootstrap.test.ts` (resource
 changes read, unreadable plans, the create-only rule; the readiness rule, the
 TLS-only policy check and policy, the unready bucket's location, readiness and
-missing settings in bootstrap's order),
+missing settings in bootstrap's order; `createOnlyRefusal`; the log archive's
+readiness, SSE-S3 rather than any encryption, and an unready archive carrying
+only its location),
 `tests/cli/presentation/plan.test.ts` (the bootstrap plan as shown, refused
 plans with each reason; the unready bucket's guidance, its commands in
-bootstrap's order and the whole-policy warning),
+bootstrap's order and the whole-policy warning; an unready log archive's
+guidance and commands in their order),
 `tests/domain/factory-lock.test.ts` (keys, record round trip, unreadable
 records, holder and breaker recorded in printable ASCII, age and staleness,
 confirmation by token only, the break entry),
@@ -1322,7 +1399,8 @@ version, a failed log write),
 `tests/infrastructure/aws-s3-lock-store.test.ts` (stubbed calls, and the real
 SDK against `tests/support/stub-s3.ts`, a local S3 stand-in with versioned,
 never-versioned and suspended buckets: HeadBucket by status, the readiness
-settings, conditional writes, reads, deletes by version, the break log, a
+settings, the log archive's HeadBucket answers named for the archive, its
+ownership controls, ABAC status and SSE-S3 read and lacking, conditional writes, reads, deletes by version, the break log, a
 never-versioned or suspended bucket refusing the lock and keeping nothing, a
 leftover `null`-version lock held and broken, error names, a missing profile, a deadline and a
 closed port; deleting the bucket: each page deleted before the next is listed, the lock's

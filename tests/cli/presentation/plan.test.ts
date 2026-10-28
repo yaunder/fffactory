@@ -14,10 +14,16 @@ import {
   savedBootstrapPlanReport,
   savedPlanReport,
   staleReport,
+  staleRunReport,
   unknownPlanReport,
 } from "../../../src/cli/presentation/plan";
 import { ansiStyle, plainStyle } from "../../../src/cli/presentation/style";
-import { tlsOnlyPolicy, unreadyBucket } from "../../../src/domain/backend-bootstrap";
+import {
+  type ArchiveReadiness,
+  tlsOnlyPolicy,
+  unreadyArchive,
+  unreadyBucket,
+} from "../../../src/domain/backend-bootstrap";
 import type { FactoryId, HostKey, Release } from "../../../src/domain/instance";
 import {
   type FactoryPlanReview,
@@ -124,6 +130,22 @@ describe("the plan section (plan-apply §Plan)", () => {
       "    ~ builder-1   remove the factory dispatch schedule if it exists",
       "  Verification     end to end: observe each worker's release, repositories, Paseo and actual dispatch schedule",
     ]);
+  });
+
+  test("the log archive, when factory.json enables it, is a row of its own before the infrastructure", () => {
+    const ARCHIVE = "fff-abcd1234-logs-123456789012-eu-west-2-an";
+    const creating = plain(
+      planSection(review({ archive: { bucket: ARCHIVE, creates: true } }), {}),
+    );
+    expect(creating.slice(5, 7)).toEqual([
+      `  Archive          ${ARCHIVE}, created`,
+      "  Infrastructure   no changes",
+    ]);
+    const present = plain(
+      planSection(review({ archive: { bucket: ARCHIVE, creates: false } }), {}),
+    );
+    expect(present[5]).toBe(`  Archive          ${ARCHIVE}, present`);
+    expect(plain(planSection(review(), {})).join("\n")).not.toContain("Archive");
   });
 
   test("a factory without a name shows its ID alone", () => {
@@ -594,6 +616,72 @@ describe("an unready state bucket's refusal (provisioning §Backend bootstrap)",
   });
 });
 
+describe("an unready log archive's refusal (provisioning §Log archive readiness)", () => {
+  const ARCHIVE = "fff-abcd1234-logs-123456789012-eu-west-2-an";
+  const LOCATION = { bucket: ARCHIVE, accountId: "123456789012", region: "eu-west-2" };
+  const READY: ArchiveReadiness = {
+    versioning: "Enabled",
+    publicAccessBlocked: true,
+    encrypted: true,
+    tlsOnly: true,
+    ownership: "BucketOwnerEnforced",
+    sseS3: true,
+    abac: "Enabled",
+  };
+  const AT = `--region eu-west-2 --bucket ${ARCHIVE} --expected-bucket-owner 123456789012`;
+
+  function unready(readiness: Partial<ArchiveReadiness>): string[] {
+    const bucket = unreadyArchive(LOCATION, { ...READY, ...readiness });
+    if (bucket === undefined) throw new Error("the archive is ready");
+    return refusal({ kind: "unready_archive", bucket });
+  }
+
+  test("names what it lacks, then the commands that complete it", () => {
+    expect(unready({ ownership: "ObjectWriter", abac: undefined })).toEqual([
+      `✖ The log archive ${ARCHIVE} exists, but without every setting fffactory gives it. It lacks:`,
+      "  bucket-owner-enforced object ownership",
+      "  attribute-based access control",
+      "",
+      NEXT,
+      "  If another apply is still creating it, wait for that to finish, then retry.",
+      "",
+      "  Otherwise complete the bucket with these AWS CLI commands, using credentials for " +
+        "account 123456789012, then retry:",
+      `    $ aws s3api put-bucket-ownership-controls ${AT} --ownership-controls ` +
+        "'Rules=[{ObjectOwnership=BucketOwnerEnforced}]'",
+      `    $ aws s3api put-bucket-abac ${AT} --abac-status Status=Enabled`,
+    ]);
+  });
+
+  test("every setting, in a fixed order, the policy last with its warning", () => {
+    const lines = unready({
+      versioning: undefined,
+      publicAccessBlocked: false,
+      tlsOnly: false,
+      ownership: undefined,
+      sseS3: false,
+      abac: "Disabled",
+    });
+    expect(lines.slice(1, 7)).toEqual([
+      "  versioning (never enabled)",
+      "  public access block",
+      "  bucket-owner-enforced object ownership",
+      "  SSE-S3 default encryption",
+      "  attribute-based access control",
+      "  TLS-only bucket policy",
+    ]);
+    expect(lines.slice(-3)).toEqual([
+      `    $ aws s3api put-bucket-abac ${AT} --abac-status Status=Enabled`,
+      `    $ aws s3api put-bucket-policy ${AT} --policy '${tlsOnlyPolicy(ARCHIVE)}'`,
+      "  put-bucket-policy replaces the whole bucket policy: add any statements it already has.",
+    ]);
+    expect(lines).toContain(
+      `    $ aws s3api put-bucket-encryption ${AT} --server-side-encryption-configuration ` +
+        '\'{"Rules":[{"ApplyServerSideEncryptionByDefault":{"SSEAlgorithm":"AES256"}}]}\'',
+    );
+  });
+});
+
 describe("D11 refusals (plan-apply §Refusals until lifecycle work lands (D11))", () => {
   test("destroying or replacing a host machine names the missing capability", () => {
     const refused = hostMachineRefusal([
@@ -823,6 +911,8 @@ describe("a saved plan's refusal (plan-apply §Freshness)", () => {
     [{ kind: "state_changed" }, "the factory's Terraform state changed after it was planned"],
     [{ kind: "state_bucket_missing" }, "the state bucket no longer exists"],
     [{ kind: "state_bucket_created" }, "the state bucket was created after it was planned"],
+    [{ kind: "archive_created" }, "the log archive was created after it was planned"],
+    [{ kind: "archive_missing" }, "the log archive no longer exists"],
     [
       { kind: "inventory_unreadable", key },
       "the EC2 inventory could not be read to check that worker builder-1 is still stopped",
@@ -897,6 +987,39 @@ describe("a saved plan's refusal (plan-apply §Freshness)", () => {
       "  Review a new plan:",
       "    $ fffactory plan",
     ]);
+  });
+
+  test("a plan made in this run gone stale names no plan ID, and reruns the command", () => {
+    const apply = { action: "apply", rerun: "apply", selection: { profile: "factory" } } as const;
+    expect(shown(staleRunReport([{ kind: "archive_created" }], apply))).toEqual([
+      "✖ Refusing to apply: the plan approved is no longer the plan to apply:",
+      "  the log archive was created after it was planned",
+      "",
+      "Nothing was applied.",
+      "",
+      NEXT,
+      "  Review a new plan:",
+      "    $ fffactory apply --profile factory",
+    ]);
+  });
+
+  test("an upgrade's plan gone stale reruns upgrade, or apply once the pin moved", () => {
+    const reasons: StaleReason[] = [
+      { kind: "paseo_changed", key, hostname: "fff-abcd1234-builder-1" },
+    ];
+    const notMoved = { action: "upgrade", rerun: "upgrade", selection: {} } as const;
+    expect(shown(staleRunReport(reasons, notMoved))).toEqual([
+      "✖ Refusing to upgrade: the plan approved is no longer the plan to apply:",
+      "  Paseo state on fff-abcd1234-builder-1 changed after it was planned",
+      "",
+      "Nothing was applied.",
+      "",
+      NEXT,
+      "  Review a new plan:",
+      "    $ fffactory upgrade",
+    ]);
+    const moved = { action: "upgrade", rerun: "apply", selection: {} } as const;
+    expect(shown(staleRunReport(reasons, moved)).at(-1)).toBe("    $ fffactory apply");
   });
 
   test("an unknown or damaged plan ID is refused, with a new plan as the way forward", () => {
