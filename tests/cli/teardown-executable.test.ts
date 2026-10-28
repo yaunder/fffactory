@@ -280,7 +280,7 @@ describe("fffactory teardown executable", () => {
     expect(result.stderr).toBe("");
     expect(result.code).toBe(0);
     expect(result.stdout).toContain(`  Tailnet devices   delete ${DEVICE} (${HOSTNAME})`);
-    expect(result.stdout).toContain(`✔ Removed factory ${FACTORY}: nothing it owns remains`);
+    expect(result.stdout).toContain(`✔ Removed factory ${FACTORY}: only what it kept remains`);
     expect(result.stdout).toContain(`  Referenced   ${stubArn(SOURCE)}`);
     expectNothingOwned(world);
     // The destroy applied exactly the plan it saved.

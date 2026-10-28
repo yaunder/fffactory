@@ -11,7 +11,8 @@ import type { FactoryInstance, SecretReference } from "../../src/domain/instance
 import type { ListedSecret } from "../../src/domain/secrets";
 import type { Machine } from "../../src/domain/status";
 import {
-  FACTORY_JSON_KEPT,
+  archiveKept,
+  factoryJsonKept,
   REVOKE_SOURCES,
   TEARDOWN_UNCONFIRMABLE,
   teardownQuestion,
@@ -27,7 +28,7 @@ import {
   fakeTransport,
   tailnetDevice,
 } from "../support/fake-workers";
-import { BUCKET, declaring, FACTORY, WORKER_TAG } from "../support/factory-world";
+import { ARCHIVE, BUCKET, declaring, FACTORY, WORKER_TAG } from "../support/factory-world";
 import { MemoryInstanceStore } from "../support/memory-instance-store";
 import { MemoryLockStore } from "../support/memory-lock-store";
 import { MemoryPlanStore } from "../support/memory-plan-store";
@@ -51,12 +52,13 @@ const owned = (name: string): ListedSecret => ({
 /** What a careless operator might paste in place of the factory ID. */
 const PASTED = "tskey-auth-kPasted1CNTRL-notthefactoryid";
 
-function instance(): FactoryInstance {
+function instance(archive = false): FactoryInstance {
   const base = declaring(KEY);
   return {
     ...base,
     tailscale: { ...base.tailscale, admin_client_secret: ADMIN_ARN },
     credentials: { github_token_secret: SOURCE_ARN },
+    ...(archive ? { log_archive: { enabled: true } } : {}),
   };
 }
 
@@ -69,9 +71,13 @@ function world(
     interactive?: boolean;
     answers?: string[];
     identity?: ReturnType<typeof fakeCallerIdentity>;
+    /** factory.json enables the log archive, `ARCHIVE`. */
+    archive?: boolean;
   } = {},
 ) {
-  const store = new MemoryInstanceStore({ [PATH]: `${JSON.stringify(instance(), null, 2)}\n` });
+  const store = new MemoryInstanceStore({
+    [PATH]: `${JSON.stringify(instance(options.archive), null, 2)}\n`,
+  });
   const lockStore = new MemoryLockStore([BUCKET]);
   const terraform = fakeFactoryWorld({
     store: lockStore,
@@ -149,10 +155,11 @@ describe("fffactory teardown: a finished teardown exits 0", () => {
     expect(out).toContain(
       "  fff-abcd1234-builder-1 is stopped: it is not inspected, and unpushed work on its disk is destroyed with it.",
     );
-    expect(out).toContain("✔ Removed factory fff-abcd1234: nothing it owns remains");
+    expect(out).toContain("✔ Removed factory fff-abcd1234: only what it kept remains");
     expect(out).toContain(`  Referenced   ${SOURCE_ARN}`);
     expect(out).toContain(`  ${REVOKE_SOURCES}`);
-    expect(w.out.at(-1)).toBe(`  ${FACTORY_JSON_KEPT}`);
+    expect(w.out.at(-1)).toBe(`  ${factoryJsonKept(undefined)}`);
+    expect(out).not.toMatch(/archive/i);
     // The review comes before any step, and the report after the last.
     expect(out.indexOf("── Teardown ──")).toBeLessThan(out.indexOf("── Removing ──"));
     expect(out.indexOf("── Removing ──")).toBeLessThan(out.indexOf("── Result ──"));
@@ -167,6 +174,20 @@ describe("fffactory teardown: a finished teardown exits 0", () => {
     expect(await teardown(w)).toBe(0);
     expect(w.prompt.asked).toEqual([teardownQuestion(FACTORY)]);
     expect(w.out.join("\n")).toContain("✔ Removed factory fff-abcd1234");
+  });
+
+  test("with the log archive: the question, review, report and advice name it kept", async () => {
+    const w = world({ interactive: true, answers: [FACTORY], archive: true });
+    expect(await teardown(w)).toBe(0);
+    expect(w.prompt.asked).toEqual([teardownQuestion(FACTORY, false, ARCHIVE)]);
+    expect(w.prompt.asked[0]).toContain(archiveKept(ARCHIVE));
+    const out = w.out.join("\n");
+    // Once in the review's Kept section, once in the report's, and in the advice.
+    expect(out.split(`\n  ${archiveKept(ARCHIVE)}`)).toHaveLength(3);
+    expect(out.indexOf(archiveKept(ARCHIVE))).toBeLessThan(out.indexOf("── Removing ──"));
+    expect(w.out.at(-1)).toBe(`  ${factoryJsonKept(ARCHIVE)}`);
+    // Named from factory.json alone: S3 was never asked about the archive.
+    expect(w.lockStore.calls.filter((call) => call.includes(ARCHIVE))).toEqual([]);
   });
 
   test("the commands it names repeat the instance and profile given", async () => {
@@ -283,7 +304,9 @@ describe("fffactory teardown: help", () => {
   test("is listed, and its usage says it is admin-tier and how it exits", async () => {
     const w = world();
     expect(await run(["--help"], w.context)).toBe(0);
-    expect(w.out.join("\n")).toContain("  teardown  ");
+    expect(w.out.join("\n")).toMatch(
+      / {2}teardown +Remove the whole factory, all it owns but its log archive, after you confirm its ID/,
+    );
     const usage = world();
     expect(await teardown(usage, "--help")).toBe(0);
     const text = usage.out.join("\n");
@@ -291,7 +314,10 @@ describe("fffactory teardown: help", () => {
       "Usage: fffactory teardown [--confirm FACTORY_ID] [--instance PATH] [--profile NAME]",
     );
     expect(text).toContain("Admin-tier");
-    expect(text).toContain("Exits 0 once nothing the factory owns remains");
+    expect(text).toContain("Exits 0 once only what it keeps remains");
+    expect(text).toContain("everything it owns but its log archive");
+    expect(text).toContain("the secrets and, when factory.json enables one,\nthe log archive");
+    expect(text).toContain("adopting the archive if\nit exists");
     // An interrupt need not leave the lock: before it, without a state bucket, or with the bucket.
     expect(text).toContain("Interrupted, it says what it left and what to do next");
     expect(text).not.toContain("Interrupting it leaves the factory locked");

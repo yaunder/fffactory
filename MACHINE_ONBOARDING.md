@@ -785,9 +785,9 @@ would end ([worker lifecycle
 §Inspect](docs/specs/worker-lifecycle.md#inspect)). A stopped worker is not
 inspected, and anything unpushed on its disk is destroyed.
 
-**Done when** it prints `✔ Removed factory ID: nothing it owns remains`,
+**Done when** it prints `✔ Removed factory ID: only what it kept remains`,
 exiting 0. An interrupt during the state bucket's last deletion can print that
-and still exit 128 plus the signal's number: nothing of the factory remains
+and still exit 128 plus the signal's number: nothing it removes remains
 ([teardown §Interruption](docs/specs/teardown.md#interruption)).
 
 **Otherwise:**
@@ -804,7 +804,9 @@ and still exit 128 plus the signal's number: nothing of the factory remains
   ([teardown §Interruption](docs/specs/teardown.md#interruption)).
 
 Afterwards factory.json is unchanged and still describes the factory (`fffactory
-apply` would create a new one): delete it once you no longer need it. Teardown
+apply` would create it again): delete it once you no longer need it. With
+`log_archive.enabled` the log archive is kept too: fffactory never removes it,
+and applying the same factory.json again adopts it. Teardown
 revokes nothing it only refers to: revoke the Tailscale auth key and admin
 OAuth client, remove the factory's tag, grant and SSH rule from the tailnet
 policy, and revoke the API credentials it was given, once nothing else uses

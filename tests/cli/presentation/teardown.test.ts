@@ -19,7 +19,8 @@ import {
   CHECK_UNCHECKED_DEVICES,
   checkOutsideEc2,
   DEVICES_NOT_CHECKED,
-  FACTORY_JSON_KEPT,
+  archiveKept,
+  factoryJsonKept,
   NO_LISTED_DEVICES,
   ranWithoutLock,
   REVOKE_SOURCES,
@@ -34,6 +35,7 @@ import {
 
 const FACTORY = "fff-abcd1234" as FactoryId;
 const BUCKET = "fff-abcd1234-state";
+const ARCHIVE = "fff-abcd1234-logs-123456789012-eu-west-2-an";
 const NOW = new Date("2026-10-21T12:00:00.000Z");
 const TARGET = {
   instancePath: "/work/.fffactory/factory.json",
@@ -85,6 +87,7 @@ function review(fields: Partial<TeardownReview> = {}): TeardownReview {
     secrets: { owned: OWNED.map((name) => ({ name, arn: arn(name) })), absent: [], kept: NO_KEPT },
     bucket: { name: BUCKET, outcome: "deleted" },
     withoutLock: undefined,
+    archive: undefined,
     ...fields,
   };
 }
@@ -99,6 +102,7 @@ function report(fields: Partial<TeardownReport> = {}): TeardownReport {
     secrets: { removed: OWNED, absent: [], kept: NO_KEPT },
     bucket: { name: BUCKET, outcome: "deleted" },
     withoutLock: undefined,
+    archive: undefined,
     ...fields,
   };
 }
@@ -223,6 +227,43 @@ describe("the review (teardown §Order, step 10)", () => {
     ]);
     expect(lines.join("\n")).not.toContain("deleted last");
   });
+
+  test("the log archive kept, named, with nothing else kept", () => {
+    const lines = plain(teardownReviewBlocks(review({ archive: ARCHIVE }), {}));
+    expect(lines.slice(-4)).toEqual([
+      `  State bucket      ${BUCKET}, deleted last, with the lock`,
+      "",
+      rule("Kept"),
+      `  ${archiveKept(ARCHIVE)}`,
+    ]);
+  });
+
+  test("the log archive kept after the devices and secrets kept, and without a state bucket", () => {
+    const lines = plain(
+      teardownReviewBlocks(
+        review({
+          devices: {
+            deleted: [],
+            possible: [{ id: "n2CNTRL", hostname: "fff-abcd1234-lab" }],
+            untagged: [],
+          },
+          secrets: { owned: [], absent: [], kept: { tagged: [], referenced: [SOURCE] } },
+          bucket: { name: BUCKET, outcome: "not_found" },
+          withoutLock: ranWithoutLock(BUCKET),
+          archive: ARCHIVE,
+        }),
+        {},
+      ),
+    );
+    expect(lines.slice(-6)).toEqual([
+      "",
+      rule("Kept"),
+      "  Possibly its devices   n2CNTRL (fff-abcd1234-lab)",
+      `  Referenced             ${SOURCE}`,
+      "",
+      `  Log archive ${ARCHIVE} is kept; fffactory never removes it.`,
+    ]);
+  });
 });
 
 describe("the steps as they run", () => {
@@ -251,14 +292,14 @@ describe("the steps as they run", () => {
   });
 });
 
-const ADVICE = [rule("Next"), `  ${REVOKE_SOURCES}`, `  ${FACTORY_JSON_KEPT}`];
+const ADVICE = [rule("Next"), `  ${REVOKE_SOURCES}`, `  ${factoryJsonKept(undefined)}`];
 
 describe("a finished teardown (teardown §Report)", () => {
   test("what it removed, on standard output, then the advice it leaves", () => {
     expect(outcome({ kind: "done", report: report() })).toEqual({
       stream: "out",
       lines: [
-        "✔ Removed factory fff-abcd1234: nothing it owns remains",
+        "✔ Removed factory fff-abcd1234: only what it kept remains",
         "",
         rule("Result"),
         "  Infrastructure    destroyed: 2 resources",
@@ -309,7 +350,7 @@ describe("a finished teardown (teardown §Report)", () => {
       rule("Next"),
       `  ${CHECK_LISTED_DEVICES}`,
       `  ${REVOKE_SOURCES}`,
-      `  ${FACTORY_JSON_KEPT}`,
+      `  ${factoryJsonKept(undefined)}`,
     ]);
   });
 
@@ -341,15 +382,62 @@ describe("a finished teardown (teardown §Report)", () => {
       `  ${CHECK_UNCHECKED_DEVICES}`,
       `  ${checkOutsideEc2(FACTORY)}`,
       `  ${REVOKE_SOURCES}`,
-      `  ${FACTORY_JSON_KEPT}`,
+      `  ${factoryJsonKept(undefined)}`,
     ]);
     expect(lines.join("\n")).not.toMatch(/destroyed|, deleted$/m);
+  });
+
+  test("the log archive kept, in the Kept section and the factory.json advice", () => {
+    expect(outcome({ kind: "done", report: report({ archive: ARCHIVE }) })).toEqual({
+      stream: "out",
+      lines: [
+        "✔ Removed factory fff-abcd1234: only what it kept remains",
+        "",
+        rule("Result"),
+        "  Infrastructure    destroyed: 2 resources",
+        `    - ${HOST}`,
+        "    - module.network.aws_vpc.this",
+        "  EC2 instances     i-0123 (builder-1, stopped)",
+        "  Tailnet devices   deleted n1CNTRL",
+        `  Owned secrets     deleted ${OWNED.join(", ")}, each confirmed gone`,
+        `  State bucket      ${BUCKET}, deleted`,
+        "",
+        rule("Kept"),
+        `  Log archive ${ARCHIVE} is kept; fffactory never removes it.`,
+        "",
+        rule("Next"),
+        `  ${REVOKE_SOURCES}`,
+        `  ${factoryJsonKept(ARCHIVE)}`,
+      ],
+    });
+  });
+
+  test("without a state bucket, the log archive is still named kept", () => {
+    const { lines } = outcome({
+      kind: "done",
+      report: report({
+        infrastructure: "not_found_by_ec2",
+        changes: [],
+        machines: [],
+        bucket: { name: BUCKET, outcome: "not_found" },
+        withoutLock: ranWithoutLock(BUCKET),
+        archive: ARCHIVE,
+      }),
+    });
+    expect(lines[0]).toBe("✔ Removed what was left of factory fff-abcd1234");
+    expect(lines).toContain(`  ${archiveKept(ARCHIVE)}`);
+    expect(lines.at(-1)).toBe(`  ${factoryJsonKept(ARCHIVE)}`);
+  });
+
+  test("without the log archive, no archive is named", () => {
+    const { lines } = outcome({ kind: "done", report: report() });
+    expect(lines.join("\n")).not.toMatch(/archive/i);
   });
 
   test("the commands it names repeat the instance and profile given", () => {
     const { lines } = outcome({ kind: "done", report: report() }, { instance: "/x/f.json" });
     expect(lines.at(-1)).toBe(
-      "  factory.json is left as it is: teardown never changes it. It still describes the factory, so `fffactory apply --instance /x/f.json` would create a new one. Remove it yourself once you no longer need it.",
+      "  factory.json is left as it is: teardown never changes it. It still describes the factory, so `fffactory apply --instance /x/f.json` would create it again. Remove it yourself once you no longer need it.",
     );
   });
 });

@@ -1,7 +1,7 @@
 /**
- * `fffactory teardown` (`docs/specs/teardown.md`, epic #56): removes everything a factory owns,
- * under the factory-wide lock and its operation record, and keeps every persistent source it
- * only refers to. In order (§Order): the checks that need no AWS, the account check and the
+ * `fffactory teardown` (`docs/specs/teardown.md`, epic #56): removes everything a factory owns
+ * but its log archive, under the factory-wide lock and its operation record, and keeps the
+ * archive and every persistent source it only refers to. In order (§Order): the checks that need no AWS, the account check and the
  * pin guard, the lock; under it the admin client, the inventory, the guarded destroy plan
  * (D13), what will be removed and kept, the confirmation by factory ID (D2), dispatch stopped
  * on every running worker (D3), one fresh inspection of each by terminate's gates, with no
@@ -66,7 +66,7 @@ import {
   resourceChanges,
 } from "../domain/plan";
 import { placedRepositories } from "../domain/repository-placement";
-import { hostName } from "../domain/resource-naming";
+import { archiveBucketName, hostName } from "../domain/resource-naming";
 import type { WorkerIdentity } from "../domain/rollout";
 import {
   classifySecrets,
@@ -336,6 +336,11 @@ interface Teardown {
   readonly adminClient: SecretReference;
   /** Whether the confirmation is asked at the terminal: no `--confirm` was given. */
   readonly asks: boolean;
+  /**
+   * The log archive teardown keeps (`archiveBucketName`), when factory.json enables one: named
+   * from factory.json alone, never asked of S3, since teardown never touches it.
+   */
+  readonly archive: string | undefined;
 }
 
 type Checked = { readonly kind: "checked"; readonly teardown: Teardown } | FactoryTeardown;
@@ -375,7 +380,13 @@ function localChecks(deps: TeardownDependencies, request: TeardownRequest): Chec
   if (confirmation === "mismatch") return refusedBefore(teardownConfirmMismatch(fields.factoryId));
   return {
     kind: "checked",
-    teardown: { request, ...fields, adminClient, asks: confirmation === "ask" },
+    teardown: {
+      request,
+      ...fields,
+      adminClient,
+      asks: confirmation === "ask",
+      archive: archiveBucketName(request.instance),
+    },
   };
 }
 
@@ -1312,6 +1323,7 @@ function reviewOf(teardown: Teardown, run: Removal, devices: FactoryDevices): Te
     },
     bucket: bucketOf(teardown, run),
     withoutLock: run.withoutLock,
+    archive: teardown.archive,
   };
 }
 
@@ -1334,7 +1346,9 @@ async function unconfirmed(
 ): Promise<FactoryTeardown | undefined> {
   if (!teardown.asks) return undefined;
   await log.stage("awaiting_approval");
-  const answer = await deps.prompt.ask(teardownQuestion(teardown.factoryId, !log.locked));
+  const answer = await deps.prompt.ask(
+    teardownQuestion(teardown.factoryId, !log.locked, teardown.archive),
+  );
   if (deps.interrupted()) return interruptedUnder(log, progress);
   if (typedIdConfirms(answer, teardown.factoryId)) return undefined;
   const recordFailure = await log.finish("declined", "declined");
@@ -1672,6 +1686,7 @@ async function removeSecrets(
     },
     bucket: bucketOf(teardown, run),
     withoutLock: run.withoutLock,
+    archive: teardown.archive,
   };
   return removeLast(deps, teardown, log, progress, report);
 }

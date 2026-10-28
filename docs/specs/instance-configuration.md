@@ -109,7 +109,8 @@ generates, never an operator's choice. Enabling it makes `fffactory plan` and
 ([plan and apply §The infrastructure stage](plan-apply.md#the-infrastructure-stage)),
 and lets each host's role write new objects under its own prefix of the bucket
 ([provisioning §Log archive access](provisioning.md#log-archive-access)).
-fffactory itself writes nothing in the archive yet.
+fffactory itself writes nothing in the archive yet, and never removes it:
+[teardown](teardown.md) keeps it and says so.
 
 The archive's bucket name is derived, never configured:
 `<factory_id>-logs-<aws.account_id>-<aws.region>-an`, such as

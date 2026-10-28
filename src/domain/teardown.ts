@@ -416,20 +416,38 @@ export function teardownConfirmMismatch(factoryId: FactoryId): Refusal {
   );
 }
 
+// TODO(re-evaluate when the collector ships): say, at removal, what evidence a worker has not yet
+// archived, which the archive kept would then lack.
+/**
+ * The log archive, `archive` (`archiveBucketName`), which teardown keeps: named from factory.json,
+ * never asked of AWS, so true whether or not it was ever created (§Report).
+ */
+export function archiveKept(archive: string): string {
+  return `Log archive ${archive} is kept; fffactory never removes it.`;
+}
+
 /**
  * The question asked once what will be removed and kept has been shown; `withoutBucket`, when
- * only the tailnet devices and owned secrets are left (§No state bucket).
+ * only the tailnet devices and owned secrets are left (§No state bucket); excepting the log
+ * archive and naming it kept when factory.json enables one (`archive`).
  */
-export function teardownQuestion(factoryId: FactoryId, withoutBucket = false): string {
+export function teardownQuestion(
+  factoryId: FactoryId,
+  withoutBucket = false,
+  archive?: string,
+): string {
+  const kept = archive === undefined ? "" : `${archiveKept(archive)} `;
+  const owns =
+    archive === undefined ? "everything it owns" : "everything it owns but its log archive";
   if (withoutBucket)
     return (
       `Remove what is left of factory ${factoryId}? Its tailnet devices and owned secrets are ` +
-      "deleted, and none can be recovered. Type the factory ID to confirm: "
+      `deleted, and none can be recovered. ${kept}Type the factory ID to confirm: `
     );
   return (
-    `Remove factory ${factoryId} and everything it owns? Its workers, network, IAM, ` +
+    `Remove factory ${factoryId} and ${owns}? Its workers, network, IAM, ` +
     "Terraform state, tailnet devices, owned secrets and state bucket are deleted, and none " +
-    "can be recovered. Type the factory ID to confirm: "
+    `can be recovered. ${kept}Type the factory ID to confirm: `
   );
 }
 
@@ -887,6 +905,8 @@ export interface TeardownReview {
   readonly bucket: TeardownBucket;
   /** Why teardown runs without the lock, the bucket missing (`ranWithoutLock`); undefined under it. */
   readonly withoutLock: string | undefined;
+  /** The log archive kept (`archiveKept`), when factory.json enables one; undefined otherwise. */
+  readonly archive: string | undefined;
 }
 
 /**
@@ -930,15 +950,25 @@ export interface TeardownReport {
   readonly bucket: TeardownBucket;
   /** Why teardown ran without the lock, the bucket missing (`ranWithoutLock`); undefined under it. */
   readonly withoutLock: string | undefined;
+  /** The log archive kept (`archiveKept`), when factory.json enables one; undefined otherwise. */
+  readonly archive: string | undefined;
 }
 
 /**
  * factory.json is left as it was (D11), and the report says so: it still describes the factory,
- * which `fffactory apply` would create anew.
+ * which `fffactory apply` would create again, adopting the log archive kept (`archive`), when
+ * factory.json enables one, if it exists: teardown never asks AWS whether it does.
  */
-export const FACTORY_JSON_KEPT =
-  "factory.json is left as it is: teardown never changes it. It still describes the factory, " +
-  "so `fffactory apply` would create a new one. Remove it yourself once you no longer need it.";
+export function factoryJsonKept(archive: string | undefined): string {
+  const again =
+    "factory.json is left as it is: teardown never changes it. It still describes the factory, " +
+    "so `fffactory apply` would create it again";
+  if (archive === undefined) return `${again}. Remove it yourself once you no longer need it.`;
+  return (
+    `${again}, adopting its log archive if it exists. ${archiveKept(archive)} ` +
+    "Remove factory.json yourself once you no longer need it."
+  );
+}
 
 /**
  * The persistent sources a factory only refers to are the operator's to revoke: the Tailscale
