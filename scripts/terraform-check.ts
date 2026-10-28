@@ -7,12 +7,15 @@
  * 1. `terraform fmt -check` over `assets/terraform`;
  * 2. `init -backend=false -lockfile=readonly` and `validate` in each root module, so each
  *    shipped lockfile must already cover its providers;
- * 3. the namespacing check: plans both root modules for two factory IDs, projected from
- *    `examples/factory.json`, and requires every name in each JSON plan to carry its
- *    factory ID and no name of one factory's plans to appear in the other's;
+ * 3. the namespacing check: plans every root module (`factory`, `backend`, `archive`) for two
+ *    factory IDs, projected from `examples/factory.json`, and requires every name in each JSON
+ *    plan to carry its factory ID and no name of one factory's plans to appear in the other's;
  * 4. the user data check: every planned host's user data, rendered by Terraform's
  *    `templatefile`, must equal the rendering the bootstrap tests run
- *    (`tests/support/user-data.ts`), so those tests exercise what hosts boot with;
+ *    (`tests/support/user-data.ts`), so those tests exercise what hosts boot with; and the
+ *    archive check: each archive plan only creates the log archive bucket fffactory derives,
+ *    in S3's account-regional namespace, with exactly its settings (versioning, public access
+ *    block, bucket-owner-enforced ownership, SSE-S3, ABAC, the TLS-only Deny) and nothing more;
  * 5. the empty factory check: the factory root planned from the example without hosts, as
  *    `fffactory worker terminate` leaves a factory whose last host it removed, plans no
  *    instance and keeps the shared infrastructure, its hosts' policy allowing only the
@@ -46,6 +49,7 @@ import { join, resolve } from "node:path";
 import { cacheDirectoryPath } from "../src/application/cache-directory";
 import { managedTerraformPaths } from "../src/application/managed-terraform";
 import {
+  projectArchiveVariables,
   projectBackendVariables,
   projectFactoryVariables,
 } from "../src/application/project-terraform-inputs";
@@ -68,7 +72,7 @@ import { removalPlanProblems } from "./terraform-removal-check";
 import { resourceSchemas } from "./terraform-state-fixture";
 
 const ROOT = resolve(import.meta.dir, "..");
-const ROOT_MODULES = ["factory", "backend"] as const;
+const ROOT_MODULES = ["factory", "backend", "archive"] as const;
 const FACTORY_IDS = ["fff-aaaa1111", "fff-bbbb2222"] as FactoryId[];
 const MINUTES = 60 * 1000;
 const EXAMPLE_KEYS = {
@@ -164,9 +168,8 @@ async function exampleVariables(
 }
 
 function project(root: RootModule, instance: FactoryInstance) {
-  return root === "factory"
-    ? projectFactoryVariables(instance, [])
-    : projectBackendVariables(instance);
+  if (root === "factory") return projectFactoryVariables(instance, []);
+  return root === "backend" ? projectBackendVariables(instance) : projectArchiveVariables(instance);
 }
 
 interface Plan {
@@ -259,6 +262,117 @@ function credentialProblems(json: unknown, variables: Record<string, unknown>): 
       ];
 }
 
+/**
+ * The archive root's settings, by resource type: each dotted path into the planned values
+ * (a nested block followed into its first instance) and the value it must have. The plan
+ * holds exactly these types, one of each, so a lifecycle rule, Object Lock configuration or
+ * KMS key fails too.
+ */
+const ARCHIVE_SETTINGS: Readonly<Record<string, readonly (readonly [string, unknown])[]>> = {
+  aws_s3_bucket: [
+    ["bucket_namespace", "account-regional"],
+    ["force_destroy", false],
+  ],
+  aws_s3_bucket_abac: [["abac_status.status", "Enabled"]],
+  aws_s3_bucket_public_access_block: [
+    ["block_public_acls", true],
+    ["block_public_policy", true],
+    ["ignore_public_acls", true],
+    ["restrict_public_buckets", true],
+  ],
+  aws_s3_bucket_ownership_controls: [["rule.object_ownership", "BucketOwnerEnforced"]],
+  aws_s3_bucket_server_side_encryption_configuration: [
+    ["rule.apply_server_side_encryption_by_default.sse_algorithm", "AES256"],
+  ],
+  aws_s3_bucket_versioning: [["versioning_configuration.status", "Enabled"]],
+  aws_s3_bucket_policy: [],
+};
+
+/** The bucket policy's one statement as planned; its resources, the bucket's ARN, are unknown. */
+const TLS_ONLY_STATEMENT = {
+  actions: ["s3:*"],
+  condition: [{ test: "Bool", values: ["false"], variable: "aws:SecureTransport" }],
+  effect: "Deny",
+  principals: [{ identifiers: ["*"], type: "*" }],
+};
+
+/** The value at a dotted path, following a nested block list into its first instance. */
+function valueAt(value: unknown, path: string): unknown {
+  return path.split(".").reduce<unknown>((at, segment) => {
+    const object = Array.isArray(at) ? at[0] : at;
+    return isJson(object) ? object[segment] : undefined;
+  }, value);
+}
+
+/** Every managed and data resource of a JSON plan's planned values, depth first. */
+function plannedAll(module: unknown): Json[] {
+  if (!isJson(module)) return [];
+  const own = (Array.isArray(module.resources) ? module.resources : []).filter(isJson);
+  const children = Array.isArray(module.child_modules) ? module.child_modules : [];
+  return [...own, ...children.flatMap(plannedAll)];
+}
+
+/** Every change in a JSON plan other than a create, or a data source's read. */
+function nonCreates(json: unknown): string[] {
+  const changes = isJson(json) && Array.isArray(json.resource_changes) ? json.resource_changes : [];
+  return changes.filter(isJson).flatMap((change) => {
+    const actions = isJson(change.change) ? change.change.actions : undefined;
+    const allowed = change.mode === "data" ? "read" : "create";
+    return JSON.stringify(actions) === JSON.stringify([allowed])
+      ? []
+      : [`${String(change.address)} is planned to ${JSON.stringify(actions)}`];
+  });
+}
+
+/** Every planned resource of a type other than `ARCHIVE_SETTINGS`', or a setting it lacks. */
+function settingProblems(managed: readonly Json[]): string[] {
+  const types = managed.map((resource) => String(resource.type)).sort();
+  const problems =
+    JSON.stringify(types) === JSON.stringify(Object.keys(ARCHIVE_SETTINGS).sort())
+      ? []
+      : [`the plan holds ${types.join(", ")}, not the bucket and its settings alone`];
+  for (const resource of managed)
+    for (const [path, expected] of ARCHIVE_SETTINGS[String(resource.type)] ?? [])
+      if (valueAt(resource.values, path) !== expected)
+        problems.push(`${String(resource.address)}: ${path} is not ${JSON.stringify(expected)}`);
+  return problems;
+}
+
+/** Whether the planned policy documents hold exactly the TLS-only Deny. */
+function tlsOnly(documents: readonly Json[]): boolean {
+  const statements = documents.flatMap((document) => {
+    const planned = isJson(document.values) ? document.values.statement : undefined;
+    return Array.isArray(planned) ? planned.filter(isJson) : [];
+  });
+  if (statements.length !== 1) return false;
+  const [{ actions, condition, effect, principals }] = statements as [Json];
+  return (
+    JSON.stringify({ actions, condition, effect, principals }) ===
+    JSON.stringify(TLS_ONLY_STATEMENT)
+  );
+}
+
+/**
+ * What is wrong with the archive root's plan for its factory ID: a change other than a create
+ * (or the policy document's read), a resource type other than the bucket and its settings, a
+ * setting other than the ones it must have, a name other than the projected one, no
+ * factory-ID tag, or a bucket policy other than the TLS-only Deny.
+ */
+function archiveProblems({ factoryId, variables, json }: Plan): string[] {
+  const resources = plannedAll(plannedRoot(json));
+  const managed = resources.filter((resource) => resource.mode === "managed");
+  const problems = [...nonCreates(json), ...settingProblems(managed)];
+  const bucket = managed.find((resource) => resource.type === "aws_s3_bucket")?.values;
+  const name = `${factoryId}-${String(variables.archive_bucket_suffix)}`;
+  if (valueAt(bucket, "bucket") !== name)
+    problems.push(`the bucket is not named ${name}, as fffactory derives it`);
+  if (valueAt(bucket, "tags_all.fffactory:factory-id") !== factoryId)
+    problems.push("the bucket does not carry the factory-ID tag");
+  if (!tlsOnly(resources.filter((resource) => resource.mode === "data")))
+    problems.push("the bucket policy is not the TLS-only Deny alone");
+  return problems;
+}
+
 /** Every host whose planned user data differs from the bootstrap tests' rendering. */
 function userDataProblems(plans: readonly Plan[]): string[] {
   return plans
@@ -279,6 +393,27 @@ function userDataProblems(plans: readonly Plan[]): string[] {
           : [`${factoryId} ${String(host.address)}: user_data differs from the tests' rendering`];
       });
     });
+}
+
+/** The user data check, then the archive check, over the namespacing plans; true when both hold. */
+function plannedRootChecks(plans: readonly Plan[]): boolean {
+  const userData = userDataProblems(plans);
+  if (userData.length > 0) {
+    console.error(`User data check failed:\n${userData.map((p) => `  ${p}`).join("\n")}`);
+    return false;
+  }
+  console.log("user data: every planned host boots with the bootstrap tests' rendering");
+  const archive = plans
+    .filter((plan) => plan.root === "archive")
+    .flatMap((plan) => archiveProblems(plan).map((problem) => `${plan.factoryId}: ${problem}`));
+  if (archive.length > 0) {
+    console.error(`Archive check failed:\n${archive.map((p) => `  ${p}`).join("\n")}`);
+    return false;
+  }
+  console.log(
+    "archive: the archive root only creates the account-regional bucket, versioned, private, SSE-S3, with ABAC and the TLS-only Deny, and no lifecycle rule, Object Lock or KMS",
+  );
+  return true;
 }
 
 /** Every namespacing problem across the plans of both factory IDs. */
@@ -441,12 +576,7 @@ async function main(): Promise<number> {
     console.log(
       `namespacing: every name (${counts.join(", ")}) carries its factory ID; none is shared between ${FACTORY_IDS.join(" and ")}`,
     );
-    const userData = userDataProblems(plans);
-    if (userData.length > 0) {
-      console.error(`User data check failed:\n${userData.map((p) => `  ${p}`).join("\n")}`);
-      return 1;
-    }
-    console.log("user data: every planned host boots with the bootstrap tests' rendering");
+    if (!plannedRootChecks(plans)) return 1;
 
     const [factoryId] = FACTORY_IDS as [FactoryId];
     const directory = join(tree, "factory");

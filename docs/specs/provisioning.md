@@ -246,11 +246,13 @@ account, Region and tailnet (D5), so every factory keeps to its own namespace.
 | --- | --- |
 | `factory/` (root) | The factory: `network`, `host-identity` and `hosts`, and the current Amazon Linux 2023 x86-64 image from the public SSM parameter `/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64`. Its state lives in the S3 backend: the bucket comes from the backend settings, the key is `factory/terraform.tfstate`, encrypted, with S3 native locking (`use_lockfile`). |
 | `backend/` (root) | The state bucket's definition, `state-bucket`, planned and applied only by [backend bootstrap](#backend-bootstrap). It has no backend of its own. |
+| `archive/` (root) | The log archive's definition, `log-archive`, for a factory.json enabling it ([instance configuration §Log archive](instance-configuration.md#log-archive)). Like `backend/`, it keeps no state: each plan starts empty, so it can only create the bucket, and no command destroys it. Nothing plans it yet: apply creates a missing archive from [#113](https://github.com/yaunder/fffactory/issues/113). An existing archive's settings cannot be changed through it, marked `TODO(re-evaluate when retention or bucket settings must change)` in `archive/main.tf`. |
 | `modules/network` | The factory VPC (DNS support and hostnames on), its internet gateway, one public subnet in `network.availability_zone` that assigns no public IPs by default, a route table with a default route to the gateway, and the hosts' security group: no ingress, all egress (hosts are reached over Tailscale). |
 | `modules/host-identity` | The hosts' IAM role, assumable only by EC2, its instance profile, and one inline policy allowing `secretsmanager:GetSecretValue` on exactly the workers' secret references factory.json declares (`tailscale.auth_key_secret`, `hosts[].paseo_password_secret`, `credentials.*_secret`), never the operator's Tailscale admin client. One role serves every host, so each may read every host's Paseo password and every credential reference, whichever hosts keep an account on a human's login; narrowing it is an open question ([#64](https://github.com/yaunder/fffactory/issues/64)). Hosts can mutate nothing. |
 | `modules/hosts` | One EC2 instance per stable host key, none for a factory that declares no host: `hosts[].instance_type`, an encrypted gp3 root volume of `hosts[].root_volume_gib` deleted with the instance, a public IP, IMDSv2 only with a hop limit of 1 and instance tags in metadata, the security group and instance profile above. Its user data is the worker bootstrap, `bootstrap/user-data.sh.tftpl` rendered with the host's namespaced hostname, the Region, the Tailscale reference and tag, and the activator ([worker bootstrap](worker-bootstrap.md)). It changes neither `ami` nor `user_data` of a running host: a newer image or bootstrap template never replaces a host. |
 | `bootstrap/` | Not a module: the worker bootstrap's user data template and root activator, which `modules/hosts` reads ([worker bootstrap](worker-bootstrap.md)). |
 | `modules/state-bucket` | The state bucket: public access blocked, bucket-owner-enforced ownership, SSE-S3 encryption, versioning, a policy denying any request without TLS, and `prevent_destroy`. |
+| `modules/log-archive` | The log archive bucket, in S3's account-regional namespace (`bucket_namespace = "account-regional"`): versioning, public access blocked, bucket-owner-enforced ownership, SSE-S3 encryption, attribute-based access control on (`aws_s3_bucket_abac`, so S3 evaluates `aws:ResourceTag` conditions; without it a grant conditioned on the factory-ID tag matches nothing and fails closed), a bucket policy holding only the Deny of any request without TLS, and `prevent_destroy`. It never expires anything: no lifecycle rule, no Object Lock (which could never be turned off) and no KMS key (whose deletion would leave the archive unreadable). The policy names no role, so a host role a later apply recreates needs no change to it. |
 
 Each root module ships its `.terraform.lock.hcl`, generated with the managed
 Terraform for `linux_amd64` and `darwin_arm64` (the release targets); it also
@@ -276,6 +278,7 @@ resource's own name (`src/domain/resource-naming.ts`):
 | Host instance, and its Tailscale hostname | `Name` tag `<id>-<host key>` |
 | Host root volume | `Name` tag `<id>-<host key>-root` |
 | State bucket | `state_backend.bucket`, which must start with `<id>-` ([instance configuration](instance-configuration.md#state-bucket)) |
+| Log archive bucket | `<id>-logs-<account>-<region>-an`, derived by `archiveBucketName`, in S3's account-regional namespace ([instance configuration §Log archive](instance-configuration.md#log-archive)) |
 | Factory-wide lock, its break log | Objects `<id>-lock.json` and `<id>-lock-log/…` in the state bucket ([Lock](#lock)) |
 | Secrets `fffactory secret set` creates | `<id>/tailscale-auth-key`, `<id>/tailscale-admin-client`, `<id>/<host key>/paseo-password`, `<id>/github-token`, `<id>/anthropic-api-key`, `<id>/openai-api-key`: Secrets Manager names are paths, as in `examples/factory.json` ([secrets](secrets.md)) |
 
@@ -299,7 +302,7 @@ Terraform, `tests/assets/terraform/guardrails.test.ts` over
 - every resource type is classified in `NAMED_RESOURCES`
   (`src/infrastructure/terraform/resource-names.ts`) by the attributes that
   name it, or as having no name of its own (routes, associations, a bucket's
-  settings); each of those names is a template beginning `${var.factory_id}-`.
+  settings, its ABAC status among them); each of those names is a template beginning `${var.factory_id}-`.
   An unclassified type fails;
 - every IAM policy is an `aws_iam_policy_document` with literal actions.
   An allowed statement whose actions are not all reads (`Get`, `List`,
@@ -374,8 +377,8 @@ Known limits, each marked in the code with a `TODO(re-evaluate when …)`:
 `bun scripts/terraform-check.ts` (`just terraform-check`, and CI's
 `Terraform modules` job) runs the managed Terraform over a copy of the
 modules: `fmt -check`, then `init -backend=false -lockfile=readonly` and
-`validate` in each root module, then the namespacing plans. It plans both
-root modules, `factory` and `backend`, for two factory IDs, `fff-aaaa1111`
+`validate` in each root module, then the namespacing plans. It plans every
+root module, `factory`, `backend` and `archive`, for two factory IDs, `fff-aaaa1111`
 and `fff-bbbb2222`, with `examples/factory.json` projected for each, and reads
 each plan with `terraform show -json`. Every name `NAMED_RESOURCES` lists in
 each plan's planned values must be known when planning and carry that plan's
@@ -383,6 +386,16 @@ factory ID, and no name of one factory's plans may appear in the other's; a
 plan with no names fails too. Each planned host's `user_data`, rendered by
 Terraform, must equal the rendering the
 [worker bootstrap tests](worker-bootstrap.md#tests) run for the same inputs.
+Each `archive` plan must only create (its policy document only read), and
+hold exactly the bucket and its six settings, one of each, so a lifecycle
+rule, Object Lock configuration or KMS key fails: the bucket named
+`<id>-<archive_bucket_suffix>` as fffactory derives it, in the
+account-regional namespace, with the factory-ID tag and no `force_destroy`;
+versioning `Enabled`; every public access block flag on;
+`BucketOwnerEnforced`; `AES256`; ABAC `Enabled`; and a policy whose one
+statement is the TLS-only Deny. `prevent_destroy` is not in a plan's JSON:
+`guardrails.test.ts` checks the archive bucket carries it, and that the
+module holds no lifecycle configuration, Object Lock or KMS.
 Last, it plans the factory root for `fff-aaaa1111` from the example without
 hosts, an empty factory ([plan-apply §An empty factory](plan-apply.md#an-empty-factory)):
 the plan must hold no instance, keep the VPC, the hosts' role and instance
@@ -426,12 +439,20 @@ read the operator's Tailscale admin client ([secrets](secrets.md#the-tailscale-a
 | `factory_id`, `account_id`, `region` | `factory_id`, `aws.account_id`, `aws.region` |
 | `state_bucket_suffix` | `state_backend.bucket` after the factory ID and a hyphen |
 
+| Variable (`archive`) | From |
+| --- | --- |
+| `factory_id`, `account_id`, `region` | `factory_id`, `aws.account_id`, `aws.region` |
+| `archive_bucket_suffix` | The derived log archive bucket name (`archiveBucketName`) after the factory ID and a hyphen: `logs-<account>-<region>-an`. Its validation accepts only `logs-<account_id>-<region>-an` |
+
 The factory projection is refused, listing each issue by field path with
 `is required to plan`, unless the instance is
 [complete](instance-configuration.md#completeness). The backend projection
 needs only `factory_id`, `aws.account_id`, `aws.region` and
 `state_backend.bucket`, and refuses a bucket that does not carry the factory
-ID. The root modules repeat factory.json's format rules as variable
+ID. The archive projection (`projectArchiveVariables`) is refused with
+`log_archive.enabled: must be true to plan the log archive` unless factory.json
+enables the archive, and then needs only `factory_id`, `aws.account_id` and
+`aws.region`. The root modules repeat factory.json's format rules as variable
 validations; none requires a host, so an empty factory's projection plans its
 shared infrastructure alone, and its hosts' policy allows only the Tailscale
 enrollment key and any credential references. The hosts' policy allows the
@@ -1083,7 +1104,7 @@ The operator's credentials need, beyond the lock's:
 | Infrastructure | `src/infrastructure/terraform/runner.ts` | `terraformEnvironment` and `terraformRunner` over an injected `ProcessRunner`, stopping Terraform with SIGINT and a grace period. |
 | Infrastructure | `src/infrastructure/local-tool-probe.ts` | `bunProcessRunner` with its graceful stop, `stopsGracefully`, `stopRunningTools` and `killRunningTools`. |
 | Infrastructure | `src/infrastructure/terraform/provisioner.ts` | `terraformProvisioner`: per-operation directories, the Terraform commands, and failed commands' diagnostics files. |
-| Domain | `src/domain/resource-naming.ts`, `src/domain/stable-host-keys.ts` | The namespacing rule, the factory-ID and host-key tags, the state bucket's suffix; the stable host key check. Pure. |
+| Domain | `src/domain/resource-naming.ts`, `src/domain/stable-host-keys.ts` | The namespacing rule, the factory-ID and host-key tags, the state bucket's suffix, the log archive's derived bucket name; the stable host key check. Pure. |
 | Application | `src/application/project-terraform-inputs.ts` | factory.json projected into each root module's variables. |
 | Infrastructure | `src/infrastructure/terraform/resource-names.ts` | `NAMED_RESOURCES`, and the namespacing check over a Terraform JSON plan. |
 | Infrastructure | `assets/terraform/` | The Terraform modules and their provider lockfiles. |
@@ -1144,15 +1165,19 @@ rejected, adding accepted, malformed keys never echoed),
 `tests/domain/instance.test.ts` (the state bucket rule),
 `tests/application/project-terraform-inputs.test.ts` (every variable
 projected, the factory's own Tailscale reference and tag, an empty factory
-projecting no hosts, incomplete instances and renamed host keys refused),
+projecting no hosts, incomplete instances and renamed host keys refused; the
+archive's derived suffix, and an archive not enabled or an instance without
+its factory ID, account or Region refused),
 `tests/infrastructure/terraform/resource-names.test.ts` (names collected from
 JSON plans, unprefixed and unknown names and unclassified types reported, two
 factory IDs sharing no name) and `tests/assets/terraform/guardrails.test.ts`
 (the modules pass, each fixture fails with its violations, the lockfiles pin
 the required provider version, each projection matches its root module's
-variables, and no validation of the `hosts` variable requires a host).
+variables, the archive bucket carries `prevent_destroy` and its module no
+lifecycle rule, Object Lock or KMS, and no validation of the `hosts` variable
+requires a host).
 `scripts/terraform-check.ts` runs the modules' `fmt`, `validate`, namespacing
-plans, the empty factory's plan, the removal plans and the destroy plans
+plans, the archive plans' settings, the empty factory's plan, the removal plans and the destroy plans
 (`scripts/terraform-destroy-check.ts`) with the managed Terraform in CI.
 Destroy plan: `tests/domain/teardown.test.ts` (hand-written plans: deletes,
 reads and no-ops passed; an update, a create, a replacement either way,
@@ -1236,4 +1261,5 @@ interruption rule, operation records and the state revision by
 [#99](https://github.com/yaunder/factory/issues/99); the hosts' read of the
 credential references by [#68](https://github.com/yaunder/fffactory/issues/68);
 deleting the state bucket by [#82](https://github.com/yaunder/fffactory/issues/82); the
-destroy plan and the tagged VPC listing by [#83](https://github.com/yaunder/fffactory/issues/83).
+destroy plan and the tagged VPC listing by [#83](https://github.com/yaunder/fffactory/issues/83); the
+`archive/` root by [#111](https://github.com/yaunder/fffactory/issues/111).

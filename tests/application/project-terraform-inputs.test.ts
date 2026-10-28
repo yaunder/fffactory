@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import example from "../../examples/factory.json";
 import {
+  projectArchiveVariables,
   projectBackendVariables,
   projectFactoryVariables,
 } from "../../src/application/project-terraform-inputs";
@@ -235,6 +236,42 @@ describe("factory.json projected into the backend root module's variables", () =
             "must start with the factory ID and a hyphen, so its name carries the factory ID",
         },
       ],
+    });
+  });
+});
+
+describe("factory.json projected into the archive root module's variables", () => {
+  test("the log archive's derived bucket is projected as its suffix after the factory ID", () => {
+    expect(projectArchiveVariables(instance())).toEqual({
+      ok: true,
+      variables: {
+        factory_id: "example",
+        account_id: "123456789012",
+        region: "us-east-1",
+        archive_bucket_suffix: "logs-123456789012-us-east-1-an",
+      },
+    });
+  });
+
+  test("an instance that does not enable the log archive is refused", () => {
+    const disabled = { ...example, log_archive: { enabled: false } };
+    const { log_archive: _, ...absent } = example;
+    for (const document of [disabled, absent])
+      expect(projectArchiveVariables(instance(document))).toEqual({
+        ok: false,
+        issues: [{ path: "log_archive.enabled", message: "must be true to plan the log archive" }],
+      });
+  });
+
+  test("an instance without its factory ID, account or Region is refused", () => {
+    expect(
+      projectArchiveVariables(instance({ schema_version: 1, log_archive: { enabled: true } })),
+    ).toEqual({
+      ok: false,
+      issues: ["factory_id", "aws.account_id", "aws.region"].map((path) => ({
+        path,
+        message: "is required to plan",
+      })),
     });
   });
 });

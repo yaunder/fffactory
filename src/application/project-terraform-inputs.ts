@@ -1,9 +1,9 @@
 /**
  * Projects factory.json into the input variables of the shipped Terraform root modules
- * (`assets/terraform/factory` and `assets/terraform/backend`). The projection exists only in
- * memory and in the operation's private inputs file: it is never written where anyone could
- * edit it, so factory.json stays the only editable desired state. Secrets appear only as the
- * references factory.json holds.
+ * (`assets/terraform/factory`, `assets/terraform/backend` and `assets/terraform/archive`). The
+ * projection exists only in memory and in the operation's private inputs file: it is never
+ * written where anyone could edit it, so factory.json stays the only editable desired state.
+ * Secrets appear only as the references factory.json holds.
  */
 import {
   assessCompleteness,
@@ -13,7 +13,7 @@ import {
   type FactoryInstance,
   type Issue,
 } from "../domain/instance";
-import { stateBucketSuffix } from "../domain/resource-naming";
+import { archiveBucketName, stateBucketSuffix } from "../domain/resource-naming";
 import { checkStableHostKeys } from "../domain/stable-host-keys";
 
 /** A host's machine declaration, as the `hosts` variable of the factory root module takes it. */
@@ -50,6 +50,15 @@ export interface BackendVariables {
   readonly region: string;
   /** `state_backend.bucket` after the factory ID and a hyphen. */
   readonly state_bucket_suffix: string;
+}
+
+/** The variables of the archive root module, `assets/terraform/archive/variables.tf`. */
+export interface ArchiveVariables {
+  readonly factory_id: string;
+  readonly account_id: string;
+  readonly region: string;
+  /** The log archive's derived bucket name (`archiveBucketName`) after the factory ID and a hyphen. */
+  readonly archive_bucket_suffix: string;
 }
 
 export type Projection<T> =
@@ -139,6 +148,35 @@ export function projectBackendVariables(instance: FactoryInstance): Projection<B
       account_id: instance.aws?.account_id as string,
       region: instance.aws?.region as string,
       state_bucket_suffix: suffix,
+    },
+  };
+}
+
+const ARCHIVE_FIELDS = BACKEND_FIELDS.filter(([path]) => path !== "state_backend.bucket");
+
+const ARCHIVE_DISABLED: Issue = {
+  path: "log_archive.enabled",
+  message: "must be true to plan the log archive",
+};
+
+/**
+ * The archive root module's variables: the log archive bucket's definition, named as
+ * `archiveBucketName` derives it. Refused unless the instance enables the log archive and
+ * declares its factory ID, account and Region.
+ */
+export function projectArchiveVariables(instance: FactoryInstance): Projection<ArchiveVariables> {
+  if (instance.log_archive?.enabled !== true) return { ok: false, issues: [ARCHIVE_DISABLED] };
+  const missing = ARCHIVE_FIELDS.filter(([, read]) => read(instance) === undefined);
+  if (missing.length > 0) return { ok: false, issues: required(missing.map(([path]) => path)) };
+  const factoryId = instance.factory_id as FactoryId;
+  const bucket = archiveBucketName(instance) as string;
+  return {
+    ok: true,
+    variables: {
+      factory_id: factoryId,
+      account_id: instance.aws?.account_id as string,
+      region: instance.aws?.region as string,
+      archive_bucket_suffix: bucket.slice(factoryId.length + 1),
     },
   };
 }

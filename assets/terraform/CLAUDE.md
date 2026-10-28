@@ -4,7 +4,7 @@ Shipped in the release bundle and run only by the managed Terraform through the
 `Provisioner` port. Spec: [docs/specs/provisioning.md](../../docs/specs/provisioning.md)
 §"Resources and namespacing".
 
-- Root modules (`factory/`, `backend/`) hold a `.terraform.lock.hcl`; the provisioner
+- Root modules (`factory/`, `backend/`, `archive/`) hold a `.terraform.lock.hcl`; the provisioner
   refuses a root without one and inits with `-lockfile=readonly`. After changing a provider
   version, regenerate it with the managed Terraform:
   `terraform providers lock -platform=linux_amd64 -platform=darwin_arm64`.
@@ -33,6 +33,11 @@ Shipped in the release bundle and run only by the managed Terraform through the
   `aws_iam_policy_document` and `aws_ssm_parameter`; no `provisioner` or `connection` blocks.
   Widening an allowlist is a guardrail change: update the spec and fixtures with it.
 - Host instances are keyed by stable host key and ignore `ami` and `user_data` changes.
+- `backend/` and `archive/` keep no state: each plan starts empty, so they only create their
+  bucket, which carries `prevent_destroy`. `archive/` is the log archive (`modules/log-archive`):
+  S3's account-regional namespace, ABAC on so tag-conditioned grants work, the TLS-only Deny
+  alone, and no lifecycle rule, Object Lock or KMS key. Its settings cannot change once created
+  (`TODO(re-evaluate when retention or bucket settings must change)` in `archive/main.tf`).
 - `hosts` may be empty: a factory whose last host `fffactory worker terminate` removed keeps
   its network, state and host identity, whose policy then allows only the Tailscale enrollment
   key and the factory-wide credential references (`credential_secret_arns`). No validation may require a host; `guardrails.test.ts` checks it and
