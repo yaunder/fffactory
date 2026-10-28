@@ -105,7 +105,8 @@ gone. Absent or `false`, the factory has none. `log_archive` holds only
 `enabled`, and requires it. The field is optional, so schema version 1 is
 kept, and `fffactory init` never writes it: init fills only what fffactory
 generates, never an operator's choice. Nothing plans, creates or writes the
-archive yet.
+archive yet; enabling it already lets each host's role write new objects under
+its own prefix of the bucket ([provisioning §Log archive access](provisioning.md#log-archive-access)).
 
 The archive's bucket name is derived, never configured:
 `<factory_id>-logs-<aws.account_id>-<aws.region>-an`, such as

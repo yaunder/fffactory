@@ -41,6 +41,11 @@ export interface FactoryVariables {
    */
   readonly credential_secret_arns: Readonly<Partial<Record<CredentialSecretField, string>>>;
   readonly hosts: Readonly<Record<string, HostMachine>>;
+  /**
+   * The log archive's derived bucket name (`archiveBucketName`), which every host may write its
+   * own prefix of; null when factory.json does not enable the archive, so hosts may write none.
+   */
+  readonly archive_bucket: string | null;
 }
 
 /** The variables of the backend root module, `assets/terraform/backend/variables.tf`. */
@@ -120,6 +125,7 @@ export function projectFactoryVariables(
           },
         ]),
       ),
+      archive_bucket: archiveBucketName(complete) ?? null,
     },
   };
 }

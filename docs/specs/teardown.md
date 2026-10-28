@@ -946,7 +946,8 @@ themselves.
 
 **Accepted risk:** without the state bucket, teardown looks for nothing
 outside EC2. The factory root also creates IAM outside the VPC: the role and
-instance profile `<id>-host` with its inline policy `<id>-read-secrets`. A
+instance profile `<id>-host` with its inline policy `<id>-read-secrets` (and,
+with the log archive enabled, `<id>-write-archive`). A
 first apply that created them and then failed, say on `VpcLimitExceeded`,
 leaves them, and a teardown after the bucket was deleted by hand reports
 `not_found_by_ec2` with them still there. The report says so (`ranWithoutLock`)
@@ -956,7 +957,7 @@ instance profile ID-host, which a failed first apply may have left, and delete
 them yourself if they are this factory's.`` In the IAM console, under Roles
 and under the instance profiles (`aws iam get-role --role-name ID-host`,
 `aws iam get-instance-profile --instance-profile-name ID-host`): delete the
-role's inline policy, remove it from the instance profile, then delete both.
+role's inline policies, remove it from the instance profile, then delete both.
 
 ## What it never prints
 

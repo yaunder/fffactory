@@ -16,10 +16,13 @@
 - `terraform-check.ts` also compares each planned host's `user_data` with the rendering the
   bootstrap tests use (`tests/support/user-data.ts`); requires each archive plan to only create
   the derived log archive bucket with exactly its settings (`ARCHIVE_SETTINGS`) and the TLS-only
-  Deny; and plans the factory root without
-  hosts, an empty factory: no instance, the shared infrastructure kept, the hosts' policy
-  allowing only the Tailscale enrollment key; and with every credential reference set, the
-  hosts' policy allowing exactly the enrollment key, the Paseo password and those references.
+  Deny; requires each factory plan's hosts' role to hold exactly the `read_secrets` and
+  `write_archive` inline policies, the latter named `<id>-write-archive` and exactly
+  `writeArchivePolicy` for the bucket that factory ID's archive plan creates; and plans the
+  factory root without hosts, an empty factory: no instance, the shared infrastructure kept, the
+  hosts' policy allowing only the Tailscale enrollment key; with every credential reference set,
+  the hosts' policy allowing exactly the enrollment key, the Paseo password and those
+  references; and without `log_archive`, the hosts' role holding only `read_secrets`.
 - `terraform-check.ts` last checks `worker terminate`'s scoped removal rule against real
   Terraform removal plans (`terraform-removal-check.ts`): states for several hosts (two with
   their own Paseo passwords, one sharing another's) and for one, every host with a password

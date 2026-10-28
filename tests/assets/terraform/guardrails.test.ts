@@ -90,7 +90,7 @@ describe("guardrails over the shipped Terraform modules (provisioning §Guardrai
     ]);
   });
 
-  test("tag-conditioned, read-only, trust and deny statements pass", async () => {
+  test("tag-conditioned, read-only, trust and deny statements pass, a conditional document's among them", async () => {
     expect(await violations("tagged-iam")).toEqual([]);
   });
 
@@ -135,6 +135,11 @@ describe("guardrails over the shipped Terraform modules (provisioning §Guardrai
         at: "main.tf:36",
         message:
           "aws_iam_role_policy_attachment.admin: policy_arn is a policy the guardrail cannot read",
+      },
+      {
+        at: "main.tf:43",
+        message:
+          "aws_iam_role_policy.indexed: policy is not an aws_iam_policy_document the guardrail can read",
       },
     ]);
   });

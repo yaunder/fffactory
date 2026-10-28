@@ -44,6 +44,7 @@ describe("factory.json projected into the factory root module's variables", () =
         },
         credential_secret_arns: {},
         hosts: { "builder-1": { instance_type: "m7i.xlarge", root_volume_gib: 200 } },
+        archive_bucket: "example-logs-123456789012-us-east-1-an",
       },
     });
   });
@@ -65,6 +66,15 @@ describe("factory.json projected into the factory root module's variables", () =
     );
     expect(projection).toEqual(projectFactoryVariables(instance(), []));
     expect(JSON.stringify(projection)).not.toContain("ts-admin");
+  });
+
+  test("hosts may write only to the log archive factory.json enables: no bucket when it does not", () => {
+    const disabled = { ...example, log_archive: { enabled: false } };
+    const { log_archive: _, ...absent } = example;
+    for (const document of [disabled, absent]) {
+      const projection = projectFactoryVariables(instance(document), []);
+      expect(projection.ok && projection.variables.archive_bucket).toBeNull();
+    }
   });
 
   test("every credential reference reaches the hosts' role, whatever a host keeps on login (D2)", () => {

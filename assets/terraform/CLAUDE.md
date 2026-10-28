@@ -25,7 +25,12 @@ Shipped in the release bundle and run only by the managed Terraform through the
   `aws:ResourceTag/fffactory:factory-id` (or `ec2:ResourceTag/…`) with `[var.factory_id]`.
   Trust statements allow only `sts:AssumeRole` to named `Service` principals. No attached,
   managed or inline policies (`policy_arn`, `policy_arns`, `managed_policy_arns`,
-  `inline_policy`).
+  `inline_policy`). A conditional document (`count`) is referenced only as `<name>[0].json`.
+- `modules/host-identity`'s role reads the factory's secret references and, only while
+  `archive_bucket` is not null, holds `<id>-write-archive`: PutObject under the worker's own
+  `$${aws:userid}` prefix, tag-conditioned, and a Deny without `If-None-Match`. Hosts get no
+  other mutation, and never read, list or delete on the archive; `just terraform-check` asserts
+  the exact statements.
 - No `dynamic` blocks in resources or policy documents: the guardrails cannot read them.
   Tag keys are plain literals, never templates. No symbolic links.
 - Top-level blocks are only `terraform`, `provider`, `variable`, `output`, `locals`,
