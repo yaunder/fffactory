@@ -298,7 +298,10 @@ Dependencies point inward: `domain <- application <- infrastructure, cli`, and
   owned secrets in the same steps as under the lock (§No state bucket). With the log archive
   enabled it keeps it, named from factory.json alone (`archiveBucketName`), never asked of AWS,
   in its question, review, report and factory.json advice (`archiveKept`, `factoryJsonKept`),
-  and never touches the `archive` root. `fffactory teardown`
+  and never touches the `archive` root. It never deletes the archive as the state bucket,
+  because validation refuses `state_backend.bucket` equal to the archive's derived name,
+  enabled or not (`docs/specs/instance-configuration.md` §State bucket): the use case trusts
+  the validated instance and does not check again. `fffactory teardown`
   (`cli/commands/teardown.ts`, §Command) takes only `--confirm FACTORY_ID`, `--instance` and
   `--profile`, refusing anything else before anything is read and never echoing it, and exits
   0 once only what it keeps remains, 2 part way, 1 otherwise (§Output and exit codes); it has no

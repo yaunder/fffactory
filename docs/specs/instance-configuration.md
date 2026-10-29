@@ -97,6 +97,17 @@ requires it to start with the factory ID and a hyphen, such as
 applies once both `factory_id` and `state_backend.bucket` are set and well
 formed; the JSON Schema cannot express it.
 
+The state bucket is never the log archive's bucket: validation refuses
+`state_backend.bucket` equal to the archive's derived name
+([Log archive](#log-archive)), once `factory_id`, `aws.account_id` and
+`aws.region` are well formed, whether `log_archive.enabled` is true, false or
+absent, with a message naming the rule, never a configured value. An archive
+kept after teardown already passes as a ready state bucket, so `apply` would
+adopt it as one, and teardown, which deletes the state bucket, would then
+delete the archive it says it keeps. Reserving the name while the archive is
+disabled keeps evidence archived before it was disabled safe the same way.
+The JSON Schema cannot express this rule.
+
 ### Log archive
 
 `log_archive.enabled: true` gives the factory a worker log archive, an S3
@@ -117,7 +128,9 @@ The archive's bucket name is derived, never configured:
 `fff-k3x9q2ab-logs-123456789012-us-east-1-an`. The `-an` suffix puts it in S3's
 account-regional namespace, where no other account can ever take the name, and
 it carries the factory ID as every factory resource name does
-([provisioning §Names](provisioning.md#names)). `archiveBucketName` in
+([provisioning §Names](provisioning.md#names)). Deriving it does not keep the
+factory's own configurable state bucket from that name; validation does
+([State bucket](#state-bucket)). `archiveBucketName` in
 `src/domain/resource-naming.ts` is the one statement of this rule; it gives no
 name while the archive is not enabled or `factory_id`, `aws.account_id` or
 `aws.region` is absent.
@@ -201,7 +214,9 @@ Validation reports every issue, each with a field path such as `factory_id`,
 - an invalid factory ID or host key;
 - a raw secret value in a secret field;
 - duplicate host keys, repository keys or repository checkout paths;
-- a state bucket whose name does not start with the factory ID and a hyphen;
+- a state bucket whose name does not start with the factory ID and a hyphen,
+  or is the log archive's derived bucket name, whether or not the archive is
+  enabled;
 - `log_archive` without `enabled`, and `log_archive.enabled: true` in
   `me-south-1` or `me-central-1`, or with a derived bucket name over 63
   characters;
@@ -349,6 +364,8 @@ pass the same selection and the factory Region.
 Tests: `tests/domain/instance.test.ts`, `tests/domain/instance-schema.test.ts`
 (JSON Schema agrees with the domain), `tests/domain/initialization.test.ts`,
 `tests/domain/resource-naming.test.ts` (the log archive's bucket name),
+`tests/cli/teardown.test.ts` (a state bucket named as the log archive refused
+before teardown reads anything of AWS, the archive left in place),
 `tests/application/resolve-instance.test.ts`,
 `tests/application/doctor.test.ts` (each source's words in doctor's summary),
 `tests/cli/presentation/instance-source.test.ts` (the instance line for each
@@ -374,5 +391,6 @@ initialization by [#90](https://github.com/yaunder/factory/issues/90);
 credentials by [#92](https://github.com/yaunder/factory/issues/92); the state
 bucket rule by [#96](https://github.com/yaunder/factory/issues/96); API
 credential references and interactive logins by
-[#66](https://github.com/yaunder/fffactory/issues/66); the log archive by
+[#66](https://github.com/yaunder/fffactory/issues/66); the log archive, and the
+state bucket's refusal of its name, by
 [#110](https://github.com/yaunder/fffactory/issues/110).

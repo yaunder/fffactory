@@ -346,24 +346,49 @@ function checkLogArchiveRegion(document: Record<string, unknown>, issues: Issue[
 }
 
 /**
+ * The log archive's bucket name (`archiveBucketName`) as if enabled, whether or not it is:
+ * undefined until the factory ID, account and Region it derives from are well formed.
+ */
+function derivedArchiveName(document: Record<string, unknown>): string | undefined {
+  const factoryId = document.factory_id;
+  const account = nested(document, "aws", "account_id");
+  const region = nested(document, "aws", "region");
+  if (typeof factoryId !== "string" || !FACTORY_ID.test(factoryId)) return undefined;
+  if (typeof account !== "string" || !ACCOUNT_ID.test(account)) return undefined;
+  if (typeof region !== "string" || !REGION.test(region)) return undefined;
+  return archiveBucketName({
+    schema_version: SCHEMA_VERSION,
+    factory_id: factoryId as FactoryId,
+    aws: { account_id: account, region },
+    log_archive: { enabled: true },
+  });
+}
+
+/**
+ * The state bucket never takes the log archive's derived name, enabled or not: a retained
+ * archive would pass as a ready state bucket, and teardown, which deletes the state bucket,
+ * would then delete the archive it promises to keep. Reserved while the archive is disabled
+ * too, so evidence kept from when it was enabled stays protected. The message names the rule,
+ * never a configured value.
+ */
+function checkStateBucketNotArchive(document: Record<string, unknown>, issues: Issue[]): void {
+  const bucket = nested(document, "state_backend", "bucket");
+  if (typeof bucket !== "string" || bucket !== derivedArchiveName(document)) return;
+  issues.push({
+    path: "state_backend.bucket",
+    message:
+      "must not be <factory_id>-logs-<aws.account_id>-<aws.region>-an, the log archive's bucket name, reserved for it even while it is not enabled: teardown deletes the state bucket and keeps the archive",
+  });
+}
+
+/**
  * The log archive's derived bucket name must fit S3's 63 characters, which a long Region name
  * could exceed. Judged once the factory ID, account and Region it derives from are well formed;
  * the message names only the rule and the length, never a configured value.
  */
 function checkLogArchiveName(document: Record<string, unknown>, issues: Issue[]): void {
   if (nested(document, "log_archive", "enabled") !== true) return;
-  const factoryId = document.factory_id;
-  const account = nested(document, "aws", "account_id");
-  const region = nested(document, "aws", "region");
-  if (typeof factoryId !== "string" || !FACTORY_ID.test(factoryId)) return;
-  if (typeof account !== "string" || !ACCOUNT_ID.test(account)) return;
-  if (typeof region !== "string" || !REGION.test(region)) return;
-  const name = archiveBucketName({
-    schema_version: SCHEMA_VERSION,
-    factory_id: factoryId as FactoryId,
-    aws: { account_id: account, region },
-    log_archive: { enabled: true },
-  });
+  const name = derivedArchiveName(document);
   if (name === undefined || name.length <= S3_BUCKET_NAME_MAX) return;
   issues.push({
     path: "log_archive.enabled",
@@ -458,6 +483,7 @@ export function parseFactoryInstance(document: unknown): InstanceParse {
     const declared = checkRepositories(document, issues);
     checkHosts(document, declared, issues);
     checkStateBucket(document, issues);
+    checkStateBucketNotArchive(document, issues);
     checkSecretPlacement(document, issues);
     checkLogArchiveRegion(document, issues);
     checkLogArchiveName(document, issues);

@@ -35,7 +35,11 @@ question, the review, the report and the advice (`archiveKept`: `Log archive
 NAME is kept; fffactory never removes it.`). A factory applied again from the
 same factory.json adopts it
 ([provisioning §Log archive readiness](provisioning.md#log-archive-readiness)).
-Whether the archive exists is not checked. Evidence a worker never archived is
+Whether the archive exists is not checked. Teardown deletes the state bucket,
+so factory.json's `state_backend.bucket` may never name the archive: validation
+refuses the archive's derived name there, whether or not the archive is
+enabled, before teardown reads anything of AWS ([instance configuration §State
+bucket](instance-configuration.md#state-bucket)). Evidence a worker never archived is
 not reported yet: the marker `TODO(re-evaluate when the collector ships)` by
 `archiveKept` in `src/domain/teardown.ts` records the gap.
 
@@ -1196,7 +1200,9 @@ case's in-memory factory: `--confirm` without a terminal and the typed ID at a
 terminal, exit 0; the log archive named kept in the question, review, report
 and advice, nothing about it asked of S3; a wrong `--confirm`, a typed answer, unknown arguments and
 `--force` refused, never echoed, before anything is read or asked; no terminal;
-another account; exit 2 part way and a rerun finishing it; an interrupt; help)
+another account; factory.json naming the log archive as its state bucket,
+archive enabled or not, refused as invalid before AWS is asked anything, the
+archive never emptied or deleted; exit 2 part way and a rerun finishing it; an interrupt; help)
 and `tests/cli/teardown-executable.test.ts` (the spawned `main.ts` with the real
 AWS SDK and Tailscale adapter against `support/stub-sts.ts`, `stub-s3.ts`,
 `stub-secrets-manager.ts`, `stub-ec2-instances.ts` (its instances and VPC gone

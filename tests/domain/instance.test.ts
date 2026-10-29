@@ -418,6 +418,32 @@ describe("parseFactoryInstance", () => {
       ).toBe(true);
       expect(parseFactoryInstance({ schema_version: 1, factory_id: "abc" }).valid).toBe(true);
     });
+
+    describe("never the log archive's bucket (instance configuration §State bucket)", () => {
+      // completeDocument's factory ID, account and Region derive this archive name.
+      const ARCHIVE = "yaunder-v2-logs-123456789012-us-east-1-an";
+      const reserved = {
+        path: "state_backend.bucket",
+        message:
+          "must not be <factory_id>-logs-<aws.account_id>-<aws.region>-an, the log archive's bucket name, reserved for it even while it is not enabled: teardown deletes the state bucket and keeps the archive",
+      };
+
+      test.each([
+        ["enabled", { log_archive: { enabled: true } }],
+        ["disabled", { log_archive: { enabled: false } }],
+        ["absent", {}],
+      ])("refuses the archive's derived name with the archive %s", (_, archive) => {
+        const document = { ...completeDocument(), ...archive, state_backend: { bucket: ARCHIVE } };
+        expect(issuesFor(document)).toEqual([reserved]);
+      });
+
+      test("is judged once the factory ID, account and Region are well formed", () => {
+        const { aws: _, ...withoutAws } = completeDocument();
+        expect(
+          parseFactoryInstance({ ...withoutAws, state_backend: { bucket: ARCHIVE } }).valid,
+        ).toBe(true);
+      });
+    });
   });
 
   describe("log archive", () => {

@@ -52,10 +52,11 @@ const owned = (name: string): ListedSecret => ({
 /** What a careless operator might paste in place of the factory ID. */
 const PASTED = "tskey-auth-kPasted1CNTRL-notthefactoryid";
 
-function instance(archive = false): FactoryInstance {
+function instance(archive = false, stateBucket = BUCKET): FactoryInstance {
   const base = declaring(KEY);
   return {
     ...base,
+    state_backend: { bucket: stateBucket },
     tailscale: { ...base.tailscale, admin_client_secret: ADMIN_ARN },
     credentials: { github_token_secret: SOURCE_ARN },
     ...(archive ? { log_archive: { enabled: true } } : {}),
@@ -73,15 +74,18 @@ function world(
     identity?: ReturnType<typeof fakeCallerIdentity>;
     /** factory.json enables the log archive, `ARCHIVE`. */
     archive?: boolean;
+    /** factory.json's `state_backend.bucket`, an existing bucket; `BUCKET` unless given. */
+    stateBucket?: string;
   } = {},
 ) {
+  const stateBucket = options.stateBucket ?? BUCKET;
   const store = new MemoryInstanceStore({
-    [PATH]: `${JSON.stringify(instance(options.archive), null, 2)}\n`,
+    [PATH]: `${JSON.stringify(instance(options.archive, stateBucket), null, 2)}\n`,
   });
-  const lockStore = new MemoryLockStore([BUCKET]);
+  const lockStore = new MemoryLockStore([stateBucket]);
   const terraform = fakeFactoryWorld({
     store: lockStore,
-    bucket: BUCKET,
+    bucket: stateBucket,
     hosts: [KEY],
     network: true,
   });
@@ -258,6 +262,20 @@ describe("fffactory teardown: refused or declined exits 1, nothing removed", () 
     ]);
     expect(w.store.reads).toEqual([]);
   });
+
+  test.each([true, false])(
+    "the retained log archive named as the state bucket is refused before AWS, never emptied or deleted (archive enabled: %p)",
+    async (archive) => {
+      const w = world({ archive, stateBucket: ARCHIVE });
+      expect(await teardown(w, "--confirm", FACTORY)).toBe(1);
+      expect(w.err).toEqual([
+        "Invalid factory.json:",
+        "  state_backend.bucket: must not be <factory_id>-logs-<aws.account_id>-<aws.region>-an, the log archive's bucket name, reserved for it even while it is not enabled: teardown deletes the state bucket and keeps the archive",
+      ]);
+      expectNothingAsked(w);
+      expect(w.lockStore.buckets.has(ARCHIVE)).toBe(true);
+    },
+  );
 
   test("an empty --profile", async () => {
     const w = world();
