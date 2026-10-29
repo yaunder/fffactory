@@ -56,6 +56,23 @@ function bootstrapPlan(planId: string, now = NOW): SavedBootstrapPlan {
   });
 }
 
+/** A factory plan that creates the log archive, binding `archive.tfplan` too. */
+function archivePlan(planId: string): SavedPlan {
+  return {
+    ...plan(planId),
+    creates_archive: true,
+  } as SavedPlan;
+}
+
+/** Creates and saves archive-creating plan `planId`, once Terraform wrote both its plans. */
+async function savedWithArchive(store: ReturnType<typeof filesystemPlanStore>, planId: string) {
+  const files = await store.create(FACTORY, planId);
+  await writeFile(files.factory, `terraform plan ${planId}`);
+  await writeFile(files.archive, `archive plan ${planId}`);
+  await store.save(archivePlan(planId));
+  return files;
+}
+
 async function fresh() {
   const directory = await mkdtemp(join(scratch, "store-"));
   return { directory, store: filesystemPlanStore(directory) };
@@ -89,6 +106,7 @@ describe("the local plan store", () => {
     expect(files).toEqual({
       factory: join(planDirectory, "factory.tfplan"),
       backend: join(planDirectory, "backend.tfplan"),
+      archive: join(planDirectory, "archive.tfplan"),
     });
     expect((await stat(planDirectory)).mode & 0o777).toBe(0o700);
     expect((await stat(join(directory, FACTORY))).mode & 0o777).toBe(0o700);
@@ -188,6 +206,53 @@ describe("the local plan store", () => {
     await writeFile(files.factory, "a factory plan, not the backend's");
     await expect(store.save(bootstrapPlan("noplan11"))).rejects.toThrow();
     expect(await store.load(FACTORY, "noplan11")).toEqual({ kind: "missing" });
+  });
+
+  test("binds a plan creating the log archive to archive.tfplan too", async () => {
+    const { directory, store } = await fresh();
+    const files = await savedWithArchive(store, "archive1");
+    const hex = (text: string) => sha256Hex(new TextEncoder().encode(text));
+    const digest = `${hex("terraform plan archive1")} ${hex("archive plan archive1")}`;
+    expect(await store.load(FACTORY, "archive1")).toEqual({
+      kind: "found",
+      plan: archivePlan("archive1"),
+      files,
+      digest,
+    });
+    expect((await readdir(join(directory, FACTORY, "archive1"))).sort()).toEqual([
+      "archive.tfplan",
+      "archive.tfplan.sha256",
+      "factory.tfplan",
+      "factory.tfplan.sha256",
+      "plan.json",
+    ]);
+    expect(await store.digest(archivePlan("archive1"))).toBe(digest);
+    await writeFile(files.archive, "a swapped archive plan");
+    expect(await store.digest(archivePlan("archive1"))).not.toBe(digest);
+    expect(await store.load(FACTORY, "archive1")).toEqual({ kind: "damaged" });
+    await rm(files.archive);
+    expect(await store.digest(archivePlan("archive1"))).toBeUndefined();
+    expect(await store.load(FACTORY, "archive1")).toEqual({ kind: "damaged" });
+  });
+
+  test("a plan that finds the archive present binds factory.tfplan alone", async () => {
+    const { store } = await fresh();
+    const files = await store.create(FACTORY, "present1");
+    await writeFile(files.factory, "terraform plan present1");
+    const present = { ...plan("present1"), creates_archive: false } as SavedPlan;
+    await store.save(present);
+    expect(await store.load(FACTORY, "present1")).toMatchObject({
+      kind: "found",
+      digest: sha256Hex(new TextEncoder().encode("terraform plan present1")),
+    });
+  });
+
+  test("saving refuses a plan creating the archive whose archive.tfplan was never written", async () => {
+    const { store } = await fresh();
+    const files = await store.create(FACTORY, "noarch11");
+    await writeFile(files.factory, "terraform plan noarch11");
+    await expect(store.save(archivePlan("noarch11"))).rejects.toThrow();
+    expect(await store.load(FACTORY, "noarch11")).toEqual({ kind: "missing" });
   });
 
   test("a plan whose record cannot be read, or is another plan's, is damaged", async () => {

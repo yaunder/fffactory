@@ -9,6 +9,7 @@ import { harness, TEST_NOW } from "../support/cli-harness";
 import { fakeCallerIdentity } from "../support/doctor-fakes";
 import { agentsIn, fakeControlPlane, fakeWorkflowQueue } from "../support/fake-control-plane";
 import {
+  ARCHIVE,
   BUCKET,
   declaring,
   FACTORY,
@@ -329,6 +330,41 @@ describe("fffactory upgrade (plan-apply §Upgrade)", () => {
       "    $ fffactory upgrade",
     ]);
     expect(store.files[PATH]).toBe(edited);
+  });
+
+  test("a log archive created while the plan was shown: the plan is stale, the pin not moved, and upgrade is rerun", async () => {
+    const { context, err, store, pin, lockStore } = cli({
+      document: text("0.2.0", { log_archive: { enabled: true } }),
+    });
+    const prompt = context.prompt;
+    const racing = {
+      ...context,
+      prompt: {
+        ...prompt,
+        ask: async (question: string) => {
+          lockStore.buckets.add(ARCHIVE);
+          return prompt.ask(question);
+        },
+      },
+    };
+    const before = store.files[PATH];
+    expect(await run(["upgrade"], racing)).toBe(1);
+    // The plan approved was made in this run: no plan ID to name, and upgrade plans again.
+    expect(err).toEqual([
+      "",
+      "✖ Refusing to upgrade: the plan approved is no longer the plan to apply:",
+      "  the log archive was created after it was planned",
+      "",
+      "Nothing was applied.",
+      "",
+      NOT_MOVED,
+      "",
+      NEXT,
+      "  Review a new plan:",
+      "    $ fffactory upgrade",
+    ]);
+    expect(store.files[PATH]).toBe(before);
+    expect(pin()).toBe("0.2.0");
   });
 
   test("a held lock refuses it, saying the pin was not moved before the Next block", async () => {

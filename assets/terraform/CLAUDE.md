@@ -4,7 +4,7 @@ Shipped in the release bundle and run only by the managed Terraform through the
 `Provisioner` port. Spec: [docs/specs/provisioning.md](../../docs/specs/provisioning.md)
 §"Resources and namespacing".
 
-- Root modules (`factory/`, `backend/`) hold a `.terraform.lock.hcl`; the provisioner
+- Root modules (`factory/`, `backend/`, `archive/`) hold a `.terraform.lock.hcl`; the provisioner
   refuses a root without one and inits with `-lockfile=readonly`. After changing a provider
   version, regenerate it with the managed Terraform:
   `terraform providers lock -platform=linux_amd64 -platform=darwin_arm64`.
@@ -25,7 +25,12 @@ Shipped in the release bundle and run only by the managed Terraform through the
   `aws:ResourceTag/fffactory:factory-id` (or `ec2:ResourceTag/…`) with `[var.factory_id]`.
   Trust statements allow only `sts:AssumeRole` to named `Service` principals. No attached,
   managed or inline policies (`policy_arn`, `policy_arns`, `managed_policy_arns`,
-  `inline_policy`).
+  `inline_policy`). A conditional document (`count`) is referenced only as `<name>[0].json`.
+- `modules/host-identity`'s role reads the factory's secret references and, only while
+  `archive_bucket` is not null, holds `<id>-write-archive`: PutObject under the worker's own
+  `$${aws:userid}` prefix, tag-conditioned, and a Deny without `If-None-Match`. Hosts get no
+  other mutation, and never read, list or delete on the archive; `just terraform-check` asserts
+  the exact statements.
 - No `dynamic` blocks in resources or policy documents: the guardrails cannot read them.
   Tag keys are plain literals, never templates. No symbolic links.
 - Top-level blocks are only `terraform`, `provider`, `variable`, `output`, `locals`,
@@ -33,6 +38,13 @@ Shipped in the release bundle and run only by the managed Terraform through the
   `aws_iam_policy_document` and `aws_ssm_parameter`; no `provisioner` or `connection` blocks.
   Widening an allowlist is a guardrail change: update the spec and fixtures with it.
 - Host instances are keyed by stable host key and ignore `ami` and `user_data` changes.
+- `backend/` and `archive/` keep no state: each plan starts empty, so they only create their
+  bucket, which carries `prevent_destroy`. `archive/` is the log archive (`modules/log-archive`):
+  S3's account-regional namespace, ABAC on so tag-conditioned grants work, the TLS-only Deny
+  alone, and no lifecycle rule, Object Lock or KMS key. `plan` and `apply` plan it create-only
+  only while the archive is missing, and apply applies it before the factory root. Its settings
+  cannot change once created (`TODO(re-evaluate when retention or bucket settings must change)`
+  in `archive/main.tf`).
 - `hosts` may be empty: a factory whose last host `fffactory worker terminate` removed keeps
   its network, state and host identity, whose policy then allows only the Tailscale enrollment
   key and the factory-wide credential references (`credential_secret_arns`). No validation may require a host; `guardrails.test.ts` checks it and

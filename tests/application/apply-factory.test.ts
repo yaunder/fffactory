@@ -21,6 +21,8 @@ import {
 import { FIRST_BOOT_POLL_MS } from "../../src/domain/rollout";
 import {
   ACCOUNT,
+  ARCHIVE,
+  archiving,
   ASSETS_SHA256,
   BUCKET,
   declaring,
@@ -34,8 +36,13 @@ import {
   workerFleet,
 } from "../support/factory-world";
 import { appliedRecord, installableWorker, machine } from "../support/fake-workers";
-import { hostAddress, NETWORK, STATE_BUCKET_ADDRESS } from "../support/fake-provisioner";
-import { READY_BUCKET } from "../support/memory-lock-store";
+import {
+  ARCHIVE_ADDRESSES,
+  hostAddress,
+  NETWORK,
+  STATE_BUCKET_ADDRESS,
+} from "../support/fake-provisioner";
+import { READY_ARCHIVE, READY_BUCKET } from "../support/memory-lock-store";
 
 /** Approval that records every plan review it is shown and answers from `answers` in turn. */
 function approval(...answers: boolean[]) {
@@ -1099,6 +1106,341 @@ describe("applying a saved plan (plan-apply §Saved plans)", () => {
       reasons: [{ kind: "state_bucket_missing" }],
     });
     expect(terraform.calls).toEqual([]);
+  });
+});
+
+describe("the log archive (plan-apply §Apply)", () => {
+  /** Each Terraform call as `CALL ROOT`. */
+  const roots = (calls: { call: string; request: { configuration: { root: string } } }[]) =>
+    calls.map(({ call, request }) => `${call} ${request.configuration.root}`);
+
+  test("without it, apply asks S3 nothing of it and applies only the factory root", async () => {
+    const { deps, lockStore, terraform } = applying({ hosts: ["builder-1"] });
+    const result = await applyFactory(
+      deps,
+      applyRequest({ instance: declaring("builder-1", "b") }),
+    );
+    expect(result).toMatchObject({ kind: "applied", infrastructure: "applied" });
+    expect(lockStore.calls.filter((call) => call.includes(ARCHIVE))).toEqual([]);
+    expect(roots(terraform.calls)).toEqual([
+      "output factory",
+      "plan factory",
+      "showPlan factory",
+      "applyPlan factory",
+    ]);
+  });
+
+  test("a missing archive is shown created, and applied after approval before the factory root", async () => {
+    const { deps, lockStore, terraform, approver } = applying({ hosts: ["builder-1"] });
+    const result = await applyFactory(
+      deps,
+      applyRequest({ instance: archiving("builder-1", "b") }),
+    );
+    expect(result).toMatchObject({ kind: "applied", infrastructure: "applied" });
+    expect(factoryReview(approver.shown[0]).archive).toEqual({ bucket: ARCHIVE, creates: true });
+    expect(roots(terraform.calls)).toEqual([
+      "plan archive",
+      "showPlan archive",
+      "output factory",
+      "plan factory",
+      "showPlan factory",
+      "applyPlan archive",
+      "applyPlan factory",
+    ]);
+    const plannedArchive = terraform.calls[0]?.request;
+    const appliedArchive = terraform.calls[5]?.request;
+    expect(appliedArchive && "planFile" in appliedArchive ? appliedArchive.planFile : "").toBe(
+      plannedArchive && "planFile" in plannedArchive ? plannedArchive.planFile : "none",
+    );
+    expect(lockStore.buckets.has(ARCHIVE)).toBe(true);
+    // No stage of its own: the archive is the infrastructure stage's.
+    expect(lockStore.operationWrites.map(recordStep).slice(0, 4)).toEqual([
+      ["running", "infrastructure:planning", 0],
+      ["running", "infrastructure:awaiting_approval", 0],
+      ["running", "infrastructure:applying", 0],
+      ["running", "infrastructure:applied", 0],
+    ]);
+  });
+
+  test("an archive created with no factory change is still applied infrastructure", async () => {
+    const { deps, terraform } = applying({ hosts: ["builder-1"] });
+    const result = await applyFactory(deps, applyRequest({ instance: archiving("builder-1") }));
+    expect(result).toMatchObject({ kind: "applied", infrastructure: "applied" });
+    expect(roots(terraform.calls).filter((call) => call.startsWith("applyPlan"))).toEqual([
+      "applyPlan archive",
+    ]);
+  });
+
+  test("a rerun finds the archive present and plans nothing for it", async () => {
+    const { deps, terraform, approver } = applying({ hosts: ["builder-1"], answers: [true, true] });
+    await applyFactory(deps, applyRequest({ instance: archiving("builder-1") }));
+    terraform.calls.length = 0;
+    const rerun = await applyFactory(deps, applyRequest({ instance: archiving("builder-1") }));
+    expect(rerun).toMatchObject({ kind: "applied", infrastructure: "unchanged" });
+    expect(factoryReview(approver.shown[1]).archive).toEqual({ bucket: ARCHIVE, creates: false });
+    expect(roots(terraform.calls)).toEqual(["output factory", "plan factory", "showPlan factory"]);
+  });
+
+  test("an archive without all its settings refuses the apply under the lock, applying nothing", async () => {
+    const { deps, lockStore, terraform, approver } = applying({ hosts: ["builder-1"] });
+    lockStore.buckets.add(ARCHIVE);
+    lockStore.archives.set(ARCHIVE, { ...READY_ARCHIVE, tlsOnly: false });
+    expect(
+      await applyFactory(deps, applyRequest({ instance: archiving("builder-1") })),
+    ).toMatchObject({
+      kind: "unready_archive",
+      bucket: { location: { bucket: ARCHIVE }, missing: ["tls_only_policy"] },
+    });
+    expect(approver.shown).toEqual([]);
+    expect(terraform.calls).toEqual([]);
+    expect(lockStore.operationWrites.at(-1)).toMatchObject({ status: "refused" });
+    expect(lockStore.locks.size).toBe(0);
+  });
+
+  test("an archive that appears after approval, before its apply, makes the plan stale", async () => {
+    const { deps, lockStore, terraform } = applying({ hosts: ["builder-1"] });
+    deps.approval = {
+      approve: async () => {
+        lockStore.buckets.add(ARCHIVE);
+        return true;
+      },
+    };
+    const result = await applyFactory(deps, applyRequest({ instance: archiving("builder-1") }));
+    expect(result).toMatchObject({ kind: "stale", reasons: [{ kind: "archive_created" }] });
+    expect(terraform.calls.some(({ call }) => call === "applyPlan")).toBe(false);
+    expect(lockStore.operationWrites.at(-1)).toMatchObject({ status: "refused" });
+    expect(lockStore.locks.size).toBe(0);
+  });
+
+  test("an archive found present that is gone after approval makes the plan stale, applying nothing", async () => {
+    const { deps, lockStore, terraform } = applying({ hosts: ["builder-1"] });
+    lockStore.buckets.add(ARCHIVE);
+    deps.approval = {
+      approve: async () => {
+        lockStore.buckets.delete(ARCHIVE);
+        return true;
+      },
+    };
+    const result = await applyFactory(
+      deps,
+      applyRequest({ instance: archiving("builder-1", "b") }),
+    );
+    expect(result).toMatchObject({ kind: "stale", reasons: [{ kind: "archive_missing" }] });
+    expect(terraform.calls.some(({ call }) => call === "applyPlan")).toBe(false);
+    expect(terraform.world.hosts.has("b")).toBe(false);
+    expect(lockStore.operationWrites.at(-1)).toMatchObject({ status: "refused" });
+    expect(lockStore.locks.size).toBe(0);
+  });
+
+  test("an archive found ready that loses a setting after approval refuses the apply, applying nothing", async () => {
+    const { deps, lockStore, terraform } = applying({ hosts: ["builder-1"] });
+    lockStore.buckets.add(ARCHIVE);
+    deps.approval = {
+      approve: async () => {
+        lockStore.archives.set(ARCHIVE, { ...READY_ARCHIVE, tlsOnly: false });
+        return true;
+      },
+    };
+    const result = await applyFactory(
+      deps,
+      applyRequest({ instance: archiving("builder-1", "b") }),
+    );
+    expect(result).toMatchObject({
+      kind: "unready_archive",
+      bucket: { location: { bucket: ARCHIVE }, missing: ["tls_only_policy"] },
+    });
+    expect(terraform.calls.some(({ call }) => call === "applyPlan")).toBe(false);
+    expect(terraform.world.hosts.has("b")).toBe(false);
+    expect(lockStore.operationWrites.at(-1)).toMatchObject({ status: "refused" });
+    expect(lockStore.locks.size).toBe(0);
+  });
+
+  test("a failing archive apply is an infrastructure-stage failure, and the factory root is not applied", async () => {
+    const { deps, lockStore, terraform } = applying({ hosts: ["builder-1"] });
+    terraform.world.failNext = "applyPlan";
+    const result = await applyFactory(
+      deps,
+      applyRequest({ instance: archiving("builder-1", "b") }),
+    );
+    expect(result).toMatchObject({ kind: "failed", step: "applying" });
+    expect(roots(terraform.calls).filter((call) => call.startsWith("applyPlan"))).toEqual([
+      "applyPlan archive",
+    ]);
+    expect(terraform.world.hosts.has("b")).toBe(false);
+    expect(lockStore.operationWrites.at(-1)).toMatchObject({
+      status: "failed",
+      stages: [{ name: "infrastructure", status: "failed" }],
+    });
+  });
+
+  describe("in a saved plan", () => {
+    /** `fffactory plan` of the archiving factory, then the saved plan and the world to apply it in. */
+    async function planned(options: { archive?: boolean } = {}) {
+      const world = applying({ hosts: ["builder-1"] });
+      if (options.archive === true) world.lockStore.buckets.add(ARCHIVE);
+      const result = await planFactory(
+        world.deps,
+        planRequest({ instance: archiving("builder-1", "b") }),
+      );
+      if (result.kind !== "planned") throw new Error(`nothing saved: ${result.kind}`);
+      world.terraform.calls.length = 0;
+      world.lockStore.calls.length = 0;
+      return { ...world, saved: result.saved };
+    }
+
+    const withPlan = (saved: SavedPlan) =>
+      applyRequest({
+        planId: saved.plan_id,
+        instance: archiving("builder-1", "b"),
+        clock: () => new Date(NOW.getTime() + 60_000),
+      });
+
+    test("applies exactly its archive.tfplan, then its factory.tfplan, approved by its ID", async () => {
+      const { deps, saved, terraform, lockStore, approver } = await planned();
+      expect(saved.creates_archive).toBe(true);
+      expect(await applyFactory(deps, withPlan(saved))).toMatchObject({ kind: "applied" });
+      expect(roots(terraform.calls)).toEqual([
+        "showPlan archive",
+        "showPlan factory",
+        "applyPlan archive",
+        "applyPlan factory",
+      ]);
+      expect(
+        terraform.calls.map(({ request }) => ("planFile" in request ? request.planFile : "")),
+      ).toEqual([
+        `/plans/${FACTORY}/${saved.plan_id}/archive.tfplan`,
+        `/plans/${FACTORY}/${saved.plan_id}/factory.tfplan`,
+        `/plans/${FACTORY}/${saved.plan_id}/archive.tfplan`,
+        `/plans/${FACTORY}/${saved.plan_id}/factory.tfplan`,
+      ]);
+      expect(factoryReview(approver.shown[0]).archive).toEqual({ bucket: ARCHIVE, creates: true });
+      expect(lockStore.buckets.has(ARCHIVE)).toBe(true);
+    });
+
+    test("one that found the archive present applies only its factory.tfplan", async () => {
+      const { deps, saved, terraform } = await planned({ archive: true });
+      expect(saved.creates_archive).toBe(false);
+      expect(await applyFactory(deps, withPlan(saved))).toMatchObject({ kind: "applied" });
+      expect(roots(terraform.calls)).toEqual(["showPlan factory", "applyPlan factory"]);
+    });
+
+    test("is stale once the archive it creates appeared between plan and apply", async () => {
+      const { deps, saved, terraform, lockStore } = await planned();
+      lockStore.buckets.add(ARCHIVE);
+      expect(await applyFactory(deps, withPlan(saved))).toEqual({
+        kind: "stale",
+        planId: saved.plan_id,
+        reasons: [{ kind: "archive_created" }],
+      });
+      expect(terraform.calls).toEqual([]);
+      expect(lockStore.operationWrites.at(-1)).toMatchObject({ status: "refused" });
+      expect(lockStore.locks.size).toBe(0);
+    });
+
+    test("is stale once the archive it found present is gone", async () => {
+      const { deps, saved, terraform, lockStore } = await planned({ archive: true });
+      lockStore.buckets.delete(ARCHIVE);
+      expect(await applyFactory(deps, withPlan(saved))).toEqual({
+        kind: "stale",
+        planId: saved.plan_id,
+        reasons: [{ kind: "archive_missing" }],
+      });
+      expect(terraform.calls).toEqual([]);
+    });
+
+    test("is stale once the archive it found present is gone after its approval", async () => {
+      const { deps, saved, terraform, lockStore } = await planned({ archive: true });
+      deps.approval = {
+        approve: async () => {
+          lockStore.buckets.delete(ARCHIVE);
+          return true;
+        },
+      };
+      expect(await applyFactory(deps, withPlan(saved))).toEqual({
+        kind: "stale",
+        planId: saved.plan_id,
+        reasons: [{ kind: "archive_missing" }],
+      });
+      expect(terraform.calls.some(({ call }) => call === "applyPlan")).toBe(false);
+      expect(lockStore.operationWrites.at(-1)).toMatchObject({ status: "refused" });
+    });
+
+    test("is refused once the archive it found ready loses a setting after its approval", async () => {
+      const { deps, saved, terraform, lockStore } = await planned({ archive: true });
+      deps.approval = {
+        approve: async () => {
+          lockStore.archives.set(ARCHIVE, { ...READY_ARCHIVE, tlsOnly: false });
+          return true;
+        },
+      };
+      expect(await applyFactory(deps, withPlan(saved))).toMatchObject({
+        kind: "unready_archive",
+        bucket: { location: { bucket: ARCHIVE }, missing: ["tls_only_policy"] },
+      });
+      expect(terraform.calls.some(({ call }) => call === "applyPlan")).toBe(false);
+      expect(lockStore.operationWrites.at(-1)).toMatchObject({ status: "refused" });
+    });
+
+    test("a swapped archive.tfplan is refused as damaged, and nothing is applied", async () => {
+      const { deps, saved, terraform, lockStore, planStore } = await planned();
+      const create = lockStore.create.bind(lockStore);
+      lockStore.create = async (bucket, record) => {
+        planStore.swap(FACTORY, saved.plan_id, "archive");
+        return create(bucket, record);
+      };
+      expect(await applyFactory(deps, withPlan(saved))).toEqual({
+        kind: "damaged_plan",
+        planId: saved.plan_id,
+      });
+      expect(terraform.calls).toEqual([]);
+      expect(lockStore.buckets.has(ARCHIVE)).toBe(false);
+    });
+
+    test("an archive.tfplan swapped after it was read back is never applied", async () => {
+      const { deps, saved, terraform, planStore } = await planned();
+      const { showPlan } = terraform.provisioner;
+      deps.provisioner = {
+        ...terraform.provisioner,
+        showPlan: async (request) => {
+          const shown = await showPlan(request);
+          planStore.swap(FACTORY, saved.plan_id, "archive");
+          return shown;
+        },
+      };
+      expect(await applyFactory(deps, withPlan(saved))).toEqual({
+        kind: "damaged_plan",
+        planId: saved.plan_id,
+      });
+      expect(terraform.calls.some(({ call }) => call === "applyPlan")).toBe(false);
+    });
+
+    test("a record disagreeing with factory.json about the archive is damaged", async () => {
+      const { deps, saved, terraform, planStore } = await planned();
+      const { creates_archive: _, ...without } = saved;
+      planStore.saved.set(`${FACTORY}/${saved.plan_id}`, without);
+      expect(await applyFactory(deps, withPlan(saved))).toEqual({
+        kind: "damaged_plan",
+        planId: saved.plan_id,
+      });
+      expect(terraform.calls).toEqual([]);
+    });
+
+    test("an archive.tfplan that reads back as more than creates is refused", async () => {
+      const { deps, saved, terraform } = await planned();
+      const update = {
+        address: ARCHIVE_ADDRESSES[1],
+        type: "aws_s3_bucket_policy",
+        actions: ["update"],
+      };
+      terraform.world.archiveShown = {
+        resource_changes: [{ ...update, change: { actions: update.actions } }],
+      };
+      expect(await applyFactory(deps, withPlan(saved))).toEqual({
+        kind: "unexpected_plan",
+        unexpected: [{ kind: "not_create", change: update }],
+      });
+      expect(terraform.calls.some(({ call }) => call === "applyPlan")).toBe(false);
+    });
   });
 });
 

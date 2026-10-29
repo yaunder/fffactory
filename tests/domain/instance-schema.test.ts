@@ -31,6 +31,8 @@ const valid: Record<string, unknown>[] = [
     },
   },
   { schema_version: 1, credentials: {} },
+  { schema_version: 1, log_archive: { enabled: true } },
+  { schema_version: 1, log_archive: { enabled: false } },
   { schema_version: 1, hosts: [{ key: "a", interactive_logins: [] }] },
   {
     schema_version: 1,
@@ -101,6 +103,10 @@ const invalid: Record<string, unknown>[] = [
   { schema_version: 1, hosts: [{ key: "a", interactive_logins: ["gitlab"] }] },
   { schema_version: 1, hosts: [{ key: "a", interactive_logins: ["github", "github"] }] },
   { schema_version: 1, hosts: [{ key: "a", dispatch: { cwd: "home/factory" } }] },
+  { schema_version: 1, log_archive: {} },
+  { schema_version: 1, log_archive: true },
+  { schema_version: 1, log_archive: { enabled: "true" } },
+  { schema_version: 1, log_archive: { enabled: true, bucket: "example-logs" } },
 ];
 
 describe("schemas/factory.schema.json", () => {

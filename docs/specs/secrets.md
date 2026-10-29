@@ -188,6 +188,18 @@ The material reaches Secrets Manager's request and nothing else:
 
 The write has a 30-second deadline (`SECRETS_MANAGER_TIMEOUT_MS`).
 
+**The log archive.** fffactory never sends secret material there, but the
+archive is meant to hold workers' agent evidence raw and unmodified, and that
+may contain anything an agent saw, a credential among it. Nothing is redacted:
+pattern scanning cannot tell a test fixture from a live credential and misses
+secrets without a known prefix. The archive is treated as sensitive instead:
+private, with public access blocked, refusing any request without TLS, and
+readable only by those granted it deliberately, since hosts may only write
+new objects under their own prefix
+([provisioning §Log archive access](provisioning.md#log-archive-access)).
+Teardown keeps it ([teardown](teardown.md)), so what it holds outlives the
+factory.
+
 ## Deleting a factory's secrets
 
 Removing a whole factory ([#56](https://github.com/yaunder/fffactory/issues/56))

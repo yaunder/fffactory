@@ -6,7 +6,8 @@ import { isPrunable, type SavedPlan } from "../../src/domain/plan";
  * In-memory PlanStore, keyed by `<factory ID>/<plan ID>`: plan directories created, the saved
  * plans in them, and any `damage`d (their Terraform plan changed after saving). A plan's
  * Terraform plan file digest, of whichever file its kind binds, is `digest-<key>-<swaps>`,
- * changed by `swap`. Records every
+ * changed by `swap`; a factory plan creating the log archive also binds `archive.tfplan`, whose
+ * part, ` archive-<swaps>`, `swap` of `"archive"` changes. Records every
  * call. Plan files are paths under `/plans` that nothing writes.
  */
 export class MemoryPlanStore implements PlanStore {
@@ -16,9 +17,15 @@ export class MemoryPlanStore implements PlanStore {
   readonly damaged = new Set<string>();
   /** How often each plan's Terraform plan file was swapped since it was saved. */
   readonly swaps = new Map<string, number>();
+  /** How often each plan's `archive.tfplan` was swapped since it was saved. */
+  readonly archiveSwaps = new Map<string, number>();
 
   private files(key: string): PlanFiles {
-    return { factory: `/plans/${key}/factory.tfplan`, backend: `/plans/${key}/backend.tfplan` };
+    return {
+      factory: `/plans/${key}/factory.tfplan`,
+      backend: `/plans/${key}/backend.tfplan`,
+      archive: `/plans/${key}/archive.tfplan`,
+    };
   }
 
   /** Marks a saved plan's Terraform plan as changed since it was saved. */
@@ -30,13 +37,16 @@ export class MemoryPlanStore implements PlanStore {
    * Replaces a saved plan's Terraform plan file with another after `load` read it, as a file
    * swapped in the plan directory would be: its digest changes; its record does not.
    */
-  swap(factoryId: FactoryId, planId: string): void {
+  swap(factoryId: FactoryId, planId: string, file: "bound" | "archive" = "bound"): void {
     const key = `${factoryId}/${planId}`;
-    this.swaps.set(key, (this.swaps.get(key) ?? 0) + 1);
+    const swaps = file === "archive" ? this.archiveSwaps : this.swaps;
+    swaps.set(key, (swaps.get(key) ?? 0) + 1);
   }
 
-  private digestOf(key: string): string {
-    return `digest-${key}-${this.swaps.get(key) ?? 0}`;
+  private digestOf(key: string, plan: SavedPlan | undefined): string {
+    const bound = `digest-${key}-${this.swaps.get(key) ?? 0}`;
+    if (plan?.kind !== undefined || plan?.creates_archive !== true) return bound;
+    return `${bound} archive-${this.archiveSwaps.get(key) ?? 0}`;
   }
 
   async create(factoryId: FactoryId, planId: string): Promise<PlanFiles> {
@@ -60,13 +70,13 @@ export class MemoryPlanStore implements PlanStore {
     const plan = this.saved.get(key);
     if (plan === undefined) return { kind: "missing" };
     if (this.damaged.has(key)) return { kind: "damaged" };
-    return { kind: "found", plan, files: this.files(key), digest: this.digestOf(key) };
+    return { kind: "found", plan, files: this.files(key), digest: this.digestOf(key, plan) };
   }
 
   async digest(plan: SavedPlan): Promise<string | undefined> {
     const key = `${plan.factory_id}/${plan.plan_id}`;
     this.calls.push(`digest ${key}`);
-    return this.directories.has(key) ? this.digestOf(key) : undefined;
+    return this.directories.has(key) ? this.digestOf(key, plan) : undefined;
   }
 
   /** Removes the saved plan's record and keeps its directory, whose files stay digestible. */

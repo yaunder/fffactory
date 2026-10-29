@@ -1,7 +1,7 @@
 # Teardown
 
-Teardown removes a whole factory: everything it owns, under the existing
-safety rules, and nothing it only refers to. Epic:
+Teardown removes a whole factory: everything it owns but its log archive,
+under the existing safety rules, and nothing it only refers to. Epic:
 [#56](https://github.com/yaunder/fffactory/issues/56), decisions D1 to D13.
 This spec covers the use case (`teardownFactory`,
 `src/application/teardown-factory.ts`): with a state bucket, its happy path,
@@ -23,7 +23,25 @@ codes](#output-and-exit-codes) and the [permissions](#permissions) it needs.
 Kept: every secret factory.json only refers to (a harness `fffv/*` source, one
 made by hand), tagged secrets the factory does not own, tailnet devices that
 are not provably the factory's, the Tailscale OAuth client and auth key
-themselves, and factory.json, which teardown never writes (D11).
+themselves, the log archive when factory.json enables it ([instance
+configuration §Log archive](instance-configuration.md#log-archive)), and
+factory.json, which teardown never writes (D11).
+
+fffactory never removes the log archive. Teardown never touches the `archive`
+root and asks AWS nothing about the archive: it names it from factory.json
+alone (`archiveBucketName`), so its words hold whether or not the archive was
+ever created, and says it is kept wherever it says what it keeps: the
+question, the review, the report and the advice (`archiveKept`: `Log archive
+NAME is kept; fffactory never removes it.`). A factory applied again from the
+same factory.json adopts it
+([provisioning §Log archive readiness](provisioning.md#log-archive-readiness)).
+Whether the archive exists is not checked. Teardown deletes the state bucket,
+so factory.json's `state_backend.bucket` may never name the archive: validation
+refuses the archive's derived name there, whether or not the archive is
+enabled, before teardown reads anything of AWS ([instance configuration §State
+bucket](instance-configuration.md#state-bucket)). Evidence a worker never archived is
+not reported yet: the marker `TODO(re-evaluate when the collector ships)` by
+`archiveKept` in `src/domain/teardown.ts` records the gap.
 
 ## Command
 
@@ -116,8 +134,9 @@ Teardown goes in this order, and stops at the first refusal:
     progress event): the target (factory.json's path, the factory, its account,
     Region and release), the destroy plan's changes, the instances and VPCs,
     the devices to delete and those only listed, the owned secrets and the kept
-    ones, and the state bucket (`TeardownBucket`: its name, and `outcome`
-    `deleted`, last of all).
+    ones, the state bucket (`TeardownBucket`: its name, and `outcome`
+    `deleted`, last of all) and, with the log archive enabled, the archive
+    kept.
 11. The [confirmation](#confirmation).
 12. Stop dispatch on every running worker the tailnet locates
     ([Gates](#gates)), recording each outcome.
@@ -333,6 +352,12 @@ D2. Teardown is confirmed by naming the factory, never by y/N:
   factory ID itself, exactly (blank space around it aside), confirms; anything
   else, or no answer, declines: recorded `declined`, nothing removed, dispatch
   not stopped, the lock released. A wrong answer is never echoed.
+- With the log archive enabled, the question excepts it, `Remove factory ID
+  and everything it owns but its log archive? ...`, and names it kept before
+  asking for the ID: `... and none can be recovered. Log archive NAME is kept;
+  fffactory never removes it. Type the factory ID to confirm: `
+  (`teardownQuestion`, `archiveKept`). Without a state bucket only the latter
+  changes.
 - `--confirm FACTORY_ID` confirms without asking; the review is still shown.
   Any other value refuses before anything reaches AWS, never echoed:
   `--confirm does not name the factory ID`, next action ``Pass --confirm ID to
@@ -573,8 +598,9 @@ lock, nothing is locked. The one exception: once the bucket is gone, the lock
 went with it, and the teardown is done: it prints the `done` report. Its exit
 status is still the interrupt's, 128 plus the signal's number:
 `src/cli/interrupts.ts`, shared by every command, exits so once an interrupt
-landed, whatever the command returned. Nothing of the factory remains, and a
-rerun finds no state bucket ([No state bucket](#no-state-bucket)).
+landed, whatever the command returned. Nothing it removes remains (the log
+archive, when enabled, is kept), and a rerun finds no state bucket ([No state
+bucket](#no-state-bucket)).
 
 The result says how far it got (`reached`, the last step started: one the
 interrupt landed before is never started, even when the call before it then
@@ -713,13 +739,24 @@ D11. A finished teardown reports (`TeardownReport`):
   `not_found` in the [no-bucket mode](#no-state-bucket): not found by this run,
   so not deleted by it;
 - `withoutLock`, only in the no-bucket mode: why it ran without the lock
-  (`ranWithoutLock`).
+  (`ranWithoutLock`);
+- `archive`, only when factory.json enables the log archive: its name
+  (`archiveBucketName`), which the report says is kept (`archiveKept`), named
+  without an AWS call. The review (`TeardownReview`) carries it too.
 
-With it, the advice teardown leaves the operator (`FACTORY_JSON_KEPT`,
+With it, the advice teardown leaves the operator (`factoryJsonKept`,
 `REVOKE_SOURCES`, `CHECK_LISTED_DEVICES`, and `CHECK_UNCHECKED_DEVICES` when
 the devices were not checked, and `checkOutsideEc2` in the no-bucket mode):
 factory.json is left as it is, and still describes the factory, so `fffactory
-apply` would create a new one;
+apply` would create it again: ``factory.json is left as it is: teardown never
+changes it. It still describes the factory, so `fffactory apply` would create
+it again. Remove it yourself once you no longer need it.`` With the log
+archive, apply would adopt the archive rather than create it, if it exists
+(teardown never asks), and the advice names it kept: ``factory.json is left as
+it is: teardown never changes it. It still describes the factory, so
+`fffactory apply` would create it again, adopting its log archive if it
+exists. Log archive NAME is kept; fffactory never removes it. Remove
+factory.json yourself once you no longer need it.``;
 teardown revokes nothing it only refers to (the Tailscale auth key and admin
 OAuth client, the tailnet policy entries made for the factory, and the API
 credentials kept with any grants given to them), which the operator revokes at
@@ -752,7 +789,8 @@ output:
    bucket, `ranWithoutLock` under them. A `Kept` section follows when anything
    is kept: the devices listed but not deleted (`Possibly its devices`, `Untagged look-alikes`), the
    secrets tagged but not owned (`Tagged, not owned`, by name and ARN) and
-   those factory.json refers to but the factory does not own (`Referenced`).
+   those factory.json refers to but the factory does not own (`Referenced`),
+   then, with the log archive enabled, `archiveKept` in a line of its own.
 2. **The question**, at a terminal without `--confirm`, on standard error
    after a blank line ([Confirmation](#confirmation)).
 3. **Each step** as it starts, under a `Removing` section: `Stopping dispatch
@@ -766,7 +804,7 @@ output:
 
 | Outcome | Stream | Shows | Exit |
 | --- | --- | --- | --- |
-| `done` | standard output | `✔ Removed factory ID: nothing it owns remains` (without a state bucket, `✔ Removed what was left of factory ID`), claiming only what it can see: an owned secret neither listed nor referenced by factory.json is not ([secrets §Listing](secrets.md#listing), an accepted risk); a `Result` section: `Infrastructure` (`destroyed: N resources` and each, `already absent: the destroy plan destroyed no resource`, or `not found by EC2: no instance or VPC is tagged with the factory ID`), the instances, `Tailnet devices` (`deleted ID, ...`, `none found` or `DEVICES_NOT_CHECKED`), `Owned secrets` (`deleted NAME, ..., each confirmed gone`, or `none found`), `Already absent`, `State bucket` (`BUCKET, deleted`, or not found by this run) and `ranWithoutLock`; the `Kept` section; then the Next block of the advice it leaves: `CHECK_UNCHECKED_DEVICES` when the devices were not checked, `CHECK_LISTED_DEVICES` when any were listed but kept, `checkOutsideEc2` without a state bucket, `REVOKE_SOURCES` (the Tailscale auth key and OAuth client, the tailnet policy entries, and the API credentials kept with their grants), and `FACTORY_JSON_KEPT`: factory.json is left as it is and still describes the factory, so `fffactory apply` would create a new one (D11) | 0; 128 + the signal's number when interrupted during the state bucket's last deletion ([Interruption](#interruption)) |
+| `done` | standard output | `✔ Removed factory ID: only what it kept remains` (without a state bucket, `✔ Removed what was left of factory ID`), claiming only what it can see: an owned secret neither listed nor referenced by factory.json is not ([secrets §Listing](secrets.md#listing), an accepted risk); a `Result` section: `Infrastructure` (`destroyed: N resources` and each, `already absent: the destroy plan destroyed no resource`, or `not found by EC2: no instance or VPC is tagged with the factory ID`), the instances, `Tailnet devices` (`deleted ID, ...`, `none found` or `DEVICES_NOT_CHECKED`), `Owned secrets` (`deleted NAME, ..., each confirmed gone`, or `none found`), `Already absent`, `State bucket` (`BUCKET, deleted`, or not found by this run) and `ranWithoutLock`; the `Kept` section, the log archive in it when enabled; then the Next block of the advice it leaves: `CHECK_UNCHECKED_DEVICES` when the devices were not checked, `CHECK_LISTED_DEVICES` when any were listed but kept, `checkOutsideEc2` without a state bucket, `REVOKE_SOURCES` (the Tailscale auth key and OAuth client, the tailnet policy entries, and the API credentials kept with their grants), and `factoryJsonKept`: factory.json is left as it is and still describes the factory, so `fffactory apply` would create it again, adopting the log archive, when enabled, if it exists, and naming it kept (D11) | 0; 128 + the signal's number when interrupted during the state bucket's last deletion ([Interruption](#interruption)) |
 | `refused` | standard error | `✖ Refusing to remove the factory: SUMMARY` and its details, for each refusal; where dispatch was left stopped (`dispatchLeftStopped`); the operation record; a Next block of each next action once | 1 |
 | no terminal, no `--confirm` | standard error | `✖` and `TEARDOWN_UNCONFIRMABLE` | 1 |
 | incomplete factory.json, another account, a pin mismatch, an unready bucket, a held lock | standard error | as `plan` words them, `Refusing to remove the factory: ...`; each missing field `PATH: is required to remove a factory` | 1 |
@@ -812,7 +850,7 @@ Instance  ~/factory/.fffactory/factory.json (nearest .fffactory/factory.json)
   Deleting the owned secrets, confirming each is gone.
   Deleting the state bucket fff-abcd1234-state, the lock last.
 
-✔ Removed factory fff-abcd1234: nothing it owns remains
+✔ Removed factory fff-abcd1234: only what it kept remains
 
 ── Result ───────────────────────────────────────────
   Infrastructure    destroyed: 2 resources
@@ -828,7 +866,21 @@ Instance  ~/factory/.fffactory/factory.json (nearest .fffactory/factory.json)
 
 ── Next ─────────────────────────────────────────────
   Teardown revokes nothing it only refers to. Once nothing else uses them, revoke the Tailscale auth key and admin OAuth client (https://login.tailscale.com/admin/settings/trust-credentials), remove the tailnet policy entries made for the factory (its tag, grant and SSH rule), and revoke the API credentials kept above, with any grants given to them, at their providers.
-  factory.json is left as it is: teardown never changes it. It still describes the factory, so `fffactory apply` would create a new one. Remove it yourself once you no longer need it.
+  factory.json is left as it is: teardown never changes it. It still describes the factory, so `fffactory apply` would create it again. Remove it yourself once you no longer need it.
+```
+
+With the log archive enabled, the same factory's `Kept` sections, in the
+review and the report, end with it, and so does the advice:
+
+```text
+── Kept ─────────────────────────────────────────────
+  Referenced   arn:aws:secretsmanager:eu-west-2:123456789012:secret:fffv/github-token-AbCdEf
+
+  Log archive fff-abcd1234-logs-123456789012-eu-west-2-an is kept; fffactory never removes it.
+
+── Next ─────────────────────────────────────────────
+  Teardown revokes nothing it only refers to. [...]
+  factory.json is left as it is: teardown never changes it. It still describes the factory, so `fffactory apply` would create it again, adopting its log archive if it exists. Log archive fff-abcd1234-logs-123456789012-eu-west-2-an is kept; fffactory never removes it. Remove factory.json yourself once you no longer need it.
 ```
 
 ## Permissions
@@ -855,6 +907,7 @@ worker, as `status` and `worker terminate` reach them; neither needs an AWS
 permission. A permission missing is found where it is used: a listing refused
 before anything is removed, or a deletion refused part way, named by its error
 and its next action ([Refusals](#refusals), [Partial failure](#partial-failure)).
+It needs nothing on the log archive: it makes no AWS call for it.
 
 ## No state bucket
 
@@ -897,10 +950,12 @@ In this mode teardown goes:
    it, and EC2 lists no instance or VPC tagged with the factory ID; nothing
    outside EC2, such as IAM, was looked for. Without a lock, teardown deletes
    only the factory's tailnet devices, owned secrets and local saved plans, as
-   `fffactory secret set` stores secrets before a bucket exists.`
+   `fffactory secret set` stores secrets before a bucket exists.`; and the log
+   archive kept, as with a bucket.
 5. The [confirmation](#confirmation), at a terminal asking `Remove what is
    left of factory ID? Its tailnet devices and owned secrets are deleted, and
-   none can be recovered. Type the factory ID to confirm: `.
+   none can be recovered. Type the factory ID to confirm: `, with the log
+   archive enabled naming it kept before `Type`, as with a bucket.
 6. Changed live state invalidates the review: once confirmed (the step
    `verifying`), the bucket must still be missing and EC2 must still list
    nothing tagged, asked one call at a time, the interrupt checked after
@@ -920,7 +975,8 @@ In this mode teardown goes:
 8. The [report](#report): `infrastructure` `not_found_by_ec2` (no destroy
    plan was made: it is inferred from EC2 alone), no changes and no instances,
    the devices and secrets as with a bucket, the state bucket's `outcome`
-   `not_found`, `withoutLock`, and with the advice `checkOutsideEc2`.
+   `not_found`, `withoutLock`, the log archive kept as with a bucket, and with
+   the advice `checkOutsideEc2`.
 
 Dispatch, the gates and the destroy have nothing to act on: a worker has no
 machine without a tagged instance. Every refusal and a decline remove nothing
@@ -946,7 +1002,8 @@ themselves.
 
 **Accepted risk:** without the state bucket, teardown looks for nothing
 outside EC2. The factory root also creates IAM outside the VPC: the role and
-instance profile `<id>-host` with its inline policy `<id>-read-secrets`. A
+instance profile `<id>-host` with its inline policy `<id>-read-secrets` (and,
+with the log archive enabled, `<id>-write-archive`). A
 first apply that created them and then failed, say on `VpcLimitExceeded`,
 leaves them, and a teardown after the bucket was deleted by hand reports
 `not_found_by_ec2` with them still there. The report says so (`ranWithoutLock`)
@@ -956,7 +1013,7 @@ instance profile ID-host, which a failed first apply may have left, and delete
 them yourself if they are this factory's.`` In the IAM console, under Roles
 and under the instance profiles (`aws iam get-role --role-name ID-host`,
 `aws iam get-instance-profile --instance-profile-name ID-host`): delete the
-role's inline policy, remove it from the instance profile, then delete both.
+role's inline policies, remove it from the instance profile, then delete both.
 
 ## What it never prints
 
@@ -981,13 +1038,13 @@ names.
 
 | Layer | Module | Responsibility |
 | --- | --- | --- |
-| Domain | `src/domain/teardown.ts` | The guarded destroy plan's rule and its consistency with the exit code (`destroyPlanRefusal`, `destroyPlanMismatch`), `VpcInventory`; the devices teardown deletes and lists (`selectFactoryDevices`, `FactoryDevices`); the kept secrets' groups (`keptSecrets`), the factory's names (`underFactoryNames`), the references under them to look up (`unlistedReferences`) and the refusal of one that cannot be (`secretUnresolved`); the confirmation rule (`teardownConfirmation`, `typedIdConfirms`) and question; the gates' next actions (`teardownGateActions`) and the review invalidated by changed machines (`machinesChanged`); the review and report (`TeardownReview`, `TeardownReport`), carrying only what may be printed (`ShownMachine`, `ShownDevice`, `ShownSecret`); the steps (`TeardownStep`), where a partial teardown stopped (`TeardownStop`) and what remains of each kind (`remainingAt`, `TeardownRemaining`, `stoppedPartWay`); an interruption's words (`interruptedTeardown`, its lock `none` without a state bucket); the state bucket's outcome (`TeardownBucket`); without a state bucket, why it runs without the lock (`ranWithoutLock`), what it leaves to the operator outside EC2 (`checkOutsideEc2`) and its refusals (`taggedWithoutBucket`, `bucketAppeared`); the words of every refusal and of the report's advice. Pure. |
+| Domain | `src/domain/teardown.ts` | The guarded destroy plan's rule and its consistency with the exit code (`destroyPlanRefusal`, `destroyPlanMismatch`), `VpcInventory`; the devices teardown deletes and lists (`selectFactoryDevices`, `FactoryDevices`); the kept secrets' groups (`keptSecrets`), the factory's names (`underFactoryNames`), the references under them to look up (`unlistedReferences`) and the refusal of one that cannot be (`secretUnresolved`); the confirmation rule (`teardownConfirmation`, `typedIdConfirms`) and question (`teardownQuestion`); the gates' next actions (`teardownGateActions`) and the review invalidated by changed machines (`machinesChanged`); the review and report (`TeardownReview`, `TeardownReport`), carrying only what may be printed (`ShownMachine`, `ShownDevice`, `ShownSecret`); the steps (`TeardownStep`), where a partial teardown stopped (`TeardownStop`) and what remains of each kind (`remainingAt`, `TeardownRemaining`, `stoppedPartWay`); an interruption's words (`interruptedTeardown`, its lock `none` without a state bucket); the state bucket's outcome (`TeardownBucket`); without a state bucket, why it runs without the lock (`ranWithoutLock`), what it leaves to the operator outside EC2 (`checkOutsideEc2`) and its refusals (`taggedWithoutBucket`, `bucketAppeared`); the log archive kept (`archiveKept`); the words of every refusal and of the report's advice (`factoryJsonKept`). Pure. |
 | Domain | `src/domain/initialization.ts` | `isGeneratedFactoryId`. |
 | Domain | `src/domain/worker-lifecycle.ts` | `removalGate` and `RemovalGateActions`: terminate's gates, their next actions completed by the command refused. |
 | Domain | `src/domain/worker-removability.ts` | `workerRemovability`: the inspection document the record carries, as `worker inspect --json` prints it. |
 | Domain | `src/domain/operation.ts` | `TEARDOWN_OPERATION` and the teardown stage's statuses; its record carrying each running worker's inspection (`InspectionRecord`, `withInspections`); its record remembering host keys (`startTeardownOperation`, `withHostKeys`) and reading them back from the records under `operationsPrefix`, bounded by the last apply or upgrade that may have changed the factory (`rememberedHostKeys`, `StoredOperation`). |
 | Domain | `src/domain/secrets.ts` | `classifySecrets`, which judges listed and described secrets alike, and `refersTo`. |
-| Application | `src/application/teardown-factory.ts` | `teardownFactory`: the order above, under the lock and its record, the lock and record never touched once the bucket is gone; without a state bucket, the same steps from the admin session on without them (`withoutBucket`, `cleanUp`, a `TeardownLog` that writes nothing), the secrets listed then each reference under `<id>/` not listed looked up (`resolvedSecrets`), the factory rechecked once confirmed (`stillWithoutBucket`); how far it got and what is left (`Progress`), every ending (`refusedUnder`, `failedUnder`, `partialUnder`, `interruptedUnder`), the interrupt checked once the run returns. |
+| Application | `src/application/teardown-factory.ts` | `teardownFactory`: the order above, under the lock and its record, the log archive named from factory.json (`archiveBucketName`) in the question, review and report, the lock and record never touched once the bucket is gone; without a state bucket, the same steps from the admin session on without them (`withoutBucket`, `cleanUp`, a `TeardownLog` that writes nothing), the secrets listed then each reference under `<id>/` not listed looked up (`resolvedSecrets`), the factory rechecked once confirmed (`stillWithoutBucket`); how far it got and what is left (`Progress`), every ending (`refusedUnder`, `failedUnder`, `partialUnder`, `interruptedUnder`), the interrupt checked once the run returns. |
 | Application | `src/application/worker-removal.ts` | Shared with `worker terminate`: `inspectForRemoval`, `openTailnetAdmin`, `deleteDevices`. |
 | Application | `src/application/stop-dispatch.ts`, `src/application/delete-owned-secret.ts` | `stopDispatch`, `deleteOwnedSecret`. |
 | Application | `src/application/plan-store.ts` | `PlanStore.removeAll`. |
@@ -1021,7 +1078,8 @@ and never without a lock; without a state bucket, why it runs without the lock,
 claiming only what it observed, the IAM it leaves to the operator,
 the tagged resources named and never a malformed host key, a bucket created
 since the review, the question about what is left, no bucket among what
-remains),
+remains; the log archive kept, in both questions and in the factory.json
+advice, and that advice without it),
 `tests/application/teardown-factory.test.ts` (a factory with no worker, one
 running worker, and two with one stopped, each ending with no instance,
 network, state, device, owned secret, plan or bucket, its referenced sources
@@ -1035,7 +1093,10 @@ every running worker before the first inspection; a `fffv/*` source and a
 tagged secret kept; D9's devices; a device appearing after the review listed,
 not deleted; no device tag or malformed host key tag in the review or report;
 a root already absent, with no root output either; a saved plan's removal never failing a finished
-teardown; and each refusal
+teardown; the log archive named kept in the question, review and report,
+nothing about it asked of S3 nor the `archive` root planned, with a state
+bucket and without one, and none named while factory.json does not enable it;
+and each refusal
 deleting nothing and leaving the lock released: a held lock, busy agents, a
 worker on a release from before agent states,
 unmanaged checkouts, a worker not located, dispatch not stopped, a machine
@@ -1125,8 +1186,10 @@ cannot be read named). terminate's own tests
 `tests/cli/presentation/teardown.test.ts` (the review: the target, each
 kind, the kept apart, the references already absent apart from them, a malformed
 host key only marked, devices not checked with their advice, no state bucket
-without a destroy plan; each step; every outcome on its stream: a finished
-teardown with its advice, the devices listed but kept, without a state bucket
+without a destroy plan, the log archive kept alone and after the secrets kept;
+each step; every outcome on its stream: a finished
+teardown with its advice, with the log archive kept and its advice, with a state
+bucket and without one, and naming no archive without it, the devices listed but kept, without a state bucket
 not found by EC2 with `checkOutsideEc2`, a wrong `--confirm` unechoed, the
 refusals, dispatch left stopped, a decline, a failure with its diagnostics
 file, a partial with what remains, an interruption with the lock, before
@@ -1134,9 +1197,12 @@ removing, without a state bucket and before the lock, `fffactory lock break`
 only in `interruptedTeardown`'s words; the commands named repeating the
 instance and profile), `tests/cli/teardown.test.ts` (in process over the use
 case's in-memory factory: `--confirm` without a terminal and the typed ID at a
-terminal, exit 0; a wrong `--confirm`, a typed answer, unknown arguments and
+terminal, exit 0; the log archive named kept in the question, review, report
+and advice, nothing about it asked of S3; a wrong `--confirm`, a typed answer, unknown arguments and
 `--force` refused, never echoed, before anything is read or asked; no terminal;
-another account; exit 2 part way and a rerun finishing it; an interrupt; help)
+another account; factory.json naming the log archive as its state bucket,
+archive enabled or not, refused as invalid before AWS is asked anything, the
+archive never emptied or deleted; exit 2 part way and a rerun finishing it; an interrupt; help)
 and `tests/cli/teardown-executable.test.ts` (the spawned `main.ts` with the real
 AWS SDK and Tailscale adapter against `support/stub-sts.ts`, `stub-s3.ts`,
 `stub-secrets-manager.ts`, `stub-ec2-instances.ts` (its instances and VPC gone

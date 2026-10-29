@@ -1,6 +1,10 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { breakFactoryLock } from "../../src/application/factory-lock";
-import { type StateBucket, StateBucketUnreachable } from "../../src/application/lock-store";
+import {
+  type ArchiveBucket,
+  type StateBucket,
+  StateBucketUnreachable,
+} from "../../src/application/lock-store";
 import { tlsOnlyPolicy } from "../../src/domain/backend-bootstrap";
 import {
   lockBreakKey,
@@ -58,6 +62,20 @@ const ALL_BLOCKED = {
   RestrictPublicBuckets: true,
 };
 const READY = { versioning: "Enabled", publicAccessBlocked: true, encrypted: true, tlsOnly: true };
+/** The log archive, in the state bucket's account and Region. */
+const ARCHIVE: ArchiveBucket = {
+  kind: "archive",
+  bucket: "fff-abcd1234-logs-123456789012-eu-west-2-an",
+  accountId: OWNER,
+  region: "eu-west-2",
+  credentials: { source: "chain" },
+};
+const READY_ARCHIVE = {
+  ...READY,
+  ownership: "BucketOwnerEnforced",
+  sseS3: true,
+  abac: "Enabled",
+};
 
 /** An error shaped as the AWS SDK throws it. */
 function sdkError(name: string, extra: Record<string, unknown> = { $fault: "client" }) {
@@ -75,7 +93,9 @@ function stubbed(script: Partial<S3Calls> = {}) {
       bucketVersioning: async () => "Enabled",
       publicAccessBlock: async () => ALL_BLOCKED,
       bucketEncryption: async () => ["AES256"],
-      bucketPolicy: async () => tlsOnlyPolicy(BUCKET.bucket),
+      ownershipControls: async () => "BucketOwnerEnforced",
+      bucketAbac: async () => "Enabled",
+      bucketPolicy: async (bucket) => tlsOnlyPolicy(bucket),
       putNewObject: async () => ({ VersionId: "v1" }),
       getObject: async () => ({ VersionId: "v1", body: JSON.stringify(RECORD) }),
       listObjects: async () => ({ IsTruncated: false }),
@@ -196,6 +216,76 @@ describe("S3 lock store over stubbed calls", () => {
   ])("reports %s", async (_, script, expected) => {
     const store = s3LockStore(stubbed(script).open);
     expect(await store.bucketReadiness(BUCKET)).toEqual({ ...READY, ...expected });
+  });
+
+  test("a log archive is found as the state bucket is, and named as the log archive", async () => {
+    expect(await s3LockStore(stubbed().open).bucketExists(ARCHIVE)).toBe(true);
+    expect(await headFailing(404).bucketExists(ARCHIVE)).toBe(false);
+    // Its name is in the account-regional namespace: a 403 is never another account's bucket.
+    const refused = headFailing(403).bucketExists(ARCHIVE);
+    await expect(refused).rejects.toThrow(
+      `The log archive ${ARCHIVE.bucket} is not accessible in account 123456789012: these ` +
+        "credentials may not reach it (S3 answered 403)",
+    );
+    await expect(headFailing(403).bucketExists(ARCHIVE)).rejects.not.toBeInstanceOf(
+      StateBucketUnreachable,
+    );
+    await expect(headFailing(301).bucketExists(ARCHIVE)).rejects.toThrow(
+      `The log archive ${ARCHIVE.bucket} exists outside the factory Region eu-west-2 (S3 answered 301)`,
+    );
+    await expect(headFailing(500).bucketExists(ARCHIVE)).rejects.toThrow(
+      "S3 HeadBucket on the log archive failed: Unknown",
+    );
+  });
+
+  test("a log archive with every setting the archive root applies is ready", async () => {
+    expect(await s3LockStore(stubbed().open).archiveReadiness(ARCHIVE)).toEqual(READY_ARCHIVE);
+  });
+
+  test.each<[string, Partial<S3Calls>, Record<string, unknown>]>([
+    [
+      "no ownership controls",
+      {
+        ownershipControls: async () => {
+          throw sdkError("OwnershipControlsNotFoundError");
+        },
+      },
+      { ownership: undefined },
+    ],
+    [
+      "other object ownership",
+      { ownershipControls: async () => "ObjectWriter" },
+      { ownership: "ObjectWriter" },
+    ],
+    ["ABAC disabled", { bucketAbac: async () => "Disabled" }, { abac: "Disabled" }],
+    ["no ABAC status", { bucketAbac: async () => undefined }, { abac: undefined }],
+    ["KMS encryption, not SSE-S3", { bucketEncryption: async () => ["aws:kms"] }, { sseS3: false }],
+    [
+      "no encryption rule",
+      {
+        bucketEncryption: async () => {
+          throw sdkError("ServerSideEncryptionConfigurationNotFoundError");
+        },
+      },
+      { encrypted: false, sseS3: false },
+    ],
+  ])("reports a log archive's %s", async (_, script, expected) => {
+    const store = s3LockStore(stubbed(script).open);
+    expect(await store.archiveReadiness(ARCHIVE)).toEqual({ ...READY_ARCHIVE, ...expected });
+  });
+
+  test("a log archive setting S3 refuses to show fails its readiness check, naming the archive", async () => {
+    const store = s3LockStore(
+      stubbed({
+        bucketAbac: async () => {
+          throw sdkError("AccessDenied");
+        },
+      }).open,
+    );
+    await expect(store.archiveReadiness(ARCHIVE)).rejects.toThrow(
+      "S3 GetBucketVersioning, GetPublicAccessBlock, GetBucketOwnershipControls, " +
+        "GetBucketEncryption, GetBucketAbac or GetBucketPolicy on the log archive failed: AccessDenied",
+    );
   });
 
   test("a bucket setting S3 refuses to show fails the readiness check", async () => {
@@ -515,6 +605,32 @@ describe("S3 lock store with the real SDK against a local stub", () => {
       publicAccessBlocked: false,
       encrypted: false,
       tlsOnly: false,
+    });
+  });
+
+  test("reads the settings the archive root applies to the log archive", async () => {
+    const store = againstStub({ buckets: { [ARCHIVE.bucket]: { owner: OWNER } } });
+    expect(await store.bucketExists(ARCHIVE)).toBe(true);
+    expect(await store.archiveReadiness(ARCHIVE)).toEqual(READY_ARCHIVE);
+    expect([...(stub?.requests ?? [])].sort()).toEqual([
+      `GET /${ARCHIVE.bucket}?abac owner=${OWNER}`,
+      `GET /${ARCHIVE.bucket}?encryption owner=${OWNER}`,
+      `GET /${ARCHIVE.bucket}?ownershipControls owner=${OWNER}`,
+      `GET /${ARCHIVE.bucket}?policy owner=${OWNER}`,
+      `GET /${ARCHIVE.bucket}?publicAccessBlock owner=${OWNER}`,
+      `GET /${ARCHIVE.bucket}?versioning owner=${OWNER}`,
+      `HEAD /${ARCHIVE.bucket} owner=${OWNER}`,
+    ]);
+  });
+
+  test("reads a log archive left without ownership controls or ABAC as lacking them", async () => {
+    const store = againstStub({
+      buckets: { [ARCHIVE.bucket]: { owner: OWNER, lacks: ["ownershipControls", "abac"] } },
+    });
+    expect(await store.archiveReadiness(ARCHIVE)).toEqual({
+      ...READY_ARCHIVE,
+      ownership: undefined,
+      abac: "Disabled",
     });
   });
 

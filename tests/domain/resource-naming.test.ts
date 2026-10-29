@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
-import type { FactoryId, HostKey } from "../../src/domain/instance";
+import type { FactoryId, FactoryInstance, HostKey } from "../../src/domain/instance";
 import {
+  archiveBucketName,
   carriesFactoryId,
   FACTORY_ID_TAG,
   HOST_KEY_TAG,
@@ -54,6 +55,49 @@ describe("resource naming (provisioning §Resources and namespacing)", () => {
     );
     expect(stateBucketSuffix(id, "fffactory-state")).toBeUndefined();
     expect(stateBucketSuffix(id, "examples-state")).toBeUndefined();
+  });
+
+  describe("the log archive's bucket name (instance configuration §Log archive)", () => {
+    const enabled = (factoryId: string, region: string): FactoryInstance => ({
+      schema_version: 1,
+      factory_id: factory(factoryId),
+      aws: { account_id: "123456789012", region },
+      log_archive: { enabled: true },
+    });
+
+    test("is derived in the account-regional namespace: ID, logs, account, Region and -an", () => {
+      expect(archiveBucketName(enabled("fff-k3x9q2ab", "us-east-1"))).toBe(
+        "fff-k3x9q2ab-logs-123456789012-us-east-1-an",
+      );
+    });
+
+    test("carries the factory ID, as every factory resource name does", () => {
+      const name = archiveBucketName(enabled("example", "eu-west-2")) as string;
+      expect(carriesFactoryId(name, factory("example"))).toBe(true);
+    });
+
+    test("the longest factory ID and the longest Region names fit S3's 63 characters", () => {
+      // Among the longest AWS Region names, partition Regions such as us-isof-south-1.
+      for (const region of ["ap-southeast-5", "us-isof-south-1", "us-gov-west-1"]) {
+        const name = archiveBucketName(enabled("a".repeat(20), region)) as string;
+        expect(name.length).toBeLessThanOrEqual(63);
+      }
+    });
+
+    test("is undefined when factory.json does not enable the archive", () => {
+      const instance = enabled("example", "us-east-1");
+      expect(archiveBucketName({ ...instance, log_archive: undefined })).toBeUndefined();
+      expect(archiveBucketName({ ...instance, log_archive: { enabled: false } })).toBeUndefined();
+    });
+
+    test("is undefined while the factory ID, account or Region it derives from is absent", () => {
+      const instance = enabled("example", "us-east-1");
+      expect(archiveBucketName({ ...instance, factory_id: undefined })).toBeUndefined();
+      expect(archiveBucketName({ ...instance, aws: { region: "us-east-1" } })).toBeUndefined();
+      expect(
+        archiveBucketName({ ...instance, aws: { account_id: "123456789012" } }),
+      ).toBeUndefined();
+    });
   });
 
   test("resources are tagged with the factory ID and host key under fffactory: keys", () => {

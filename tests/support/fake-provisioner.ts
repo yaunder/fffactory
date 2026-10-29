@@ -115,11 +115,18 @@ export const hostAddress = (key: string) => `module.hosts.aws_instance.host["${k
 /** The root outputs the world's state records once applied, as the factory root declares them. */
 export const ROOT_OUTPUTS = ["host_keys", "hosts", "network"] as const;
 export const STATE_BUCKET_ADDRESS = "module.state_bucket.aws_s3_bucket.state";
+/** What the archive root creates, as `modules/log-archive` names it (a few of its resources). */
+export const ARCHIVE_ADDRESSES = [
+  "module.log_archive.aws_s3_bucket.archive",
+  "module.log_archive.aws_s3_bucket_policy.archive",
+] as const;
 
 /**
  * A factory's AWS world behind a Provisioner, so plan and apply can be tested against state
  * that changes: the state bucket (in `store`), the network and one host machine per host key.
- * The backend root plans creating the bucket. The factory root plans the network, a host per
+ * The backend root plans creating the bucket, and the archive root the log archive bucket its
+ * variables name (`ARCHIVE_ADDRESSES`), each added to `store`'s buckets once applied; the
+ * archive root's plan is shown as `archiveShown` when set. The factory root plans the network, a host per
  * declared key not yet provisioned and removing any provisioned key no longer declared,
  * `replace` forces a host's replacement and `resize` an in-place change of its instance type;
  * `output` records the provisioned keys once there is state. `showPlan` gives every change a
@@ -172,6 +179,8 @@ export function fakeFactoryWorld(options: {
     outputs: undefined as Readonly<Record<string, unknown>> | undefined,
     /** Answers `showPlan` with this instead of the saved plan when set. */
     shown: undefined as unknown,
+    /** Answers `showPlan` of an archive root plan with this instead of the saved plan when set. */
+    archiveShown: undefined as unknown,
     /** Runs before each change an apply makes, with how many it made so far. */
     beforeChange: undefined as ((applied: number) => void) | undefined,
     /** Rejects the next call to this port method, as a failing Terraform command does. */
@@ -304,6 +313,17 @@ export function fakeFactoryWorld(options: {
     ];
   }
 
+  /** The archive root: the log archive bucket `variables` name, created. */
+  function archiveChanges(variables: Readonly<Record<string, unknown>>): WorldChange[] {
+    const bucket = `${String(variables.factory_id)}-${String(variables.archive_bucket_suffix)}`;
+    return ARCHIVE_ADDRESSES.map((address, index) => ({
+      address,
+      type: address.split(".")[2] as string,
+      actions: ["create"],
+      apply: index === 0 ? () => options.store.buckets.add(bucket) : () => {},
+    }));
+  }
+
   /**
    * Saves `changes` as the plan at `planFile`, a destroy's (`destroying`) also deleting the root
    * outputs the state records. Whether it changes anything, as -detailed-exitcode reports it: a
@@ -339,6 +359,16 @@ export function fakeFactoryWorld(options: {
     };
   }
 
+  /** What `request` plans, by its root module: the backend, the archive, or the factory. */
+  function plannedChanges(request: PlanRequest): WorldChange[] {
+    const { root } = request.configuration;
+    if (root === "backend") return backendChanges();
+    if (root === "archive") return archiveChanges(request.variables);
+    if (request.destroy === true) return destroyChanges();
+    const declared = Object.keys((request.variables.hosts ?? {}) as Record<string, unknown>);
+    return factoryChanges(declared, request.variables);
+  }
+
   const provisioner: Provisioner = {
     output: async (request) => {
       calls.push({ call: "output", request });
@@ -350,19 +380,15 @@ export function fakeFactoryWorld(options: {
     plan: async (request) => {
       calls.push({ call: "plan", request });
       failing("plan");
-      const declared = Object.keys((request.variables.hosts ?? {}) as Record<string, unknown>);
-      const changes =
-        request.configuration.root === "backend"
-          ? backendChanges()
-          : request.destroy === true
-            ? destroyChanges()
-            : factoryChanges(declared, request.variables);
+      const changes = plannedChanges(request);
       const destroying = request.configuration.root === "factory" && request.destroy === true;
       return { changes: save(request.planFile, changes, destroying) };
     },
     showPlan: async (request) => {
       calls.push({ call: "showPlan", request });
       failing("showPlan");
+      if (request.configuration.root === "archive" && world.archiveShown !== undefined)
+        return world.archiveShown;
       if (world.shown !== undefined) return world.shown;
       const outputs = destroyPlans.get(request.planFile) ?? [];
       return {
@@ -391,7 +417,7 @@ export function fakeFactoryWorld(options: {
       let applied = 0;
       for (const apply of writes) {
         world.beforeChange?.(applied);
-        if (request.configuration.root === "backend") apply();
+        if (request.configuration.root !== "factory") apply();
         else write(apply, destroying);
         applied += 1;
       }

@@ -1,7 +1,8 @@
 /**
  * A local stand-in for S3, so tests exercise the real AWS SDK without reaching AWS. It keeps
  * versioned objects in memory and implements what the lock store uses: HeadBucket, reads of
- * the bucket's versioning, public access block, default encryption and policy, PutObject,
+ * the bucket's versioning, public access block, default encryption and policy (and, as the log
+ * archive's readiness reads them, its object ownership and ABAC status), PutObject,
  * conditional or not (`If-None-Match: *`), GetObject, HeadObject, DeleteObject by version (or,
  * on a versioned bucket, without one, which writes a delete marker), ListObjectsV2 (the current
  * objects under a prefix, by key, in pages of `listPageSize` resumed from its continuation
@@ -26,13 +27,19 @@ export interface StubBucket {
    */
   readonly versioned?: boolean | "suspended";
   /**
-   * Settings backend bootstrap applies that this bucket lacks, as an interrupted bootstrap
-   * leaves them. Every other one is as bootstrap sets it.
+   * Settings backend bootstrap, or the archive root, applies that this bucket lacks, as an
+   * interrupted bootstrap leaves them. Every other one is as they set it. A bucket lacking ABAC
+   * answers that it is `Disabled`.
    */
   readonly lacks?: readonly BucketSetting[];
 }
 
-export type BucketSetting = "publicAccessBlock" | "encryption" | "policy";
+export type BucketSetting =
+  | "publicAccessBlock"
+  | "encryption"
+  | "policy"
+  | "ownershipControls"
+  | "abac";
 
 export interface StubS3Options {
   readonly buckets?: Readonly<Record<string, StubBucket>>;
@@ -159,6 +166,8 @@ const BUCKET_QUERIES = [
   "publicAccessBlock",
   "encryption",
   "policy",
+  "ownershipControls",
+  "abac",
   "versions",
   "delete",
   "list-type",
@@ -487,6 +496,15 @@ export function stubS3(options: StubS3Options = {}): StubS3 {
           "<SSEAlgorithm>AES256</SSEAlgorithm></ApplyServerSideEncryptionByDefault></Rule>" +
           "</ServerSideEncryptionConfiguration>",
       ),
+    ownershipControls: () =>
+      xml(
+        "<OwnershipControls><Rule><ObjectOwnership>BucketOwnerEnforced</ObjectOwnership></Rule>" +
+          "</OwnershipControls>",
+      ),
+    abac: ({ settings }) =>
+      xml(
+        `<AbacStatus><Status>${settings.lacks?.includes("abac") ? "Disabled" : "Enabled"}</Status></AbacStatus>`,
+      ),
     policy: ({ bucket }) =>
       new Response(
         JSON.stringify({
@@ -506,10 +524,11 @@ export function stubS3(options: StubS3Options = {}): StubS3 {
       ),
   };
 
-  const LACKING: Record<BucketSetting, readonly [number, string]> = {
+  const LACKING: Partial<Record<BucketSetting, readonly [number, string]>> = {
     publicAccessBlock: [404, "NoSuchPublicAccessBlockConfiguration"],
     encryption: [404, "ServerSideEncryptionConfigurationNotFoundError"],
     policy: [404, "NoSuchBucketPolicy"],
+    ownershipControls: [404, "OwnershipControlsNotFoundError"],
   };
 
   function setting(request: Addressed, name: string): Response {

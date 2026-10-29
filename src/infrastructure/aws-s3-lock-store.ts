@@ -1,10 +1,16 @@
 import type { S3ClientConfig } from "@aws-sdk/client-s3";
 import {
+  type ArchiveBucket,
+  type FactoryBucket,
   type LockStore,
   type StateBucket,
   StateBucketUnreachable,
 } from "../application/lock-store";
-import { deniesInsecureTransport, type StateBucketReadiness } from "../domain/backend-bootstrap";
+import {
+  type ArchiveReadiness,
+  deniesInsecureTransport,
+  type StateBucketReadiness,
+} from "../domain/backend-bootstrap";
 import {
   type HeldLock,
   type LockBreakEntry,
@@ -61,6 +67,13 @@ export interface S3Calls extends AwsCalls {
   publicAccessBlock(bucket: string, owner: string): Promise<PublicAccessBlockSettings>;
   /** The algorithms of GetBucketEncryption's default encryption rules. */
   bucketEncryption(bucket: string, owner: string): Promise<readonly string[]>;
+  /**
+   * The object ownership of GetBucketOwnershipControls' rule; rejects with S3's error when the
+   * bucket has none.
+   */
+  ownershipControls(bucket: string, owner: string): Promise<string | undefined>;
+  /** GetBucketAbac's status, undefined when S3 names none. */
+  bucketAbac(bucket: string, owner: string): Promise<string | undefined>;
   /** GetBucketPolicy's policy document; rejects with S3's error when the bucket has none. */
   bucketPolicy(bucket: string, owner: string): Promise<string | undefined>;
   /** Writes an object only if none exists at `key` (`If-None-Match: *`). */
@@ -192,6 +205,16 @@ export function sdkS3Calls(config: Partial<S3ClientConfig> = {}): OpenCalls<S3Ca
           (rule) => rule.ApplyServerSideEncryptionByDefault?.SSEAlgorithm ?? [],
         );
       },
+      ownershipControls: async (Bucket, ExpectedBucketOwner) =>
+        (
+          await client.send(
+            new s3.GetBucketOwnershipControlsCommand({ Bucket, ExpectedBucketOwner }),
+            options,
+          )
+        ).OwnershipControls?.Rules?.[0]?.ObjectOwnership,
+      bucketAbac: async (Bucket, ExpectedBucketOwner) =>
+        (await client.send(new s3.GetBucketAbacCommand({ Bucket, ExpectedBucketOwner }), options))
+          .AbacStatus?.Status,
       bucketPolicy: async (Bucket, ExpectedBucketOwner) =>
         (await client.send(new s3.GetBucketPolicyCommand({ Bucket, ExpectedBucketOwner }), options))
           .Policy,
@@ -315,6 +338,7 @@ function revisionOf(answer: ObjectRevision, bucket: string): string {
 const NO_PUBLIC_ACCESS_BLOCK = "NoSuchPublicAccessBlockConfiguration";
 const NO_ENCRYPTION = "ServerSideEncryptionConfigurationNotFoundError";
 const NO_POLICY = "NoSuchBucketPolicy";
+const NO_OWNERSHIP_CONTROLS = "OwnershipControlsNotFoundError";
 
 /** `call`'s answer, or `absent` when S3 answers that the setting does not exist. */
 async function orAbsent<T, A>(call: Promise<T>, missing: string, absent: A): Promise<T | A> {
@@ -336,8 +360,17 @@ const BLOCKS: readonly (keyof PublicAccessBlockSettings)[] = [
 /** Versioning states S3 reports; anything else is shown as never enabled. */
 const VERSIONING_STATES = new Set(["Enabled", "Suspended"]);
 
-/** How the state bucket's settings compare with those backend bootstrap applies. */
-async function readiness(calls: S3Calls, bucket: StateBucket): Promise<StateBucketReadiness> {
+/** SSE-S3's algorithm, as GetBucketEncryption names it. */
+const SSE_S3 = "AES256";
+
+/**
+ * How a bucket's settings compare with those backend bootstrap applies, and its default
+ * encryption rules' algorithms.
+ */
+async function bucketSettings(
+  calls: S3Calls,
+  bucket: FactoryBucket,
+): Promise<{ readonly readiness: StateBucketReadiness; readonly algorithms: readonly string[] }> {
   const { bucket: name, accountId } = bucket;
   const [versioning, block, algorithms, policy] = await Promise.all([
     calls.bucketVersioning(name, accountId),
@@ -345,13 +378,46 @@ async function readiness(calls: S3Calls, bucket: StateBucket): Promise<StateBuck
     orAbsent(calls.bucketEncryption(name, accountId), NO_ENCRYPTION, []),
     orAbsent(calls.bucketPolicy(name, accountId), NO_POLICY, undefined),
   ]);
-  return {
+  const readiness = {
     versioning:
       versioning !== undefined && VERSIONING_STATES.has(versioning) ? versioning : undefined,
     publicAccessBlocked: block !== undefined && BLOCKS.every((setting) => block[setting] === true),
     encrypted: algorithms.length > 0,
     tlsOnly: deniesInsecureTransport(policy, name),
   };
+  return { readiness, algorithms };
+}
+
+/** How the state bucket's settings compare with those backend bootstrap applies. */
+async function readiness(calls: S3Calls, bucket: StateBucket): Promise<StateBucketReadiness> {
+  return (await bucketSettings(calls, bucket)).readiness;
+}
+
+/** How the log archive's settings compare with those the archive root applies. */
+async function archiveReadiness(calls: S3Calls, bucket: ArchiveBucket): Promise<ArchiveReadiness> {
+  const { bucket: name, accountId } = bucket;
+  const [settings, ownership, abac] = await Promise.all([
+    bucketSettings(calls, bucket),
+    orAbsent(calls.ownershipControls(name, accountId), NO_OWNERSHIP_CONTROLS, undefined),
+    calls.bucketAbac(name, accountId),
+  ]);
+  const { readiness, algorithms } = settings;
+  return {
+    ...readiness,
+    ownership,
+    sseS3: algorithms.length > 0 && algorithms.every((algorithm) => algorithm === SSE_S3),
+    abac,
+  };
+}
+
+/** How a bucket is named in what the adapter says of it. */
+function bucketLabel(bucket: FactoryBucket): string {
+  return bucket.kind === "archive" ? "the log archive" : "the state bucket";
+}
+
+/** `bucketLabel`, opening a sentence. */
+function capitalized(label: string): string {
+  return `${label.charAt(0).toUpperCase()}${label.slice(1)}`;
 }
 
 /** A conditional write refused because the object exists, or another write to it is in flight. */
@@ -365,14 +431,14 @@ const UNREACHABLE = "unreachable";
  * of the factory's reach (403), a refusal otherwise. Its answers have no body, so the SDK can
  * name only a 404: the HTTP status tells them apart.
  */
-function headBucketFailure(error: unknown, bucket: StateBucket): false | typeof UNREACHABLE {
+function headBucketFailure(error: unknown, bucket: FactoryBucket): false | typeof UNREACHABLE {
   const status = httpStatus(error);
   if (status === 404) return false;
   if (status === 403) return UNREACHABLE;
   if (status === 301)
     throw new AdapterRefusal(
-      `The state bucket ${bucket.bucket} exists outside the factory Region ${bucket.region} ` +
-        "(S3 answered 301)",
+      `${capitalized(bucketLabel(bucket))} ${bucket.bucket} exists outside the factory Region ` +
+        `${bucket.region} (S3 answered 301)`,
     );
   throw error;
 }
@@ -506,8 +572,9 @@ async function listKeys(calls: S3Calls, bucket: StateBucket, prefix: string): Pr
 }
 
 /**
- * The factory lock, operation records and state revision in the state bucket over S3. Every
- * request requires the bucket to be owned by the factory's account (`ExpectedBucketOwner`).
+ * The factory lock, operation records and state revision in the state bucket over S3, and the
+ * log archive's existence and settings (D7), never an object in it. Every request requires the
+ * bucket to be owned by the factory's account (`ExpectedBucketOwner`).
  * Operation records are read back by listing their prefix (ListObjectsV2), then GetObject of
  * each, a few at a time, each read with its own deadline.
  * The lock is created with a conditional write, and removed by object version, so a lock that
@@ -522,8 +589,8 @@ export function s3LockStore(
   open: OpenCalls<S3Calls> = sdkS3Calls(),
   timeoutMs: number = S3_TIMEOUT_MS,
 ): LockStore {
-  const session = <T>(bucket: StateBucket, what: string, work: (calls: S3Calls) => Promise<T>) =>
-    withAwsSession(open, bucket, timeoutMs, `S3 ${what} on the state bucket`, work);
+  const session = <T>(bucket: FactoryBucket, what: string, work: (calls: S3Calls) => Promise<T>) =>
+    withAwsSession(open, bucket, timeoutMs, `S3 ${what} on ${bucketLabel(bucket)}`, work);
 
   /** One step of deleting the bucket in its own session, every failure resolved by name. */
   async function step<T>(
@@ -768,7 +835,13 @@ export function s3LockStore(
         }
       });
       if (exists !== UNREACHABLE) return exists;
-      throw new StateBucketUnreachable(bucket.bucket, bucket.accountId);
+      if (bucket.kind !== "archive")
+        throw new StateBucketUnreachable(bucket.bucket, bucket.accountId);
+      // Its name is in S3's account-regional namespace: no other account can hold it.
+      throw new AdapterRefusal(
+        `The log archive ${bucket.bucket} is not accessible in account ${bucket.accountId}: ` +
+          "these credentials may not reach it (S3 answered 403)",
+      );
     },
 
     create: (bucket, record: LockRecord) =>
@@ -784,6 +857,14 @@ export function s3LockStore(
         bucket,
         "GetBucketVersioning, GetPublicAccessBlock, GetBucketEncryption or GetBucketPolicy",
         (calls) => readiness(calls, bucket),
+      ),
+
+    archiveReadiness: (bucket) =>
+      session(
+        bucket,
+        "GetBucketVersioning, GetPublicAccessBlock, GetBucketOwnershipControls, " +
+          "GetBucketEncryption, GetBucketAbac or GetBucketPolicy",
+        (calls) => archiveReadiness(calls, bucket),
       ),
 
     read: (bucket) => session(bucket, "GetObject", (calls) => read(calls, bucket)),

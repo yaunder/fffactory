@@ -33,6 +33,7 @@ import {
   planRefusalReport,
   reviewBlocks,
   staleReport,
+  staleRunReport,
   unknownPlanReport,
 } from "../presentation/plan";
 import type { Writer } from "../presentation/style";
@@ -230,6 +231,7 @@ const REFUSED: Readonly<Record<Refused["kind"], true>> = {
   d11: true,
   stopped_resize: true,
   unready: true,
+  unready_archive: true,
   unexpected_plan: true,
   locked: true,
   stale: true,
@@ -243,7 +245,9 @@ function refusalReport(result: Refused, context: CliContext, reporting: ApplyRep
   const { selection } = reporting;
   switch (result.kind) {
     case "stale":
-      return staleReport(result.planId, result.reasons, selection);
+      return reporting.savedPlan === true
+        ? staleReport(result.planId, result.reasons, selection)
+        : staleRunReport(result.reasons, reporting);
     case "no_plan":
       return unknownPlanReport(result.planId, selection);
     case "damaged_plan":
@@ -358,7 +362,12 @@ async function apply(args: readonly string[], context: CliContext): Promise<numb
       randomBytes: context.randomBytes,
     },
   );
-  return reportApply(result, context, { action: "apply", rerun: "apply", selection: values });
+  return reportApply(result, context, {
+    action: "apply",
+    rerun: "apply",
+    selection: values,
+    savedPlan: planId !== undefined,
+  });
 }
 
 export const applyCommand: Command = {

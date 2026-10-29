@@ -7,17 +7,22 @@
   ([docs/specs/release.md](../docs/specs/release.md) §Worker executable).
 - `terraform-check.ts` (`just terraform-check`, CI's Terraform job) checks `assets/terraform`
   with the managed Terraform only: `fmt`, `validate` against the shipped lockfiles, and plans
-  of both root modules for two factory IDs whose JSON must keep every name in its own
-  namespace. Its plans reach no AWS: an override in its private copy gives the provider
+  of every root module (`factory`, `backend`, `archive`) for two factory IDs whose JSON must
+  keep every name in its own namespace. Its plans reach no AWS: an override in its private copy gives the provider
   example keys and points every endpoint at a local stand-in, and Terraform runs with
   `AWS_CONFIG_FILE` and `AWS_SHARED_CREDENTIALS_FILE` at `/dev/null` and
   `AWS_EC2_METADATA_DISABLED=true`, so no local AWS profile or credential can be read. It
   downloads Terraform and the provider, so `check-all` does not run it.
 - `terraform-check.ts` also compares each planned host's `user_data` with the rendering the
-  bootstrap tests use (`tests/support/user-data.ts`), and plans the factory root without
-  hosts, an empty factory: no instance, the shared infrastructure kept, the hosts' policy
-  allowing only the Tailscale enrollment key; and with every credential reference set, the
-  hosts' policy allowing exactly the enrollment key, the Paseo password and those references.
+  bootstrap tests use (`tests/support/user-data.ts`); requires each archive plan to only create
+  the derived log archive bucket with exactly its settings (`ARCHIVE_SETTINGS`) and the TLS-only
+  Deny; requires each factory plan's hosts' role to hold exactly the `read_secrets` and
+  `write_archive` inline policies, the latter named `<id>-write-archive` and exactly
+  `writeArchivePolicy` for the bucket that factory ID's archive plan creates; and plans the
+  factory root without hosts, an empty factory: no instance, the shared infrastructure kept, the
+  hosts' policy allowing only the Tailscale enrollment key; with every credential reference set,
+  the hosts' policy allowing exactly the enrollment key, the Paseo password and those
+  references; and without `log_archive`, the hosts' role holding only `read_secrets`.
 - `terraform-check.ts` last checks `worker terminate`'s scoped removal rule against real
   Terraform removal plans (`terraform-removal-check.ts`): states for several hosts (two with
   their own Paseo passwords, one sharing another's) and for one, every host with a password

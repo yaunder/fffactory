@@ -15,7 +15,7 @@ import {
   text,
 } from "./validation";
 import { ENROLLMENTS, type EnrollmentId } from "./readiness";
-import { carriesFactoryId } from "./resource-naming";
+import { archiveBucketName, carriesFactoryId } from "./resource-naming";
 
 export type { Issue } from "./validation";
 export { ROOT as DOCUMENT_ROOT } from "./validation";
@@ -50,6 +50,10 @@ const RELEASE_MESSAGE = "must be a release version like 1.2.3";
 const ACCOUNT_ID = /^\d{12}$/;
 const REGION = /^[a-z]{2}(-[a-z]+)+-\d+$/;
 const BUCKET = /^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/;
+/** S3's longest bucket name. */
+const S3_BUCKET_NAME_MAX = 63;
+/** Regions without S3's account-regional namespace, which names the log archive. */
+const NO_ACCOUNT_REGIONAL_NAMESPACE: readonly string[] = ["me-south-1", "me-central-1"];
 const REPOSITORY_KEY = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const isRepositoryKey = (value: string) => REPOSITORY_KEY.test(value);
 const isHostKey = (value: string) => HOST_KEY.test(value);
@@ -101,6 +105,11 @@ export interface FactoryInstance {
   readonly name?: string;
   readonly aws?: { readonly account_id?: string; readonly region?: string };
   readonly state_backend?: { readonly bucket?: string };
+  // TODO(re-evaluate when the collector ships): make the archive default-on, absent meaning
+  // enabled and shown in the reviewed plan; `init` never fills it, as it never makes an
+  // operator's choice.
+  /** The worker log archive; absent or disabled, there is none. Its name is `archiveBucketName`. */
+  readonly log_archive?: { readonly enabled: boolean };
   readonly network?: {
     readonly vpc_cidr?: string;
     readonly public_subnet_cidr?: string;
@@ -214,6 +223,7 @@ const documentRule = object(
     state_backend: object({
       bucket: pattern(BUCKET, "must be an S3 bucket name"),
     }),
+    log_archive: object({ enabled: boolean }, ["enabled"]),
     network: object({
       vpc_cidr: pattern(IPV4_CIDR, "must be an IPv4 CIDR block"),
       public_subnet_cidr: pattern(IPV4_CIDR, "must be an IPv4 CIDR block"),
@@ -321,6 +331,71 @@ function checkStateBucket(document: Record<string, unknown>, issues: Issue[]): v
     });
 }
 
+/**
+ * The log archive's bucket is named in S3's account-regional namespace, which some Regions
+ * lack. The message names the Region, a fixed one that has passed its format check.
+ */
+function checkLogArchiveRegion(document: Record<string, unknown>, issues: Issue[]): void {
+  if (nested(document, "log_archive", "enabled") !== true) return;
+  const region = nested(document, "aws", "region");
+  if (typeof region !== "string" || !NO_ACCOUNT_REGIONAL_NAMESPACE.includes(region)) return;
+  issues.push({
+    path: "log_archive.enabled",
+    message: `must not be true in ${region}: S3's account-regional namespace, which names the log archive, is not available there`,
+  });
+}
+
+/**
+ * The log archive's bucket name (`archiveBucketName`) as if enabled, whether or not it is:
+ * undefined until the factory ID, account and Region it derives from are well formed.
+ */
+function derivedArchiveName(document: Record<string, unknown>): string | undefined {
+  const factoryId = document.factory_id;
+  const account = nested(document, "aws", "account_id");
+  const region = nested(document, "aws", "region");
+  if (typeof factoryId !== "string" || !FACTORY_ID.test(factoryId)) return undefined;
+  if (typeof account !== "string" || !ACCOUNT_ID.test(account)) return undefined;
+  if (typeof region !== "string" || !REGION.test(region)) return undefined;
+  return archiveBucketName({
+    schema_version: SCHEMA_VERSION,
+    factory_id: factoryId as FactoryId,
+    aws: { account_id: account, region },
+    log_archive: { enabled: true },
+  });
+}
+
+/**
+ * The state bucket never takes the log archive's derived name, enabled or not: a retained
+ * archive would pass as a ready state bucket, and teardown, which deletes the state bucket,
+ * would then delete the archive it promises to keep. Reserved while the archive is disabled
+ * too, so evidence kept from when it was enabled stays protected. The message names the rule,
+ * never a configured value.
+ */
+function checkStateBucketNotArchive(document: Record<string, unknown>, issues: Issue[]): void {
+  const bucket = nested(document, "state_backend", "bucket");
+  if (typeof bucket !== "string" || bucket !== derivedArchiveName(document)) return;
+  issues.push({
+    path: "state_backend.bucket",
+    message:
+      "must not be <factory_id>-logs-<aws.account_id>-<aws.region>-an, the log archive's bucket name, reserved for it even while it is not enabled: teardown deletes the state bucket and keeps the archive",
+  });
+}
+
+/**
+ * The log archive's derived bucket name must fit S3's 63 characters, which a long Region name
+ * could exceed. Judged once the factory ID, account and Region it derives from are well formed;
+ * the message names only the rule and the length, never a configured value.
+ */
+function checkLogArchiveName(document: Record<string, unknown>, issues: Issue[]): void {
+  if (nested(document, "log_archive", "enabled") !== true) return;
+  const name = derivedArchiveName(document);
+  if (name === undefined || name.length <= S3_BUCKET_NAME_MAX) return;
+  issues.push({
+    path: "log_archive.enabled",
+    message: `must not be true while the log archive's bucket name, <factory_id>-logs-<aws.account_id>-<aws.region>-an, would be ${name.length} characters, beyond S3's ${S3_BUCKET_NAME_MAX}`,
+  });
+}
+
 /** A field of one of the document's objects, or undefined. */
 function nested(document: Record<string, unknown>, parent: string, field: string): unknown {
   const value = document[parent];
@@ -408,7 +483,10 @@ export function parseFactoryInstance(document: unknown): InstanceParse {
     const declared = checkRepositories(document, issues);
     checkHosts(document, declared, issues);
     checkStateBucket(document, issues);
+    checkStateBucketNotArchive(document, issues);
     checkSecretPlacement(document, issues);
+    checkLogArchiveRegion(document, issues);
+    checkLogArchiveName(document, issues);
   }
   return issues.length === 0
     ? { valid: true, instance: document as unknown as FactoryInstance }

@@ -18,7 +18,8 @@ module "network" {
 
 # Every host shares one role: it may read the enrollment key, every host's Paseo password and
 # the factory-wide credentials; narrowing it per host is an open question (#64). The operator's
-# Tailscale admin client is never among them.
+# Tailscale admin client is never among them. With the log archive enabled, each host may also
+# write new objects under its own prefix of the archive bucket, and nothing else of it.
 module "host_identity" {
   source = "../modules/host-identity"
 
@@ -28,6 +29,7 @@ module "host_identity" {
     values(var.paseo_password_secret_arns),
     values(var.credential_secret_arns),
   ))
+  archive_bucket = var.archive_bucket
 }
 
 module "hosts" {

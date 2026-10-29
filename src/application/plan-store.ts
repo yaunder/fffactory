@@ -11,6 +11,11 @@ export interface PlanFiles {
    * bound, by a factory's interactive first apply.
    */
   readonly backend: string;
+  /**
+   * The archive root's saved plan, creating the log archive, which a saved factory plan that
+   * creates it binds beside `factory`.
+   */
+  readonly archive: string;
 }
 
 export type StoredPlan =
@@ -18,7 +23,10 @@ export type StoredPlan =
       readonly kind: "found";
       readonly plan: SavedPlan;
       readonly files: PlanFiles;
-      /** The SHA-256 the Terraform plan file it binds was saved with, and has now. */
+      /**
+       * The SHA-256 each Terraform plan file it binds was saved with, and has now, as one
+       * opaque value (`PlanStore.digest`).
+       */
       readonly digest: string;
     }
   | { readonly kind: "missing" }
@@ -27,9 +35,10 @@ export type StoredPlan =
 
 /**
  * Port: the operator's local, private store of plans, per factory. A plan's directory holds
- * its Terraform plan files and, once saved, its record; a saved plan is bound to the one
- * Terraform plan file its kind names, as that file was when saved: a factory plan to
- * `factory`, a bootstrap plan to `backend` (`PlanFiles`). Plans are short-lived: `prune`
+ * its Terraform plan files and, once saved, its record; a saved plan is bound to the
+ * Terraform plan files its kind names, as they were when saved: a factory plan to `factory`,
+ * and to `archive` too when it creates the log archive (`creates_archive`), a bootstrap plan
+ * to `backend` (`PlanFiles`). Plans are short-lived: `prune`
  * removes expired ones of either kind and any directory without a record, never saved or
  * spent, long unchanged.
  */
@@ -37,18 +46,18 @@ export interface PlanStore {
   /** Creates plan `planId`'s empty private directory; rejects when it exists. */
   create(factoryId: FactoryId, planId: string): Promise<PlanFiles>;
   /**
-   * Saves the plan's record, binding it to the Terraform plan file its kind names as that
-   * file is now; rejects when that file was never written.
+   * Saves the plan's record, binding it to the Terraform plan files it binds as they are now;
+   * rejects when one was never written.
    */
   save(plan: SavedPlan): Promise<void>;
   /**
-   * The saved plan `planId`, only when its record and the Terraform plan file it binds are as
+   * The saved plan `planId`, only when its record and the Terraform plan files it binds are as
    * saved.
    */
   load(factoryId: FactoryId, planId: string): Promise<StoredPlan>;
   /**
-   * The SHA-256 of the Terraform plan file the saved plan binds, as the file is now;
-   * undefined when absent.
+   * The SHA-256 of each Terraform plan file the saved plan binds, as the files are now, as one
+   * opaque value that changes when any of them does; undefined when one is absent.
    */
   digest(plan: SavedPlan): Promise<string | undefined>;
   /**

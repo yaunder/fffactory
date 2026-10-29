@@ -1,7 +1,7 @@
 /**
  * `fffactory plan`: the factory's complete plan from factory.json and live state: the
- * infrastructure stage, the factory root module's Terraform plan, then the workers and
- * control-plane stages. Every plan, even one of a factory that declares no worker and has
+ * infrastructure stage (the log archive's root when factory.json enables a missing archive, and
+ * the factory root module's Terraform plan), then the workers and control-plane stages. Every plan, even one of a factory that declares no worker and has
  * nothing to change, is saved under a short-lived plan ID, bound to factory.json's
  * exact text, the release and its assets, the AWS account and the revision of the factory's
  * Terraform state, so `fffactory apply --plan-id` can apply exactly it. Before the state
@@ -37,6 +37,7 @@ import {
   newSavedBootstrapPlan,
   newSavedPlan,
   type PlanCircumstances,
+  type PlannedArchive,
   type PlannedWorker,
   type PlanTarget,
   pinRefusal,
@@ -51,6 +52,7 @@ import {
 } from "../domain/plan";
 import { checkStableHostKeys, recordedHostKeys } from "../domain/stable-host-keys";
 import { planBackendBootstrap, stateBucketState } from "./bootstrap-backend";
+import { planArchive } from "./log-archive";
 import { stateBucketOf } from "./factory-lock";
 import type { LockStore, StateBucket } from "./lock-store";
 import type { PlanFiles, PlanStore } from "./plan-store";
@@ -105,7 +107,12 @@ export type PlanRefusal =
   | ({ readonly kind: "stopped_resize" } & ResizeGuard)
   /** The state bucket exists without every setting backend bootstrap applies. */
   | { readonly kind: "unready"; readonly bucket: UnreadyBucket }
-  /** Terraform's plan or outputs could not be read, or a bootstrap plan did more than create. */
+  /** The log archive exists without every setting the archive root applies. */
+  | { readonly kind: "unready_archive"; readonly bucket: UnreadyBucket }
+  /**
+   * Terraform's plan or outputs could not be read, or a bootstrap or log archive plan did more
+   * than create.
+   */
   | { readonly kind: "unexpected_plan"; readonly unexpected: readonly UnexpectedPlan[] }
   | { readonly kind: "locked"; readonly held: HeldLock | undefined };
 
@@ -188,6 +195,8 @@ export interface InfrastructurePlanRequest {
   readonly terraformDirectory: string;
   /** Absolute path, owned by the caller, for the factory's saved Terraform plan. */
   readonly planFile: string;
+  /** Absolute path, owned by the caller, for the log archive's, when it is missing. */
+  readonly archivePlanFile: string;
   /**
    * Whether the plan is made under the factory-wide lock. Only then does Terraform take its
    * own state lock: `plan` takes none, so a killed plan leaves no lock behind.
@@ -200,21 +209,28 @@ export interface InfrastructurePlanRequest {
 export type InfrastructurePlan =
   | Extract<
       PlanRefusal,
-      { readonly kind: "refused" | "d11" | "stopped_resize" | "unexpected_plan" }
+      {
+        readonly kind: "refused" | "d11" | "stopped_resize" | "unready_archive" | "unexpected_plan";
+      }
     >
   | {
       readonly kind: "planned";
+      /** The factory root's changes. */
       readonly changes: readonly ResourceChange[];
       /** The state revision read before planning; undefined when there was no state yet. */
       readonly stateRevision: string | undefined;
+      /** The log archive as planned; undefined when factory.json does not enable it. */
+      readonly archive: PlannedArchive | undefined;
     };
 
 /**
  * The infrastructure stage's plan: reads the state's revision first, so any later write is
- * seen, then the host keys the state records (`Provisioner.output`; none before the first
- * apply), refuses removing one (D11), plans the factory root with factory.json's projection,
- * and refuses a plan that does more to a host machine than create or update it (D11), or that
- * changes the instance type of a worker `resizeGuard` guards.
+ * seen, then plans the log archive, for a factory.json enabling it (`planArchive`: a missing
+ * one create-only into `archivePlanFile`, an unready one refused), then reads the host keys
+ * the state records (`Provisioner.output`; none before the first apply), refuses removing one
+ * (D11), plans the factory root with factory.json's projection, and refuses a plan that does
+ * more to a host machine than create or update it (D11), or that changes the instance type of
+ * a worker `resizeGuard` guards.
  */
 export async function planInfrastructure(
   { lockStore, provisioner }: Pick<FactoryPlanDependencies, "lockStore" | "provisioner">,
@@ -222,6 +238,11 @@ export async function planInfrastructure(
 ): Promise<InfrastructurePlan> {
   const { instance, bucket } = request;
   const stateRevision = await lockStore.stateRevision(bucket);
+  const archive = await planArchive(
+    { lockStore, provisioner },
+    { ...request, planFile: request.archivePlanFile },
+  );
+  if (archive.kind !== "planned") return archive;
   const target = factoryTarget(bucket, request.terraformDirectory);
   const recorded = recordedHostKeys(await provisioner.output(target));
   if (recorded === undefined)
@@ -244,7 +265,12 @@ export async function planInfrastructure(
   if (lost !== undefined) return { kind: "d11", refusal: lost };
   const resized = resizeRefusal(shown, request.resizeGuard);
   if (resized !== undefined) return { kind: "stopped_resize", ...resized };
-  return { kind: "planned", changes: changes.filter(changesSomething), stateRevision };
+  return {
+    kind: "planned",
+    changes: changes.filter(changesSomething),
+    stateRevision,
+    archive: archive.archive,
+  };
 }
 
 /** What one read of the EC2 inventory says of the declared workers' machines. */
@@ -336,8 +362,9 @@ async function planAndSaveBootstrap(
 }
 
 /**
- * The factory's plan, its infrastructure into the plan directory's `factory.tfplan`, saved
- * there as a factory plan. A held lock refuses it.
+ * The factory's plan, its infrastructure into the plan directory's `factory.tfplan` (and a
+ * missing log archive into its `archive.tfplan`), saved there as a factory plan. A held lock
+ * refuses it.
  */
 async function planAndSaveFactory(
   deps: FactoryPlanDependencies,
@@ -353,6 +380,7 @@ async function planAndSaveFactory(
     ...request,
     bucket,
     planFile: files.factory,
+    archivePlanFile: files.archive,
     underFactoryLock: false,
     resizeGuard: machines.resizeGuard,
   });
@@ -379,6 +407,7 @@ async function planAndSaveFactory(
     controlPlane,
     dispatch,
     stopped: stoppedKeys,
+    archive: infrastructure.archive,
   });
   const saved = newSavedPlan({
     ...circumstances(request, target),
@@ -388,6 +417,7 @@ async function planAndSaveFactory(
     controlPlane,
     dispatch,
     stopped: stoppedKeys,
+    archive: infrastructure.archive,
   });
   await deps.planStore.save(saved);
   return { kind: "planned", review, saved };

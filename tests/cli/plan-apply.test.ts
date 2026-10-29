@@ -26,6 +26,7 @@ import type { ControlPlane } from "../../src/application/control-plane";
 import type { WorkflowQueue } from "../../src/application/workflow-queue";
 import { agentsIn, fakeControlPlane, fakeWorkflowQueue } from "../support/fake-control-plane";
 import {
+  ARCHIVE,
   BUCKET,
   declaring,
   FACTORY,
@@ -44,7 +45,7 @@ import { newSavedBootstrapPlan } from "../../src/domain/plan";
 import { fakePrompt } from "../support/fake-secrets";
 import { type Behavior, fakeTerraform } from "../support/fake-terraform";
 import { MemoryInstanceStore } from "../support/memory-instance-store";
-import { MemoryLockStore, READY_BUCKET } from "../support/memory-lock-store";
+import { MemoryLockStore, READY_ARCHIVE, READY_BUCKET } from "../support/memory-lock-store";
 import { MemoryPlanStore } from "../support/memory-plan-store";
 import {
   appliedRecord,
@@ -457,6 +458,23 @@ describe("fffactory plan (plan-apply §Plan)", () => {
     ]);
   });
 
+  test("log_archive.enabled in a Region without the account-regional namespace is refused before AWS (instance-configuration §Log archive)", async () => {
+    const document = text(["builder-1"], { log_archive: { enabled: true } }).replaceAll(
+      "eu-west-2",
+      "me-south-1",
+    );
+    const { context, err, identity, terraform, lockStore, assets } = cli({ document });
+    expect(await run(["plan"], context)).toBe(1);
+    expect(err).toEqual([
+      "Invalid factory.json:",
+      "  log_archive.enabled: must not be true in me-south-1: S3's account-regional namespace, which names the log archive, is not available there",
+    ]);
+    expect(identity.requests).toEqual([]);
+    expect(terraform.calls).toEqual([]);
+    expect(lockStore.calls).toEqual([]);
+    expect(assets.materialized).toEqual([]);
+  });
+
   test("D11: removing a provisioned host key by hand is refused, naming `fffactory worker terminate`", async () => {
     const { context, err, planStore } = cli({ hosts: ["builder-1", "builder-2"] });
     expect(await run(["plan"], context)).toBe(1);
@@ -608,6 +626,43 @@ describe("fffactory plan (plan-apply §Plan)", () => {
     ]);
   });
 
+  test("with the log archive enabled, shows it created, or present once it exists (plan-apply §The infrastructure stage)", async () => {
+    const document = text(["builder-1"], { log_archive: { enabled: true } });
+    const missing = cli({ document });
+    expect(await run(["plan"], missing.context)).toBe(0);
+    expect(missing.out).toEqual([
+      ...header("plan"),
+      ...PLAN,
+      `  Archive          ${ARCHIVE}, created`,
+      ...CREATES,
+      ...STAGES,
+      ...SAVED,
+    ]);
+    const present = cli({ document });
+    present.lockStore.buckets.add(ARCHIVE);
+    expect(await run(["plan"], present.context)).toBe(0);
+    expect(present.out).toContain(`  Archive          ${ARCHIVE}, present`);
+  });
+
+  test("a log archive without all its settings is refused with how to complete it", async () => {
+    const { context, err, lockStore, planStore } = cli({
+      document: text(["builder-1"], { log_archive: { enabled: true } }),
+    });
+    lockStore.buckets.add(ARCHIVE);
+    lockStore.archives.set(ARCHIVE, { ...READY_ARCHIVE, abac: "Disabled" });
+    expect(await run(["plan"], context)).toBe(1);
+    expect(err.slice(0, 7)).toEqual([
+      "",
+      `✖ The log archive ${ARCHIVE} exists, but without every setting fffactory gives it. It lacks:`,
+      "  attribute-based access control",
+      "",
+      NEXT,
+      "  If another apply is still creating it, wait for that to finish, then retry.",
+      "",
+    ]);
+    expect(planStore.saved.size).toBe(0);
+  });
+
   test("a Terraform plan fffactory cannot read is refused", async () => {
     const { context, err, terraform } = cli();
     terraform.world.shown = { resource_changes: "garbled" };
@@ -743,6 +798,61 @@ describe("fffactory apply (plan-apply §Apply)", () => {
     ]);
     expect(prompt.asked).toEqual([]);
     expect(terraform.calls.map(({ call }) => call)).toEqual(["showPlan", "applyPlan"]);
+  });
+
+  test("a saved plan creating the log archive is stale once the archive exists", async () => {
+    const { context, err, lockStore, terraform } = cli({
+      document: text(["builder-1"], { log_archive: { enabled: true } }),
+    });
+    expect(await run(["plan"], context)).toBe(0);
+    lockStore.buckets.add(ARCHIVE);
+    terraform.calls.length = 0;
+    expect(await run(["apply", "--plan-id", "aaaaaaaa"], context)).toBe(1);
+    expect(err).toEqual([
+      "",
+      "✖ Refusing to apply plan aaaaaaaa: it is no longer the plan to apply:",
+      "  the log archive was created after it was planned",
+      "",
+      "Nothing was applied.",
+      "",
+      NEXT,
+      "  Review a new plan:",
+      "    $ fffactory plan",
+    ]);
+    expect(terraform.calls).toEqual([]);
+  });
+
+  test("a log archive created while an interactive apply's plan was shown: stale, with no plan ID, and apply is rerun", async () => {
+    const { context, err, lockStore, terraform } = cli({
+      document: text(["builder-1"], { log_archive: { enabled: true } }),
+      hosts: ["builder-1"],
+      interactive: true,
+      answers: ["yes"],
+    });
+    const prompt = context.prompt;
+    const racing = {
+      ...context,
+      prompt: {
+        ...prompt,
+        ask: async (question: string) => {
+          lockStore.buckets.add(ARCHIVE);
+          return prompt.ask(question);
+        },
+      },
+    };
+    expect(await run(["apply"], racing)).toBe(1);
+    expect(err).toEqual([
+      "",
+      "✖ Refusing to apply: the plan approved is no longer the plan to apply:",
+      "  the log archive was created after it was planned",
+      "",
+      "Nothing was applied.",
+      "",
+      NEXT,
+      "  Review a new plan:",
+      "    $ fffactory apply",
+    ]);
+    expect(terraform.calls.some(({ call }) => call === "applyPlan")).toBe(false);
   });
 
   test("applying a plan after factory.json changes is refused", async () => {

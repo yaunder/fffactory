@@ -30,7 +30,9 @@ versioned in-memory `support/memory-lock-store.ts` (whose bucket deletion remove
 bucket's records and break log, and can stop before the lock, or after it with the bucket left,
 `deletionLeaves`, or at an interrupt set by `beforeLock`, and whose `unreachable` buckets answer
 `bucketExists` with S3's 403, and which reads back its operation records, with any text `store` put
-under their prefix, through `readOperations`) and `support/memory-plan-store.ts`,
+under their prefix, through `readOperations`; a log archive is one of its buckets, ready as the
+archive root leaves it, `READY_ARCHIVE`, unless `archives` says otherwise) and
+`support/memory-plan-store.ts` (whose `swap` of `"archive"` changes a plan's `archive.tfplan`),
 the fakes in `support/fake-secrets.ts` (Secrets Manager, whose listing, restore, deletion,
 descriptions and looks answer as scripted and are recorded in `calls`; `fakeSecretsManager`, a
 world of secrets those calls change, so a rerun sees what the run before deleted, with failures
@@ -40,12 +42,15 @@ descriptions and looks (`describe`, `exists`) that find a secret by its full or 
 only in the Region its ARN names; and the operator prompt) and
 `support/fake-provisioner.ts` (a scripted `fakeProvisioner`, and `fakeFactoryWorld`, a
 factory whose Terraform state changes as plans apply and whose apply can be stopped part
-way, which can replace a host or change its instance type in place (`resize`), and whose
+way, whose `archive` root creates the log archive its variables name (`ARCHIVE_ADDRESSES`,
+shown as `archiveShown` when set), which can replace a host or change its instance type in place (`resize`), and whose
 `showPlan` gives every change a `before` and an `after` as `terraform show -json` does;
-`support/factory-world.ts` builds the plan and apply fixtures on it), stubbed SDK calls,
+`support/factory-world.ts` builds the plan and apply fixtures on it, `archiving` enabling the
+log archive, `ARCHIVE`), stubbed SDK calls,
 or the real SDK pointed at `support/stub-sts.ts`, `support/stub-vpc-quota.ts` (EC2 and
 Service Quotas), `support/stub-s3.ts` (a versioned, never-versioned or suspended bucket
-with conditional writes and bootstrap's settings, some of them lackable, older versions and
+with conditional writes and bootstrap's settings, and the log archive's ownership controls and
+ABAC status, some of them lackable, older versions and
 delete markers (`addVersions`), a current delete marker, written as a DeleteObject without a
 version ID writes one (`markDeleted`), whose deletion makes the version under it current again,
 ListObjectVersions with `IsLatest` and `LastModified`, in pages resumed after their markers even

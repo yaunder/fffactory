@@ -77,7 +77,11 @@ const TAG_CONDITIONS = new Set([
  * credentials). Replace the prefix rule with an explicit list of read actions.
  */
 const READ_ONLY_ACTION = /^[a-z0-9-]+:(Get|List|Describe|BatchGet)[A-Za-z0-9*]*$/;
-const POLICY_REFERENCE = /^data\.aws_iam_policy_document\.[A-Za-z0-9_-]+\.json$/;
+/**
+ * A reference to a policy document the check reads: the document itself, or the one instance,
+ * `[0]`, of a document whose `count` makes it conditional. Any other index is not read.
+ */
+const POLICY_REFERENCE = /^data\.aws_iam_policy_document\.[A-Za-z0-9_-]+(\[0\])?\.json$/;
 const POLICY_ATTRIBUTES = new Set(["policy", "assume_role_policy"]);
 /** Policies held elsewhere, by ARN or inline block, which the check cannot read. */
 const OPAQUE_POLICIES = ["inline_policy", "managed_policy_arns", "policy_arn", "policy_arns"];

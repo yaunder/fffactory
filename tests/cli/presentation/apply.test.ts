@@ -365,6 +365,19 @@ describe("the Applying section (plan-apply §Apply, §Waiting for a new worker)"
     ]);
   });
 
+  test("creating the log archive alone is Terraform's apply: plan-apply §Apply", () => {
+    const archive = { bucket: "fff-abcd1234-logs-123456789012-eu-west-2-an", creates: true };
+    const creating = { ...review, changes: [], archive };
+    expect(rows(creating)).toEqual([
+      rule("Applying"),
+      "  Infrastructure   applying with Terraform (its output is not shown; can take several minutes)",
+    ]);
+    // An archive found present applies nothing for it.
+    expect(
+      infrastructureApplyingRow({ ...creating, archive: { ...archive, creates: false } }),
+    ).toBeUndefined();
+  });
+
   test("an upgrade's pin, written once approved, before the worker installs: plan-apply §Upgrade", () => {
     const upgrade: FactoryPlanReview = {
       ...review,
