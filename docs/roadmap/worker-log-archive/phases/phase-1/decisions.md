@@ -39,11 +39,18 @@ runs in parallel with epic #94.
    `<factory-id>-logs-<account>-<region>-an` (account-regional namespace).
    Max length 56 <= 63 for any valid factory ID and region. Turning it off
    removes the worker grant and keeps the bucket. User: "for now".
-   Rationale: no free choice means no suffix rule, no not-the-state-bucket
-   rule, and no change refusal (nothing exists to remember a prior value
-   except a factory-root output, as host keys do).
+   Rationale: no free choice means no suffix rule and no change refusal
+   (nothing exists to remember a prior value except a factory-root output, as
+   host keys do).
+   Not-the-state-bucket rule still needed (found in review of #116): deriving
+   the archive name does not stop the still-configurable `state_backend.bucket`
+   from naming it. A retained archive passes as a ready state bucket, so apply
+   would adopt it and teardown would delete it, breaking D8 ("Log archive
+   <name> is kept; fffactory never removes it"). Validation refuses a state
+   bucket equal to the derived archive name, enabled or not, so evidence a
+   torn-down factory kept stays protected.
    Rejected alternatives:
-     - free `log_archive.bucket` (roadmap): three new rules plus a change
+     - free `log_archive.bucket` (roadmap): two more new rules plus a change
        refusal with no storage for the prior value.
 
 ✓ D4. The identity record moves to Phase 4

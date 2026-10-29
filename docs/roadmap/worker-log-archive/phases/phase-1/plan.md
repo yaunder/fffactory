@@ -76,7 +76,8 @@ words. fffactory writes no S3 objects in this phase (D4).
 **Domain** (`src/domain`)
 - `instance.ts`: optional `log_archive.enabled` (D3), schema v1 kept;
   mirrored in `schemas/factory.schema.json`; refused when the region lacks the
-  account-regional namespace (me-south-1, me-central-1).
+  account-regional namespace (me-south-1, me-central-1); `state_backend.bucket`
+  refused when it equals the derived archive name, enabled or not (D3).
 - `resource-naming.ts`: the derived archive bucket name `<factory-id>-logs-<account>-<region>-an` (D3).
 - `plan.ts`: a saved factory plan records whether it creates the archive; a
   staleness reason when that fact changes (mirrors `state_bucket_created`); the
