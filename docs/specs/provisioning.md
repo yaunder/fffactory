@@ -798,11 +798,15 @@ create-only rule as backend bootstrap's (`createOnlyRefusal`,
 approved on its own: the lock lives in the state bucket, not the archive, so
 the archive is created under the factory lock, in the factory's one reviewed
 plan, applied before the factory root once approved, and checked missing again
-right before its apply ([plan and apply §Apply](plan-apply.md#apply)). Two
+once approved, before an upgrade's pin is written or anything is applied
+([plan and apply §Apply](plan-apply.md#apply)). Two
 applies cannot race to create it: the factory lock serialises them, and a
 saved plan creating an archive that exists by its apply is stale. A ready
 archive is left alone, so a factory applied again after teardown, which keeps
-the archive ([teardown](teardown.md)), adopts it.
+the archive ([teardown](teardown.md)), adopts it; a plan that found it ready
+checks it again after approval, before anything is changed, and is stale once
+it is gone and refused as above once it lacks a setting
+([plan and apply §Freshness](plan-apply.md#freshness)).
 
 ## Lock
 

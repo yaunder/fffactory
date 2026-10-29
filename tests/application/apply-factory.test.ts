@@ -1212,6 +1212,49 @@ describe("the log archive (plan-apply §Apply)", () => {
     expect(lockStore.locks.size).toBe(0);
   });
 
+  test("an archive found present that is gone after approval makes the plan stale, applying nothing", async () => {
+    const { deps, lockStore, terraform } = applying({ hosts: ["builder-1"] });
+    lockStore.buckets.add(ARCHIVE);
+    deps.approval = {
+      approve: async () => {
+        lockStore.buckets.delete(ARCHIVE);
+        return true;
+      },
+    };
+    const result = await applyFactory(
+      deps,
+      applyRequest({ instance: archiving("builder-1", "b") }),
+    );
+    expect(result).toMatchObject({ kind: "stale", reasons: [{ kind: "archive_missing" }] });
+    expect(terraform.calls.some(({ call }) => call === "applyPlan")).toBe(false);
+    expect(terraform.world.hosts.has("b")).toBe(false);
+    expect(lockStore.operationWrites.at(-1)).toMatchObject({ status: "refused" });
+    expect(lockStore.locks.size).toBe(0);
+  });
+
+  test("an archive found ready that loses a setting after approval refuses the apply, applying nothing", async () => {
+    const { deps, lockStore, terraform } = applying({ hosts: ["builder-1"] });
+    lockStore.buckets.add(ARCHIVE);
+    deps.approval = {
+      approve: async () => {
+        lockStore.archives.set(ARCHIVE, { ...READY_ARCHIVE, tlsOnly: false });
+        return true;
+      },
+    };
+    const result = await applyFactory(
+      deps,
+      applyRequest({ instance: archiving("builder-1", "b") }),
+    );
+    expect(result).toMatchObject({
+      kind: "unready_archive",
+      bucket: { location: { bucket: ARCHIVE }, missing: ["tls_only_policy"] },
+    });
+    expect(terraform.calls.some(({ call }) => call === "applyPlan")).toBe(false);
+    expect(terraform.world.hosts.has("b")).toBe(false);
+    expect(lockStore.operationWrites.at(-1)).toMatchObject({ status: "refused" });
+    expect(lockStore.locks.size).toBe(0);
+  });
+
   test("a failing archive apply is an infrastructure-stage failure, and the factory root is not applied", async () => {
     const { deps, lockStore, terraform } = applying({ hosts: ["builder-1"] });
     terraform.world.failNext = "applyPlan";
@@ -1303,6 +1346,39 @@ describe("the log archive (plan-apply §Apply)", () => {
         reasons: [{ kind: "archive_missing" }],
       });
       expect(terraform.calls).toEqual([]);
+    });
+
+    test("is stale once the archive it found present is gone after its approval", async () => {
+      const { deps, saved, terraform, lockStore } = await planned({ archive: true });
+      deps.approval = {
+        approve: async () => {
+          lockStore.buckets.delete(ARCHIVE);
+          return true;
+        },
+      };
+      expect(await applyFactory(deps, withPlan(saved))).toEqual({
+        kind: "stale",
+        planId: saved.plan_id,
+        reasons: [{ kind: "archive_missing" }],
+      });
+      expect(terraform.calls.some(({ call }) => call === "applyPlan")).toBe(false);
+      expect(lockStore.operationWrites.at(-1)).toMatchObject({ status: "refused" });
+    });
+
+    test("is refused once the archive it found ready loses a setting after its approval", async () => {
+      const { deps, saved, terraform, lockStore } = await planned({ archive: true });
+      deps.approval = {
+        approve: async () => {
+          lockStore.archives.set(ARCHIVE, { ...READY_ARCHIVE, tlsOnly: false });
+          return true;
+        },
+      };
+      expect(await applyFactory(deps, withPlan(saved))).toMatchObject({
+        kind: "unready_archive",
+        bucket: { location: { bucket: ARCHIVE }, missing: ["tls_only_policy"] },
+      });
+      expect(terraform.calls.some(({ call }) => call === "applyPlan")).toBe(false);
+      expect(lockStore.operationWrites.at(-1)).toMatchObject({ status: "refused" });
     });
 
     test("a swapped archive.tfplan is refused as damaged, and nothing is applied", async () => {

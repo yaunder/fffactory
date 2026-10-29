@@ -54,8 +54,11 @@ Dependencies point inward: `domain <- application <- infrastructure, cli`, and
   no port of its own): a missing one is planned create-only into `archive.tfplan`, which a saved
   factory plan then binds by SHA-256 beside `factory.tfplan` (`creates_archive`, stale once the
   archive's presence changed, `archiveStaleness`), and apply applies it after approval, under
-  the lock, rechecked missing right before, then the factory root, in the infrastructure stage,
-  never a stage of its own (D5); a present, ready one plans nothing; an unready one is refused.
+  the lock, then the factory root, in the infrastructure stage, never a stage of its own (D5);
+  a present, ready one plans nothing; an unready one is refused. Right after approval, before
+  an upgrade's pin moves or anything is applied, every plan with the archive, saved or not,
+  rechecks it as found (`approvedArchiveChanged`): stale once one it creates exists or one it
+  found is gone, refused unready once one it found ready lacks a setting.
   fffactory writes no object in the archive. Without it nothing of this runs. The workers
   stage (`application/apply-workers.ts`) is the second step under the same lock and record, and
   its changes, each declared worker's install, are in the one plan approved. The repositories

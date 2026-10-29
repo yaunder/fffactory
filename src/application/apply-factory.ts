@@ -102,6 +102,7 @@ import type { Approval } from "./approval";
 import { applySavedBootstrap, beginFactoryOperation } from "./bootstrap-backend";
 import { archiveOf, archivePlanFile, archiveState, readBackArchivePlan } from "./log-archive";
 import { type FactoryLock, type Interrupted, settleFactoryLock } from "./factory-lock";
+import type { ArchiveBucket } from "./lock-store";
 import {
   checkPlannable,
   circumstances,
@@ -400,14 +401,31 @@ async function savedArchive(
     return { kind: "damaged_plan", planId: saved.plan_id };
   if (archive === undefined || saved.creates_archive === undefined)
     return { kind: "as_planned", archive: undefined };
-  const state = await archiveState(deps.lockStore, archive);
-  const stale = archiveStaleness(saved, state.kind !== "missing");
-  if (stale !== undefined) return { kind: "stale", planId: saved.plan_id, reasons: [stale] };
-  if (state.kind === "unready") return { kind: "unready_archive", bucket: state.bucket };
+  const changed = await archiveChanged(deps, saved.plan_id, archive, saved.creates_archive);
+  if (changed !== undefined) return changed;
   return {
     kind: "as_planned",
     archive: { bucket: archive.bucket, creates: saved.creates_archive },
   };
+}
+
+/**
+ * The log archive, read now, against what its plan found: the plan's staleness once it exists
+ * though the plan creates it (`archive_created`, ready or not), or is gone though the plan found
+ * it present (`archive_missing`); refused as unready once the one the plan found ready lacks a
+ * setting the archive root applies; undefined while it is as planned.
+ */
+async function archiveChanged(
+  deps: FactoryApplyDependencies,
+  planId: string,
+  archive: ArchiveBucket,
+  creates: boolean,
+): Promise<Extract<FactoryApply, { readonly kind: "stale" | "unready_archive" }> | undefined> {
+  const state = await archiveState(deps.lockStore, archive);
+  const stale = archiveStaleness({ creates_archive: creates }, state.kind !== "missing");
+  if (stale !== undefined) return { kind: "stale", planId, reasons: [stale] };
+  if (state.kind === "unready") return { kind: "unready_archive", bucket: state.bucket };
+  return undefined;
 }
 
 /** This apply's archive root plan file, for a plan creating the log archive. */
@@ -673,19 +691,21 @@ async function movePin(
 }
 
 /**
- * Right before the approved plan creates the log archive: undefined while it is still missing,
- * or the plan's staleness once it exists, ready or not, as another apply racing this one, or
- * anything outside fffactory, may have made it.
+ * Right after the plan is approved, before anything is changed: the log archive as the plan
+ * found it, still missing when it creates it, still present and ready when it found it so.
+ * Another apply racing this one, or anything outside fffactory, may have made, deleted or
+ * changed it while the approval was asked. Undefined without one.
  */
-async function archiveAppeared(
+async function approvedArchiveChanged(
   deps: FactoryApplyDependencies,
   request: FactoryApplyRequest,
   locked: LockedApply,
-): Promise<Extract<FactoryApply, { readonly kind: "stale" }> | undefined> {
+  planned: PlannedArchive | undefined,
+): ReturnType<typeof archiveChanged> {
+  if (planned === undefined) return undefined;
   const archive = archiveOf(request.instance, locked.lock.bucket);
-  if (archive === undefined) throw new Error("a plan creating the log archive has none");
-  if (!(await deps.lockStore.bucketExists(archive))) return undefined;
-  return { kind: "stale", planId: locked.planId, reasons: [{ kind: "archive_created" }] };
+  if (archive === undefined) throw new Error("a plan with a log archive has none");
+  return archiveChanged(deps, locked.planId, archive, planned.creates);
 }
 
 /**
@@ -720,9 +740,9 @@ async function applyInfrastructure(
 
 /**
  * From the approval question on: asks, checks a saved plan's files are still the ones loaded
- * and a log archive it creates still missing, moves an upgrade's pin, applies exactly the
- * archive's plan file when it creates the archive, then the factory's when it changes
- * anything, then runs the workers stage.
+ * and the log archive still as planned (`approvedArchiveChanged`), moves an upgrade's pin,
+ * applies exactly the archive's plan file when it creates the archive, then the factory's when
+ * it changes anything, then runs the workers stage.
  */
 async function approveAndApply(
   deps: FactoryApplyDependencies,
@@ -743,7 +763,7 @@ async function approveAndApply(
   // Refused before an upgrade's pin is written, so a refusal leaves the pin where it was.
   const refusal =
     (await swappedPlanFile(deps, locked)) ??
-    (archive?.creates === true ? await archiveAppeared(deps, request, locked) : undefined);
+    (await approvedArchiveChanged(deps, request, locked, archive));
   if (refusal !== undefined) {
     await log.finish("refused", "refused");
     return refusal;

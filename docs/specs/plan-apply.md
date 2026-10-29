@@ -832,6 +832,20 @@ and the stopped workers, and `archive.tfplan` is read back before
 `factory.tfplan`: it may only create, or the plan is refused as Terraform's
 plan fffactory cannot apply.
 
+Every factory plan with the log archive, saved or made in the run, has its
+archive checked once more right after approval, under the lock and before
+anything is changed: before an upgrade's pin is written, and before either
+Terraform plan file is applied (`approvedArchiveChanged`). An approval takes
+as long as the operator does, and the archive may be created, deleted or
+changed outside fffactory meanwhile. Live state that changed invalidates the
+plan approved, whichever it found: one it creates that exists now, ready or
+not, makes it stale (`the log archive was created after it was planned`); one
+it found present that is gone makes it stale (`the log archive no longer
+exists`); and one it found ready that now lacks a setting the archive root
+applies refuses it as `plan` refuses an unready archive
+([provisioning §Log archive readiness](provisioning.md#log-archive-readiness)),
+with its Next block. Either way nothing is applied and the pin is not moved.
+
 The revision is the state object's S3 version ID and entity tag, read with
 HeadObject (`ExpectedBucketOwner` set); every write changes it. It is read
 before planning, and compared again under the lock, where nothing else of
@@ -879,7 +893,8 @@ the `--instance` and `--profile` apply was given.
 
 A plan made in the run, approved at the terminal by `apply` or `upgrade` and
 never saved, can go stale under the lock too (the log archive it creates
-appearing before its apply, or a worker's Paseo state changing). Its ID was
+appearing before its apply, or the one it found present vanishing, or a
+worker's Paseo state changing). Its ID was
 never shown, so the refusal names none, and its Next block reruns the command:
 `fffactory upgrade` while an upgrade's pin has not moved, `fffactory apply`
 otherwise (an upgrade's refusal adds the pin notice, [Upgrade](#upgrade)):
@@ -983,11 +998,14 @@ After the checks above, and a saved plan's local freshness:
    (its output is not shown; can take several minutes)` when the plan has
    infrastructure changes or creates the log archive. Exactly the saved
    Terraform plan files are applied (`terraform apply PLANFILE`), never a new
-   plan: a plan creating the log archive first applies `archive.tfplan`, after
-   checking again, right after approval and before an upgrade's pin is written
-   ([Upgrade](#upgrade)), that the archive is still missing (one that exists by
-   then, ready or not, makes the plan stale, `the log archive was created after
-   it was planned`, and nothing is applied), then `factory.tfplan`, so the
+   plan. Right after approval and before an upgrade's pin is written
+   ([Upgrade](#upgrade)), the log archive is checked again as the plan found it
+   ([Freshness](#freshness)): still missing when the plan creates it (one that
+   exists by then, ready or not, makes the plan stale, `the log archive was
+   created after it was planned`), still present and ready when it found it so
+   (gone makes it stale, `the log archive no longer exists`; lacking a setting
+   refuses it as unready); either way nothing is applied. A plan creating the
+   log archive first applies `archive.tfplan`, then `factory.tfplan`, so the
    archive exists before the hosts' role that may write to it. It is part of
    the infrastructure stage, not a stage of its own: the record shows the
    infrastructure stage `applying`, then `applied`, and a failure of either
@@ -1600,10 +1618,11 @@ factory.json's pin was not moved: it still pins the release it pinned.
    `release` changed to the running release. Every refusal of plan and apply
    applies, and the workers stage installs the running release. A missing log
    archive is planned and created there as apply creates it, after the pin is
-   written; it is checked again still missing right after approval and before
-   the pin is written, and one that exists by then makes the plan stale (`the
-   log archive was created after it was planned`): the pin is not moved and
-   nothing is applied.
+   written. Right after approval and before the pin is written, the archive is
+   checked again as the plan found it, as apply checks it
+   ([Freshness](#freshness)): one created by then, or one found present that is
+   gone, makes the plan stale, and one found ready that lacks a setting refuses
+   it as unready: the pin is not moved and nothing is applied.
 2. The pin move is shown with the plan, beside the release it moves to, and
    approved together:
 
@@ -1634,8 +1653,8 @@ factory.json's pin was not moved: it still pins the release it pinned.
    The plan shows every stage it approves.
    The earlier pin is shown only when it is a plain `MAJOR.MINOR.PATCH`,
    which cannot hold anything else; otherwise `from the release it pins now`.
-3. Once approved, and only then, and once the log archive a plan creates is
-   checked still missing (item 1), the new pin is written, the `Applying`
+3. Once approved, and only then, and once the log archive is checked to be
+   still as the plan found it (item 1), the new pin is written, the `Applying`
    section's first row, before Terraform's: the document, serialized as `init`
    and `secret set` write it, with only `release` changed. It is written only
    while factory.json is still the exact text the plan was made from; otherwise
@@ -1691,9 +1710,10 @@ factory.json pins release 0.3.0.
 The operation record starts with a `pin` stage, `pending`, before the
 infrastructure stage; it ends `written`, `refused` (factory.json changed) or
 `failed` (writing it failed). An upgrade that ends before the pin is written,
-declined, refused (while planning, or once approved because the log archive it
-creates appeared) or failed while planning, ends the `pin` stage the same way
-(`finishOperation`: a stage still `pending` never started). A failure after the
+declined, refused (while planning, or once approved because the log archive
+changed from what the plan found) or failed while planning, ends the `pin`
+stage the same way (`finishOperation`: a stage still `pending` never
+started). A failure after the
 pin was written is the infrastructure stage's; the `pin` stage stays
 `written`. An interrupt before the pin was written leaves it `pending`, since
 nothing more of the record is written after an interrupt. The lock's and the record's `operation` is `upgrade`, and their
@@ -1790,7 +1810,7 @@ unchanged by where the plan was made.
 | Domain | `src/domain/stable-host-keys.ts` | `recordedHostKeys`, reading the factory root's `host_keys` output. |
 | Application | `src/application/plan-factory.ts` | `checkPlannable`, `planInfrastructure` (the log archive's plan first), `planFactory` (a missing bucket's bootstrap plan saved too), `declaredMachines` (the one inventory read: the stopped workers and the resize guard). |
 | Application | `src/application/log-archive.ts` | The log archive in the infrastructure stage: `archiveOf` (the archive in the state bucket's account, Region and credentials), `archiveState` (missing, present, or unready), `planArchive` (a missing archive's create-only `archive.tfplan`), `archivePlanFile` and `readBackArchivePlan`. |
-| Application | `src/application/apply-factory.ts` | `applyFactory`: saved-plan freshness (the state bucket gone, and a worker's Paseo state changed, as `StaleReason`s too), the review approved, the lock, infrastructure, workers, repository and control-plane stages, operation records, interruption; `PinUpdate`, upgrade's pin write beside the `PinMove` it shows; a saved bootstrap plan routed to `applySavedBootstrap`, then its record; a saved plan's log archive checked as planned and its `archive.tfplan` read back, and the archive applied before the factory root, rechecked missing right before. |
+| Application | `src/application/apply-factory.ts` | `applyFactory`: saved-plan freshness (the state bucket gone, and a worker's Paseo state changed, as `StaleReason`s too), the review approved, the lock, infrastructure, workers, repository and control-plane stages, operation records, interruption; `PinUpdate`, upgrade's pin write beside the `PinMove` it shows; a saved bootstrap plan routed to `applySavedBootstrap`, then its record; a saved plan's log archive checked as planned and its `archive.tfplan` read back, any plan's log archive rechecked as planned right after approval, before the pin or Terraform (`approvedArchiveChanged`), and the archive applied before the factory root. |
 | Application | `src/application/bootstrap-backend.ts` | `applySavedBootstrap`: a saved bootstrap plan's bucket and file checks, its read-back (its review, a `PlanReview`), its exact apply, then the lock. |
 | Application | `src/application/plan-control-plane.ts` | Derives Paseo changes and saved live observations from worker inspections. |
 | Application | `src/application/apply-workers.ts` | `applyWorkers`: the workers stage ([host protocol §apply](host-protocol.md#apply)). |
@@ -1879,16 +1899,21 @@ or whose Terraform plan file was swapped after it was loaded or after it was
 read back; the log archive disabled asking S3 nothing, a missing one shown
 created and applied after approval before the factory root with no stage of
 its own, a rerun planning nothing for it, an unready one refused under the lock,
-one appearing after approval making the plan stale, a failed archive apply an
-infrastructure-stage failure with the factory root not applied, and a saved
-plan applying its `archive.tfplan` then its `factory.tfplan`, or only the
-latter when it found the archive present, stale once the archive appeared or
-vanished, damaged once its `archive.tfplan` was swapped before or after its
-read-back, and refused when it reads back as more than creates; a saved bootstrap plan applied exactly, then the lock, its record
-and the release in that order and nothing of the factory planned, spent so a
-rerun names it missing, refused with nothing applied, locked or recorded when
-stale (factory.json, release, assets, path, expiry), when the bucket exists,
-ready or not, tampered, read back other than its record or doing more than
+one appearing after approval making the plan stale, one found present that is
+gone after approval making it stale and one found ready that loses a setting
+after approval refusing it unready, nothing applied either way, a failed
+archive apply an infrastructure-stage failure with the factory root not
+applied, and a saved plan applying its `archive.tfplan` then its
+`factory.tfplan`, or only the latter when it found the archive present, stale
+once the archive appeared or vanished, before its apply or after its approval,
+refused unready once the archive it found ready loses a setting after its
+approval, damaged once its `archive.tfplan` was swapped before or after its
+read-back, and refused when it reads back as more than creates; a saved
+bootstrap plan applied exactly, then the lock, its record and the release in
+that order and nothing of the factory planned, spent so a rerun names it
+missing, refused with nothing applied, locked or recorded when stale
+(factory.json, release, assets, path, expiry), when the bucket exists, ready or
+not, tampered, read back other than its record or doing more than
 create, its failed Terraform apply spending it with no lock or record, an
 interrupt before the lock taking none, one after it keeping it, and one once
 its record is written keeping the lock and the record, an unwritable record
@@ -2036,8 +2061,10 @@ converging; a failure writing the pin; a failure after the pin was written,
 recorded as the infrastructure stage's; an interrupt after the pin was written,
 its lock broken and apply finishing; a missing log archive created through the
 same infrastructure stage after the pin, and one appearing during approval
-refusing the plan stale with the pin not moved; every refusal before AWS: nothing to
-upgrade, a downgrade, no pin, base and schema D11),
+refusing the plan stale, one found present disappearing during approval refusing
+it stale and one found ready losing a setting during approval refusing it
+unready, each with the pin not moved and nothing applied; every refusal
+before AWS: nothing to upgrade, a downgrade, no pin, base and schema D11),
 `tests/cli/upgrade.test.ts` (the output and question, the pin row before the
 install, every stage apply runs in its Result: the control plane applied, Paseo
 `install` called, dispatch reconciled and the end-to-end verification; a

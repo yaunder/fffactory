@@ -1004,11 +1004,15 @@ export function stateStaleness(
 }
 
 /**
- * Why a saved plan may no longer be applied once the factory lock is held: the log archive it
- * was planned to create exists now (`exists`), or the one it found present is gone. Undefined
- * while the archive is as planned, and for a plan of a factory without one.
+ * Why a plan may no longer be applied once the factory lock is held, a saved one before its
+ * apply and any once approved: the log archive it was planned to create exists now (`exists`),
+ * or the one it found present is gone. Undefined while the archive is as planned, and for a
+ * plan of a factory without one.
  */
-export function archiveStaleness(plan: SavedFactoryPlan, exists: boolean): StaleReason | undefined {
+export function archiveStaleness(
+  plan: Pick<SavedFactoryPlan, "creates_archive">,
+  exists: boolean,
+): StaleReason | undefined {
   if (plan.creates_archive === undefined || plan.creates_archive !== exists) return undefined;
   return { kind: exists ? "archive_created" : "archive_missing" };
 }
