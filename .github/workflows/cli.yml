@@ -44,6 +44,9 @@ jobs:
       - name: Type check
         run: bun run typecheck
 
+      - name: Build documentation and check links
+        run: bun run docs:build
+
       - name: Test with coverage
         run: bun test --coverage
 

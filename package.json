@@ -6,6 +6,8 @@
   "type": "module",
   "scripts": {
     "fffactory": "bun src/cli/main.ts",
+    "docs:build": "bun scripts/docs.ts",
+    "docs:serve": "bun scripts/docs.ts --serve",
     "format": "biome format --write",
     "format:check": "biome format",
     "lint": "biome lint --write",

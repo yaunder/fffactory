@@ -341,4 +341,9 @@ just check-all
 The checks exercise repository code without AWS credentials or factory state.
 Maintainers: [prepare and protect a fresh public repository](docs/public-repository.md).
 
+To preview the documentation website, run `just docs-serve` and open
+`http://127.0.0.1:4321`. `just docs-build` generates static HTML in `dist/docs/`
+and checks links. The site uses the existing Markdown with Bun's built-in
+converter; see [documentation site maintenance](docs/specs/documentation-site.md).
+
 Licensed under the [MIT License](LICENSE), copyright Yaunder.

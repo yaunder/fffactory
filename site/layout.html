@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="description" content="fffactory documentation: create, connect, and operate your software factory.">
+    <title>{{title}} · fffactory docs</title>
+    <link rel="stylesheet" href="style.css">
+    <script src="site.js" defer></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#content">Skip to content</a>
+    <header class="site-header">
+      <a class="brand" href="index.html"><span class="brand-mark" aria-hidden="true">ff</span>fffactory<span class="docs-label">Docs</span></a>
+      <a class="github-link" href="https://github.com/yaunder/fffactory">GitHub <span aria-hidden="true">↗</span></a>
+    </header>
+    <div class="layout">
+      <aside class="sidebar">
+        <details class="mobile-menu" open>
+          <summary>Documentation menu</summary>
+          <nav aria-label="Documentation">{{navigation}}</nav>
+        </details>
+        <div class="sidebar-footer">An open-source project by <strong>Yaunder</strong></div>
+      </aside>
+      <main id="content" tabindex="-1">
+        <div class="eyebrow">{{group}}</div>
+        <article>{{content}}</article>
+        <nav class="pagination" aria-label="Previous and next pages">{{pagination}}</nav>
+        <footer class="page-footer"><a href="{{source}}">View source on GitHub ↗</a><span>fffactory documentation</span></footer>
+      </main>
+      <aside class="outline" aria-label="On this page">
+        <span class="outline-title">On this page</span>
+        <nav>{{outline}}</nav>
+      </aside>
+    </div>
+  </body>
+</html>
