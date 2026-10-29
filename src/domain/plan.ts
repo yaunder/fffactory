@@ -348,6 +348,18 @@ export interface FactoryPlanReview {
   readonly dispatch: readonly PlannedDispatch[];
   readonly stopped: readonly HostKey[];
   readonly pinMove?: PinMove;
+  /** The log archive, for a factory.json enabling it: absent otherwise. */
+  readonly archive?: PlannedArchive;
+}
+
+/**
+ * The log archive in a factory plan: its bucket, and whether the plan creates it with the
+ * archive root, applied before the factory root, or found it present and ready, planning
+ * nothing for it.
+ */
+export interface PlannedArchive {
+  readonly bucket: string;
+  readonly creates: boolean;
 }
 
 /** Backend bootstrap's plan: the bucket it creates, and every resource it creates. */
@@ -368,6 +380,7 @@ export interface FactoryPlanReviewInput {
   readonly dispatch: readonly PlannedDispatch[];
   readonly stopped: readonly HostKey[];
   readonly pinMove?: PinMove | undefined;
+  readonly archive?: PlannedArchive | undefined;
 }
 
 /** The review of a factory plan of `instance`: every declared worker and its repositories. */
@@ -383,6 +396,9 @@ export function factoryPlanReview(input: FactoryPlanReviewInput): FactoryPlanRev
     dispatch: input.dispatch,
     stopped: input.stopped,
     ...(input.pinMove === undefined ? {} : { pinMove: input.pinMove }),
+    ...(input.archive === undefined
+      ? {}
+      : { archive: { bucket: input.archive.bucket, creates: input.archive.creates } }),
   };
 }
 
@@ -560,8 +576,9 @@ interface SavedPlanBinding {
 
 /**
  * A saved factory plan's record, kept beside its factory Terraform plan file
- * (`factory.tfplan`) in the local plan store. It holds no configuration values: factory.json
- * is bound by its SHA-256. A record without `kind` is one.
+ * (`factory.tfplan`), and the archive root's (`archive.tfplan`) when it creates the log
+ * archive, in the local plan store. It holds no configuration values: factory.json is bound
+ * by its SHA-256. A record without `kind` is one. `changes` are the factory root's alone.
  */
 export interface SavedFactoryPlan extends SavedPlanBinding {
   readonly kind?: never;
@@ -577,6 +594,11 @@ export interface SavedFactoryPlan extends SavedPlanBinding {
    * never installs them, even once they run again.
    */
   readonly stopped_workers: readonly HostKey[];
+  /**
+   * For a factory.json enabling the log archive, whether the plan creates it: then it also
+   * binds the archive root's Terraform plan file (`archive.tfplan`). Absent otherwise.
+   */
+  readonly creates_archive?: boolean;
 }
 
 /**
@@ -609,6 +631,8 @@ export interface NewSavedPlan extends PlanCircumstances {
   readonly controlPlane?: readonly PlannedControlPlane[];
   readonly dispatch?: readonly PlannedDispatch[];
   readonly stopped?: readonly HostKey[];
+  /** The log archive as planned, for a factory.json enabling it. */
+  readonly archive?: PlannedArchive | undefined;
 }
 
 function copyChanges(changes: readonly ResourceChange[]): ResourceChange[] {
@@ -647,6 +671,7 @@ export function newSavedPlan(plan: NewSavedPlan): SavedFactoryPlan {
       schedule,
     })),
     stopped_workers: [...(plan.stopped ?? [])],
+    ...(plan.archive === undefined ? {} : { creates_archive: plan.archive.creates }),
   };
 }
 
@@ -798,7 +823,13 @@ function hasBindingFields(document: Record<string, unknown>): boolean {
 }
 
 /** What only a factory plan records; a bootstrap record holding any of them is unreadable. */
-const FACTORY_PLAN_FIELDS = ["state_revision", "control_plane", "dispatch", "stopped_workers"];
+const FACTORY_PLAN_FIELDS = [
+  "state_revision",
+  "control_plane",
+  "dispatch",
+  "stopped_workers",
+  "creates_archive",
+];
 
 function parseBootstrapPlan(document: Record<string, unknown>): SavedBootstrapPlan | undefined {
   if (FACTORY_PLAN_FIELDS.some((field) => document[field] !== undefined)) return undefined;
@@ -829,21 +860,35 @@ function parseFactoryPlan(
   const controlPlane = readControlPlane(document.control_plane, factoryId);
   const dispatch = readDispatch(document.dispatch, factoryId);
   const stopped = readStoppedWorkers(document.stopped_workers);
+  const createsArchive = document.creates_archive;
   if (
     changes === undefined ||
     controlPlane === undefined ||
     dispatch === undefined ||
     stopped === undefined ||
+    !(createsArchive === undefined || typeof createsArchive === "boolean") ||
     !(document.state_revision === null || printable(document.state_revision)) ||
     !hasBindingFields(document)
   )
     return undefined;
+  // Each field read by name, so nothing the record holds beyond them reaches the plan.
   return {
-    ...(document as unknown as SavedFactoryPlan),
+    schema_version: PLAN_SCHEMA_VERSION,
+    plan_id: document.plan_id as string,
+    factory_id: document.factory_id as FactoryId,
+    instance_path: document.instance_path as string,
+    configuration_sha256: document.configuration_sha256 as string,
+    release: document.release as Release,
+    assets_sha256: document.assets_sha256 as string,
+    account_id: document.account_id as string,
+    state_revision: document.state_revision as string | null,
+    created_at: document.created_at as string,
+    expires_at: document.expires_at as string,
     changes,
     control_plane: controlPlane,
     dispatch,
     stopped_workers: stopped,
+    ...(createsArchive === undefined ? {} : { creates_archive: createsArchive }),
   };
 }
 
@@ -891,6 +936,10 @@ export type StaleReason =
   | { readonly kind: "state_bucket_missing" }
   /** The state bucket a bootstrap plan was planned to create exists now, ready or not. */
   | { readonly kind: "state_bucket_created" }
+  /** The log archive a factory plan was planned to create exists now, ready or not. */
+  | { readonly kind: "archive_created" }
+  /** The log archive a factory plan found present no longer exists. */
+  | { readonly kind: "archive_missing" }
   /** The EC2 inventory could not be read to check that worker `key` is still stopped. */
   | { readonly kind: "inventory_unreadable"; readonly key: HostKey }
   /** Worker `key` was stopped when it was planned, and is not now. */
@@ -952,6 +1001,20 @@ export function stateStaleness(
 ): StaleReason | undefined {
   if ((revision ?? null) === plan.state_revision) return undefined;
   return { kind: "state_changed" };
+}
+
+/**
+ * Why a plan may no longer be applied once the factory lock is held, a saved one before its
+ * apply and any once approved: the log archive it was planned to create exists now (`exists`),
+ * or the one it found present is gone. Undefined while the archive is as planned, and for a
+ * plan of a factory without one.
+ */
+export function archiveStaleness(
+  plan: Pick<SavedFactoryPlan, "creates_archive">,
+  exists: boolean,
+): StaleReason | undefined {
+  if (plan.creates_archive === undefined || plan.creates_archive !== exists) return undefined;
+  return { kind: exists ? "archive_created" : "archive_missing" };
 }
 
 /**

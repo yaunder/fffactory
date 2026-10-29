@@ -87,14 +87,20 @@ chain. Every such command first refuses unless the caller is in factory.json's
   (the VPC, subnet, internet gateway, route table, security group and
   instances, and `DescribeVpcs`, `DescribeInstances`), SSM `GetParameter` (only
   the public Amazon Linux image parameter), IAM (the hosts' role, instance
-  profile and inline policy, and passing the role to EC2), S3 (creating and
+  profile and inline policies, and passing the role to EC2), S3 (creating and
   configuring the state bucket, and reading and writing its state, lock and
-  operation objects), Secrets Manager (`CreateSecret`, `PutSecretValue`, with
+  operation objects; with `log_archive.enabled`, also creating the log archive
+  bucket, `CreateBucket` in S3's account-regional namespace, setting its ABAC
+  (`PutBucketAbac`), versioning, public access block, ownership controls,
+  encryption and bucket policy, and reading them back, `HeadBucket`,
+  `GetBucketOwnershipControls` and `GetBucketAbac` among the reads
+  ([provisioning §Log archive readiness](docs/specs/provisioning.md#log-archive-readiness))),
+  Secrets Manager (`CreateSecret`, `PutSecretValue`, with
   tags, and `GetSecretValue` for the admin client) and Service Quotas
   (`GetServiceQuota`, `GetAWSDefaultServiceQuota`).
   Removing workers and the factory also calls EC2 `TerminateInstances` and the
   other deletes Terraform's destroy needs, IAM's deletes of the hosts' role,
-  policy and instance profile, Secrets Manager `ListSecrets`, `RestoreSecret`,
+  policies and instance profile, Secrets Manager `ListSecrets`, `RestoreSecret`,
   `DeleteSecret` and `DescribeSecret`, and S3 `ListBucketVersions`,
   `DeleteObject`, `DeleteObjectVersion` and `DeleteBucket`
   ([teardown §Permissions](docs/specs/teardown.md#permissions)).
@@ -779,9 +785,9 @@ would end ([worker lifecycle
 §Inspect](docs/specs/worker-lifecycle.md#inspect)). A stopped worker is not
 inspected, and anything unpushed on its disk is destroyed.
 
-**Done when** it prints `✔ Removed factory ID: nothing it owns remains`,
+**Done when** it prints `✔ Removed factory ID: only what it kept remains`,
 exiting 0. An interrupt during the state bucket's last deletion can print that
-and still exit 128 plus the signal's number: nothing of the factory remains
+and still exit 128 plus the signal's number: nothing it removes remains
 ([teardown §Interruption](docs/specs/teardown.md#interruption)).
 
 **Otherwise:**
@@ -798,7 +804,9 @@ and still exit 128 plus the signal's number: nothing of the factory remains
   ([teardown §Interruption](docs/specs/teardown.md#interruption)).
 
 Afterwards factory.json is unchanged and still describes the factory (`fffactory
-apply` would create a new one): delete it once you no longer need it. Teardown
+apply` would create it again): delete it once you no longer need it. With
+`log_archive.enabled` the log archive is kept too: fffactory never removes it,
+and applying the same factory.json again adopts it. Teardown
 revokes nothing it only refers to: revoke the Tailscale auth key and admin
 OAuth client, remove the factory's tag, grant and SSH rule from the tailnet
 policy, and revoke the API credentials it was given, once nothing else uses

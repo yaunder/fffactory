@@ -4,13 +4,17 @@
  *
  *   factory.tfplan         the factory root's Terraform plan, written by Terraform
  *   backend.tfplan         backend bootstrap's plan, as a saved bootstrap plan or on a first apply
+ *   archive.tfplan         the archive root's plan, when a factory plan creates the log archive
  *   factory.tfplan.sha256  a saved factory plan's factory.tfplan SHA-256 when it was saved
  *   backend.tfplan.sha256  a saved bootstrap plan's backend.tfplan SHA-256 when it was saved
+ *   archive.tfplan.sha256  a saved factory plan's archive.tfplan SHA-256, when it creates the
+ *                          log archive
  *   plan.json              the saved plan's record, written last: its presence saves the plan,
  *                          and its removal spends it, the Terraform plan kept for the apply
  *
- * A record binds the one Terraform plan file its kind names: a factory plan `factory.tfplan`,
- * a bootstrap plan (`"kind": "bootstrap"`) `backend.tfplan`.
+ * A record binds the Terraform plan files its kind names: a factory plan `factory.tfplan`, and
+ * `archive.tfplan` too when it creates the log archive (`"creates_archive": true`), a bootstrap
+ * plan (`"kind": "bootstrap"`) `backend.tfplan`.
  *
  * Teardown removes a factory's directory whole, every plan in it (`removeAll`).
  *
@@ -45,6 +49,7 @@ import { sha256Hex } from "./release-tarball";
 const RECORD = "plan.json";
 const FACTORY_PLAN = "factory.tfplan";
 const BACKEND_PLAN = "backend.tfplan";
+const ARCHIVE_PLAN = "archive.tfplan";
 const DIGEST_SUFFIX = ".sha256";
 const ABSENT = new Set(["ENOENT", "ENOTDIR"]);
 
@@ -88,9 +93,19 @@ async function syncDirectory(path: string): Promise<void> {
   }
 }
 
-/** The Terraform plan file a saved plan of this kind binds. */
-function boundFile(plan: SavedPlan): string {
-  return plan.kind === "bootstrap" ? BACKEND_PLAN : FACTORY_PLAN;
+/** The Terraform plan files a saved plan binds, in a fixed order. */
+function boundFiles(plan: SavedPlan): string[] {
+  if (plan.kind === "bootstrap") return [BACKEND_PLAN];
+  return plan.creates_archive === true ? [FACTORY_PLAN, ARCHIVE_PLAN] : [FACTORY_PLAN];
+}
+
+/**
+ * The SHA-256 of each file a saved plan binds, joined by spaces, as one value: a plan binding one
+ * file has that file's SHA-256. Undefined when one is absent.
+ */
+async function boundDigest(path: string, plan: SavedPlan): Promise<string | undefined> {
+  const digests = await Promise.all(boundFiles(plan).map((file) => digestOf(join(path, file))));
+  return digests.every((digest) => digest !== undefined) ? digests.join(" ") : undefined;
 }
 
 /** PlanStore over the local filesystem, rooted at `directory` (`<cache>/plans`). */
@@ -105,6 +120,7 @@ export function filesystemPlanStore(directory: string): PlanStore {
     return {
       factory: join(planDirectory, FACTORY_PLAN),
       backend: join(planDirectory, BACKEND_PLAN),
+      archive: join(planDirectory, ARCHIVE_PLAN),
     };
   }
 
@@ -134,11 +150,12 @@ export function filesystemPlanStore(directory: string): PlanStore {
 
     async save(plan: SavedPlan) {
       const path = planDirectory(plan.factory_id, plan.plan_id);
-      const bound = boundFile(plan);
-      const digest = await digestOf(join(path, bound));
-      if (digest === undefined)
+      const bound = boundFiles(plan);
+      const digests = await Promise.all(bound.map((file) => digestOf(join(path, file))));
+      if (!digests.every((digest) => digest !== undefined))
         throw new Error(`Plan ${plan.plan_id} has no Terraform plan to save`);
-      await writeAtomically(join(path, `${bound}${DIGEST_SUFFIX}`), `${digest}\n`);
+      for (const [index, file] of bound.entries())
+        await writeAtomically(join(path, `${file}${DIGEST_SUFFIX}`), `${digests[index]}\n`);
       await writeAtomically(join(path, RECORD), serializeSavedPlan(plan));
     },
 
@@ -148,15 +165,18 @@ export function filesystemPlanStore(directory: string): PlanStore {
       if (text === undefined) return { kind: "missing" };
       const plan = parseSavedPlan(text, factoryId, planId);
       if (plan === undefined) return { kind: "damaged" };
-      const bound = boundFile(plan);
-      const recorded = (await textOf(join(path, `${bound}${DIGEST_SUFFIX}`)))?.trim();
-      const digest = await digestOf(join(path, bound));
-      if (digest === undefined || digest !== recorded) return { kind: "damaged" };
+      const recorded = await Promise.all(
+        boundFiles(plan).map(async (file) =>
+          (await textOf(join(path, `${file}${DIGEST_SUFFIX}`)))?.trim(),
+        ),
+      );
+      const digest = await boundDigest(path, plan);
+      if (digest === undefined || digest !== recorded.join(" ")) return { kind: "damaged" };
       return { kind: "found", plan, files: filesOf(path), digest };
     },
 
     async digest(plan) {
-      return digestOf(join(planDirectory(plan.factory_id, plan.plan_id), boundFile(plan)));
+      return boundDigest(planDirectory(plan.factory_id, plan.plan_id), plan);
     },
 
     async spend(factoryId, planId) {

@@ -10,11 +10,12 @@ import type { FactoryTeardown, TeardownProgress } from "../../application/teardo
 import type { FactoryId } from "../../domain/instance";
 import { changesSomething, changeTally, type ResourceChange } from "../../domain/plan";
 import {
+  archiveKept,
   CHECK_LISTED_DEVICES,
   CHECK_UNCHECKED_DEVICES,
   checkOutsideEc2,
   dispatchLeftStopped,
-  FACTORY_JSON_KEPT,
+  factoryJsonKept,
   interruptedTeardown,
   type KeptSecrets,
   type ListedDevices,
@@ -147,7 +148,8 @@ function plannedSecrets(review: TeardownReview): Row[] {
 /**
  * What teardown will remove and keep, shown before it is confirmed (§Order, step 10): its target,
  * the destroy plan's deletes, the instances and VPCs, the devices, the secrets and the state
- * bucket, then what it keeps; without a state bucket, why it runs without the lock.
+ * bucket, then what it keeps, the log archive among it; without a state bucket, why it runs
+ * without the lock.
  */
 export function teardownReviewBlocks(review: TeardownReview, selection: Selection): Block[] {
   const remove: Row[] = [
@@ -168,16 +170,27 @@ export function teardownReviewBlocks(review: TeardownReview, selection: Selectio
         ...withoutLockNote(review.withoutLock, selection),
       ],
     },
-    ...keptSection(review.devices, review.secrets.kept),
+    ...keptSection(review.devices, review.secrets.kept, review.archive),
   ];
 }
 
-/** What teardown keeps (D7, D9): the devices listed but not deleted, and the kept secrets. */
-function keptSection(devices: ListedDevices, kept: KeptSecrets): Block[] {
+/**
+ * What teardown keeps (D7, D9): the devices listed but not deleted, the kept secrets, then the log
+ * archive, when factory.json enables one.
+ */
+function keptSection(
+  devices: ListedDevices,
+  kept: KeptSecrets,
+  archive: string | undefined,
+): Block[] {
   const rows = [...listedDeviceRows(devices), ...keptSecretRows(kept)];
-  return rows.length === 0
-    ? []
-    : [{ kind: "section", title: "Kept", blocks: [{ kind: "rows", rows }] }];
+  const blocks: Block[] = [
+    ...(rows.length === 0 ? [] : [{ kind: "rows" as const, rows }]),
+    ...(archive === undefined
+      ? []
+      : [{ kind: "text" as const, lines: [shown(archiveKept(archive))] }]),
+  ];
+  return blocks.length === 0 ? [] : [{ kind: "section", title: "Kept", blocks }];
 }
 
 /** Without a state bucket, why teardown runs without the lock (`ranWithoutLock`). */
@@ -320,9 +333,9 @@ function resultRows(report: TeardownReport): Row[] {
 }
 
 /**
- * The advice a finished teardown leaves (§Report): factory.json kept, the persistent sources to
- * revoke, the devices listed or not checked to check, and without a state bucket the IAM outside
- * EC2.
+ * The advice a finished teardown leaves (§Report): factory.json kept, with the log archive it
+ * names, the persistent sources to revoke, the devices listed or not checked to check, and
+ * without a state bucket the IAM outside EC2.
  */
 function adviceNext(
   report: TeardownReport,
@@ -337,12 +350,15 @@ function adviceNext(
       ? []
       : [checkOutsideEc2(factoryId)]),
     REVOKE_SOURCES,
-    FACTORY_JSON_KEPT,
+    factoryJsonKept(report.archive),
   ];
   return nextOf(advice, selection);
 }
 
-/** A finished teardown: what it removed and kept, then the advice it leaves. */
+/**
+ * A finished teardown: what it removed and kept, then the advice it leaves. Its verdict claims
+ * only what it removed: what it kept, the log archive among it, remains.
+ */
 function doneReport(report: TeardownReport, reporting: TeardownReporting): Report {
   const { factoryId, selection } = reporting;
   const named = factoryId === undefined ? "the factory" : `factory ${factoryId}`;
@@ -354,7 +370,7 @@ function doneReport(report: TeardownReport, reporting: TeardownReporting): Repor
         status: "ready",
         text:
           report.withoutLock === undefined
-            ? `Removed ${named}: nothing it owns remains`
+            ? `Removed ${named}: only what it kept remains`
             : `Removed what was left of ${named}`,
       },
       {
@@ -365,7 +381,7 @@ function doneReport(report: TeardownReport, reporting: TeardownReporting): Repor
           ...withoutLockNote(report.withoutLock, selection),
         ],
       },
-      ...keptSection(report.devices, report.secrets.kept),
+      ...keptSection(report.devices, report.secrets.kept, report.archive),
     ],
     ...(next === undefined ? {} : { next }),
   };

@@ -40,6 +40,7 @@ import {
   interruptedTeardown,
   ranWithoutLock,
   type TeardownStep,
+  teardownQuestion,
   type VpcInventory,
 } from "../../src/domain/teardown";
 import type { PeerView, TailnetDevice } from "../../src/domain/tailnet";
@@ -60,6 +61,7 @@ import {
   tailnetDevice,
 } from "../support/fake-workers";
 import {
+  ARCHIVE,
   BUCKET,
   declaring,
   FACTORY,
@@ -111,6 +113,12 @@ function instanceOf(keys: readonly string[]): FactoryInstance {
     credentials: { github_token_secret: SOURCE_ARN },
   };
 }
+
+/** `instanceOf(keys)` with the log archive enabled, named `ARCHIVE`. */
+const archivingOf = (keys: readonly string[]): FactoryInstance => ({
+  ...instanceOf(keys),
+  log_archive: { enabled: true },
+});
 
 interface WorldOptions {
   /** The declared workers and their machines' EC2 states; every one provisioned. */
@@ -516,6 +524,37 @@ describe("fffactory teardown: the happy path (teardown §Order)", () => {
     // The review comes before the question, and nothing was stopped before it was answered.
     expect(w.lockStore.operationWrites.map(({ stages }) => stages[0]?.status)).toContain(
       "awaiting_approval",
+    );
+  });
+
+  test("names no log archive while factory.json does not enable one", async () => {
+    const prompt = fakePrompt({ interactive: true, answers: [FACTORY] });
+    const w = world({ prompt });
+    const result = await teardownFactory(w.deps, request(w, { confirm: undefined }));
+    expect(result.kind === "done" && result.report.archive).toBeUndefined();
+    const review = w.progress.find((event) => event.kind === "review");
+    expect(review?.kind === "review" && review.review.archive).toBeUndefined();
+    expect(prompt.asked).toEqual([teardownQuestion(FACTORY)]);
+  });
+
+  test("keeps the log archive: reviewed, asked and reported by name, S3 never asked about it", async () => {
+    const prompt = fakePrompt({ interactive: true, answers: [FACTORY] });
+    const w = world({ workers: { "builder-1": "stopped" }, prompt });
+    const result = await teardownFactory(
+      w.deps,
+      request(w, { confirm: undefined, instance: archivingOf(w.keys) }),
+    );
+    expect(result).toMatchObject({ kind: "done", report: { archive: ARCHIVE } });
+    expect(w.progress.find((event) => event.kind === "review")).toMatchObject({
+      review: { archive: ARCHIVE },
+    });
+    expect(prompt.asked).toEqual([teardownQuestion(FACTORY, false, ARCHIVE)]);
+    expectAllRemoved(w);
+    // Named from factory.json alone: nothing about the archive reached S3, and the destroy
+    // planned only the factory root.
+    expect(w.lockStore.calls.filter((call) => call.includes(ARCHIVE))).toEqual([]);
+    expect(w.terraform.calls.map(({ request }) => request.configuration.root)).not.toContain(
+      "archive",
     );
   });
 
@@ -3100,6 +3139,7 @@ describe("fffactory teardown: no state bucket (teardown §No state bucket)", () 
         },
         bucket: { name: BUCKET, outcome: "not_found" },
         withoutLock: ranWithoutLock(BUCKET),
+        archive: undefined,
       },
     });
     expect(w.secrets.secrets()).toEqual([]);
@@ -3159,6 +3199,22 @@ describe("fffactory teardown: no state bucket (teardown §No state bucket)", () 
     // No worker to stop dispatch on or inspect: nothing was asked of one.
     expect(w.queue.reconcile).toEqual([]);
     expect(w.control.calls).toEqual([]);
+    expectNoBucketTouched(w);
+  });
+
+  test("names the log archive kept, without a state bucket too", async () => {
+    const prompt = fakePrompt({ interactive: true, answers: [FACTORY] });
+    const w = bucketless({ prompt });
+    const result = await teardownFactory(
+      w.deps,
+      request(w, { confirm: undefined, instance: archivingOf(w.keys) }),
+    );
+    expect(result).toMatchObject({
+      kind: "done",
+      report: { withoutLock: ranWithoutLock(BUCKET), archive: ARCHIVE },
+    });
+    expect(w.progress[0]).toMatchObject({ kind: "review", review: { archive: ARCHIVE } });
+    expect(prompt.asked).toEqual([teardownQuestion(FACTORY, true, ARCHIVE)]);
     expectNoBucketTouched(w);
   });
 
@@ -3368,6 +3424,7 @@ describe("fffactory teardown: no state bucket (teardown §No state bucket)", () 
         },
         bucket: { name: BUCKET, outcome: "not_found" },
         withoutLock: ranWithoutLock(BUCKET),
+        archive: undefined,
       },
     });
     expect(w.progress.slice(progress)).toContainEqual(

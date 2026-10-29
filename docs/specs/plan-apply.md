@@ -143,7 +143,8 @@ keeps Terraform's state lock as well.
 3. While the factory is locked, planning is refused with the holder
    ([provisioning §Lock](provisioning.md#lock)): a plan made during another
    operation would be stale.
-4. The infrastructure stage is planned (next section), then the workers stage
+4. The infrastructure stage is planned (next section), with the log archive
+   first when factory.json enables it, then the workers stage
    ([below](#the-workers-stage)), Paseo control-plane changes derived from each
    worker's inspection, repository reconciliation for every declared worker,
    the complete requested dispatch projection (or schedule removal), and
@@ -254,19 +255,61 @@ runs under the lock:
 
 1. reads the revision of the factory's Terraform state (below), before
    anything else, so any later state write is seen;
-2. reads the host keys the state records, the factory root's `host_keys`
+2. with `log_archive.enabled`, checks the log archive
+   ([provisioning §Log archive readiness](provisioning.md#log-archive-readiness))
+   and plans it (`planArchive`, `src/application/log-archive.ts`, decision D5
+   of the worker log archive's Phase 1):
+   - missing: the state-less `archive` root module is planned with the
+     [archive projection](provisioning.md#terraform-inputs), no backend
+     settings, into the plan's private directory as `archive.tfplan`, and read
+     back with `showPlan`. It may only create, as backend bootstrap's plan
+     may: a plan doing anything else, creating nothing or unreadable is
+     refused as Terraform's plan fffactory cannot apply, listing each
+     offending resource, and nothing is saved;
+   - present and ready: nothing is planned for it. A factory applied again
+     after [teardown](teardown.md), which keeps the archive, adopts it;
+   - present but lacking any of its settings: refused as an unready state
+     bucket is ([provisioning §Log archive readiness](provisioning.md#log-archive-readiness)),
+     before anything is planned or saved.
+
+   Without `log_archive.enabled`, nothing is asked of S3 about it and nothing
+   is planned for it: the plan, its review and its record are what they were
+   before the archive existed;
+3. reads the host keys the state records, the factory root's `host_keys`
    output, with `Provisioner.output`. Before the first apply the state has no
    outputs and records none. An output that is not a list of strings is
    refused: `the factory's Terraform state records host keys that cannot be
    read`;
-3. refuses removing a recorded host key (D11, below);
-4. plans the factory root module with factory.json's
+4. refuses removing a recorded host key (D11, below);
+5. plans the factory root module with factory.json's
    [projection](provisioning.md#terraform-inputs) and the backend setting
    `bucket`, into the plan's private directory, and reads the saved plan back
    with `showPlan`. A plan that cannot be read, including a change naming no
    action, is refused;
-5. refuses a plan that does anything to a host machine but create it, update it
+6. refuses a plan that does anything to a host machine but create it, update it
    in place or leave it, such as destroying or replacing it (D11, below).
+
+The log archive is shown in the plan as its own row, before the
+infrastructure's: its bucket name
+([instance configuration §Log archive](instance-configuration.md#log-archive)),
+then `created` when the plan creates it or `present` when it plans nothing for
+it. Its resources are the archive root's, never counted in the infrastructure
+row's tally or listed under it, which are the factory root's:
+
+```text
+── Plan ─────────────────────────────────────────────
+  Factory   Test factory (fff-abcd1234)
+  Account   123456789012 · eu-west-2
+  Release   0.3.0
+
+  Archive          fff-abcd1234-logs-123456789012-eu-west-2-an, created
+  Infrastructure   2 to add, 0 to change, 0 to destroy
+    + module.network.aws_vpc.this
+    + module.hosts.aws_instance.host["builder-1"]
+  ...
+```
+
+A factory without the archive has no such row.
 
 ### The workers stage
 
@@ -677,8 +720,10 @@ A plan with changes is saved in the operator's local plan store,
 | --- | --- |
 | `factory.tfplan` | The factory root's Terraform plan file, written by Terraform. |
 | `backend.tfplan` | Backend bootstrap's plan, as a saved bootstrap plan or on a first apply. |
+| `archive.tfplan` | The archive root's plan, when a factory plan creates the log archive. |
 | `factory.tfplan.sha256` | A saved factory plan's `factory.tfplan` SHA-256 when it was saved. |
 | `backend.tfplan.sha256` | A saved bootstrap plan's `backend.tfplan` SHA-256 when it was saved. |
+| `archive.tfplan.sha256` | A saved factory plan's `archive.tfplan` SHA-256 when it was saved, when it creates the log archive. |
 | `plan.json` | The plan's record, written last: its presence saves the plan, and removing it spends a saved bootstrap plan. |
 
 The plan ID is eight random lowercase letters or digits. Only a well-formed
@@ -706,6 +751,16 @@ configuration value:
 }
 ```
 
+For a factory.json enabling the log archive, a factory plan's record also holds
+`"creates_archive"`: `true` when the plan creates it, and is then bound to
+`archive.tfplan` beside `factory.tfplan`, or `false` when it found the archive
+present and ready. The archive's name is not recorded: factory.json, bound by
+its SHA-256, derives it. Without the archive the field is absent, and a record
+holding anything but a boolean there is unreadable; one whose field is present
+or absent against what the factory.json it is bound to enables is damaged. A
+record is read field by field: anything else it holds is dropped, never carried
+into the plan applied.
+
 A record has a kind. A record without `kind` is a **factory plan**, as above,
 bound to `factory.tfplan`; every record made before bootstrap plans existed is
 one and reads unchanged. A record with `"kind": "bootstrap"` is a **bootstrap
@@ -730,9 +785,9 @@ stays 1 for both.
 }
 ```
 
-A bootstrap plan has no `state_revision`, `control_plane`, `dispatch` or
-`stopped_workers`: there is no state, and no worker is reached, before the
-bucket exists. A bootstrap record carrying any of them, or with no changes, or
+A bootstrap plan has no `state_revision`, `control_plane`, `dispatch`,
+`stopped_workers` or `creates_archive`: there is no state, and no worker is
+reached, before the bucket exists. A bootstrap record carrying any of them, or with no changes, or
 with a change that does anything but create, is unreadable, and so is a factory
 record without `state_revision` or `dispatch`.
 
@@ -757,6 +812,7 @@ live assumptions are the AWS account and the factory's Terraform state:
 | `state_revision` | The factory's Terraform state object (`factory/terraform.tfstate` in the state bucket) has another revision, or appeared or vanished: another apply, or anything else, wrote it. |
 | `control_plane[].observation` | The existing worker's active release or host-projection digest changed before activation. |
 | `stopped_workers` | A worker it skipped as stopped is not stopped now, or one it installs is ([Stopped workers](#stopped-workers)); or it skips one and the EC2 inventory cannot be read to check it. A record without the field skips none. |
+| `creates_archive` | It creates the log archive and the archive exists now, ready or not: `the log archive was created after it was planned`; or it found the archive present and it is gone: `the log archive no longer exists`. An archive present but no longer ready refuses it as `plan` does. |
 
 A bootstrap plan is bound to the same `expires_at`, `instance_path`,
 `configuration_sha256`, `release`, `assets_sha256` and `account_id`, and is
@@ -767,6 +823,28 @@ it is stale when the state bucket exists at apply, ready or not: `the state
 bucket was created after it was planned`. Its plan file is `backend.tfplan`,
 bound and checked by its SHA-256 as a factory plan's `factory.tfplan` is: a
 missing or changed file makes the plan damaged.
+
+A factory plan creating the log archive binds `archive.tfplan` by its SHA-256
+as it binds `factory.tfplan`, checked at the same points: a missing or changed
+file makes the plan damaged, and nothing is applied. Under the lock the
+archive's presence is read again (`archiveStaleness`) after the state revision
+and the stopped workers, and `archive.tfplan` is read back before
+`factory.tfplan`: it may only create, or the plan is refused as Terraform's
+plan fffactory cannot apply.
+
+Every factory plan with the log archive, saved or made in the run, has its
+archive checked once more right after approval, under the lock and before
+anything is changed: before an upgrade's pin is written, and before either
+Terraform plan file is applied (`approvedArchiveChanged`). An approval takes
+as long as the operator does, and the archive may be created, deleted or
+changed outside fffactory meanwhile. Live state that changed invalidates the
+plan approved, whichever it found: one it creates that exists now, ready or
+not, makes it stale (`the log archive was created after it was planned`); one
+it found present that is gone makes it stale (`the log archive no longer
+exists`); and one it found ready that now lacks a setting the archive root
+applies refuses it as `plan` refuses an unready archive
+([provisioning §Log archive readiness](provisioning.md#log-archive-readiness)),
+with its Next block. Either way nothing is applied and the pin is not moved.
 
 The revision is the state object's S3 version ID and entity tag, read with
 HeadObject (`ExpectedBucketOwner` set); every write changes it. It is read
@@ -802,8 +880,9 @@ other release assets than this fffactory's` (only when the release is the
 same), `it was planned in AWS account A, not this one`, `the factory's
 Terraform state changed after it was planned`, `the state bucket no longer
 exists`, `the state bucket was created after it was planned` (a bootstrap
-plan's), `worker KEY was stopped when it was planned, and is not now`, `worker
-KEY is stopped now, and was not when it was planned`, `the EC2 inventory could
+plan's), `the log archive was created after it was planned`, `the log archive
+no longer exists`, `worker KEY was stopped when it was planned, and is not
+now`, `worker KEY is stopped now, and was not when it was planned`, `the EC2 inventory could
 not be read to check that worker KEY is still stopped`, and `Paseo state on
 HOSTNAME changed after it was planned`. An unknown or pruned plan ID is
 refused `✖ There is no saved plan ID for this factory here: it expired, was
@@ -811,6 +890,27 @@ applied, or was saved elsewhere`, a damaged one `✖ Saved plan ID cannot be
 applied: its record cannot be read, or its Terraform plan changed after it was
 saved`, each with the same Next block. The `fffactory plan` it names repeats
 the `--instance` and `--profile` apply was given.
+
+A plan made in the run, approved at the terminal by `apply` or `upgrade` and
+never saved, can go stale under the lock too (the log archive it creates
+appearing before its apply, or the one it found present vanishing, or a
+worker's Paseo state changing). Its ID was
+never shown, so the refusal names none, and its Next block reruns the command:
+`fffactory upgrade` while an upgrade's pin has not moved, `fffactory apply`
+otherwise (an upgrade's refusal adds the pin notice, [Upgrade](#upgrade)):
+
+```text
+✖ Refusing to upgrade: the plan approved is no longer the plan to apply:
+  the log archive was created after it was planned
+
+Nothing was applied.
+
+factory.json's pin was not moved: it still pins the release it pinned.
+
+── Next ─────────────────────────────────────────────
+  Review a new plan:
+    $ fffactory upgrade
+```
 
 An existing worker's Paseo state (`control_plane[].observation`) is compared
 again under the lock, as the workers stage reaches the worker:
@@ -877,10 +977,13 @@ After the checks above, and a saved plan's local freshness:
    apply, showing its holder.
 2. Under the lock, the operation's record is written (next section), led by
    the `backend` stage when this apply created the bucket.
-3. With a saved plan, the state revision is compared, and the saved Terraform
-   plan file is read back: its changes, which must be its record's, are the
-   plan, and the D11 refusals apply to them. Without one, the infrastructure stage is planned
-   afresh, as `plan` plans it, and every refusal applies.
+3. With a saved plan, the state revision is compared, the log archive's
+   presence too when factory.json enables it ([Freshness](#freshness)), and
+   the saved Terraform plan files are read back: an `archive.tfplan` must only
+   create, and `factory.tfplan`'s changes, which must be its record's, are the
+   plan, and the D11 refusals apply to them. Without one, the infrastructure
+   stage is planned afresh, as `plan` plans it, the log archive included, and
+   every refusal applies.
 4. One approval tied to exactly that plan: the plan is printed as `plan`
    prints its `Plan` section (a first apply's bootstrap as its `Plan: backend
    bootstrap` section), then, after a blank line, at a terminal, `Apply this
@@ -893,9 +996,22 @@ After the checks above, and a saved plan's local freshness:
 5. The `Applying` section begins, its rows streamed as each step starts
    ([below](#what-apply-prints)): `Infrastructure   applying with Terraform
    (its output is not shown; can take several minutes)` when the plan has
-   infrastructure changes. Exactly the saved Terraform plan file is applied
-   (`terraform apply PLANFILE`), never a new plan; a plan without
-   infrastructure changes applies none, and has no such row.
+   infrastructure changes or creates the log archive. Exactly the saved
+   Terraform plan files are applied (`terraform apply PLANFILE`), never a new
+   plan. Right after approval and before an upgrade's pin is written
+   ([Upgrade](#upgrade)), the log archive is checked again as the plan found it
+   ([Freshness](#freshness)): still missing when the plan creates it (one that
+   exists by then, ready or not, makes the plan stale, `the log archive was
+   created after it was planned`), still present and ready when it found it so
+   (gone makes it stale, `the log archive no longer exists`; lacking a setting
+   refuses it as unready); either way nothing is applied. A plan creating the
+   log archive first applies `archive.tfplan`, then `factory.tfplan`, so the
+   archive exists before the hosts' role that may write to it. It is part of
+   the infrastructure stage, not a stage of its own: the record shows the
+   infrastructure stage `applying`, then `applied`, and a failure of either
+   Terraform apply is the infrastructure stage's failure, the factory root not
+   applied after a failed archive. A plan without infrastructure changes that
+   creates no archive applies none, and has no such row.
 6. The workers stage ([above](#the-workers-stage)). It and every later stage
    send a stopped worker nothing ([Stopped workers](#stopped-workers)).
 7. The repository stage, exactly as shown in the plan, under the same lock.
@@ -1500,7 +1616,13 @@ factory.json's pin was not moved: it still pins the release it pinned.
 1. Under the lock, the infrastructure stage is planned afresh from
    factory.json as it will be once the pin moves: the document read, with only
    `release` changed to the running release. Every refusal of plan and apply
-   applies, and the workers stage installs the running release.
+   applies, and the workers stage installs the running release. A missing log
+   archive is planned and created there as apply creates it, after the pin is
+   written. Right after approval and before the pin is written, the archive is
+   checked again as the plan found it, as apply checks it
+   ([Freshness](#freshness)): one created by then, or one found present that is
+   gone, makes the plan stale, and one found ready that lacks a setting refuses
+   it as unready: the pin is not moved and nothing is applied.
 2. The pin move is shown with the plan, beside the release it moves to, and
    approved together:
 
@@ -1531,7 +1653,8 @@ factory.json's pin was not moved: it still pins the release it pinned.
    The plan shows every stage it approves.
    The earlier pin is shown only when it is a plain `MAJOR.MINOR.PATCH`,
    which cannot hold anything else; otherwise `from the release it pins now`.
-3. Once approved, and only then, the new pin is written, the `Applying`
+3. Once approved, and only then, and once the log archive is checked to be
+   still as the plan found it (item 1), the new pin is written, the `Applying`
    section's first row, before Terraform's: the document, serialized as `init`
    and `secret set` write it, with only `release` changed. It is written only
    while factory.json is still the exact text the plan was made from; otherwise
@@ -1587,8 +1710,10 @@ factory.json pins release 0.3.0.
 The operation record starts with a `pin` stage, `pending`, before the
 infrastructure stage; it ends `written`, `refused` (factory.json changed) or
 `failed` (writing it failed). An upgrade that ends before the pin is written,
-declined, refused or failed while planning, ends the `pin` stage the same way
-(`finishOperation`: a stage still `pending` never started). A failure after the
+declined, refused (while planning, or once approved because the log archive
+changed from what the plan found) or failed while planning, ends the `pin`
+stage the same way (`finishOperation`: a stage still `pending` never
+started). A failure after the
 pin was written is the infrastructure stage's; the `pin` stage stays
 `written`. An interrupt before the pin was written leaves it `pending`, since
 nothing more of the record is written after an interrupt. The lock's and the record's `operation` is `upgrade`, and their
@@ -1663,25 +1788,29 @@ refused (D11).
 The plan an operator approves reaches the CLI as data: a `PlanReview`
 (`src/domain/plan.ts`), either a factory plan (its target, infrastructure
 changes, every declared worker with its placed repositories, control-plane
-changes, dispatch settings, the workers skipped as stopped and, for an upgrade,
-the pin move) or backend bootstrap's (its target, bucket and creations). The
+changes, dispatch settings, the workers skipped as stopped, the log archive as
+planned (`PlannedArchive`) and, for an upgrade, the pin move) or backend
+bootstrap's (its target, bucket and creations). The
 `Approval` port takes that review, and `planFactory`, `applyFactory`,
 `bootstrapBackend` and `upgradeFactory` return or pass reviews and typed
 refusals: each saved plan's staleness is a `StaleReason`, an unreadable or
-non-create plan an `UnexpectedPlan`, an unready state bucket an `UnreadyBucket`.
+non-create plan an `UnexpectedPlan`, an unready state bucket or log archive an
+`UnreadyBucket`.
 Only `src/cli/presentation/` lays any of them out, in the
 [layout blocks](cli-output.md#layout-blocks), so what each command prints is
 unchanged by where the plan was made.
 
 | Layer | Module | Responsibility |
 | --- | --- | --- |
-| Domain | `src/domain/plan.ts` | Plan IDs, the CLI/pin match guard, reading a JSON plan's resource changes and comparing them with a record's (`sameChanges`), `ChangeKind` and `changeTally`, `PlanReview` (`factoryPlanReview`), `UnexpectedPlan`, the D11 refusals, the refusal to resize a stopped or stopping worker, or any while the EC2 inventory cannot be read (`resizeRefusal`), the saved plan record and its two kinds (`SavedFactoryPlan`, `SavedBootstrapPlan`), its freshness rule as `StaleReason`s (`planStaleness`, `stateStaleness`, `stoppedStaleness`, and `bootstrapStaleness`), `FACTORY_STATE_KEY`, `PLAN_TTL_MS`. Pure; no text layout. |
+| Domain | `src/domain/plan.ts` | Plan IDs, the CLI/pin match guard, reading a JSON plan's resource changes and comparing them with a record's (`sameChanges`), `ChangeKind` and `changeTally`, `PlanReview` (`factoryPlanReview`), `UnexpectedPlan`, the D11 refusals, the refusal to resize a stopped or stopping worker, or any while the EC2 inventory cannot be read (`resizeRefusal`), the saved plan record and its two kinds (`SavedFactoryPlan`, `SavedBootstrapPlan`), its freshness rule as `StaleReason`s (`planStaleness`, `stateStaleness`, `stoppedStaleness`, `archiveStaleness`, and `bootstrapStaleness`), `PlannedArchive` and the record's `creates_archive`, `FACTORY_STATE_KEY`, `PLAN_TTL_MS`. Pure; no text layout. |
+| Domain | `src/domain/backend-bootstrap.ts` | The create-only rule a bootstrap or log archive plan is read back by (`createOnlyRefusal`), and the log archive's readiness (`ArchiveReadiness`, `missingArchiveHardening`, `unreadyArchive`). Pure. |
 | Domain | `src/domain/release-compatibility.ts` | `RELEASE_COMPATIBILITY`, release precedence, upgrade's assessment of the pin, the schema version check, the base generation and schema D11 refusals, the `PinMove` an upgrade shows (`pinMove`: a pin that is not a plain release is never carried). Pure. |
 | Domain | `src/domain/operation.ts` | The operation record, its key, stage transitions (upgrade's `pin` stage too), workers, repositories and control-plane outcomes. Pure. |
 | Domain | `src/domain/repository-placement.ts` | The per-worker repository manifest, fixed worker protocol commands, and completed-result parser. Pure. |
 | Domain | `src/domain/stable-host-keys.ts` | `recordedHostKeys`, reading the factory root's `host_keys` output. |
-| Application | `src/application/plan-factory.ts` | `checkPlannable`, `planInfrastructure`, `planFactory` (a missing bucket's bootstrap plan saved too), `declaredMachines` (the one inventory read: the stopped workers and the resize guard). |
-| Application | `src/application/apply-factory.ts` | `applyFactory`: saved-plan freshness (the state bucket gone, and a worker's Paseo state changed, as `StaleReason`s too), the review approved, the lock, infrastructure, workers, repository and control-plane stages, operation records, interruption; `PinUpdate`, upgrade's pin write beside the `PinMove` it shows; a saved bootstrap plan routed to `applySavedBootstrap`, then its record. |
+| Application | `src/application/plan-factory.ts` | `checkPlannable`, `planInfrastructure` (the log archive's plan first), `planFactory` (a missing bucket's bootstrap plan saved too), `declaredMachines` (the one inventory read: the stopped workers and the resize guard). |
+| Application | `src/application/log-archive.ts` | The log archive in the infrastructure stage: `archiveOf` (the archive in the state bucket's account, Region and credentials), `archiveState` (missing, present, or unready), `planArchive` (a missing archive's create-only `archive.tfplan`), `archivePlanFile` and `readBackArchivePlan`. |
+| Application | `src/application/apply-factory.ts` | `applyFactory`: saved-plan freshness (the state bucket gone, and a worker's Paseo state changed, as `StaleReason`s too), the review approved, the lock, infrastructure, workers, repository and control-plane stages, operation records, interruption; `PinUpdate`, upgrade's pin write beside the `PinMove` it shows; a saved bootstrap plan routed to `applySavedBootstrap`, then its record; a saved plan's log archive checked as planned and its `archive.tfplan` read back, any plan's log archive rechecked as planned right after approval, before the pin or Terraform (`approvedArchiveChanged`), and the archive applied before the factory root. |
 | Application | `src/application/bootstrap-backend.ts` | `applySavedBootstrap`: a saved bootstrap plan's bucket and file checks, its read-back (its review, a `PlanReview`), its exact apply, then the lock. |
 | Application | `src/application/plan-control-plane.ts` | Derives Paseo changes and saved live observations from worker inspections. |
 | Application | `src/application/apply-workers.ts` | `applyWorkers`: the workers stage ([host protocol §apply](host-protocol.md#apply)). |
@@ -1689,12 +1818,12 @@ unchanged by where the plan was made.
 | Application | `src/application/upgrade.ts` | `upgradeFactory`: the refusals, then apply's operation with the pin move shown in the review and written under the lock once approved. |
 | Application | `src/application/set-secret.ts` | The CLI/pin match guard on `secret set`. |
 | Domain | `src/domain/rollout.ts` | A worker's outcome (`stoppedOutcome` too), the rollout rule, and the first boot wait's rules: its deadline, poll and report intervals, which tailnet states are still joining, a bootstrap refusal to wait for, and the timed-out failure. Pure. |
-| Application | `src/application/plan-store.ts` | The `PlanStore` port, which binds a record to the Terraform plan file its kind names, with `digest` for the check under the lock, `spend` (its record durably removed, its Terraform plan kept), `removeAll` (every plan of a factory, [teardown](teardown.md)'s), and `planStoreDirectory`. |
+| Application | `src/application/plan-store.ts` | The `PlanStore` port, which binds a record to the Terraform plan files it names (`archive.tfplan` too for a factory plan creating the log archive), with `digest` for the check under the lock, `spend` (its record durably removed, its Terraform plan kept), `removeAll` (every plan of a factory, [teardown](teardown.md)'s), and `planStoreDirectory`. |
 | Application | `src/application/factory-lock.ts` | `Interrupted` and `settleFactoryLock`: an interrupted operation keeps its lock. |
-| Application | `src/application/lock-store.ts` | `writeOperation` and `stateRevision` on the state bucket port; `readOperations`, teardown's alone. |
-| Infrastructure | `src/infrastructure/plan-store.ts` | `filesystemPlanStore`: private plan directories, the bound plan file's digest (`factory.tfplan` or `backend.tfplan`), spending a plan (unlinking `plan.json`, then fsyncing its directory), pruning either kind and spent leftovers, and removing a factory's directory whole. |
-| Infrastructure | `src/infrastructure/aws-s3-lock-store.ts` | PutObject of operation records, and their ListObjectsV2 and GetObject for teardown; HeadObject of the state object. |
-| CLI adapter | `src/cli/presentation/plan.ts` | Every plan review and refusal in blocks: `planSection` (the target rows and an upgrade's pin move, the infrastructure tally and changes with Terraform's symbols, then each stage's row with each worker's change), `bootstrapSection`, `reviewBlocks`, `savedPlanReport` and `savedBootstrapPlanReport` (`plan`'s saved plan and Next block), `planRefusalReport` (each `PlanRefusal`), `d11Report`, `staleReport`, `unknownPlanReport` and `damagedPlanReport`, with `describeStaleReason` and `describeUnexpectedPlan`, and the unready bucket's AWS CLI commands; `describeRemovalPlan`, still unstyled. |
+| Application | `src/application/lock-store.ts` | `writeOperation` and `stateRevision` on the state bucket port; `readOperations`, teardown's alone; `bucketExists` of either `FactoryBucket`, and `archiveReadiness` of the `ArchiveBucket` (D7: no port of its own). |
+| Infrastructure | `src/infrastructure/plan-store.ts` | `filesystemPlanStore`: private plan directories, the bound plan files' digest (`factory.tfplan`, with `archive.tfplan` when it creates the log archive, or `backend.tfplan`), spending a plan (unlinking `plan.json`, then fsyncing its directory), pruning either kind and spent leftovers, and removing a factory's directory whole. |
+| Infrastructure | `src/infrastructure/aws-s3-lock-store.ts` | PutObject of operation records, and their ListObjectsV2 and GetObject for teardown; HeadObject of the state object; the log archive's HeadBucket and readiness reads. |
+| CLI adapter | `src/cli/presentation/plan.ts` | Every plan review and refusal in blocks: `planSection` (the target rows and an upgrade's pin move, the log archive's row, the infrastructure tally and changes with Terraform's symbols, then each stage's row with each worker's change), `bootstrapSection`, `reviewBlocks`, `savedPlanReport` and `savedBootstrapPlanReport` (`plan`'s saved plan and Next block), `planRefusalReport` (each `PlanRefusal`), `d11Report`, `staleReport` (a saved plan's) and `staleRunReport` (a plan made in the run, its ID never shown), `unknownPlanReport` and `damagedPlanReport`, with `describeStaleReason` and `describeUnexpectedPlan`, and the unready state bucket's and log archive's AWS CLI commands; `describeRemovalPlan`, still unstyled. |
 | CLI adapter | `src/cli/presentation/command-line.ts` | `fffactoryCommand`: a command a Next block names, with the `--instance` and `--profile` given, quoted for a POSIX shell (`shellWord`). |
 | CLI adapter | `src/cli/presentation/instance-source.ts` | `instanceHeader`: the command, its release, and the instance (`displayPath`, `describeSource`'s words). |
 | CLI adapter | `src/cli/presentation/apply.ts` | Apply's and upgrade's run: the `Applying` rows (`applyingSection`, `applyingRow`, `applyingLabelWidth`, `infrastructureApplyingRow`, `pinnedRow`, `progressRow`), the `Result` and the one Next block laid out from the complete `FactoryApply`, each line on its stream (`appliedLines`, `bootstrappedLines`, `failedLines`, `interruptedLines`), the runs that applied nothing (`refusedRunReport`), and an upgrade's pin notice (`pinNotice`). |
@@ -1711,7 +1840,9 @@ their tally, a plan's changes compared with its record's, a factory review
 carrying every stage, both D11 refusals, unknown host machine actions refused,
 the record round trip and unreadable records, the bootstrap record's round trip
 beside factory records without `kind`, every staleness reason of either kind as
-a `StaleReason`, the workers whose machine a plan creates, the resize of a
+a `StaleReason`, the log archive's `creates_archive` round trip, its unreadable
+values, a record's unknown fields dropped, a bootstrap record recording it
+unreadable, and its staleness both ways, the workers whose machine a plan creates, the resize of a
 stopped or stopping worker, or of any with the inventory unreadable, refused
 and an unreadable change failing closed, `stopped_workers` round-tripping and
 every stopped staleness reason),
@@ -1723,8 +1854,10 @@ empty factory, the pin move, backend bootstrap's plan, `plan`'s Next block and
 its quoted instance and profile, the saved bootstrap plan's Next block applying
 it and planning the factory, the instance and profile a plan row's command
 repeats, data such as the factory name and dispatch values shown verbatim, an
-unready bucket's guidance, both D11 refusals, the resize refusals, every
+unready bucket's guidance, the log archive's row and an unready archive's
+guidance, both D11 refusals, the resize refusals, every
 `StaleReason`'s words and the stale (a bootstrap plan's bucket reason too),
+a plan made in the run gone stale naming no plan ID and rerunning its command,
 unknown and damaged plan refusals, the
 removal plan), `tests/cli/presentation/instance-source.test.ts` (the header, a
 path under home shown from `~`, a path shown verbatim),
@@ -1747,7 +1880,11 @@ Terraform plans, a host replacement refused and never saved, unreadable outputs
 and plans, a failing Terraform plan, no Terraform state lock, pruning, a
 stopped worker's install skipped and saved and never inspected, a stopped or
 stopping worker's resize refused and a running one's planned, an unreadable EC2
-inventory planning every install and refusing any resize),
+inventory planning every install and refusing any resize; the log archive
+disabled asking S3 nothing and planning nothing for it, missing planned
+create-only into `archive.tfplan`, present and ready planning nothing, present
+but unready refused, and an archive plan doing more than create or creating
+nothing refused and never saved),
 `tests/application/apply-factory.test.ts` (against
 `tests/support/fake-provisioner.ts`'s `fakeFactoryWorld`, a factory whose
 Terraform state changes as plans apply: plan, approve and apply under one lock;
@@ -1759,11 +1896,24 @@ expired, after the state changed, unknown, damaged, whose record no longer
 matches its Terraform plan, unreadable, replacing a host, without its bucket,
 for another factory.json or account, after a worker's Paseo state changed,
 or whose Terraform plan file was swapped after it was loaded or after it was
-read back; a saved bootstrap plan applied exactly, then the lock, its record
-and the release in that order and nothing of the factory planned, spent so a
-rerun names it missing, refused with nothing applied, locked or recorded when
-stale (factory.json, release, assets, path, expiry), when the bucket exists,
-ready or not, tampered, read back other than its record or doing more than
+read back; the log archive disabled asking S3 nothing, a missing one shown
+created and applied after approval before the factory root with no stage of
+its own, a rerun planning nothing for it, an unready one refused under the lock,
+one appearing after approval making the plan stale, one found present that is
+gone after approval making it stale and one found ready that loses a setting
+after approval refusing it unready, nothing applied either way, a failed
+archive apply an infrastructure-stage failure with the factory root not
+applied, and a saved plan applying its `archive.tfplan` then its
+`factory.tfplan`, or only the latter when it found the archive present, stale
+once the archive appeared or vanished, before its apply or after its approval,
+refused unready once the archive it found ready loses a setting after its
+approval, damaged once its `archive.tfplan` was swapped before or after its
+read-back, and refused when it reads back as more than creates; a saved
+bootstrap plan applied exactly, then the lock, its record and the release in
+that order and nothing of the factory planned, spent so a rerun names it
+missing, refused with nothing applied, locked or recorded when stale
+(factory.json, release, assets, path, expiry), when the bucket exists, ready or
+not, tampered, read back other than its record or doing more than
 create, its failed Terraform apply spending it with no lock or record, an
 interrupt before the lock taking none, one after it keeping it, and one once
 its record is written keeping the lock and the record, an unwritable record
@@ -1811,9 +1961,13 @@ operation keeps its lock), `tests/infrastructure/plan-store.test.ts` (including
 the plan file's digest as it is now, a bootstrap plan bound to `backend.tfplan`,
 damaged once that file changes or vanishes, and pruned once long expired; a
 spent plan missing, its `backend.tfplan` kept unchanged, spent only once, and
-pruned once long unchanged),
+pruned once long unchanged; a plan creating the log archive bound to
+`archive.tfplan` too, damaged once it changes or vanishes, one finding the
+archive present bound to `factory.tfplan` alone, and saving refused without
+`archive.tfplan`),
 `tests/infrastructure/aws-s3-lock-store.test.ts` (records and state revisions,
-stubbed and against `tests/support/stub-s3.ts`),
+and the log archive's HeadBucket answers and readiness, stubbed and against
+`tests/support/stub-s3.ts`),
 `tests/infrastructure/terminal-prompt.test.ts` (Ctrl-C cancels an echoed
 question), `tests/cli/presentation/workers.test.ts` (each worker outcome's
 row and status across its later stages, an installed worker never ready while
@@ -1821,7 +1975,7 @@ enrollment or a later stage is pending or failed, a stopped worker's start
 command with the instance and profile, the enrollment's login once and its
 accounts numbered, delivered accounts grouped apart), `tests/cli/presentation/apply.test.ts` (the 2026-10-05 run
 as [What apply prints](#what-apply-prints) shows it, plain and in color; the
-Applying rows; the Result and Next block with nothing pending, one and several
+Applying rows, Terraform's for a plan that only creates the log archive; the Result and Next block with nothing pending, one and several
 workers to enroll, a delivered credential to replace with no login, and once for
 several workers before their logins, mixed failed, skipped and not-attempted workers on both
 streams in order, a failed worker's next action that a skipped one's shares
@@ -1837,7 +1991,10 @@ lock naming `fffactory plan`), `tests/cli/apply-stages.test.ts`
 written, a failed worker's next action on standard error and the Next block
 of a run with no failed worker on standard output),
 `tests/cli/plan-apply.test.ts` (output, exit codes and every refusal
-in process, the plan's every stage including a placed repository and requested
+in process, the log archive's row created or present, an unready archive's
+refusal, and a saved plan stale once the archive it creates exists, and an
+interactive apply's once it appears while the plan is shown, naming no plan ID
+and rerunning `fffactory apply`, the plan's every stage including a placed repository and requested
 dispatch, `plan`'s Next block repeating a quoted instance and profile, a
 refusal's Next block repeating them, and human output colored only on the
 stream that is, the complete pipeline's Result and enrollment Next block, the
@@ -1902,15 +2059,21 @@ bucket refused with nothing bootstrapped, asked, locked or written; factory.json
 changed after planning; a failed apply leaving the pin moved and a plain apply
 converging; a failure writing the pin; a failure after the pin was written,
 recorded as the infrastructure stage's; an interrupt after the pin was written,
-its lock broken and apply finishing; every refusal before AWS: nothing to
-upgrade, a downgrade, no pin, base and schema D11),
+its lock broken and apply finishing; a missing log archive created through the
+same infrastructure stage after the pin, and one appearing during approval
+refusing the plan stale, one found present disappearing during approval refusing
+it stale and one found ready losing a setting during approval refusing it
+unready, each with the pin not moved and nothing applied; every refusal
+before AWS: nothing to upgrade, a downgrade, no pin, base and schema D11),
 `tests/cli/upgrade.test.ts` (the output and question, the pin row before the
 install, every stage apply runs in its Result: the control plane applied, Paseo
 `install` called, dispatch reconciled and the end-to-end verification; a
 deferred maintenance exiting 2 with dispatch `skipped`, Paseo `install` not
 called and the pin moved; plan passing the guard once upgraded, declined, a
 failed apply naming `fffactory apply`, a failure once the pin moved and how to finish, no state
-bucket, factory.json changed, no terminal, a held lock refusing it, each with
+bucket, factory.json changed, the log archive created while the plan was shown
+naming no plan ID and rerunning `fffactory upgrade`, no terminal, a held lock
+refusing it, each with
 the pin notice before the Next block, nothing to upgrade and the other refusals
 without reaching AWS, usage),
 `tests/application/set-secret.test.ts` and `tests/cli/secret.test.ts` (the guard

@@ -33,6 +33,7 @@ export const NAMED_RESOURCES: Readonly<Record<string, readonly string[]>> = {
   aws_s3_bucket_server_side_encryption_configuration: [],
   aws_s3_bucket_versioning: [],
   aws_s3_bucket_policy: [],
+  aws_s3_bucket_abac: [],
 };
 
 export interface PlannedName {

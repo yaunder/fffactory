@@ -7,8 +7,17 @@ import type { FactoryInstance, HostKey, Release } from "../../src/domain/instanc
 import type { OperationRecord } from "../../src/domain/operation";
 import type { PlanReview } from "../../src/domain/plan";
 import type { ReleaseCompatibility } from "../../src/domain/release-compatibility";
-import { BUCKET, declaring, FACTORY, factory, NOW, planRequest } from "../support/factory-world";
+import {
+  ARCHIVE,
+  BUCKET,
+  declaring,
+  FACTORY,
+  factory,
+  NOW,
+  planRequest,
+} from "../support/factory-world";
 import { MemoryInstanceStore } from "../support/memory-instance-store";
+import { type MemoryLockStore, READY_ARCHIVE } from "../support/memory-lock-store";
 import type { MemoryPlanStore } from "../support/memory-plan-store";
 
 const PATH = "/work/.fffactory/factory.json";
@@ -193,6 +202,106 @@ describe("fffactory upgrade (plan-apply §Upgrade)", () => {
     const result = await upgradeFactory(deps, request);
     expect(result).toMatchObject({ kind: "upgrade", pinned: true, apply: { kind: "applied" } });
     expect(events).toEqual(["write factory.json (locked: true)", "terraform apply"]);
+  });
+
+  test("a missing log archive is created through the same infrastructure stage, after the pin", async () => {
+    const { deps, request, store, events, shown, lockStore, terraform } = upgrading();
+    const instance: FactoryInstance = { ...pinnedTo("0.2.0"), log_archive: { enabled: true } };
+    const text = textOf(instance);
+    store.files[PATH] = text;
+    const result = await upgradeFactory(deps, { ...request, instance, text });
+    expect(result).toMatchObject({
+      kind: "upgrade",
+      pinned: true,
+      apply: { kind: "applied", infrastructure: "applied" },
+    });
+    expect(shown).toMatchObject([{ kind: "factory", archive: { bucket: ARCHIVE, creates: true } }]);
+    expect(events).toEqual(["write factory.json (locked: true)", "terraform apply"]);
+    expect(terraform.calls.filter(({ call }) => call === "applyPlan")).toMatchObject([
+      { request: { configuration: { root: "archive" } } },
+    ]);
+    expect(lockStore.buckets.has(ARCHIVE)).toBe(true);
+    expect(stages(lockStore.operationWrites.at(-1))).toContain("infrastructure:applied");
+  });
+
+  test("a log archive that appears during approval refuses the plan before the pin moves", async () => {
+    const { deps, request, store, events, lockStore, pinned, setBeforeAnswer } = upgrading();
+    const instance: FactoryInstance = { ...pinnedTo("0.2.0"), log_archive: { enabled: true } };
+    const text = textOf(instance);
+    store.files[PATH] = text;
+    setBeforeAnswer(() => {
+      lockStore.buckets.add(ARCHIVE);
+    });
+    const result = await upgradeFactory(deps, { ...request, instance, text });
+    expect(result).toMatchObject({
+      kind: "upgrade",
+      pinned: false,
+      apply: { kind: "stale", reasons: [{ kind: "archive_created" }] },
+    });
+    expect(store.files[PATH]).toBe(text);
+    expect(store.writes).toEqual([]);
+    expect(pinned).toEqual([]);
+    expect(events).toEqual([]);
+    expect(lockStore.locks.size).toBe(0);
+    expect(stages(lockStore.operationWrites.at(-1))).toBe("pin:refused infrastructure:refused");
+    expect(lockStore.operationWrites.at(-1)?.status).toBe("refused");
+  });
+
+  test.each([
+    [
+      "a log archive found present that disappears during approval is stale",
+      (lockStore: MemoryLockStore) => lockStore.buckets.delete(ARCHIVE),
+      { kind: "stale", reasons: [{ kind: "archive_missing" }] },
+    ],
+    [
+      "a log archive found ready that loses a setting during approval is unready",
+      (lockStore: MemoryLockStore) =>
+        lockStore.archives.set(ARCHIVE, { ...READY_ARCHIVE, tlsOnly: false }),
+      { kind: "unready_archive", bucket: { missing: ["tls_only_policy"] } },
+    ],
+  ])("%s: refused before the pin moves, applying nothing", async (_, change, apply) => {
+    const { deps, request, store, events, lockStore, pinned, setBeforeAnswer } = upgrading({
+      hosts: [],
+    });
+    lockStore.buckets.add(ARCHIVE);
+    const instance: FactoryInstance = { ...pinnedTo("0.2.0"), log_archive: { enabled: true } };
+    const text = textOf(instance);
+    store.files[PATH] = text;
+    setBeforeAnswer(() => {
+      change(lockStore);
+    });
+    const result = await upgradeFactory(deps, { ...request, instance, text });
+    expect(result).toMatchObject({ kind: "upgrade", pinned: false, apply });
+    expect(store.files[PATH]).toBe(text);
+    expect(store.writes).toEqual([]);
+    expect(pinned).toEqual([]);
+    expect(events).toEqual([]);
+    expect(lockStore.locks.size).toBe(0);
+    expect(stages(lockStore.operationWrites.at(-1))).toBe("pin:refused infrastructure:refused");
+  });
+
+  test("interrupted while the log archive is rechecked: the pin is not moved", async () => {
+    const { deps, request, store, events, lockStore, pinned, signal, setBeforeAnswer } =
+      upgrading();
+    const instance: FactoryInstance = { ...pinnedTo("0.2.0"), log_archive: { enabled: true } };
+    const text = textOf(instance);
+    store.files[PATH] = text;
+    setBeforeAnswer(() => {
+      const bucketExists = lockStore.bucketExists.bind(lockStore);
+      lockStore.bucketExists = async (bucket) => {
+        signal.interrupted = true;
+        return bucketExists(bucket);
+      };
+    });
+    const result = await upgradeFactory(deps, { ...request, instance, text });
+    expect(result).toMatchObject({
+      kind: "upgrade",
+      pinned: false,
+      apply: { kind: "interrupted", locked: true },
+    });
+    expect(store.files[PATH]).toBe(text);
+    expect(pinned).toEqual([]);
+    expect(events).toEqual([]);
   });
 
   test("declined: the pin is not moved and nothing is applied", async () => {

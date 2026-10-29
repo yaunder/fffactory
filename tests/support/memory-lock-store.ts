@@ -1,10 +1,12 @@
 import {
+  type ArchiveBucket,
+  type FactoryBucket,
   type LockCreation,
   type LockStore,
   type StateBucket,
   StateBucketUnreachable,
 } from "../../src/application/lock-store";
-import type { StateBucketReadiness } from "../../src/domain/backend-bootstrap";
+import type { ArchiveReadiness, StateBucketReadiness } from "../../src/domain/backend-bootstrap";
 import type { HeldLock, LockBreakEntry, LockRecord } from "../../src/domain/factory-lock";
 import {
   type OperationRecord,
@@ -23,6 +25,14 @@ export const READY_BUCKET: StateBucketReadiness = {
   tlsOnly: true,
 };
 
+/** A log archive as the archive root leaves it. */
+export const READY_ARCHIVE: ArchiveReadiness = {
+  ...READY_BUCKET,
+  ownership: "BucketOwnerEnforced",
+  sseS3: true,
+  abac: "Enabled",
+};
+
 /**
  * In-memory LockStore behaving as the versioned state bucket does: `create` is a conditional
  * write that never replaces a lock, each write gets a new version, and `remove` deletes only
@@ -34,7 +44,9 @@ export const READY_BUCKET: StateBucketReadiness = {
  * logs and operation records are kept by key, each remembering its bucket: deleting a bucket
  * removes its own, then its lock, then the bucket, and an interrupt by then (`beforeLock` can
  * set one) leaves the lock and the bucket. A bucket in `unreachable` answers `bucketExists` as
- * S3's 403 does: another account's name, or one these credentials may not reach.
+ * S3's 403 does: another account's name, or one these credentials may not reach. A log archive
+ * is a bucket like any other, ready as the archive root leaves it unless `archiveReadiness`
+ * says otherwise.
  */
 export class MemoryLockStore implements LockStore {
   readonly calls: string[] = [];
@@ -44,6 +56,8 @@ export class MemoryLockStore implements LockStore {
   readonly locks = new Map<string, HeldLock>();
   /** Buckets whose settings are not those backend bootstrap applies. */
   readonly readiness = new Map<string, StateBucketReadiness>();
+  /** Log archives whose settings are not those the archive root applies. */
+  readonly archives = new Map<string, ArchiveReadiness>();
   private versions = 0;
   /** The latest record per operation key. */
   readonly operations = new Map<string, OperationRecord>();
@@ -85,11 +99,11 @@ export class MemoryLockStore implements LockStore {
     return `version-${this.versions}`;
   }
 
-  private requireBucket({ bucket }: StateBucket): void {
+  private requireBucket({ bucket }: FactoryBucket): void {
     if (!this.buckets.has(bucket)) throw new Error(`S3 answered NoSuchBucket`);
   }
 
-  async bucketExists(bucket: StateBucket): Promise<boolean> {
+  async bucketExists(bucket: FactoryBucket): Promise<boolean> {
     this.calls.push(`bucketExists ${bucket.bucket}`);
     if (this.unreachable.has(bucket.bucket))
       throw new StateBucketUnreachable(bucket.bucket, bucket.accountId);
@@ -100,6 +114,12 @@ export class MemoryLockStore implements LockStore {
     this.calls.push(`bucketReadiness ${bucket.bucket}`);
     this.requireBucket(bucket);
     return this.readiness.get(bucket.bucket) ?? READY_BUCKET;
+  }
+
+  async archiveReadiness(bucket: ArchiveBucket): Promise<ArchiveReadiness> {
+    this.calls.push(`archiveReadiness ${bucket.bucket}`);
+    this.requireBucket(bucket);
+    return this.archives.get(bucket.bucket) ?? READY_ARCHIVE;
   }
 
   async create(bucket: StateBucket, record: LockRecord): Promise<LockCreation> {

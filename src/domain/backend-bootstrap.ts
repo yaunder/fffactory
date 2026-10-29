@@ -4,20 +4,47 @@
  * small plan is shown and approved on its own, and may only create. A bucket an interrupted
  * bootstrap left without all its settings is refused (`unreadyBucket`); the CLI lays out how
  * to complete it (`cli/presentation/plan.ts`).
+ *
+ * The log archive's state-less root is judged by the same rules: its plan may only create
+ * (`bootstrapPlanVerdict`), and an existing archive without every setting the archive root
+ * applies is refused (`unreadyArchive`, by `missingArchiveHardening`).
  */
-import { changesSomething, type PlanTarget, type ResourceChange } from "./plan";
+import {
+  changesSomething,
+  type PlanTarget,
+  type ResourceChange,
+  type UnexpectedPlan,
+} from "./plan";
 import { isRecord } from "./validation";
 
 export type BootstrapPlanVerdict =
   | { readonly ok: true; readonly creates: readonly string[] }
   | { readonly ok: false; readonly unexpected: readonly ResourceChange[] };
 
-/** A backend bootstrap plan may only create resources; anything else is refused. */
+/**
+ * A backend bootstrap plan, or a log archive plan, may only create resources; anything else is
+ * refused.
+ */
 export function bootstrapPlanVerdict(changes: readonly ResourceChange[]): BootstrapPlanVerdict {
   const changing = changes.filter(changesSomething);
   const unexpected = changing.filter(({ actions }) => actions.join() !== "create");
   if (unexpected.length > 0) return { ok: false, unexpected };
   return { ok: true, creates: changing.map(({ address }) => address) };
+}
+
+/**
+ * Why a create-only plan, backend bootstrap's or the log archive's, as `showPlan` read it back
+ * (`changes`, undefined when unreadable), may not be applied: it cannot be read, does more than
+ * create, or creates nothing. Undefined when it may.
+ */
+export function createOnlyRefusal(
+  changes: readonly ResourceChange[] | undefined,
+): UnexpectedPlan[] | undefined {
+  if (changes === undefined) return [{ kind: "unreadable_plan" }];
+  const verdict = bootstrapPlanVerdict(changes);
+  if (!verdict.ok) return verdict.unexpected.map((change) => ({ kind: "not_create", change }));
+  if (verdict.creates.length === 0) return [{ kind: "creates_nothing" }];
+  return undefined;
 }
 
 /** What the bootstrap plan shows before its changes: the plan's target and the bucket. */
@@ -40,11 +67,28 @@ export interface StateBucketReadiness {
   readonly tlsOnly: boolean;
 }
 
+/**
+ * What the archive root sets on the log archive, as S3 reports it: the state bucket's settings
+ * and three more. Its default encryption must be SSE-S3, and `encrypted` alone does not say so:
+ * S3 encrypts every new bucket by default.
+ */
+export interface ArchiveReadiness extends StateBucketReadiness {
+  /** GetBucketOwnershipControls' object ownership, undefined when the bucket has none. */
+  readonly ownership: string | undefined;
+  /** Its default encryption rules exist, and every one is SSE-S3 (`AES256`). */
+  readonly sseS3: boolean;
+  /** GetBucketAbac's status: `Enabled`, `Disabled`, or undefined when never set. */
+  readonly abac: string | undefined;
+}
+
 export type BucketHardening =
   | "versioning"
   | "public_access_block"
   | "default_encryption"
-  | "tls_only_policy";
+  | "tls_only_policy"
+  | "bucket_owner_enforced"
+  | "sse_s3"
+  | "abac";
 
 const HARDENING: readonly BucketHardening[] = [
   "versioning",
@@ -55,13 +99,35 @@ const HARDENING: readonly BucketHardening[] = [
 
 /** Each setting backend bootstrap applies that the bucket lacks, in the order it applies them. */
 export function missingHardening(readiness: StateBucketReadiness): BucketHardening[] {
-  const present: Record<BucketHardening, boolean> = {
+  const present: Partial<Record<BucketHardening, boolean>> = {
     versioning: readiness.versioning === "Enabled",
     public_access_block: readiness.publicAccessBlocked,
     default_encryption: readiness.encrypted,
     tls_only_policy: readiness.tlsOnly,
   };
-  return HARDENING.filter((setting) => !present[setting]);
+  return HARDENING.filter((setting) => present[setting] !== true);
+}
+
+const ARCHIVE_HARDENING: readonly BucketHardening[] = [
+  "versioning",
+  "public_access_block",
+  "bucket_owner_enforced",
+  "sse_s3",
+  "abac",
+  "tls_only_policy",
+];
+
+/** Each setting the archive root applies that the log archive lacks, in a fixed order. */
+export function missingArchiveHardening(readiness: ArchiveReadiness): BucketHardening[] {
+  const present: Partial<Record<BucketHardening, boolean>> = {
+    versioning: readiness.versioning === "Enabled",
+    public_access_block: readiness.publicAccessBlocked,
+    bucket_owner_enforced: readiness.ownership === "BucketOwnerEnforced",
+    sse_s3: readiness.sseS3,
+    abac: readiness.abac === "Enabled",
+    tls_only_policy: readiness.tlsOnly,
+  };
+  return ARCHIVE_HARDENING.filter((setting) => present[setting] !== true);
 }
 
 /**
@@ -130,7 +196,7 @@ export function deniesInsecureTransport(policy: string | undefined, bucket: stri
   return listOf(document.Statement).some((statement) => deniesInsecure(statement, bucket));
 }
 
-/** Where the state bucket is, for the commands that complete it. */
+/** Where the state bucket, or the log archive, is, for the commands that complete it. */
 export interface StateBucketLocation {
   readonly bucket: string;
   readonly accountId: string;
@@ -141,7 +207,8 @@ export interface StateBucketLocation {
  * A state bucket that exists but lacks some of backend bootstrap's settings: where it is, what
  * S3 reports of it, and each setting it lacks, in the order bootstrap applies them. The backend
  * root keeps no state and a rerun skips a bucket that exists, so fffactory itself cannot finish
- * an interrupted bootstrap: the operator completes it.
+ * an interrupted bootstrap: the operator completes it. A log archive lacking some of the
+ * archive root's settings is one too, for the same reason.
  */
 export interface UnreadyBucket {
   readonly location: StateBucketLocation;
@@ -155,6 +222,17 @@ export function unreadyBucket(
   readiness: StateBucketReadiness,
 ): UnreadyBucket | undefined {
   const missing = missingHardening(readiness);
+  if (missing.length === 0) return undefined;
+  const { bucket, accountId, region } = location;
+  return { location: { bucket, accountId, region }, readiness, missing };
+}
+
+/** The log archive at `location` as an unready one, or undefined when it has every setting. */
+export function unreadyArchive(
+  location: StateBucketLocation,
+  readiness: ArchiveReadiness,
+): UnreadyBucket | undefined {
+  const missing = missingArchiveHardening(readiness);
   if (missing.length === 0) return undefined;
   const { bucket, accountId, region } = location;
   return { location: { bucket, accountId, region }, readiness, missing };

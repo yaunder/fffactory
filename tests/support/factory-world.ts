@@ -36,6 +36,8 @@ import { sha256Text } from "../../src/infrastructure/release-tarball";
 
 export const BUCKET = "fff-abcd1234-state";
 export const FACTORY = "fff-abcd1234" as FactoryId;
+/** The log archive's bucket `archiving` derives (`archiveBucketName`). */
+export const ARCHIVE = "fff-abcd1234-logs-123456789012-eu-west-2-an";
 /** The release `planRequest` runs, and the digest of its assets. */
 export const RELEASE = "0.3.0" as Release;
 export const ASSETS_SHA256 = "b".repeat(64);
@@ -84,6 +86,11 @@ export function declaring(...hosts: DeclaredHost[]): FactoryInstance {
       };
     }),
   };
+}
+
+/** `declaring(...hosts)` with the log archive enabled, named `ARCHIVE`. */
+export function archiving(...hosts: DeclaredHost[]): FactoryInstance {
+  return { ...declaring(...hosts), log_archive: { enabled: true } };
 }
 
 /** `declaring(key)` with one repository placed on the host and dispatch requested on it. */

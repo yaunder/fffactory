@@ -1,5 +1,5 @@
 import type { CredentialSelection } from "../domain/aws-account";
-import type { StateBucketReadiness } from "../domain/backend-bootstrap";
+import type { ArchiveReadiness, StateBucketReadiness } from "../domain/backend-bootstrap";
 import type { HeldLock, LockBreakEntry, LockRecord } from "../domain/factory-lock";
 import type { FactoryId } from "../domain/instance";
 import type { OperationRecord, StoredOperation } from "../domain/operation";
@@ -7,6 +7,8 @@ import type { BucketDeletion } from "../domain/state-bucket-deletion";
 
 /** The factory's state bucket, reached with the credentials the account check allowed. */
 export interface StateBucket {
+  /** Never set: `kind` tells it from an `ArchiveBucket` (`FactoryBucket`). */
+  readonly kind?: never;
   readonly factoryId: FactoryId;
   readonly bucket: string;
   /** The factory's account: every request requires the bucket to be owned by it. */
@@ -14,6 +16,23 @@ export interface StateBucket {
   readonly region: string;
   readonly credentials: CredentialSelection;
 }
+
+/**
+ * The factory's log archive (`archiveBucketName`), in the state bucket's account and Region and
+ * reached with the same credentials. fffactory only asks whether it exists and how it is set:
+ * it writes nothing in it.
+ */
+export interface ArchiveBucket {
+  readonly kind: "archive";
+  readonly bucket: string;
+  /** The factory's account: every request requires the bucket to be owned by it. */
+  readonly accountId: string;
+  readonly region: string;
+  readonly credentials: CredentialSelection;
+}
+
+/** A bucket whose existence and settings the factory's operations check (D7). */
+export type FactoryBucket = StateBucket | ArchiveBucket;
 
 /**
  * `bucketExists` was refused with S3's 403 for a request that requires the factory's account to
@@ -40,7 +59,8 @@ export type LockCreation =
   | { readonly created: false; readonly held: HeldLock | undefined };
 
 /**
- * Port: the state bucket, as the factory's operations use it: its readiness, the factory-wide
+ * Port: the state bucket, as the factory's operations use it: its readiness (and the log
+ * archive's, the one other bucket they check, `FactoryBucket`), the factory-wide
  * lock (one object, `lockKey`) and its break log, the records of operations that held the lock,
  * written and, for teardown, read back, the revision of the factory's Terraform state, and,
  * last of all, its deletion. Every call but `deleteBucket` rejects, naming the AWS error but
@@ -49,13 +69,15 @@ export type LockCreation =
  */
 export interface LockStore {
   /**
-   * Whether the state bucket exists in the factory's account. Rejects when it cannot tell,
-   * with `StateBucketUnreachable` when S3 answers 403: the name belongs to another account, or
-   * these credentials may not reach it.
+   * Whether the state bucket, or the log archive, exists in the factory's account. Rejects
+   * when it cannot tell, for the state bucket with `StateBucketUnreachable` when S3 answers
+   * 403: the name belongs to another account, or these credentials may not reach it.
    */
-  bucketExists(bucket: StateBucket): Promise<boolean>;
+  bucketExists(bucket: FactoryBucket): Promise<boolean>;
   /** The settings backend bootstrap applies to an existing state bucket, as S3 reports them. */
   bucketReadiness(bucket: StateBucket): Promise<StateBucketReadiness>;
+  /** The settings the archive root applies to an existing log archive, as S3 reports them. */
+  archiveReadiness(bucket: ArchiveBucket): Promise<ArchiveReadiness>;
   /** Creates the lock object only if none exists: a conditional write that never replaces one. */
   create(bucket: StateBucket, record: LockRecord): Promise<LockCreation>;
   /** The lock object, or undefined when there is none. */

@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { FactoryId, HostKey, Release } from "../../src/domain/instance";
 import {
+  archiveStaleness,
   bootstrapStaleness,
   changeKind,
   changeTally,
@@ -697,6 +698,110 @@ const BOOTSTRAP: SavedBootstrapPlan = newSavedBootstrapPlan({
   accountId: "123456789012",
   now: NOW,
   changes: [change(BUCKET, ["create"], "aws_s3_bucket"), change(VERSIONING, ["create"])],
+});
+
+describe("the log archive in a saved factory plan (plan-apply §Saved plans)", () => {
+  const ARCHIVE = "fff-abcd1234-logs-123456789012-eu-west-2-an";
+  const creating = newSavedPlan({
+    ...CURRENT,
+    planId: "k3x9q2ab",
+    stateRevision: "state-v1",
+    now: NOW,
+    changes: [],
+    archive: { bucket: ARCHIVE, creates: true },
+  });
+
+  test("records whether it creates the archive, and nothing of it without one", () => {
+    expect(creating.creates_archive).toBe(true);
+    expect("creates_archive" in SAVED).toBe(false);
+    const present = newSavedPlan({
+      ...CURRENT,
+      planId: "k3x9q2ab",
+      stateRevision: "state-v1",
+      now: NOW,
+      changes: [],
+      archive: { bucket: ARCHIVE, creates: false },
+    });
+    expect(present.creates_archive).toBe(false);
+    // The bucket's name is factory.json's, bound by its SHA-256: the record holds none.
+    expect(serializeSavedPlan(present)).not.toContain(ARCHIVE);
+  });
+
+  test("round-trips through its text; anything but a boolean is unreadable", () => {
+    expect(parseSavedPlan(serializeSavedPlan(creating), creating.factory_id, "k3x9q2ab")).toEqual(
+      creating,
+    );
+    const record = JSON.parse(serializeSavedPlan(creating)) as Record<string, unknown>;
+    for (const creates of ["yes", 1, null, {}])
+      expect(
+        parseSavedPlan(
+          JSON.stringify({ ...record, creates_archive: creates }),
+          creating.factory_id,
+          "k3x9q2ab",
+        ),
+      ).toBeUndefined();
+  });
+
+  test("a factory record's unknown fields never reach the plan read from it", () => {
+    const record = JSON.parse(serializeSavedPlan(creating)) as Record<string, unknown>;
+    const read = parseSavedPlan(
+      JSON.stringify({ ...record, archive_bucket: "elsewhere", kind: undefined, extra: [1] }),
+      creating.factory_id,
+      "k3x9q2ab",
+    );
+    expect(read).toEqual(creating);
+    expect(Object.keys(read ?? {})).not.toContain("archive_bucket");
+    expect(Object.keys(read ?? {})).not.toContain("extra");
+  });
+
+  test("a bootstrap record recording the archive is unreadable", () => {
+    const bootstrap = newSavedBootstrapPlan({
+      ...CURRENT,
+      planId: "b00tstr4",
+      now: NOW,
+      changes: [{ address: "module.state_bucket.aws_s3_bucket.state", actions: ["create"] }],
+    });
+    const record = JSON.parse(serializeSavedPlan(bootstrap)) as Record<string, unknown>;
+    expect(
+      parseSavedPlan(
+        JSON.stringify({ ...record, creates_archive: false }),
+        bootstrap.factory_id,
+        "b00tstr4",
+      ),
+    ).toBeUndefined();
+  });
+
+  test("is stale once the archive it creates exists, or the one it found is gone", () => {
+    expect(archiveStaleness(creating, false)).toBeUndefined();
+    expect(archiveStaleness(creating, true)).toEqual({ kind: "archive_created" });
+    const present = { ...creating, creates_archive: false };
+    expect(archiveStaleness(present, true)).toBeUndefined();
+    expect(archiveStaleness(present, false)).toEqual({ kind: "archive_missing" });
+    // A plan of a factory without the archive is never stale for it.
+    expect(archiveStaleness(SAVED, true)).toBeUndefined();
+    expect(archiveStaleness(SAVED, false)).toBeUndefined();
+  });
+
+  test("the review shows the archive only when factory.json enables it", () => {
+    const input = {
+      target: {
+        instancePath: "/work/.fffactory/factory.json",
+        factoryId: "fff-abcd1234" as FactoryId,
+        accountId: "123456789012",
+        region: "eu-west-2",
+        release: "0.3.0" as Release,
+      },
+      changes: [],
+      instance: { schema_version: 1 as const, factory_id: "fff-abcd1234" as FactoryId, hosts: [] },
+      controlPlane: [],
+      dispatch: [],
+      stopped: [],
+    };
+    expect("archive" in factoryPlanReview(input)).toBe(false);
+    expect(
+      factoryPlanReview({ ...input, archive: { bucket: ARCHIVE, creates: true } }).archive,
+    ).toEqual({ bucket: ARCHIVE, creates: true });
+  });
 });
 
 describe("comparing a plan's changes with its record (plan-apply §Freshness)", () => {

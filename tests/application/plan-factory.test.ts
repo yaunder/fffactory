@@ -6,6 +6,8 @@ import type { HostKey, Release } from "../../src/domain/instance";
 import { PLAN_KEPT_MS, PLAN_TTL_MS } from "../../src/domain/plan";
 import { FAKE_CALLER } from "../support/doctor-fakes";
 import {
+  ARCHIVE,
+  archiving,
   BUCKET,
   currentWorker,
   declaring,
@@ -17,8 +19,13 @@ import {
   workerFleet,
 } from "../support/factory-world";
 import { appliedRecord, installableWorker, machine } from "../support/fake-workers";
-import { hostAddress, NETWORK, STATE_BUCKET_ADDRESS } from "../support/fake-provisioner";
-import { READY_BUCKET } from "../support/memory-lock-store";
+import {
+  ARCHIVE_ADDRESSES,
+  hostAddress,
+  NETWORK,
+  STATE_BUCKET_ADDRESS,
+} from "../support/fake-provisioner";
+import { READY_ARCHIVE, READY_BUCKET } from "../support/memory-lock-store";
 
 /** What every plan review shows first. */
 const TARGET = {
@@ -475,5 +482,127 @@ describe("fffactory plan (plan-apply §Plan)", () => {
       planRequest({ now: later, randomBytes: (n) => new Uint8Array(n).fill(1) }),
     );
     expect([...planStore.saved.keys()]).toEqual(["fff-abcd1234/bbbbbbbb"]);
+  });
+});
+
+describe("the log archive (plan-apply §The infrastructure stage)", () => {
+  const ARCHIVE_PLAN = "/plans/fff-abcd1234/aaaaaaaa/archive.tfplan";
+  const ARCHIVE_TARGET = {
+    configuration: { directory: TERRAFORM, root: "archive" },
+    credentials: { source: "--profile" as const, profile: "factory" },
+    region: "eu-west-2",
+    backend: {},
+  };
+
+  test("without it, S3 is asked nothing of it, no archive root is planned and nothing is recorded", async () => {
+    const { deps, lockStore, terraform } = factory({ hosts: ["builder-1"] });
+    const result = await planFactory(deps, planRequest());
+    expect(result).toMatchObject({ kind: "planned" });
+    if (result.kind !== "planned") return;
+    expect("archive" in result.review).toBe(false);
+    expect("creates_archive" in result.saved).toBe(false);
+    expect(lockStore.calls.filter((call) => call.includes(ARCHIVE))).toEqual([]);
+    expect(terraform.calls.map(({ request }) => request.configuration.root)).not.toContain(
+      "archive",
+    );
+  });
+
+  test("a missing archive is planned create-only into archive.tfplan, and the plan says it creates it", async () => {
+    const { deps, lockStore, terraform } = factory({ hosts: ["builder-1"] });
+    const result = await planFactory(deps, planRequest({ instance: archiving("builder-1") }));
+    expect(result).toMatchObject({
+      kind: "planned",
+      review: { archive: { bucket: ARCHIVE, creates: true } },
+      saved: { creates_archive: true },
+    });
+    expect(lockStore.calls).toEqual([
+      `bucketExists ${BUCKET}`,
+      `bucketReadiness ${BUCKET}`,
+      `read ${BUCKET}`,
+      `stateRevision ${BUCKET}`,
+      `bucketExists ${ARCHIVE}`,
+    ]);
+    expect(
+      terraform.calls.map(({ call, request }) => `${call} ${request.configuration.root}`),
+    ).toEqual([
+      "plan archive",
+      "showPlan archive",
+      "output factory",
+      "plan factory",
+      "showPlan factory",
+    ]);
+    expect(terraform.calls[0]?.request).toEqual({
+      ...ARCHIVE_TARGET,
+      planFile: ARCHIVE_PLAN,
+      variables: {
+        factory_id: FACTORY,
+        account_id: "123456789012",
+        region: "eu-west-2",
+        archive_bucket_suffix: "logs-123456789012-eu-west-2-an",
+      },
+    });
+    expect(terraform.calls[1]?.request).toEqual({ ...ARCHIVE_TARGET, planFile: ARCHIVE_PLAN });
+    // The archive's resources are the archive root's, never among the factory root's changes.
+    expect(shownChanges(result)).not.toContain(`create ${ARCHIVE_ADDRESSES[0]}`);
+  });
+
+  test("a present, ready archive plans nothing for it: an apply after teardown adopts it", async () => {
+    const { deps, lockStore, terraform } = factory({ hosts: ["builder-1"] });
+    lockStore.buckets.add(ARCHIVE);
+    const result = await planFactory(deps, planRequest({ instance: archiving("builder-1") }));
+    expect(result).toMatchObject({
+      kind: "planned",
+      review: { archive: { bucket: ARCHIVE, creates: false } },
+      saved: { creates_archive: false },
+    });
+    expect(lockStore.calls.slice(-2)).toEqual([
+      `bucketExists ${ARCHIVE}`,
+      `archiveReadiness ${ARCHIVE}`,
+    ]);
+    expect(terraform.calls.map(({ request }) => request.configuration.root)).not.toContain(
+      "archive",
+    );
+  });
+
+  test("a present archive lacking any of its settings is refused, as an unready state bucket is", async () => {
+    const { deps, lockStore, terraform, planStore } = factory({ hosts: ["builder-1"] });
+    lockStore.buckets.add(ARCHIVE);
+    const readiness = { ...READY_ARCHIVE, abac: undefined, ownership: "ObjectWriter" };
+    lockStore.archives.set(ARCHIVE, readiness);
+    expect(await planFactory(deps, planRequest({ instance: archiving("builder-1") }))).toEqual({
+      kind: "unready_archive",
+      bucket: {
+        location: { bucket: ARCHIVE, accountId: "123456789012", region: "eu-west-2" },
+        readiness,
+        missing: ["bucket_owner_enforced", "abac"],
+      },
+    });
+    expect(terraform.calls).toEqual([]);
+    expect(planStore.directories.size).toBe(0);
+  });
+
+  test("an archive plan that does more than create, or creates nothing, is refused and never saved", async () => {
+    const { deps, terraform, planStore } = factory({ hosts: ["builder-1"] });
+    const update = {
+      address: ARCHIVE_ADDRESSES[1],
+      type: "aws_s3_bucket_policy",
+      actions: ["update"],
+    };
+    terraform.world.archiveShown = {
+      resource_changes: [{ ...update, change: { actions: update.actions } }],
+    };
+    expect(await planFactory(deps, planRequest({ instance: archiving("builder-1") }))).toEqual({
+      kind: "unexpected_plan",
+      unexpected: [{ kind: "not_create", change: update }],
+    });
+    terraform.world.archiveShown = { resource_changes: [] };
+    expect(await planFactory(deps, planRequest({ instance: archiving("builder-1") }))).toEqual({
+      kind: "unexpected_plan",
+      unexpected: [{ kind: "creates_nothing" }],
+    });
+    expect(planStore.directories.size).toBe(0);
+    expect(terraform.calls.map(({ request }) => request.configuration.root)).not.toContain(
+      "factory",
+    );
   });
 });

@@ -1,10 +1,14 @@
 import { describe, expect, test } from "bun:test";
 import {
+  type ArchiveReadiness,
   bootstrapPlanVerdict,
+  createOnlyRefusal,
   deniesInsecureTransport,
+  missingArchiveHardening,
   missingHardening,
   type StateBucketReadiness,
   tlsOnlyPolicy,
+  unreadyArchive,
   unreadyBucket,
 } from "../../src/domain/backend-bootstrap";
 import { resourceChanges } from "../../src/domain/plan";
@@ -109,6 +113,80 @@ describe("bootstrapPlanVerdict", () => {
         { address: "a.y", actions: ["update"] },
         { address: "a.z", actions: ["delete", "create"] },
       ],
+    });
+  });
+});
+
+describe("createOnlyRefusal (plan-apply §The infrastructure stage)", () => {
+  test("a plan that only creates may be applied", () => {
+    expect(createOnlyRefusal([{ address: "a.x", actions: ["create"] }])).toBeUndefined();
+  });
+
+  test("an unreadable plan, one doing more than create, and one creating nothing are refused", () => {
+    expect(createOnlyRefusal(undefined)).toEqual([{ kind: "unreadable_plan" }]);
+    const update = { address: "a.y", actions: ["update"] };
+    expect(createOnlyRefusal([{ address: "a.x", actions: ["create"] }, update])).toEqual([
+      { kind: "not_create", change: update },
+    ]);
+    expect(createOnlyRefusal([{ address: "data.a.z", actions: ["read"] }])).toEqual([
+      { kind: "creates_nothing" },
+    ]);
+  });
+});
+
+describe("log archive readiness (provisioning §Backend bootstrap)", () => {
+  const LOCATION = {
+    bucket: "fff-abcd1234-logs-123456789012-eu-west-2-an",
+    accountId: "123456789012",
+    region: "eu-west-2",
+  };
+  const READY: ArchiveReadiness = {
+    versioning: "Enabled",
+    publicAccessBlocked: true,
+    encrypted: true,
+    tlsOnly: true,
+    ownership: "BucketOwnerEnforced",
+    sseS3: true,
+    abac: "Enabled",
+  };
+
+  test("an archive the archive root finished is ready", () => {
+    expect(missingArchiveHardening(READY)).toEqual([]);
+    expect(unreadyArchive(LOCATION, READY)).toBeUndefined();
+  });
+
+  test("names each of its settings it lacks, SSE-S3 rather than any encryption", () => {
+    const bare: ArchiveReadiness = {
+      versioning: "Suspended",
+      publicAccessBlocked: false,
+      // S3 encrypts every new bucket by default: that alone is not SSE-S3 as the root sets it.
+      encrypted: true,
+      tlsOnly: false,
+      ownership: "ObjectWriter",
+      sseS3: false,
+      abac: "Disabled",
+    };
+    expect(missingArchiveHardening(bare)).toEqual([
+      "versioning",
+      "public_access_block",
+      "bucket_owner_enforced",
+      "sse_s3",
+      "abac",
+      "tls_only_policy",
+    ]);
+    expect(missingArchiveHardening({ ...READY, ownership: undefined, abac: undefined })).toEqual([
+      "bucket_owner_enforced",
+      "abac",
+    ]);
+  });
+
+  test("an unready archive carries only where it is, what S3 reports and what it lacks", () => {
+    const readiness = { ...READY, sseS3: false };
+    const archive = { ...LOCATION, kind: "archive", credentials: { source: "chain" } };
+    expect(unreadyArchive(archive, readiness)).toEqual({
+      location: LOCATION,
+      readiness,
+      missing: ["sse_s3"],
     });
   });
 });

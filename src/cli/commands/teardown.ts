@@ -27,30 +27,32 @@ import { loadInstance, printAccountRefusal } from "./selected-instance";
 const USAGE = [
   "Usage: fffactory teardown [--confirm FACTORY_ID] [--instance PATH] [--profile NAME]",
   "",
-  "Removes the whole factory and everything it owns, under the factory-wide lock:",
-  "every worker's EC2 instance and root volume, the network, IAM and everything else",
-  "its Terraform state holds, its tailnet devices, the secrets it owns (deleted",
-  "without a recovery window, each confirmed gone), its local saved plans and, last,",
-  "the state bucket with its state, lock and operation records. Admin-tier: it",
-  "needs AWS credentials that can destroy the factory and the factory's Tailscale",
-  "admin client (`fffactory secret set tailscale-admin-client`).",
+  "Removes the whole factory and everything it owns but its log archive, under the",
+  "factory-wide lock: every worker's EC2 instance and root volume, the network, IAM",
+  "and everything else its Terraform state holds, its tailnet devices, the secrets",
+  "it owns (deleted without a recovery window, each confirmed gone), its local saved",
+  "plans and, last, the state bucket with its state, lock and operation records.",
+  "Admin-tier: it needs AWS credentials that can destroy the factory and the",
+  "factory's Tailscale admin client (`fffactory secret set tailscale-admin-client`).",
   "",
   "It first shows what it will remove and keep: the factory, the destroy plan, the",
-  "instances and VPCs, the devices and the secrets. You confirm by typing the",
-  "factory ID at a terminal, or with --confirm FACTORY_ID. Once confirmed, it stops",
-  "dispatch on every running worker and inspects each once: busy agents, work",
-  "not pushed to any remote, unresolved or unmanaged checkouts, or a worker that",
-  "cannot be inspected refuse it, naming the worker. Teardown has no --force:",
-  "remove such a worker first with `fffactory worker terminate KEY --force`. A",
-  "stopped worker is not inspected, and unpushed work on its disk is destroyed.",
-  "A refusal leaves dispatch stopped where it stopped it: `fffactory apply`",
-  "restarts it.",
+  "instances and VPCs, the devices, the secrets and, when factory.json enables one,",
+  "the log archive. You confirm by typing the factory ID at a terminal, or with",
+  "--confirm FACTORY_ID. Once confirmed, it stops dispatch on every running worker",
+  "and inspects each once: busy agents, work not pushed to any remote, unresolved",
+  "or unmanaged checkouts, or a worker that cannot be inspected refuse it, naming",
+  "the worker. Teardown has no --force: remove such a worker first with",
+  "`fffactory worker terminate KEY --force`. A stopped worker is not inspected, and",
+  "unpushed work on its disk is destroyed. A refusal leaves dispatch stopped where",
+  "it stopped it: `fffactory apply` restarts it.",
   "",
   "It keeps every secret factory.json only refers to, tagged secrets it does not",
   "own, tailnet devices that are not provably the factory's, the Tailscale auth",
-  "key and OAuth client themselves, and factory.json, which still describes the",
-  "factory: `fffactory apply` would create a new one. Revoke the persistent",
-  "sources at their providers yourself once nothing else uses them.",
+  "key and OAuth client themselves, the log archive when factory.json enables",
+  "one, which fffactory never removes, and factory.json, which still describes",
+  "the factory: `fffactory apply` would create it again, adopting the archive if",
+  "it exists. Revoke the persistent sources at their providers yourself once",
+  "nothing else uses them.",
   "",
   "When a deletion fails part way, it reports what remains, and rerunning it",
   "finishes from what actually remains. Without a state bucket, it deletes only",
@@ -70,7 +72,7 @@ const USAGE = [
   "  --profile NAME        Use this AWS profile. Otherwise AWS_PROFILE, or else the",
   "                        standard AWS credential chain.",
   "",
-  "Exits 0 once nothing the factory owns remains, 1 when refused or declined",
+  "Exits 0 once only what it keeps remains, 1 when refused or declined",
   "(nothing removed) or failed before removing anything, 2 when it stopped part",
   "way, with what remains and the next action, and 128 plus the signal's number",
   "when interrupted.",
@@ -153,7 +155,7 @@ function dependencies(
   };
 }
 
-/** 0 once nothing the factory owns remains, 2 part way, 1 for anything else. */
+/** 0 once only what teardown keeps remains, 2 part way, 1 for anything else. */
 function exitCode(result: FactoryTeardown): number {
   if (result.kind === "done") return 0;
   return result.kind === "partial" ? 2 : 1;
@@ -209,7 +211,7 @@ async function teardown(args: readonly string[], context: CliContext): Promise<n
 }
 
 export const teardownCommand: Command = {
-  summary: "Remove the whole factory and everything it owns, after you confirm its ID",
+  summary: "Remove the whole factory, all it owns but its log archive, after you confirm its ID",
   usage: USAGE,
   run: teardown,
   waitsOnInterrupt: true,

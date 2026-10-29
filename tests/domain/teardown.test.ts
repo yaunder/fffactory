@@ -6,6 +6,7 @@ import { classifySecrets, type ListedSecret } from "../../src/domain/secrets";
 import type { Machine } from "../../src/domain/status";
 import type { TailnetDevice } from "../../src/domain/tailnet";
 import {
+  archiveKept,
   bucketRemains,
   bucketAppeared,
   bucketUnreachable,
@@ -17,7 +18,7 @@ import {
   destroyPlanRefusal,
   destroyProjectionRefusal,
   dispatchLeftStopped,
-  FACTORY_JSON_KEPT,
+  factoryJsonKept,
   interruptedTeardown,
   inventoryUnavailable,
   leftoversUnverified,
@@ -285,6 +286,8 @@ describe("the guarded destroy plan (provisioning §Destroy plan)", () => {
 });
 
 const ID = "fff-abcd1234" as FactoryId;
+/** The log archive `archiveBucketName` derives for `ID` in the test account and Region. */
+const ARCHIVE = "fff-abcd1234-logs-123456789012-eu-west-2-an";
 const TAG = "tag:factory";
 
 const device = (id: string, hostName: string, tags: readonly string[] = [TAG]): TailnetDevice => ({
@@ -1144,12 +1147,42 @@ describe("a factory without a state bucket (teardown §No state bucket)", () => 
 
 describe("teardown's advice (teardown §Report)", () => {
   test("leaves factory.json and every source it only refers to to the operator", () => {
-    expect(FACTORY_JSON_KEPT).toBe(
-      "factory.json is left as it is: teardown never changes it. It still describes the factory, so `fffactory apply` would create a new one. Remove it yourself once you no longer need it.",
+    expect(factoryJsonKept(undefined)).toBe(
+      "factory.json is left as it is: teardown never changes it. It still describes the factory, so `fffactory apply` would create it again. Remove it yourself once you no longer need it.",
     );
     expect(REVOKE_SOURCES).toBe(
       "Teardown revokes nothing it only refers to. Once nothing else uses them, revoke the Tailscale auth key and admin OAuth client (https://login.tailscale.com/admin/settings/trust-credentials), remove the tailnet policy entries made for the factory (its tag, grant and SSH rule), and revoke the API credentials kept above, with any grants given to them, at their providers.",
     );
     expect(CHECK_LISTED_DEVICES).toContain("https://login.tailscale.com/admin/machines");
+  });
+
+  test("with the log archive, factory.json still names the archive apply would adopt", () => {
+    expect(factoryJsonKept(ARCHIVE)).toBe(
+      "factory.json is left as it is: teardown never changes it. It still describes the factory, so `fffactory apply` would create it again, adopting its log archive if it exists. " +
+        `Log archive ${ARCHIVE} is kept; fffactory never removes it. ` +
+        "Remove factory.json yourself once you no longer need it.",
+    );
+  });
+});
+
+describe("the log archive teardown keeps (teardown §Confirmation, §Report)", () => {
+  test("is named, never removed", () => {
+    expect(archiveKept(ARCHIVE)).toBe(
+      `Log archive ${ARCHIVE} is kept; fffactory never removes it.`,
+    );
+  });
+
+  test("the question excepts it and says it is kept, with a state bucket or without one", () => {
+    expect(teardownQuestion(ID, false, ARCHIVE)).toBe(
+      `Remove factory ${ID} and everything it owns but its log archive? Its workers, network, IAM, Terraform ` +
+        "state, tailnet devices, owned secrets and state bucket are deleted, and none can be " +
+        `recovered. Log archive ${ARCHIVE} is kept; fffactory never removes it. ` +
+        "Type the factory ID to confirm: ",
+    );
+    expect(teardownQuestion(ID, true, ARCHIVE)).toBe(
+      `Remove what is left of factory ${ID}? Its tailnet devices and owned secrets are ` +
+        `deleted, and none can be recovered. Log archive ${ARCHIVE} is kept; fffactory never ` +
+        "removes it. Type the factory ID to confirm: ",
+    );
   });
 });

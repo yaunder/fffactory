@@ -149,3 +149,13 @@ variable "hosts" {
     error_message = "Host keys must be 1-32 lowercase letters, digits and single hyphens, starting with a letter."
   }
 }
+
+variable "archive_bucket" {
+  description = "The log archive's bucket, <factory_id>-logs-<account_id>-<region>-an, derived when factory.json enables log_archive; every host may write its own prefix of it. Null when the archive is not enabled: hosts may write nothing."
+  type        = string
+
+  validation {
+    condition     = var.archive_bucket == null || var.archive_bucket == "${var.factory_id}-logs-${var.account_id}-${var.region}-an"
+    error_message = "archive_bucket must be null or the derived <factory_id>-logs-<account_id>-<region>-an."
+  }
+}

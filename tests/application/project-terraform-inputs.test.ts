@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import example from "../../examples/factory.json";
 import {
+  projectArchiveVariables,
   projectBackendVariables,
   projectFactoryVariables,
 } from "../../src/application/project-terraform-inputs";
@@ -43,6 +44,7 @@ describe("factory.json projected into the factory root module's variables", () =
         },
         credential_secret_arns: {},
         hosts: { "builder-1": { instance_type: "m7i.xlarge", root_volume_gib: 200 } },
+        archive_bucket: "example-logs-123456789012-us-east-1-an",
       },
     });
   });
@@ -64,6 +66,15 @@ describe("factory.json projected into the factory root module's variables", () =
     );
     expect(projection).toEqual(projectFactoryVariables(instance(), []));
     expect(JSON.stringify(projection)).not.toContain("ts-admin");
+  });
+
+  test("hosts may write only to the log archive factory.json enables: no bucket when it does not", () => {
+    const disabled = { ...example, log_archive: { enabled: false } };
+    const { log_archive: _, ...absent } = example;
+    for (const document of [disabled, absent]) {
+      const projection = projectFactoryVariables(instance(document), []);
+      expect(projection.ok && projection.variables.archive_bucket).toBeNull();
+    }
   });
 
   test("every credential reference reaches the hosts' role, whatever a host keeps on login (D2)", () => {
@@ -235,6 +246,42 @@ describe("factory.json projected into the backend root module's variables", () =
             "must start with the factory ID and a hyphen, so its name carries the factory ID",
         },
       ],
+    });
+  });
+});
+
+describe("factory.json projected into the archive root module's variables", () => {
+  test("the log archive's derived bucket is projected as its suffix after the factory ID", () => {
+    expect(projectArchiveVariables(instance())).toEqual({
+      ok: true,
+      variables: {
+        factory_id: "example",
+        account_id: "123456789012",
+        region: "us-east-1",
+        archive_bucket_suffix: "logs-123456789012-us-east-1-an",
+      },
+    });
+  });
+
+  test("an instance that does not enable the log archive is refused", () => {
+    const disabled = { ...example, log_archive: { enabled: false } };
+    const { log_archive: _, ...absent } = example;
+    for (const document of [disabled, absent])
+      expect(projectArchiveVariables(instance(document))).toEqual({
+        ok: false,
+        issues: [{ path: "log_archive.enabled", message: "must be true to plan the log archive" }],
+      });
+  });
+
+  test("an instance without its factory ID, account or Region is refused", () => {
+    expect(
+      projectArchiveVariables(instance({ schema_version: 1, log_archive: { enabled: true } })),
+    ).toEqual({
+      ok: false,
+      issues: ["factory_id", "aws.account_id", "aws.region"].map((path) => ({
+        path,
+        message: "is required to plan",
+      })),
     });
   });
 });

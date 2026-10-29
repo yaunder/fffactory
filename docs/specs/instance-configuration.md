@@ -53,6 +53,7 @@ Schema is [`schemas/factory.schema.json`](../../schemas/factory.schema.json), an
 | `aws.account_id` | Expected AWS account, 12 digits. |
 | `aws.region` | Expected AWS Region, such as `us-east-1`. |
 | `state_backend.bucket` | State bucket name (S3 bucket name rules: 3-63 of `a-z`, `0-9`, `.`, `-`), starting with the factory ID and a hyphen. See below. |
+| `log_archive.enabled` | Optional; whether the factory has a worker log archive (required inside `log_archive`). Its bucket name is derived. See [Log archive](#log-archive). |
 | `network.vpc_cidr`, `network.public_subnet_cidr` | IPv4 CIDR blocks. |
 | `network.availability_zone` | Availability zone, such as `us-east-1a`. |
 | `tailscale.tag` | Tailscale tag, such as `tag:software-factory`. |
@@ -95,6 +96,56 @@ requires it to start with the factory ID and a hyphen, such as
 `fff-k3x9q2ab-state-123456789012` for factory `fff-k3x9q2ab`. The rule
 applies once both `factory_id` and `state_backend.bucket` are set and well
 formed; the JSON Schema cannot express it.
+
+The state bucket is never the log archive's bucket: validation refuses
+`state_backend.bucket` equal to the archive's derived name
+([Log archive](#log-archive)), once `factory_id`, `aws.account_id` and
+`aws.region` are well formed, whether `log_archive.enabled` is true, false or
+absent, with a message naming the rule, never a configured value. An archive
+kept after teardown already passes as a ready state bucket, so `apply` would
+adopt it as one, and teardown, which deletes the state bucket, would then
+delete the archive it says it keeps. Reserving the name while the archive is
+disabled keeps evidence archived before it was disabled safe the same way.
+The JSON Schema cannot express this rule.
+
+### Log archive
+
+`log_archive.enabled: true` gives the factory a worker log archive, an S3
+bucket meant to keep workers' logs after the workers, and the factory, are
+gone. Absent or `false`, the factory has none. `log_archive` holds only
+`enabled`, and requires it. The field is optional, so schema version 1 is
+kept, and `fffactory init` never writes it: init fills only what fffactory
+generates, never an operator's choice. Enabling it makes `fffactory plan` and
+`apply` create the archive when it is missing, in the factory's reviewed plan
+([plan and apply §The infrastructure stage](plan-apply.md#the-infrastructure-stage)),
+and lets each host's role write new objects under its own prefix of the bucket
+([provisioning §Log archive access](provisioning.md#log-archive-access)).
+fffactory itself writes nothing in the archive yet, and never removes it:
+[teardown](teardown.md) keeps it and says so.
+
+The archive's bucket name is derived, never configured:
+`<factory_id>-logs-<aws.account_id>-<aws.region>-an`, such as
+`fff-k3x9q2ab-logs-123456789012-us-east-1-an`. The `-an` suffix puts it in S3's
+account-regional namespace, where no other account can ever take the name, and
+it carries the factory ID as every factory resource name does
+([provisioning §Names](provisioning.md#names)). Deriving it does not keep the
+factory's own configurable state bucket from that name; validation does
+([State bucket](#state-bucket)). `archiveBucketName` in
+`src/domain/resource-naming.ts` is the one statement of this rule; it gives no
+name while the archive is not enabled or `factory_id`, `aws.account_id` or
+`aws.region` is absent.
+
+The name must fit S3's 63 characters. A factory ID has at most 20, which leaves
+21 for the Region; every AWS Region name today is shorter, but the Region
+format has no length bound. Validation therefore refuses
+`log_archive.enabled: true` whose derived name would exceed 63 characters,
+once `factory_id`, `aws.account_id` and `aws.region` are well formed, with a
+message naming the rule and the name's length, never a configured value.
+
+The account-regional namespace is unavailable in `me-south-1` and
+`me-central-1`, so validation refuses `log_archive.enabled: true` in either,
+once `aws.region` names it, with a message naming the Region; `false` is
+accepted anywhere. The JSON Schema cannot express this rule.
 
 ### Secret references
 
@@ -163,15 +214,20 @@ Validation reports every issue, each with a field path such as `factory_id`,
 - an invalid factory ID or host key;
 - a raw secret value in a secret field;
 - duplicate host keys, repository keys or repository checkout paths;
-- a state bucket whose name does not start with the factory ID and a hyphen;
+- a state bucket whose name does not start with the factory ID and a hyphen,
+  or is the log archive's derived bucket name, whether or not the archive is
+  enabled;
+- `log_archive` without `enabled`, and `log_archive.enabled: true` in
+  `me-south-1` or `me-central-1`, or with a derived bucket name over 63
+  characters;
 - a secret reference in another Region than `aws.region` or another account
   than `aws.account_id`;
 - placement of a repository that is not declared in `repositories`;
 - an `interactive_logins` entry that is not an account ID, or that repeats one.
 
-Messages never echo field values, except keys that already passed their format
-check, so a secret pasted into any field cannot leak through validation
-output.
+Messages never echo field values, except keys and `aws.region` that already
+passed their format check, so a secret pasted into any field cannot leak
+through validation output.
 
 ## Completeness
 
@@ -186,18 +242,17 @@ ready only once its Paseo daemon runs, and the daemon never starts without a
 password ([control plane §The daemon password](control-plane.md#the-daemon-password)),
 so a host without one could be created but never made ready; the report names
 the command that stores it, `fffactory secret set paseo-password --host KEY`
-for that host's key. `hosts` may be an empty list: a
-factory may declare no worker, as
-[`fffactory worker terminate KEY`](worker-lifecycle.md#terminate-remove) leaves
-it after removing the last host, and its plan is then its shared
+for that host's key. `hosts` may be an empty list: a factory may declare no
+worker, as [`fffactory worker terminate KEY`](worker-lifecycle.md#terminate-remove)
+leaves it after removing the last host, and its plan is then its shared
 infrastructure alone
 ([plan-apply §An empty factory](plan-apply.md#an-empty-factory)). An absent
 `hosts` is still reported missing, so a new document is not taken for a factory
 deliberately without workers. Repositories, dispatch settings,
-`tailscale.admin_client_secret`, `credentials` and `interactive_logins` are
-optional for completeness. `plan`, `apply`, `upgrade`, `status`, `teardown` and
-the `worker` commands refuse an incomplete document; `secret set` does not, as it
-is how a secret reference is filled in.
+`tailscale.admin_client_secret`, `credentials`, `interactive_logins` and
+`log_archive` are optional for completeness. `plan`, `apply`, `upgrade`,
+`status`, `teardown` and the `worker` commands refuse an incomplete document;
+`secret set` does not, as it is how a secret reference is filled in.
 
 ## `fffactory validate`
 
@@ -300,7 +355,7 @@ pass the same selection and the factory Region.
 
 | Layer | Module | Responsibility |
 | --- | --- | --- |
-| Domain | `src/domain/instance.ts`, `src/domain/validation.ts`, `src/domain/initialization.ts` | `FactoryInstance`, `FactoryId`, `HostKey`, `Release`, secret references, validation rules, the delivered-account rule (`deliveredAccounts`), completeness report, factory ID generation from injected random bytes, and the gap-filling merge. Pure. |
+| Domain | `src/domain/instance.ts`, `src/domain/validation.ts`, `src/domain/initialization.ts`, `src/domain/resource-naming.ts` | `FactoryInstance`, `FactoryId`, `HostKey`, `Release`, secret references, validation rules, the delivered-account rule (`deliveredAccounts`), completeness report, factory ID generation from injected random bytes, the gap-filling merge, and the log archive's derived bucket name (`archiveBucketName`). Pure. |
 | Application | `src/application/resolve-instance.ts`, `src/application/validate-instance.ts`, `src/application/init-instance.ts`, `src/application/instance-store.ts` | Discovery precedence, reading and validating a document, initialization, the `InstanceStore` port. `describeSource`, each discovery source's words, is published wording: doctor's JSON `summary` embeds it, so it stays here. |
 | CLI adapter | `src/cli/presentation/instance-source.ts` | `instanceLine`, the `Instance: PATH (SOURCE)` line commands print, and `instanceHeader`, the restyled commands' header (`fffactory COMMAND · release R`, then `Instance  PATH (SOURCE)`, a path under home shown from `~`; [plan and apply §Before anything reaches AWS](plan-apply.md#before-anything-reaches-aws)), both in `describeSource`'s words. |
 | Infrastructure | `src/infrastructure/filesystem-instance-store.ts` | Filesystem `InstanceStore`, including the atomic write. |
@@ -308,6 +363,9 @@ pass the same selection and the factory Region.
 
 Tests: `tests/domain/instance.test.ts`, `tests/domain/instance-schema.test.ts`
 (JSON Schema agrees with the domain), `tests/domain/initialization.test.ts`,
+`tests/domain/resource-naming.test.ts` (the log archive's bucket name),
+`tests/cli/teardown.test.ts` (a state bucket named as the log archive refused
+before teardown reads anything of AWS, the archive left in place),
 `tests/application/resolve-instance.test.ts`,
 `tests/application/doctor.test.ts` (each source's words in doctor's summary),
 `tests/cli/presentation/instance-source.test.ts` (the instance line for each
@@ -333,4 +391,6 @@ initialization by [#90](https://github.com/yaunder/factory/issues/90);
 credentials by [#92](https://github.com/yaunder/factory/issues/92); the state
 bucket rule by [#96](https://github.com/yaunder/factory/issues/96); API
 credential references and interactive logins by
-[#66](https://github.com/yaunder/fffactory/issues/66).
+[#66](https://github.com/yaunder/fffactory/issues/66); the log archive, and the
+state bucket's refusal of its name, by
+[#110](https://github.com/yaunder/fffactory/issues/110).

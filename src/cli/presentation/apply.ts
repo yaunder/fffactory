@@ -49,14 +49,16 @@ type RefusedRun = Extract<
 /**
  * How a run is reported: the action, such as `apply`, the command a rerun uses, `apply`, or
  * `upgrade` for an upgrade whose pin was not moved, the instance and profile the command was
- * given, which every command it names repeats, and an upgrade's pin: whether it moved to
- * `release`.
+ * given, which every command it names repeats, an upgrade's pin: whether it moved to
+ * `release`, and whether the plan was a saved one named by its ID (`--plan-id`); otherwise it
+ * was made in this run, and its ID never shown.
  */
 export interface ApplyReporting {
   readonly action: "apply" | "upgrade";
   readonly rerun: "apply" | "upgrade";
   readonly selection: Selection;
   readonly pin?: { readonly moved: boolean; readonly release: string } | undefined;
+  readonly savedPlan?: boolean;
 }
 
 /** An output stream: standard output or standard error. */
@@ -87,9 +89,14 @@ export const applyingRow = (row: Row, labelWidth: number): Block => ({
 
 const INFRASTRUCTURE = "Infrastructure";
 
-/** Whether Terraform applies anything for `review`: backend bootstrap always creates. */
+/**
+ * Whether Terraform applies anything for `review`: backend bootstrap always creates, and a
+ * factory plan creating the log archive applies the archive root.
+ */
 const terraformApplies = (review: PlanReview): boolean =>
-  review.kind === "backend_bootstrap" || changeTally(review.changes).changing > 0;
+  review.kind === "backend_bootstrap" ||
+  review.archive?.creates === true ||
+  changeTally(review.changes).changing > 0;
 
 /** The widest label `review`'s Applying rows can have: Terraform's, the pin's, each worker's. */
 export function applyingLabelWidth(review: PlanReview): number {

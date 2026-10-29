@@ -2157,6 +2157,7 @@ describe("fffactory worker terminate (worker-lifecycle §Terminate (remove))", (
       bucket: location.bucket,
       terraformDirectory: TERRAFORM,
       planFile: "/plans/after/factory.tfplan",
+      archivePlanFile: "/plans/after/archive.tfplan",
       underFactoryLock: false,
       resizeGuard: { inventory: "read", workers: [] },
     });
