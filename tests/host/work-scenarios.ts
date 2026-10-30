@@ -234,6 +234,7 @@ export async function saveCheckpoint(
     next_seq: 2,
     saved_at: LAST_SUCCESS,
     last_success_at: LAST_SUCCESS,
+    discovery_after: null,
     sources,
   };
   const directory = world.at(COLLECTOR_STATE);

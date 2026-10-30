@@ -123,7 +123,11 @@ and `host collect --once`, which the log archive's timer runs as `factory`
   kept); found open elsewhere or unverifiable, it fails the run (`SourcePathMismatch`,
   `OpenPathUnverified`) and leaves the source, never silently. An append's tail is kept only
   while its prefix, hashed again after the tail's read on the same open file, is still the one
-  captured, so a rewrite is never spliced (§Capture). It never changes a source. Its
+  captured, so a rewrite is never spliced (§Capture). Its discovery is bounded by
+  `COLLECTION_BUDGET.entries` and a quarter of its time: the checkpoint's recent sources first,
+  by path, then the walk resumed from `discovery_after`, never the whole tree at once
+  (§Budgets); `discoverSources`, the backlog's, always walks from the beginning. It never
+  changes a source. Its
   time budget bounds the decisions' hashing too, newest first, with half the budget, so a run always reaches its checkpoint (§Budgets). File-system failures are
   reported by their error code, a vanished source is none, and an error without a code is
   thrown. Tests run it over a worker in a temporary directory and `tests/support/memory-archive.ts`.

@@ -133,7 +133,7 @@ function system(archive: MemoryArchive, overrides: Partial<CollectSystem> = {}):
     now: time.now,
     randomBytes,
     lock: flockExclusive,
-    budget: { milliseconds: 40_000, bytes: 64 * 1024 * 1024 },
+    budget: { milliseconds: 40_000, bytes: 64 * 1024 * 1024, entries: 50_000 },
     openFiles: platform() === "linux" ? "/proc/self/fd" : null,
     incarnation: null,
     ...overrides,
@@ -907,7 +907,7 @@ describe("the lock", () => {
 });
 
 describe("budgets", () => {
-  const budget = { milliseconds: 40_000, bytes: 100 * KiB };
+  const budget = { milliseconds: 40_000, bytes: 100 * KiB, entries: 50_000 };
 
   test("the byte budget admits the most recently modified first and leaves the rest", async () => {
     await put(SUBAGENT, transcript(600, "old"));
@@ -966,7 +966,10 @@ describe("budgets", () => {
     const newest = sessions.at(-1) ?? "";
     await append(newest, transcript(2, "more"));
     const slow = clock(Date.parse("2026-10-30T11:00:00.000Z"), 1_000);
-    const timed = { budget: { milliseconds: 10_000, bytes: 64 * 1024 * 1024 }, now: slow.now };
+    const timed = {
+      budget: { milliseconds: 10_000, bytes: 64 * 1024 * 1024, entries: 50_000 },
+      now: slow.now,
+    };
 
     const report = await run(archive, timed);
 
@@ -992,7 +995,7 @@ describe("budgets", () => {
     const slow = clock(Date.parse("2026-10-30T11:00:00.000Z"), 3_000);
 
     const report = await run(archive, {
-      budget: { milliseconds: 10_000, bytes: 64 * 1024 * 1024 },
+      budget: { milliseconds: 10_000, bytes: 64 * 1024 * 1024, entries: 50_000 },
       now: slow.now,
     });
 
@@ -1001,6 +1004,81 @@ describe("budgets", () => {
     const entry = (await checkpoint())?.sources.find((source) => source.path === SESSION);
     expect(entry?.mtime_ms).toBe(captured);
     expect(await run(archive)).toMatchObject({ budget_hit: null, backlog: { files: 0 } });
+  });
+});
+
+describe("discovery's budget", () => {
+  const older = (n: number) => `${CLAUDE_ROOT}/file-history/h${String(n).padStart(2, "0")}/v1`;
+  const bounded = (entries: number) => ({
+    budget: { milliseconds: 40_000, bytes: 64 * 1024 * 1024, entries },
+  });
+  const archived = (archive: MemoryArchive) =>
+    new Set(records(archive).flatMap((record) => record.captures.map((capture) => capture.path)));
+
+  test("a history larger than one discovery is reached run by run: new evidence within a cycle, and the backlog drains", async () => {
+    const history = Array.from({ length: 20 }, (_, n) => older(n));
+    for (const path of history) await put(path, `old ${path}`);
+    const archive = memoryArchive();
+
+    const first = await run(archive, bounded(16));
+
+    expect(first.budget_hit).toBe("time");
+    expect(archived(archive).size).toBeGreaterThan(0);
+    expect(archived(archive).size).toBeLessThan(history.length);
+    expect((await checkpoint())?.discovery_after).toBeString();
+    await expectCheckpointBacked(archive);
+    const fresh = `${CLAUDE_ROOT}/file-history/a-new/v1`;
+    await put(fresh, "new evidence, before where discovery stopped");
+    let runs = 0;
+    while (!archived(archive).has(fresh) && runs < 12) {
+      await run(archive, bounded(16));
+      runs += 1;
+    }
+    expect(archived(archive).has(fresh)).toBe(true);
+    let last = first;
+    for (let n = 0; n < 12 && (last.budget_hit !== null || last.backlog.files > 0); n += 1)
+      last = await run(archive, bounded(16));
+    expect(archived(archive).size).toBe(history.length + 1);
+    await expectCheckpointBacked(archive);
+    await expectReassembles(archive);
+  });
+
+  test("a source appended to is captured by the next run, wherever discovery has reached", async () => {
+    for (let n = 0; n < 20; n += 1) await put(older(n), `old ${n}`);
+    await put(SESSION, transcript(800));
+    const archive = memoryArchive();
+    for (let n = 0; n < 12 && archived(archive).size < 21; n += 1) await run(archive, bounded(16));
+    expect(archived(archive).size).toBe(21);
+
+    for (let round = 0; round < 6; round += 1) {
+      await append(SESSION, transcript(1, `r${round}`));
+      const report = await run(archive, bounded(16));
+      expect(report.budget_hit).toBe("time");
+      expect(captureOf(lastRecord(archive), SESSION)).toMatchObject({ length: 100 });
+    }
+    await expectReassembles(archive);
+  });
+
+  test("discovery stops at its share of the time budget; the run still reaches its checkpoint", async () => {
+    const history = Array.from({ length: 70 }, (_, n) => older(n));
+    for (const path of history) await put(path, "old");
+    const archive = memoryArchive();
+    let readings = 0;
+    const now = () => {
+      readings += 1;
+      if (readings === 2) time.advance(11_000);
+      return time.now();
+    };
+
+    const report = await run(archive, { now });
+
+    expect(report).toMatchObject({ outcome: "succeeded", budget_hit: "time" });
+    expect(archived(archive).size).toBeGreaterThan(0);
+    expect(archived(archive).size).toBeLessThan(history.length);
+    expect((await checkpoint())?.sources.length).toBe(archived(archive).size);
+    for (let n = 0; n < 3 && archived(archive).size < history.length; n += 1) await run(archive);
+    expect(archived(archive).size).toBe(history.length);
+    await expectReassembles(archive);
   });
 });
 
@@ -1014,7 +1092,7 @@ describe("random appends, rewrites and crashes", () => {
     const paths = [SESSION, SUBAGENT, TOOL_RESULT];
     for (const path of paths) await put(path, transcript(random(900)));
     const archive = memoryArchive();
-    const budget = { milliseconds: 40_000, bytes: 96 * KiB };
+    const budget = { milliseconds: 40_000, bytes: 96 * KiB, entries: 50_000 };
     for (let round = 0; round < 40; round += 1) {
       for (const path of paths) await mutate(path, random);
       const crashAt = random(6);

@@ -215,6 +215,7 @@ only after the data it names is stored:
 | `next_seq` | The sequence the next journal record takes; past the last one this run wrote, or a key it found taken. |
 | `saved_at` | When it was saved. |
 | `last_success_at` | When the last successful run ended, or `null`. |
+| `discovery_after` | Where the next run's discovery resumes: the last path the last run's discovery looked at before its budget stopped it, or `null` to start from the beginning ([Budgets](#budgets)). A checkpoint without it, saved before discovery resumed, reads as `null`. |
 | `sources` | Per source, by source ID: `path`, `identity`, `mtime_ms`, `generation`, captured `length` and `prefix_sha256`. |
 
 A missing or unreadable checkpoint is lost: the next run starts a new epoch,
@@ -223,8 +224,9 @@ again are already stored, and readers dedupe the ranges.
 
 ## Budgets
 
-A run uploads at most 64 MiB of blobs and stops starting uploads after 40 s
-(`COLLECTION_BUDGET`; both `TODO(re-evaluate when measured on Acceptance)`).
+A run uploads at most 64 MiB of blobs, stops starting uploads after 40 s, and
+its discovery looks at most at 50,000 entries (`COLLECTION_BUDGET`; all
+`TODO(re-evaluate when measured on Acceptance)`).
 Pending captures go most recently modified first, ties by source ID
 (`budgetedCaptures`): each is admitted while the bytes admitted stay within the
 budget, and the first that would exceed it stops the run there, leaving it and
@@ -248,6 +250,35 @@ takes longer than the decisions' half to hash never finishes a verify, and the
 sources modified more recently than it are verified first every run; at disk
 speed that is a prefix of gigabytes (`TODO(re-evaluate when T7 measures run
 time on Acceptance)`).
+
+Discovery is bounded too, so a history of any size never keeps a run from its
+captures, its checkpoint or its heartbeat, and never holds more than the
+budget's entries in memory. It takes at most the first quarter of the time
+budget (10 s, the clock read every 64 entries) and the budget's entries, each
+name it looks at counted, in two parts:
+
+1. **Recent sources.** The checkpoint's most recently modified sources, at most
+   half the entries, are looked at again by path, each found only as the walk
+   would find it: collectable, its every directory walkable and a directory by
+   `lstat`, never a link. A source being written, such as a live transcript, is
+   so appended to every run, wherever the walk is.
+2. **The walk.** The walk goes on from the checkpoint's `discovery_after`, in
+   its own order (each directory's names sorted, a directory before what it
+   holds): it looks at no path up to that one but the directories on the way to
+   it. Stopped by the budget, it saves the last path it looked at as the next
+   run's `discovery_after`; reaching the end, it saves `null`, and the next run
+   starts from the beginning.
+
+Every path is so looked at at least once in every cycle of runs, each run
+looking at least at half the entries, so a new file anywhere, however much
+history comes before it, is found within a bounded number of runs (about the
+number of entries over half the budget's, plus one), and once captured it is a
+recent source. A backlog drains: each cycle finds every source, and what is
+found is decided and captured within the other budgets. A walk resumed by
+position rather than by modification time needs no order of directories by
+time, which a file's append does not change. A run whose discovery stopped
+reports `budget_hit: "time"`, and its backlog counts only the sources it
+found.
 
 ## Backlog
 
@@ -296,8 +327,10 @@ One run (`collectOnce`, `src/host/collect.ts`) is one pass, in this order:
    which still collects.
 2. **Checkpoint.** It reads `checkpoint.json` beside the lock; missing or
    unreadable, it starts a new one ([Checkpoint](#checkpoint)).
-3. **Discovery.** It walks `CLAUDE_ROOT` with `lstat`, descending only into
-   walkable directories and finding only collectable files ([Sources](#sources)).
+3. **Discovery.** It looks again at the checkpoint's recent sources, then walks
+   `CLAUDE_ROOT` with `lstat` from where the last run's walk stopped,
+   descending only into walkable directories and finding only collectable files
+   ([Sources](#sources)), within its budget ([Budgets](#budgets)).
    A symbolic link is neither descended into nor collected, nor is `CLAUDE_ROOT`
    when it is one; a path neither walkable nor collectable is not even `lstat`ed.
 4. **Decision.** Each source is decided from its entry and its `lstat`
@@ -321,7 +354,8 @@ One run (`collectOnce`, `src/host/collect.ts`) is one pass, in this order:
 8. **Checkpoint.** It saves the checkpoint whole or not at all (a private
    `0600` copy, flushed and renamed over it). Its entries take the run's captures
    only when their journal record was stored, so it never names a blob or record
-   that is not stored; `next_seq` passes every key this run found taken or wrote.
+   that is not stored; `next_seq` passes every key this run found taken or wrote,
+   and `discovery_after` is where its discovery stopped.
 
 A source is opened only with `O_NOFOLLOW`, and read only while the open file is
 still the device and inode discovery found, the kernel finds it open at its own
@@ -345,10 +379,11 @@ among them), or the checkpoint could not
 be saved, or a source was not found open at its own path; `failure` the first
 one's class: the file-system error code, `SourcePathMismatch`,
 `OpenPathUnverified` or the writer's), `budget_hit` (`time` over `bytes`; `time`
-when the decisions or the uploads ran out of it), `uploaded_bytes` (the blobs it
+when discovery, the decisions or the uploads ran out of their budget), `uploaded_bytes` (the blobs it
 created; one that existed is not counted), the journal sequence it wrote, the
 last success (the checkpoint's, this run's when it succeeded and was saved) and
-the backlog by the checkpoint in force after it and the stats it discovered.
+the backlog by the checkpoint in force after it and the stats it discovered
+(only those its discovery found, when it stopped).
 
 The archive is written through an `ArchiveWriter` (`put(key, bytes)` answering
 `created`, `exists` or `failed` with a class; `src/domain/archive-format.ts`),

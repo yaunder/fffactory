@@ -285,6 +285,7 @@ const CHECKPOINT: Checkpoint = {
   next_seq: 3,
   saved_at: "2026-10-30T10:16:02.000Z",
   last_success_at: "2026-10-30T10:16:02.000Z",
+  discovery_after: `${R}/file-history/0b6e1c3a`,
   sources: [
     ENTRY,
     {
@@ -318,8 +319,15 @@ describe("checkpoint", () => {
       next_seq: 1,
       saved_at: "2026-10-30T10:15:00.000Z",
       last_success_at: null,
+      discovery_after: null,
       sources: [],
     });
+  });
+
+  test("a checkpoint saved before discovery resumed reads as starting from the beginning", () => {
+    const { discovery_after: _, ...older } = CHECKPOINT;
+    const parsed = parseCheckpoint(JSON.stringify(older));
+    expect(parsed).toEqual({ ok: true, document: { ...CHECKPOINT, discovery_after: null } });
   });
 
   test("an unreadable checkpoint is refused, so the run starts a new epoch", () => {
@@ -331,6 +339,8 @@ describe("checkpoint", () => {
       JSON.stringify({ ...CHECKPOINT, sources: [{ ...ENTRY, identity: "" }] }),
       JSON.stringify({ ...CHECKPOINT, sources: [{ ...ENTRY, path: `${R}/../x` }] }),
       JSON.stringify({ ...CHECKPOINT, sources: [ENTRY, ENTRY] }),
+      JSON.stringify({ ...CHECKPOINT, discovery_after: `${R}/../x` }),
+      JSON.stringify({ ...CHECKPOINT, discovery_after: "/etc" }),
     ])
       expect(parseCheckpoint(text).ok).toBe(false);
   });
@@ -350,8 +360,8 @@ describe("budgets", () => {
   const sources = (result: ReturnType<typeof budgetedCaptures>) =>
     result.admitted.map((item) => item.source);
 
-  test("40 s and 64 MiB per run, more than a small file", () => {
-    expect(COLLECTION_BUDGET).toEqual({ milliseconds: 40_000, bytes: 64 * MiB });
+  test("40 s, 64 MiB and 50 000 entries discovered per run, more than a small file", () => {
+    expect(COLLECTION_BUDGET).toEqual({ milliseconds: 40_000, bytes: 64 * MiB, entries: 50_000 });
     expect(COLLECTION_BUDGET.bytes).toBeGreaterThan(SMALL_FILE_BYTES);
   });
 

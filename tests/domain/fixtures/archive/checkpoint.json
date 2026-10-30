@@ -4,6 +4,7 @@
   "next_seq": 3,
   "saved_at": "2026-10-30T10:16:02.000Z",
   "last_success_at": "2026-10-30T10:16:02.000Z",
+  "discovery_after": "/home/factory/.claude/file-history/0b6e1c3a",
   "sources": [
     {
       "source": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",

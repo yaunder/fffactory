@@ -118,10 +118,15 @@ export function walkable(path: string): boolean {
 export const SMALL_FILE_BYTES = 64 * 1024;
 
 /**
- * What one run may upload, and for how long it starts uploads.
+ * What one run may upload, for how long it starts uploads, and how many entries its discovery
+ * looks at (§Budgets).
  * TODO(re-evaluate when measured on Acceptance): set from the measured run time and peak RSS.
  */
-export const COLLECTION_BUDGET = { milliseconds: 40_000, bytes: 64 * 1024 * 1024 } as const;
+export const COLLECTION_BUDGET = {
+  milliseconds: 40_000,
+  bytes: 64 * 1024 * 1024,
+  entries: 50_000,
+} as const;
 
 /** A source as `stat` sees it. */
 export interface SourceStat {
@@ -262,6 +267,11 @@ export interface Checkpoint {
   readonly next_seq: number;
   readonly saved_at: string;
   readonly last_success_at: string | null;
+  /**
+   * Where the next run's discovery resumes: the last path the last run's looked at before its
+   * budget stopped it, or null to start from the beginning (§Budgets).
+   */
+  readonly discovery_after: string | null;
   readonly sources: readonly SourceCheckpoint[];
 }
 
@@ -273,6 +283,7 @@ export function newCheckpoint(epochId: string, now: string): Checkpoint {
     next_seq: 1,
     saved_at: now,
     last_success_at: null,
+    discovery_after: null,
     sources: [],
   };
 }
@@ -301,6 +312,7 @@ export function checkpointJson(checkpoint: Checkpoint): string {
       next_seq: checkpoint.next_seq,
       saved_at: checkpoint.saved_at,
       last_success_at: checkpoint.last_success_at,
+      discovery_after: checkpoint.discovery_after,
       sources: [...checkpoint.sources].sort(bySource).map(sourceJson),
     },
     null,
@@ -336,6 +348,9 @@ function readCheckpoint(document: Fields): Checkpoint {
     saved_at: isoTime(document.saved_at, "saved_at"),
     last_success_at: nullable(document.last_success_at, (value) =>
       isoTime(value, "last_success_at"),
+    ),
+    discovery_after: nullable(document.discovery_after ?? null, (value) =>
+      sourcePath(value, "discovery_after"),
     ),
     sources,
   };

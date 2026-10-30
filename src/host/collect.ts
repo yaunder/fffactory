@@ -77,7 +77,12 @@ export interface CollectSystem {
   readonly now: () => Date;
   readonly randomBytes: RandomBytes;
   readonly lock: ExclusiveLock;
-  readonly budget: { readonly milliseconds: number; readonly bytes: number };
+  readonly budget: {
+    readonly milliseconds: number;
+    readonly bytes: number;
+    /** How many entries a run's discovery looks at (§Budgets). */
+    readonly entries: number;
+  };
   /**
    * Where the kernel lists this process's open files, `/proc/self/fd` on a worker (Linux, the
    * collector's only platform); null leaves where a source was opened unchecked, for tests
@@ -181,25 +186,31 @@ async function lstatOf(root: string, path: string, failures: Failures) {
 /** One discovery: where it looks, what it found, and whether it may go on. */
 interface Walk {
   readonly root: string;
-  readonly found: Observed[];
+  /** What it found, by source ID, in the order found. */
+  readonly found: Map<string, Observed>;
   readonly failures: Failures;
   /** Asked before each entry is looked at; false stops discovery there (`cut`). */
   readonly more: () => boolean;
+  /** Where it resumes: it looks at no path up to this one but those on the way to it. */
+  readonly after: string | null;
+  /** The last path it looked at. */
+  last: string | null;
   cut: boolean;
 }
 
+function walking(root: string, failures: Failures, more: () => boolean, after: string | null) {
+  const walk: Walk = { root, found: new Map(), failures, more, after, last: null, cut: false };
+  return walk;
+}
+
 /**
- * Every source, by `lstat`: a symbolic link is neither descended into nor collected. Stops,
- * `cut`, once `more` says no; a run never stops it.
+ * Every source after `walking.after` in the walk's order, by `lstat`: a symbolic link is neither
+ * descended into nor collected. Stops, `cut`, once `more` says no.
  */
-async function discover(
-  root: string,
-  failures: Failures,
-  more: () => boolean = () => true,
-): Promise<Walk> {
-  const walking: Walk = { root, found: [], failures, more, cut: false };
-  if ((await lstatOf(root, CLAUDE_ROOT, failures))?.isDirectory()) await walk(walking, CLAUDE_ROOT);
-  return walking;
+async function discover(walk: Walk): Promise<Walk> {
+  if ((await lstatOf(walk.root, CLAUDE_ROOT, walk.failures))?.isDirectory())
+    await walkDirectory(walk, CLAUDE_ROOT);
+  return walk;
 }
 
 /** What discovery found under `root`, and whether it found everything. */
@@ -211,42 +222,139 @@ export interface Discovery {
 
 /**
  * The collector's discovery for a reader other than the run (`host work inspect`'s backlog):
- * the same allowlist, never through a symbolic link, stopped once `more` says no.
+ * the same allowlist, never through a symbolic link, from the beginning, stopped once `more`
+ * says no.
  */
 export async function discoverSources(root: string, more: () => boolean): Promise<Discovery> {
   const failures: Failures = { first: null };
-  const walking = await discover(root, failures, more);
-  return { observed: walking.found, complete: !walking.cut && failures.first === null };
+  const walk = await discover(walking(root, failures, more, null));
+  return { observed: [...walk.found.values()], complete: !walk.cut && failures.first === null };
 }
 
 const asFile = (path: string) => collectable({ path, kind: "file", viaSymlink: false });
 
-async function walk(walking: Walk, directory: string) {
+/**
+ * Where `path` is in the walk's order against `after`, the order a walk looks at paths in (each
+ * directory's names sorted, a directory before what it holds): after it, on the way to it (it, or
+ * a directory holding it), or before it.
+ */
+function placed(path: string, after: string | null): "after" | "on_the_way" | "before" {
+  if (after === null) return "after";
+  if (path === after || after.startsWith(`${path}/`)) return "on_the_way";
+  return walkOrder(path.split("/"), after.split("/")) > 0 ? "after" : "before";
+}
+
+/** Two paths' segments in the walk's order: negative, zero or positive. */
+function walkOrder(these: readonly string[], those: readonly string[]): number {
+  const index = these.findIndex((segment, at) => segment !== those[at]);
+  if (index === -1 || index >= those.length) return these.length - those.length;
+  return (these[index] ?? "") < (those[index] ?? "") ? -1 : 1;
+}
+
+async function walkDirectory(walk: Walk, directory: string) {
   let names: string[];
   try {
-    names = (await readdir(join(walking.root, directory))).sort();
+    names = (await readdir(join(walk.root, directory))).sort();
   } catch (error) {
-    note(walking.failures, error);
+    note(walk.failures, error);
     return;
   }
   for (const name of names) {
-    if (walking.cut || !walking.more()) {
-      walking.cut = true;
+    const path = `${directory}/${name}`;
+    const place = placed(path, walk.after);
+    if (place === "before") continue;
+    if (walk.cut || !walk.more()) {
+      walk.cut = true;
       return;
     }
-    await visit(walking, `${directory}/${name}`);
+    if (place === "after") walk.last = path;
+    await visit(walk, path, place === "after");
   }
 }
 
-/** Descends into a collected directory, or finds a source; `lstat`s nothing else. */
-async function visit(walking: Walk, path: string) {
+/**
+ * Descends into a collected directory, or finds a source when `finds`; `lstat`s nothing else.
+ */
+async function visit(walk: Walk, path: string, finds: boolean) {
   const descend = walkable(path);
-  const source = asFile(path);
+  const source = finds && asFile(path);
   if (!descend && !source) return;
-  const stats = await lstatOf(walking.root, path, walking.failures);
-  if (descend && stats?.isDirectory()) await walk(walking, path);
-  else if (source && stats?.isFile())
-    walking.found.push({ source: sourceId(path), path, stat: sourceStat(stats) });
+  const stats = await lstatOf(walk.root, path, walk.failures);
+  if (descend && stats?.isDirectory()) await walkDirectory(walk, path);
+  else if (source && stats?.isFile()) found(walk, path, stats);
+}
+
+function found(walk: Walk, path: string, stats: BigIntStats) {
+  const source = sourceId(path);
+  if (!walk.found.has(source)) walk.found.set(source, { source, path, stat: sourceStat(stats) });
+}
+
+/**
+ * Whether `directory` is reached by directories alone from the Claude root, each one discovery
+ * would descend into: `lstat`ed once a run, in `seen`.
+ */
+async function reachable(
+  walk: Walk,
+  directory: string,
+  seen: Map<string, boolean>,
+): Promise<boolean> {
+  const known = seen.get(directory);
+  if (known !== undefined) return known;
+  const parent = directory === CLAUDE_ROOT ? undefined : dirname(directory);
+  const reached: boolean =
+    walkable(directory) &&
+    (parent === undefined || (await reachable(walk, parent, seen))) &&
+    (await lstatOf(walk.root, directory, walk.failures))?.isDirectory() === true;
+  seen.set(directory, reached);
+  return reached;
+}
+
+/**
+ * Looks again at `recent`, the sources the checkpoint saw modified last, by path, each only
+ * while `more` says yes, as discovery would find it: a collectable file in directories alone.
+ */
+async function revisit(walk: Walk, recent: readonly SourceCheckpoint[], more: () => boolean) {
+  const seen = new Map<string, boolean>();
+  for (const entry of recent) {
+    if (!more()) return;
+    if (!asFile(entry.path) || !(await reachable(walk, dirname(entry.path), seen))) continue;
+    const stats = await lstatOf(walk.root, entry.path, walk.failures);
+    if (stats?.isFile()) found(walk, entry.path, stats);
+  }
+}
+
+/** How often, in entries, discovery reads the run's clock. */
+const CLOCK_EVERY = 64;
+/** The share of the time budget discovery may take. */
+const DISCOVERY_SHARE = 0.25;
+
+/**
+ * A run's discovery (§Budgets), within its share of the time budget and the budget's entries:
+ * first the sources the checkpoint saw modified last, at most half the entries, then the walk,
+ * resumed after where the last run's stopped. A walk that reaches the end starts the next run's
+ * from the beginning.
+ */
+async function discoverForRun(
+  system: CollectSystem,
+  root: string,
+  loaded: Checkpoint,
+  startedMs: number,
+  failures: Failures,
+): Promise<Walk> {
+  const end = startedMs + system.budget.milliseconds * DISCOVERY_SHARE;
+  let looked = 0;
+  let late = false;
+  const within = (entries: number) => () => {
+    if (late || looked >= entries) return false;
+    looked += 1;
+    late = looked % CLOCK_EVERY === 0 && system.now().getTime() >= end;
+    return !late;
+  };
+  const walk = walking(root, failures, within(system.budget.entries), loaded.discovery_after);
+  const hot = Math.floor(system.budget.entries / 2);
+  const recent = loaded.sources.toSorted(newestFirst).slice(0, hot);
+  await revisit(walk, recent, within(hot));
+  return discover(walk);
 }
 
 /**
@@ -686,7 +794,8 @@ async function run(system: CollectSystem): Promise<CollectionReport> {
     (await loadCheckpoint(system.stateDirectory)) ??
     newCheckpoint(newEpoch(started, system.randomBytes), run_started_at);
   const entries = new Map(loaded.sources.map((entry) => [entry.source, entry]));
-  const observed = (await discover(root, failures)).found;
+  const discovery = await discoverForRun(system, root, loaded, started.getTime(), failures);
+  const observed = [...discovery.found.values()];
   const decisionEnd = started.getTime() + system.budget.milliseconds * DECISION_SHARE;
   let passed = false;
   const past = () => {
@@ -710,6 +819,7 @@ async function run(system: CollectSystem): Promise<CollectionReport> {
     next_seq: journal.next_seq,
     saved_at: ended_at,
     last_success_at: failures.first === null ? ended_at : loaded.last_success_at,
+    discovery_after: discovery.cut ? (discovery.last ?? loaded.discovery_after) : null,
     sources: [...entries.values()],
   };
   const kept = await settle(system, loaded, next, failures);
@@ -719,7 +829,10 @@ async function run(system: CollectSystem): Promise<CollectionReport> {
     ended_at,
     outcome: failures.first === null ? "succeeded" : "failed",
     failure: failures.first,
-    budget_hit: budgetHit(decisions.timeHit || uploads.timeHit, budgeted.budget_hit),
+    budget_hit: budgetHit(
+      discovery.cut || decisions.timeHit || uploads.timeHit,
+      budgeted.budget_hit,
+    ),
     uploaded_bytes: uploads.uploaded,
     journal_seq: journal.seq,
     last_success_at: kept.last_success_at,
