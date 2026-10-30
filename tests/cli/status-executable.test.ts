@@ -220,6 +220,9 @@ describe("fffactory status executable", () => {
           "builder-1",
           "0.1.0",
           "arn:aws:secretsmanager:us-east-1:123456789012:secret:example/builder-1/paseo-password-AbCdEf" as SecretReference,
+          undefined,
+          // The log archive `examples/factory.json` enables.
+          { bucket: "example-logs-123456789012-us-east-1-an", region: "us-east-1" },
         ),
       ),
       repositoryAnswer: repositoryInspectionJson({

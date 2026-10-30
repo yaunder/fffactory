@@ -1,0 +1,64 @@
+{
+  "schema_version": 1,
+  "release": "0.3.0",
+  "factory": {
+    "factory_id": "fff-abcd1234",
+    "account_id": "123456789012",
+    "region": "eu-west-2",
+    "release": "0.3.0"
+  },
+  "workers": [
+    {
+      "inspection": {
+        "key": "builder-1",
+        "hostname": "fff-abcd1234-builder-1",
+        "not_inspected": null,
+        "verdict": "removable",
+        "summary": "fff-abcd1234-builder-1 can be terminated: no agent is working or needs input, and no work or checkout would be lost",
+        "details": [],
+        "activity": {
+          "state": "idle",
+          "reason": null,
+          "agents": [
+            {
+              "id": "agent-1",
+              "state": "finished",
+              "dispatched": true
+            }
+          ]
+        },
+        "unarchived": {
+          "state": "counted",
+          "files": 3,
+          "bytes": 70000,
+          "complete": false,
+          "last_success_at": "2026-10-30T10:15:00.000Z"
+        }
+      },
+      "next_action": null
+    },
+    {
+      "inspection": {
+        "key": "builder-2",
+        "hostname": "fff-abcd1234-builder-2",
+        "verdict": "not_inspected",
+        "not_inspected": "absent",
+        "summary": "No EC2 instance carries its key: its machine is already gone.",
+        "details": [],
+        "activity": {
+          "state": "unknown",
+          "reason": null,
+          "agents": null
+        },
+        "unarchived": {
+          "state": "unknown",
+          "files": null,
+          "bytes": null,
+          "complete": null,
+          "last_success_at": null
+        }
+      },
+      "next_action": null
+    }
+  ]
+}

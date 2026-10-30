@@ -32,10 +32,12 @@ import {
   type WorkerCommand,
   workerCommandLine,
 } from "../../domain/worker-lifecycle";
+import type { UnarchivedEvidence } from "../../domain/worker-removability";
 import { sha256Text } from "../../infrastructure/release-tarball";
 import type { CliContext, Command } from "../context";
 import { printDiagnostics } from "../diagnostics";
 import { describeRemovalPlan } from "../presentation/plan";
+import { unarchivedWords } from "../presentation/worker-inspection";
 import { terraformDirectory } from "./planning";
 import { inspectWorkers } from "./worker-inspect";
 import { loadInstance, printAccountRefusal } from "./selected-instance";
@@ -150,9 +152,16 @@ function progressLine(event: Exclude<PowerProgress, { readonly kind: "removal_pl
       return `Waiting for ${event.hostname} to come online in the tailnet (up to ${ONLINE_DEADLINE_MS / 60_000} min).`;
     case "removing_devices":
       return `Deleting the Tailscale devices named ${event.hostname}.`;
+    case "unarchived":
+      return unarchivedLine(event.hostname, event.unarchived);
     default:
       return removalLine(event);
   }
+}
+
+/** The worker's unarchived evidence, which terminating it destroys: said, never judged (S2). */
+function unarchivedLine(hostname: string, unarchived: UnarchivedEvidence): string {
+  return `Log archive on ${hostname}: ${unarchivedWords(unarchived)}.`;
 }
 
 /** Terminate's removal of the host, step by step. */
@@ -259,6 +268,8 @@ function reportDone(
   context: CliContext,
 ): number {
   context.out(doneLine(result));
+  if (result.unarchived !== undefined)
+    context.out(unarchivedLine(result.worker.hostname, result.unarchived));
   if (result.verdict !== undefined) printVerdict(result.verdict, context);
   if (result.devices !== undefined)
     printDevices(result.devices, result.leftover, result.worker.hostname, context);

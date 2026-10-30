@@ -137,10 +137,10 @@ function printOutcome(
       });
       return 1;
     case "inspected": {
-      const { target, workers } = outcome;
+      const { target, workers, archiving } = outcome;
       if (json)
         context.out(JSON.stringify(inspectionJson(target, workers, context.release), null, 2));
-      else printReport(context.out, inspectionReport(workers, selection));
+      else printReport(context.out, inspectionReport(workers, selection, archiving));
       return removalExitCode(workers);
     }
   }

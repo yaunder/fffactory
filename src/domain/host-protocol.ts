@@ -80,8 +80,9 @@ export type ReleaseState =
 /**
  * The host's configuration: none yet, its SHA-256, or a file `fffactory-admin` cannot read.
  * `control_plane_sha256` digests the part of it the control plane installs from
- * (`controlPlaneProjection`): a worker reports it when its file is a host projection, and one
- * from before credential references reports none, its whole file being that part.
+ * (`controlPlaneProjection`): a worker reports it when its file is a host projection carrying
+ * credential references or the log archive; one without either, or one from before credential
+ * references, reports none, its whole file being that part.
  */
 export type ConfigurationState =
   | { readonly state: "none" }

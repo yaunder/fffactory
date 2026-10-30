@@ -121,7 +121,7 @@ summary and next action, the rest its details, in this order:
 | A host configuration whose SHA-256 is not that of the [host projection](host-protocol.md#the-host-projection) apply would send it | Repair the worker with `fffactory apply`. |
 | No host configuration, or one `fffactory-admin` cannot read | Repair the worker with `fffactory apply`. |
 | A service not `active` | Repair the worker with `fffactory apply`. |
-| With a release active: an install recorded as running: "An install of release R started at T has not finished; it may still be running" | If it started more than 82 min ago (apply's activation timeout), repair the worker with `fffactory apply`; otherwise wait for it to finish. |
+| With a release active: an install recorded as running: "An install of release R started at T has not finished; it may still be running" | If it started more than 84 min ago (apply's activation timeout), repair the worker with `fffactory apply`; otherwise wait for it to finish. |
 | With a release active: no install record, one that cannot be read, one that failed at a step, outside its steps (naming why) or in verification (naming the failed checks), or one of another release than the active one | Repair the worker with `fffactory apply`. |
 | Base software ready, but repositories are unresolved or have never synchronized | Resolve the reported checkouts or run `fffactory apply`. |
 | The repository result is unreadable or cannot be observed | Repair the worker with `fffactory apply`. |
@@ -130,10 +130,11 @@ summary and next action, the rest its details, in this order:
 
 The expected digest is that of the projection apply sends the host, built from
 factory.json's host for the pinned release by the same `projectHost`
-(`src/domain/host-projection.ts`), Paseo secret reference and delivered
-credential references included. Status compares the whole file, so a changed
-credential reference reads as a configuration to repair with `fffactory apply`,
-which is how a credential is delivered.
+(`src/domain/host-projection.ts`), Paseo secret reference, delivered
+credential references and the log archive included. Status compares the whole
+file, so a changed credential reference, or the log archive turned on or off,
+reads as a configuration to repair with `fffactory apply`, which is how either
+is delivered.
 
 A running record may belong to an install that is still going, since an
 interrupted or timed-out `fffactory apply` stops waiting but `host apply`

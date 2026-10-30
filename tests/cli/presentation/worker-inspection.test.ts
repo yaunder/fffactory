@@ -9,6 +9,7 @@ import { ansiStyle, plainStyle } from "../../../src/cli/presentation/style";
 import {
   inspectionReport,
   keyRefusalReport,
+  unarchivedWords,
 } from "../../../src/cli/presentation/worker-inspection";
 import type { HostKey } from "../../../src/domain/instance";
 import {
@@ -36,6 +37,13 @@ const NO_WORK = {
     hostname: "fff-abcd1234-builder-1",
     complete: true,
     repositories: [],
+    archive: {
+      state: "collected",
+      complete: true,
+      unarchived_files: 3,
+      unarchived_bytes: 70_000,
+      last_success_at: "2026-10-30T10:15:00.000Z",
+    },
   },
 } as const;
 
@@ -72,8 +80,9 @@ const GONE = workerRemovability(
   inspectGateActions("b" as HostKey),
 );
 
-function plain(workers: readonly WorkerRemovability[], instance?: string) {
-  const report = inspectionReport(workers, { instance });
+/** The report, for a factory with the log archive enabled unless `archiving` says otherwise. */
+function plain(workers: readonly WorkerRemovability[], instance?: string, archiving = true) {
+  const report = inspectionReport(workers, { instance }, archiving);
   return render(plainStyle, report.blocks, report.next);
 }
 
@@ -82,15 +91,18 @@ describe("worker inspect's report (worker-lifecycle §Inspect)", () => {
     expect(plain([REMOVABLE, BUSY, GONE])).toEqual([
       rule("Workers"),
       "  ✔ builder-1   removable · fff-abcd1234-builder-1 can be terminated: no agent is working or needs input, and no work or checkout would be lost",
-      "    Agents   1 finished (idle)",
+      "    Agents    1 finished (idle)",
       "      finished   agent-1 (dispatched)",
+      "    Archive   3 files (70000 bytes) unarchived; last collection succeeded at 2026-10-30T10:15:00.000Z",
       "",
       "  ! builder-2   refused · 1 agent is working on fff-abcd1234-builder-2: terminating it would end it",
-      "    Agents   1 working, 2 finished (busy)",
+      "    Agents    1 working, 2 finished (busy)",
       "      working    agent-1 (dispatched)",
       "      finished   agent-2, agent-3 (dispatched)",
+      "    Archive   unarchived evidence unknown",
       "",
       "  ↷ b           not inspected · No EC2 instance carries its key: its machine is already gone.",
+      "    Archive   unarchived evidence unknown",
       "",
       "! 1 removable, 1 refused, 1 not inspected",
       "",
@@ -127,11 +139,12 @@ describe("worker inspect's report (worker-lifecycle §Inspect)", () => {
       ],
       "/w/f.json",
     );
-    expect(lines.slice(1, 5)).toEqual([
+    expect(lines.slice(1, 6)).toEqual([
       "  ! builder-1   refused · fff-abcd1234-builder-1 could not be inspected for unpushed work: no answer within 2 min",
       "    /workspace/repos/acme/widget: unreadable",
       "",
-      "    Agents   none (idle)",
+      "    Agents    none (idle)",
+      "    Archive   unarchived evidence unknown",
     ]);
     expect(lines.at(-1)).toBe(
       "  builder-1: Check the worker with `fffactory status --instance /w/f.json`, then rerun " +
@@ -140,14 +153,15 @@ describe("worker inspect's report (worker-lifecycle §Inspect)", () => {
     );
   });
 
-  test("a stopped worker, never inspected, shows no agents; every worker removable is ready", () => {
+  test("a stopped worker, never inspected, shows no agents and its evidence unknown (S1)", () => {
     const stopped = workerRemovability(
       worker("builder-2"),
       { kind: "stopped" },
       inspectGateActions("builder-2" as HostKey),
     );
-    expect(plain([REMOVABLE, stopped]).slice(-3)).toEqual([
+    expect(plain([REMOVABLE, stopped]).slice(-4)).toEqual([
       "  ◼ builder-2   not inspected · The machine is stopped: the worker is not inspected, and unpushed work on its disk is not reported.",
+      "    Archive   unarchived evidence unknown",
       "",
       "✔ 1 removable, 1 not inspected",
     ]);
@@ -167,9 +181,20 @@ describe("worker inspect's report (worker-lifecycle §Inspect)", () => {
       inspectGateActions("builder-1" as HostKey),
     );
     expect(plain([waiting]).slice(2, 4)).toEqual([
-      "    Agents   1 needing input (busy)",
+      "    Agents    1 needing input (busy)",
       "      needing input   agent-1 (dispatched)",
     ]);
+  });
+
+  test("without the log archive, only a backlog a worker counted is said", () => {
+    const lines = plain([REMOVABLE, BUSY, GONE], undefined, false);
+    expect(lines.filter((line) => line.includes("Archive"))).toEqual([
+      "    Archive   3 files (70000 bytes) unarchived; last collection succeeded at 2026-10-30T10:15:00.000Z",
+    ]);
+    expect(lines).toContain(
+      "  ↷ b           not inspected · No EC2 instance carries its key: its machine is already gone.",
+    );
+    expect(lines.join("\n")).not.toContain("unknown");
   });
 
   test("a factory that declares no worker says so", () => {
@@ -185,10 +210,51 @@ describe("worker inspect's report (worker-lifecycle §Inspect)", () => {
         activity: { state: "unknown" as const, reason: "`odd`", agents: null },
       },
     };
-    const report = inspectionReport([odd], {});
+    const report = inspectionReport([odd], {}, true);
     const colored = render(ansiStyle, report.blocks);
     expect(colored.join("\n")).toContain("a `reason` from the worker");
-    expect(stripVTControlCharacters(colored.join("\n"))).toContain("Agents   unknown (`odd`)");
+    expect(stripVTControlCharacters(colored.join("\n"))).toContain("Agents    unknown (`odd`)");
+  });
+});
+
+describe("a worker's unarchived evidence in words (worker-lifecycle §Inspect)", () => {
+  const UNKNOWN = {
+    state: "unknown",
+    files: null,
+    bytes: null,
+    complete: null,
+    last_success_at: null,
+  } as const;
+  const COUNTED = {
+    state: "counted",
+    files: 1,
+    bytes: 1,
+    complete: true,
+    last_success_at: null,
+  } as const;
+
+  test("counted: how many files and bytes, at least when not all counted, and the last success", () => {
+    expect(unarchivedWords(COUNTED)).toBe(
+      "1 file (1 byte) unarchived; no collection has succeeded yet",
+    );
+    expect(
+      unarchivedWords({
+        ...COUNTED,
+        files: 0,
+        bytes: 0,
+        last_success_at: "2026-10-30T10:15:00.000Z",
+      }),
+    ).toBe("nothing unarchived; last collection succeeded at 2026-10-30T10:15:00.000Z");
+    expect(unarchivedWords({ ...COUNTED, files: 0, bytes: 0, complete: false })).toBe(
+      "at least 0 files (0 bytes) unarchived, not all counted; no collection has succeeded yet",
+    );
+  });
+
+  test("not collected, or unknown: never nothing unarchived (S1)", () => {
+    expect(unarchivedWords({ ...UNKNOWN, state: "not_collected" })).toBe(
+      "not collected: no log archive collector runs there",
+    );
+    expect(unarchivedWords(UNKNOWN)).toBe("unarchived evidence unknown");
   });
 });
 

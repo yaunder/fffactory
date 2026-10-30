@@ -26,8 +26,8 @@ import { readVerification, type Verification, verificationFields } from "./readi
 const MINUTE_MS = 60_000;
 
 /**
- * The install steps (shell assets, then the native TypeScript plugins and credentials steps),
- * run in this order in one process. Each is idempotent, so a rerun repairs what a failed one
+ * The install steps (shell assets, then the native TypeScript plugins, credentials and collector
+ * steps), run in this order in one process. Each is idempotent, so a rerun repairs what a failed one
  * left.
  */
 export const INSTALL_STEPS = [
@@ -43,6 +43,8 @@ export const INSTALL_STEPS = [
   { name: "plugins", timeoutMs: 15 * MINUTE_MS, implementation: "plugins" },
   /** The API credentials delivered to the host, in each tool's own store. */
   { name: "credentials", timeoutMs: 10 * MINUTE_MS, implementation: "credentials" },
+  /** The log archive's collector: its timer enabled, or it removed (`collector-installation.ts`). */
+  { name: "collector", timeoutMs: 2 * MINUTE_MS, implementation: "collector" },
 ] as const;
 export type StepName = (typeof INSTALL_STEPS)[number]["name"];
 
@@ -61,33 +63,92 @@ export const ANTHROPIC_KEY_FILE = "/home/factory/.config/fffactory/anthropic-api
 export const ANTHROPIC_KEY_HELPER = `cat ${ANTHROPIC_KEY_FILE}`;
 
 /**
- * Claude Code's root-owned managed settings, which name fffactory's helper while Anthropic is
- * delivered, replacing whatever was there, and are removed when it is not only while they still
- * name that helper (`namesKeyHelper`).
+ * Claude Code's root-owned managed settings. The `credentials` step composes them from what
+ * fffactory needs (`claudeManagedSettingsJson`), replacing whatever was there, and removes them
+ * when it needs none only while they are fffactory's own (`ownsManagedSettings`).
  */
 export const CLAUDE_MANAGED_SETTINGS = "/etc/claude-code/managed-settings.json";
 
-/** The managed settings' text while Anthropic is delivered. */
-export const CLAUDE_MANAGED_SETTINGS_JSON = `${JSON.stringify({ apiKeyHelper: ANTHROPIC_KEY_HELPER }, null, 2)}\n`;
+/**
+ * How many days Claude Code keeps its session history while the log archive is enabled: the
+ * value Claude's own hint suggests for long retention (~10 years), so evidence stays on the
+ * worker until it is collected.
+ */
+export const CLAUDE_CLEANUP_PERIOD_DAYS = 3650;
+
+/** fffactory's managed settings, each key with the one value fffactory gives it, in order. */
+const FFFACTORY_SETTINGS = {
+  apiKeyHelper: ANTHROPIC_KEY_HELPER,
+  cleanupPeriodDays: CLAUDE_CLEANUP_PERIOD_DAYS,
+} as const;
+type FffactorySetting = keyof typeof FFFACTORY_SETTINGS;
 
 /**
- * Whether managed settings' `text` names fffactory's key helper (`apiKeyHelper` exactly
- * `ANTHROPIC_KEY_HELPER`): only such a file is fffactory's. Text that is not a JSON object
- * names none.
+ * What fffactory needs of Claude Code's managed settings: its key helper while Anthropic is
+ * delivered, and the long history while the projection carries the log archive.
  */
-export function namesKeyHelper(text: string): boolean {
+export interface ManagedSettingsNeeds {
+  readonly keyHelper: boolean;
+  readonly keepHistory: boolean;
+}
+
+/**
+ * The managed settings' text for `needs`, two-space indented with a final newline, or
+ * undefined when fffactory needs none.
+ */
+export function claudeManagedSettingsJson(
+  needs: ManagedSettingsNeeds & { readonly keyHelper: true },
+): string;
+export function claudeManagedSettingsJson(needs: ManagedSettingsNeeds): string | undefined;
+export function claudeManagedSettingsJson(needs: ManagedSettingsNeeds): string | undefined {
+  const keys: FffactorySetting[] = [
+    ...(needs.keyHelper ? (["apiKeyHelper"] as const) : []),
+    ...(needs.keepHistory ? (["cleanupPeriodDays"] as const) : []),
+  ];
+  if (keys.length === 0) return undefined;
+  const settings = Object.fromEntries(keys.map((key) => [key, FFFACTORY_SETTINGS[key]]));
+  return `${JSON.stringify(settings, null, 2)}\n`;
+}
+
+/** `text` as a JSON object, or undefined when it is none. */
+function settingsObject(text: string): Readonly<Record<string, unknown>> | undefined {
   let settings: unknown;
   try {
     settings = JSON.parse(text);
   } catch {
-    return false;
+    return undefined;
   }
+  return typeof settings === "object" && settings !== null && !Array.isArray(settings)
+    ? (settings as Record<string, unknown>)
+    : undefined;
+}
+
+/**
+ * Whether managed settings' `text` is fffactory's own: a JSON object holding at least one key,
+ * and only `apiKeyHelper` and `cleanupPeriodDays`, each with fffactory's value. Anything else,
+ * one more key or another value, is someone else's policy and is never removed.
+ */
+export function ownsManagedSettings(text: string): boolean {
+  const settings = settingsObject(text);
+  if (settings === undefined) return false;
+  const entries = Object.entries(settings);
   return (
-    typeof settings === "object" &&
-    settings !== null &&
-    !Array.isArray(settings) &&
-    (settings as { apiKeyHelper?: unknown }).apiKeyHelper === ANTHROPIC_KEY_HELPER
+    entries.length > 0 &&
+    entries.every(
+      ([key, value]) =>
+        Object.hasOwn(FFFACTORY_SETTINGS, key) &&
+        FFFACTORY_SETTINGS[key as FffactorySetting] === value,
+    )
   );
+}
+
+/**
+ * Whether managed settings' `text` names fffactory's key helper (`apiKeyHelper` exactly
+ * `ANTHROPIC_KEY_HELPER`), whatever else it holds: Claude Code then runs that helper, so
+ * `host verify` also checks the key file it reads. Text that is not a JSON object names none.
+ */
+export function namesKeyHelper(text: string): boolean {
+  return settingsObject(text)?.apiKeyHelper === ANTHROPIC_KEY_HELPER;
 }
 
 /**

@@ -8,7 +8,13 @@ colors one with `styles`, and which keeps both streams' lines in the order writt
 (`written`), and the spawned `main.ts`; `cli/presentation/` checks the text laid
 out from domain data, pure like `domain/`, while `application/` tests assert that data, never
 its text).
-Each test maps to a section of a spec in `docs/specs/`. Areas with their own rules:
+Each test maps to a section of a spec in `docs/specs/`.
+`domain/fixtures/archive/` holds archive format v1's documents and the collector's checkpoint
+(`docs/specs/collector.md`), each its serializer's output byte for byte; the collection run
+and the archive's reader read the same fixtures. The collection run (`host/collect.test.ts`)
+writes to `support/memory-archive.ts`, an in-memory `ArchiveWriter` with failures and crashes
+injected per put, and reads it back by the reader's rules with `support/archive-reassembly.ts`.
+Areas with their own rules:
 
 - [`host/`](host/CLAUDE.md): the worker side of the host protocol, and its shared contract
   fixtures.
@@ -47,7 +53,11 @@ shown as `archiveShown` when set), which can replace a host or change its instan
 `showPlan` gives every change a `before` and an `after` as `terraform show -json` does;
 `support/factory-world.ts` builds the plan and apply fixtures on it, `archiving` enabling the
 log archive, `ARCHIVE`), stubbed SDK calls,
-or the real SDK pointed at `support/stub-sts.ts`, `support/stub-vpc-quota.ts` (EC2 and
+or the real SDK pointed at `support/stub-sts.ts` (whose caller's `UserId` a test may give, and
+which records each request's session token), `support/loopback-imds.ts` (a loopback IMDSv2:
+token, role credentials with a known session token, and identity document, refusing a request
+without its token; the SDK reads its endpoint only from `AWS_EC2_METADATA_SERVICE_ENDPOINT`, which
+`withMetadataEndpoint` sets in the test process for one call and restores), `support/stub-vpc-quota.ts` (EC2 and
 Service Quotas), `support/stub-s3.ts` (a versioned, never-versioned or suspended bucket
 with conditional writes and bootstrap's settings, and the log archive's ownership controls and
 ABAC status, some of them lackable, older versions and
@@ -57,7 +67,9 @@ ListObjectVersions with `IsLatest` and `LastModified`, in pages resumed after th
 once those versions are deleted, and refusing with `InvalidArgument` a version marker it never
 gave, DeleteObjects with per-key
 failures (`undeletable`) recorded in `deleteBatches`, DeleteBucket refused while
-anything is left, and ListObjectsV2 under a prefix in pages of `listPageSize`, `forcePathStyle`) or `support/stub-secrets-manager.ts` (which also answers `GetSecretValue`, and ListSecrets,
+anything is left, ListObjectsV2 under a prefix in pages of `listPageSize`, a PutObject without
+`If-None-Match: *` refused as the archive's hosts policy does (`requireIfNoneMatch`), any request
+refused with an error a test chooses (`refuse`), and each request's session token, `forcePathStyle`) or `support/stub-secrets-manager.ts` (which also answers `GetSecretValue`, and ListSecrets,
 RestoreSecret, DeleteSecret and DescribeSecret (name, ARN, tags and deleted date) as AWS documents them: tag filters by prefix,
 scheduled secrets, pages of `pageSize`, a forced deletion of a scheduled secret refused and one
 still described for `lingering` looks), with AWS's documentation example
@@ -88,7 +100,8 @@ records every call, so a test can assert EC2 was never asked to change anything
 recording every call and the secret each `open` got, and `fake-secrets.ts`'s
 `fakeSecretStore` reading the admin client by its ARN. Terminate's work inspection answers
 through the same scripted transport: `statusAnswers` answers it, by default with no work, or
-with `workAnswer`'s document or any outcome a test gives. `worker inspect` runs terminate's
+with `workAnswer`'s document (without the log archive's backlog, as an older worker answers,
+unless a test gives one) or any outcome a test gives. `worker inspect` runs terminate's
 inspection over the same fakes, and a test asserts it took no lock and asked EC2 and the admin
 client nothing. Terminate's and teardown's records are compared with `worker inspect`'s
 documents (`printedBy`), each run in its own world built with the same options, so neither

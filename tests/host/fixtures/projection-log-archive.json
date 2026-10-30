@@ -1,0 +1,11 @@
+{
+  "protocol_version": 1,
+  "factory_id": "fff-aaaa1111",
+  "host_key": "builder-1",
+  "hostname": "fff-aaaa1111-builder-1",
+  "release": "0.3.0",
+  "log_archive": {
+    "bucket": "fff-aaaa1111-logs-123456789012-eu-west-2-an",
+    "region": "eu-west-2"
+  }
+}

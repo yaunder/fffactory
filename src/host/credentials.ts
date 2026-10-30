@@ -3,27 +3,30 @@
  * host projection delivers, read its secret by ARN with the instance role and write it into the
  * tool's own store, the material only ever on a command's standard input. GitHub and OpenAI log
  * in as `factory`; Anthropic gets `factory`'s key file and Claude Code's root-owned helper. An
- * account not delivered keeps its tool's store, except fffactory's own: the key file, and Claude
- * Code's managed settings while they name fffactory's helper. Runs only inside locked `host
- * apply`. No tool's output is kept: the step's log and every failure carry fffactory's words only.
+ * account not delivered keeps its tool's store, except fffactory's own: the key file. Claude
+ * Code's managed settings are composed of what fffactory needs, the helper while Anthropic is
+ * delivered and the long history while the projection carries the log archive, and removed when
+ * it needs neither only while they are fffactory's own. Runs only inside locked `host apply`. No
+ * tool's output is kept: the step's log and every failure carry fffactory's words only.
  */
-import { randomUUID } from "node:crypto";
-import { chmod, mkdir, open, readFile, rename, rm } from "node:fs/promises";
+import { readFile, rm } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import type { HostCredentials } from "../domain/host-projection";
+import type { HostCredentials, HostProjection } from "../domain/host-projection";
 import {
   ANTHROPIC_KEY_FILE,
+  CLAUDE_CLEANUP_PERIOD_DAYS,
   CLAUDE_MANAGED_SETTINGS,
-  CLAUDE_MANAGED_SETTINGS_JSON,
   CREDENTIAL_COMMAND_TIMEOUT_MS,
   CREDENTIAL_LOGIN_TIMEOUT_MS,
-  namesKeyHelper,
+  claudeManagedSettingsJson,
+  ownsManagedSettings,
 } from "../domain/installation";
 import { CREDENTIAL_SECRET_FIELDS, type SecretReference } from "../domain/instance";
 import { ENROLLMENTS, type EnrollmentId } from "../domain/readiness";
 import { SecretMaterial } from "../domain/secrets";
 import type { ProcessOutcome } from "../infrastructure/local-tool-probe";
 import type { WorkerSystem } from "./inspect";
+import { writeRootFile } from "./root-files";
 import { AS_FACTORY, FACTORY_HOME } from "./runtime-account";
 import { AWS_ENV, readSecretValue } from "./secret-value";
 
@@ -36,13 +39,16 @@ const GITHUB = ["--hostname", "github.com"] as const;
 const GITHUB_LOGIN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,99}$/;
 const ERROR_CODE = /^[A-Z0-9_]{1,32}$/;
 
-/** Why the step failed, for one account, in fffactory's own words. */
+/**
+ * Why the step failed, in fffactory's own words, for one account or, for managed settings that
+ * only keep the history, the log archive.
+ */
 class Refused extends Error {
   constructor(
-    readonly account: EnrollmentId,
+    readonly subject: EnrollmentId | "log_archive",
     readonly reason: string,
   ) {
-    super(`${account}: ${reason}`);
+    super(`${subject}: ${reason}`);
   }
 }
 
@@ -195,34 +201,35 @@ async function deliverOpenai(run: Commands, key: SecretMaterial): Promise<void> 
   );
 }
 
-/** Writes `text` to the root-owned `path` whole or not at all, in a root 0755 directory. */
-async function writeRootFile(path: string, text: string): Promise<void> {
-  await mkdir(dirname(path), { recursive: true, mode: 0o755 });
-  await chmod(dirname(path), 0o755);
-  const staging = `${path}.${randomUUID()}.tmp`;
+/**
+ * Claude Code's managed settings as `text`, whole, failing the step for `subject`: the account
+ * whose helper they name, or the log archive when they only keep the history.
+ */
+async function writeManagedSettings(
+  system: WorkerSystem,
+  text: string,
+  subject: EnrollmentId | "log_archive",
+): Promise<void> {
   try {
-    const handle = await open(staging, "wx", 0o644);
-    try {
-      await handle.chmod(0o644);
-      await handle.writeFile(text);
-      await handle.sync();
-    } finally {
-      await handle.close();
-    }
-    await rename(staging, path);
-  } finally {
-    await rm(staging, { force: true });
+    await writeRootFile(join(system.root, CLAUDE_MANAGED_SETTINGS), text);
+  } catch (error) {
+    throw new Refused(
+      subject,
+      `writing Claude Code's managed settings failed (${errorCode(error)})`,
+    );
   }
 }
 
 /**
  * D12: the key into `factory`'s 0600 file, written as `factory` (never root in a directory
- * `factory` owns) and renamed into place, then Claude Code's managed settings naming the helper.
+ * `factory` owns) and renamed into place, then Claude Code's managed settings naming the
+ * helper, and keeping the history while the log archive is enabled.
  */
 async function deliverAnthropic(
   system: WorkerSystem,
   run: Commands,
   key: SecretMaterial,
+  keepHistory: boolean,
 ): Promise<void> {
   const file = join(system.root, ANTHROPIC_KEY_FILE);
   const staging = `${file}.new`;
@@ -238,22 +245,16 @@ async function deliverAnthropic(
     key,
   );
   await run.must("anthropic", what, ["/usr/bin/mv", "-fT", "--", staging, file]);
-  try {
-    await writeRootFile(join(system.root, CLAUDE_MANAGED_SETTINGS), CLAUDE_MANAGED_SETTINGS_JSON);
-  } catch (error) {
-    throw new Refused(
-      "anthropic",
-      `writing Claude Code's managed settings failed (${errorCode(error)})`,
-    );
-  }
+  const settings = claudeManagedSettingsJson({ keyHelper: true, keepHistory });
+  await writeManagedSettings(system, settings, "anthropic");
 }
 
-/** What Claude Code's managed settings hold: nothing, fffactory's helper, another's, or unreadable. */
+/** What Claude Code's managed settings are: none, fffactory's own, another's, or unreadable. */
 async function managedSettings(
   path: string,
 ): Promise<"none" | "fffactory's" | "another's" | { unreadable: string }> {
   try {
-    return namesKeyHelper(await readFile(path, "utf8")) ? "fffactory's" : "another's";
+    return ownsManagedSettings(await readFile(path, "utf8")) ? "fffactory's" : "another's";
   } catch (error) {
     return (error as NodeJS.ErrnoException | undefined)?.code === "ENOENT"
       ? "none"
@@ -262,14 +263,21 @@ async function managedSettings(
 }
 
 /**
- * D14: Claude Code's helper, only while its managed settings name fffactory's (`namesKeyHelper`):
- * settings that do not, or cannot be read, are someone else's policy and stay. Then the key the
- * helper reads, so the helper never names a missing file. Returns what it did, for the log.
+ * With Anthropic not delivered: Claude Code's managed settings first, so they never name the key
+ * file once it is gone. Settings fffactory still needs, `needed` (the history alone), replace
+ * whatever was there; with none needed, only fffactory's own (`ownsManagedSettings`) are removed,
+ * and settings that are not, or cannot be read, are someone else's policy and stay (D14).
  */
-async function removeAnthropic(system: WorkerSystem, run: Commands): Promise<string> {
+async function settleWithoutHelper(
+  system: WorkerSystem,
+  needed: string | undefined,
+): Promise<string> {
+  if (needed !== undefined) {
+    await writeManagedSettings(system, needed, "log_archive");
+    return "Claude Code's managed settings name no API key helper";
+  }
   const path = join(system.root, CLAUDE_MANAGED_SETTINGS);
   const settings = await managedSettings(path);
-  let done: string;
   if (settings === "fffactory's") {
     try {
       await rm(path, { force: true });
@@ -279,12 +287,24 @@ async function removeAnthropic(system: WorkerSystem, run: Commands): Promise<str
         `removing Claude Code's managed settings failed (${errorCode(error)})`,
       );
     }
-    done = "Claude Code's API key helper removed";
-  } else if (settings === "none") done = "no API key helper of fffactory's to remove";
-  else if (settings === "another's")
-    done = "Claude Code's managed settings kept: they do not name fffactory's helper";
-  else
-    done = `Claude Code's managed settings kept: they could not be read (${settings.unreadable})`;
+    return "Claude Code's managed settings removed";
+  }
+  if (settings === "none") return "no managed settings of fffactory's to remove";
+  if (settings === "another's")
+    return "Claude Code's managed settings kept: they are not fffactory's";
+  return `Claude Code's managed settings kept: they could not be read (${settings.unreadable})`;
+}
+
+/**
+ * D14: Claude Code's managed settings without the helper (`settleWithoutHelper`), then the key
+ * the helper read, so the helper never names a missing file. Returns what it did, for the log.
+ */
+async function removeAnthropic(
+  system: WorkerSystem,
+  run: Commands,
+  needed: string | undefined,
+): Promise<string> {
+  const done = await settleWithoutHelper(system, needed);
   await run.must("anthropic", "removing its key file", [
     "/usr/bin/rm",
     "-f",
@@ -312,32 +332,49 @@ async function deliver(
   run: Commands,
   id: EnrollmentId,
   material: SecretMaterial,
+  keepHistory: boolean,
 ): Promise<void> {
   if (id === "github") await deliverGithub(run, material);
   else if (id === "openai") await deliverOpenai(run, material);
-  else await deliverAnthropic(system, run, material);
+  else await deliverAnthropic(system, run, material, keepHistory);
 }
 
+/** What of the host projection the step reads: the credential references and the log archive. */
+export type CredentialsInput = Pick<HostProjection, "credentials" | "log_archive">;
+
 /**
- * Delivers the accounts `credentials` references, within `budgetMs`, telling `note` what it did
- * in its own words. Every secret is read and checked before any tool runs. Returns why the step
- * failed, naming the account and the AWS error name, exit status or deadline, or undefined.
+ * Delivers the accounts `input.credentials` references, and composes Claude Code's managed
+ * settings with the long history while `input.log_archive` is present, within `budgetMs`,
+ * telling `note` what it did in its own words. Every secret is read and checked before any tool
+ * runs. Returns why the step failed, naming the account (or the log archive) and the AWS error
+ * name, exit status or deadline, or undefined.
  */
 export async function workerCredentials(
   system: WorkerSystem,
-  credentials: HostCredentials | undefined,
+  input: CredentialsInput,
   budgetMs: number,
   note: (line: string) => Promise<void>,
 ): Promise<string | undefined> {
   const run = commands(system, budgetMs);
+  const keepHistory = input.log_archive !== undefined;
   try {
-    const delivered = await fetchAll(run, credentials);
+    const delivered = await fetchAll(run, input.credentials);
     for (const [id, material] of delivered) {
-      await deliver(system, run, id, material);
+      await deliver(system, run, id, material, keepHistory);
       await note(`${id}: delivered`);
     }
     if (!delivered.some(([id]) => id === "anthropic"))
-      await note(await removeAnthropic(system, run));
+      await note(
+        await removeAnthropic(
+          system,
+          run,
+          claudeManagedSettingsJson({ keyHelper: false, keepHistory }),
+        ),
+      );
+    if (keepHistory)
+      await note(
+        `log_archive: Claude Code keeps its history (cleanupPeriodDays ${CLAUDE_CLEANUP_PERIOD_DAYS})`,
+      );
     return undefined;
   } catch (error) {
     if (error instanceof Refused) return error.message;

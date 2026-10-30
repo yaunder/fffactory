@@ -9,7 +9,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { WORKER_PATHS } from "../../src/domain/host-protocol";
 import { hostProjection, hostProjectionJson } from "../../src/domain/host-projection";
-import { type HostApplyRecord, INSTALL_STEPS, parseHostApply } from "../../src/domain/installation";
+import { COLLECTOR_CONFIGURATION } from "../../src/domain/collector";
+import {
+  CLAUDE_MANAGED_SETTINGS,
+  type HostApplyRecord,
+  INSTALL_STEPS,
+  parseHostApply,
+} from "../../src/domain/installation";
 import type { FactoryId, HostKey, Release, SecretReference } from "../../src/domain/instance";
 import { ENROLLMENTS, type Verification } from "../../src/domain/readiness";
 import {
@@ -17,6 +23,7 @@ import {
   readLimited,
   workerApplier as realWorkerApplier,
 } from "../../src/host/apply";
+import { localCollectionSystem, workerCollection } from "../../src/host/collection";
 import { workerEndpoint } from "../../src/host/endpoint";
 import { flockExclusive } from "../../src/host/install-lock";
 import type { HostVerifier } from "../../src/host/verify";
@@ -43,6 +50,12 @@ const PROJECTION = hostProjectionJson(
 );
 const STEP_NAMES = INSTALL_STEPS.map((step) => step.name);
 const NOW = new Date("2026-09-30T12:00:00.000Z");
+const exited = (exitCode: number, stdout = ""): ProcessOutcome => ({
+  kind: "exited",
+  exitCode,
+  stdout,
+  stderr: "",
+});
 
 let root: string;
 beforeEach(async () => {
@@ -119,6 +132,11 @@ function applySystem(overrides: Partial<ApplySystem> = {}): ApplySystem {
     lock: flockExclusive,
     ...overrides,
   };
+}
+
+/** The result of step `name` in an install's record. */
+function step(record: HostApplyRecord, name: string) {
+  return record.steps.find((result) => result.name === name);
 }
 
 async function ran(): Promise<string[]> {
@@ -241,6 +259,7 @@ describe("host apply, installing (host protocol §apply)", () => {
       { name: "harness", status: "failed", reason: "exited with status 3" },
       { name: "plugins", status: "not_run", reason: null },
       { name: "credentials", status: "not_run", reason: null },
+      { name: "collector", status: "not_run", reason: null },
     ]);
     expect(await readlink(at(WORKER_PATHS.activeRelease))).toBe(`releases/${RELEASE}`);
     expect((await kept()).state).toBe("failed");
@@ -280,12 +299,13 @@ describe("host apply, installing (host protocol §apply)", () => {
     };
     await workerApplier(applySystem({ run }), fakeVerifier().verifier).apply();
     expect(seen).toEqual([
-      "packages: running not_run,not_run,not_run,not_run,not_run,not_run",
-      "user: running succeeded,not_run,not_run,not_run,not_run,not_run",
-      "systemd: running succeeded,succeeded,not_run,not_run,not_run,not_run",
-      "harness: running succeeded,succeeded,succeeded,not_run,not_run,not_run",
-      "plugins: running succeeded,succeeded,succeeded,succeeded,not_run,not_run",
-      "credentials: running succeeded,succeeded,succeeded,succeeded,succeeded,not_run",
+      "packages: running not_run,not_run,not_run,not_run,not_run,not_run,not_run",
+      "user: running succeeded,not_run,not_run,not_run,not_run,not_run,not_run",
+      "systemd: running succeeded,succeeded,not_run,not_run,not_run,not_run,not_run",
+      "harness: running succeeded,succeeded,succeeded,not_run,not_run,not_run,not_run",
+      "plugins: running succeeded,succeeded,succeeded,succeeded,not_run,not_run,not_run",
+      "credentials: running succeeded,succeeded,succeeded,succeeded,succeeded,not_run,not_run",
+      "collector: running succeeded,succeeded,succeeded,succeeded,succeeded,succeeded,not_run",
     ]);
   });
 
@@ -418,7 +438,7 @@ describe("host apply's native plugin step", () => {
     await writeFile(join(RELEASE_DIRECTORY(), "steps/plugins.json"), "invalid");
     const { verifier, runs } = fakeVerifier();
     const result = await realWorkerApplier(applySystem(), verifier).apply();
-    expect(result.state !== "refused" && result.steps.at(-2)).toEqual({
+    expect(result.state !== "refused" && step(result, "plugins")).toEqual({
       name: "plugins",
       status: "failed",
       reason: "plugin installation or verification failed",
@@ -463,7 +483,7 @@ describe("host apply's native credentials step (credential delivery)", () => {
     return { run, seen };
   }
 
-  test("runs last, inside the install lock, delivering what the projection references", async () => {
+  test("runs inside the install lock, delivering what the projection references", async () => {
     await nativeWorker();
     const { run, seen } = tools({
       kind: "exited",
@@ -476,7 +496,7 @@ describe("host apply's native credentials step (credential delivery)", () => {
       fakeVerifier().verifier,
     ).apply();
     expect(result.state).toBe("succeeded");
-    expect(result.state !== "refused" && result.steps.at(-1)).toEqual({
+    expect(result.state !== "refused" && step(result, "credentials")).toEqual({
       name: "credentials",
       status: "succeeded",
       reason: null,
@@ -486,11 +506,39 @@ describe("host apply's native credentials step (credential delivery)", () => {
     const log = await readFile(at(join(WORKER_PATHS.logs, "credentials.log")), "utf8");
     expect(log).toBe(
       "github: delivered\n" +
-        "anthropic: not delivered; no API key helper of fffactory's to remove\n" +
+        "anthropic: not delivered; no managed settings of fffactory's to remove\n" +
         "--- fffactory: step credentials succeeded\n",
     );
     expect(log).not.toContain(TOKEN);
     expect(await readFile(at(WORKER_PATHS.lastApply), "utf8")).not.toContain(TOKEN);
+  });
+
+  test("gives the step the projection's log archive, so Claude Code keeps its history", async () => {
+    await nativeWorker();
+    const { run } = tools({ kind: "exited", exitCode: 254, stdout: "", stderr: "" });
+    const archiving = hostProjectionJson(
+      hostProjection(
+        "fff-aaaa1111" as FactoryId,
+        "builder-1" as HostKey,
+        RELEASE,
+        undefined,
+        undefined,
+        { bucket: "fff-aaaa1111-logs-123456789012-eu-west-2-an", region: "eu-west-2" },
+      ),
+    );
+    const result = await realWorkerApplier(
+      applySystem({ run, readInput: async () => archiving }),
+      fakeVerifier().verifier,
+    ).apply();
+    expect(result.state).toBe("succeeded");
+    expect(await readFile(at(CLAUDE_MANAGED_SETTINGS), "utf8")).toBe(
+      `${JSON.stringify({ cleanupPeriodDays: 3650 }, null, 2)}\n`,
+    );
+    expect(await readFile(at(join(WORKER_PATHS.logs, "credentials.log")), "utf8")).toBe(
+      "anthropic: not delivered; Claude Code's managed settings name no API key helper\n" +
+        "log_archive: Claude Code keeps its history (cleanupPeriodDays 3650)\n" +
+        "--- fffactory: step credentials succeeded\n",
+    );
   });
 
   test("a secret it cannot read fails the step and the install, naming the account", async () => {
@@ -507,7 +555,7 @@ describe("host apply's native credentials step (credential delivery)", () => {
       verifier,
     ).apply();
     expect(result).toMatchObject({ state: "failed", verification: null });
-    expect(result.state !== "refused" && result.steps.at(-1)).toEqual({
+    expect(result.state !== "refused" && step(result, "credentials")).toEqual({
       name: "credentials",
       status: "failed",
       reason: "github: reading its secret failed (ResourceNotFoundException)",
@@ -515,6 +563,95 @@ describe("host apply's native credentials step (credential delivery)", () => {
     expect(runs()).toBe(0);
     expect(await readFile(at(join(WORKER_PATHS.logs, "credentials.log")), "utf8")).toBe(
       "--- fffactory: step credentials failed: github: reading its secret failed (ResourceNotFoundException)\n",
+    );
+  });
+});
+
+describe("host apply's native collector step (host protocol §The collector step)", () => {
+  const ARCHIVING = hostProjectionJson(
+    hostProjection(
+      "fff-aaaa1111" as FactoryId,
+      "builder-1" as HostKey,
+      RELEASE,
+      undefined,
+      undefined,
+      { bucket: "fff-aaaa1111-logs-123456789012-eu-west-2-an", region: "eu-west-2" },
+    ),
+  );
+  const LOG = () => readFile(at(join(WORKER_PATHS.logs, "collector.log")), "utf8");
+
+  /** Shell steps run for real; systemctl answers `systemctl`, every other tool succeeds. */
+  async function collectorWorker(systemctl: ProcessOutcome = exited(0)) {
+    await worker();
+    await writeFile(
+      join(RELEASE_DIRECTORY(), "steps/plugins.json"),
+      JSON.stringify({ schema: 1, providers: { claude: { plugins: [] }, codex: { plugins: [] } } }),
+    );
+    const systemd: string[] = [];
+    const tool = (argv: readonly string[]) =>
+      exited(argv[0] === "/usr/bin/aws" ? 254 : 0, argv.includes("hosts") ? "{}" : "[]");
+    const run: ProcessRunner = async (argv, timeout, options) => {
+      if (argv[0] === "/bin/bash") return bunProcessRunner(argv, timeout, options);
+      if (argv[0] !== "/usr/bin/systemctl") return tool(argv);
+      expect(await flockExclusive(at(WORKER_PATHS.applyLock))).toBeUndefined();
+      systemd.push(argv.slice(1).join(" "));
+      return systemctl;
+    };
+    return { run, systemd };
+  }
+
+  test("runs last, inside the install lock, enabling the timer, and the record keeps it", async () => {
+    const { run, systemd } = await collectorWorker();
+    const result = await realWorkerApplier(
+      applySystem({ run, readInput: async () => ARCHIVING }),
+      fakeVerifier().verifier,
+    ).apply();
+    expect(result.state).toBe("succeeded");
+    const last = { name: "collector", status: "succeeded" as const, reason: null };
+    expect(result.state !== "refused" && result.steps.at(-1)).toEqual(last);
+    expect((await kept()).steps.at(-1)).toEqual(last);
+    expect(systemd).toEqual(["daemon-reload", "enable --now fffactory-collector.timer"]);
+    expect(await readFile(at(COLLECTOR_CONFIGURATION), "utf8")).toContain(
+      '"bucket": "fff-aaaa1111-logs-123456789012-eu-west-2-an"',
+    );
+    expect(await LOG()).toEndWith(
+      "log_archive: fffactory-collector.timer enabled; collection is not waited for\n" +
+        "--- fffactory: step collector succeeded\n",
+    );
+  });
+
+  test("without the log archive, on a worker that never had the collector, changes nothing", async () => {
+    const { run, systemd } = await collectorWorker();
+    const result = await realWorkerApplier(applySystem({ run }), fakeVerifier().verifier).apply();
+    expect(result.state).toBe("succeeded");
+    expect(result.state !== "refused" && result.steps.at(-1)).toEqual({
+      name: "collector",
+      status: "succeeded",
+      reason: null,
+    });
+    expect(systemd).toEqual([]);
+    expect(await readFile(at(COLLECTOR_CONFIGURATION), "utf8").catch(() => null)).toBeNull();
+    expect(await LOG()).toBe(
+      "log_archive: not enabled; no collector to remove\n--- fffactory: step collector succeeded\n",
+    );
+  });
+
+  test("a systemctl that fails fails the step and the install, before verification", async () => {
+    const { run } = await collectorWorker(exited(1));
+    const { verifier, runs } = fakeVerifier();
+    const result = await realWorkerApplier(
+      applySystem({ run, readInput: async () => ARCHIVING }),
+      verifier,
+    ).apply();
+    expect(result).toMatchObject({ state: "failed", verification: null });
+    expect(result.state !== "refused" && result.steps.at(-1)).toEqual({
+      name: "collector",
+      status: "failed",
+      reason: "systemctl daemon-reload exited with status 1",
+    });
+    expect(runs()).toBe(0);
+    expect(await LOG()).toEndWith(
+      "--- fffactory: step collector failed: systemctl daemon-reload exited with status 1\n",
     );
   });
 });
@@ -675,7 +812,10 @@ describe("the worker endpoint", () => {
       stdout: "active\n",
       stderr: "",
     });
-    const endpoint = workerEndpoint(applySystem({ run }));
+    const endpoint = workerEndpoint(
+      applySystem({ run }),
+      workerCollection(localCollectionSystem(RELEASE, root)),
+    );
     expect(endpoint.isRoot()).toBe(true);
     expect((await endpoint.inspect()).release).toEqual({ state: "none" });
     expect((await endpoint.verify()).hostname).toBe(WORKER_HOSTNAME);

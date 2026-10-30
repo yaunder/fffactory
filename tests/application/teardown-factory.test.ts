@@ -59,7 +59,11 @@ import {
   readyWorker,
   statusAnswers,
   tailnetDevice,
+  workAnswer,
 } from "../support/fake-workers";
+import { INSPECT_WORK_COMMAND } from "../../src/domain/work-inspection";
+import { UNARCHIVED_UNKNOWN } from "../../src/domain/worker-removability";
+import type { WorkerUnarchived } from "../../src/domain/teardown";
 import {
   ARCHIVE,
   BUCKET,
@@ -556,6 +560,172 @@ describe("fffactory teardown: the happy path (teardown §Order)", () => {
     expect(w.terraform.calls.map(({ request }) => request.configuration.root)).not.toContain(
       "archive",
     );
+  });
+
+  test("says each worker's unarchived evidence before the destroy and in the report; never refuses (S2)", async () => {
+    const backlog = {
+      state: "collected",
+      complete: true,
+      unarchived_files: 3,
+      unarchived_bytes: 70_000,
+      last_success_at: "2026-10-30T10:15:00.000Z",
+    } as const;
+    const w = world({
+      workers: { "builder-1": "running", "builder-2": "stopped" },
+      worker: (key) =>
+        statusAnswers(
+          readyWorker(FACTORY, key, RELEASE),
+          "synchronized",
+          [],
+          undefined,
+          workAnswer(hostname(key), [], true, backlog),
+        ),
+    });
+    const result = await teardownFactory(w.deps, request(w, { instance: archivingOf(w.keys) }));
+    const unarchived: readonly WorkerUnarchived[] = [
+      {
+        hostname: hostname("builder-1"),
+        unarchived: {
+          state: "counted",
+          files: 3,
+          bytes: 70_000,
+          complete: true,
+          last_success_at: "2026-10-30T10:15:00.000Z",
+        },
+      },
+      // Stopped, never inspected: unknown, never nothing unarchived (S1).
+      { hostname: hostname("builder-2"), unarchived: UNARCHIVED_UNKNOWN },
+    ];
+    expect(result).toMatchObject({ kind: "done", report: { unarchived } });
+    const kinds = w.progress.map(({ kind }) => kind);
+    expect(w.progress).toContainEqual({ kind: "unarchived", workers: unarchived });
+    expect(kinds.indexOf("unarchived")).toBeLessThan(kinds.indexOf("destroying"));
+    expectAllRemoved(w);
+  });
+
+  /** `w.deps` with every progress event and the question asked in one timeline, in order. */
+  function timed(w: World) {
+    const timeline: string[] = [];
+    const deps: TeardownDependencies = {
+      ...w.deps,
+      progress: (event) => {
+        timeline.push(event.kind);
+        w.deps.progress(event);
+      },
+      prompt: {
+        ...w.deps.prompt,
+        ask: async (question) => {
+          timeline.push("asked");
+          return w.deps.prompt.ask(question);
+        },
+      },
+    };
+    return { deps, timeline };
+  }
+
+  const reviewOf = (w: World) => {
+    const event = w.progress.find((each) => each.kind === "review");
+    return event?.kind === "review" ? event.review : undefined;
+  };
+
+  test("previews each worker's unarchived evidence in the review, before the question; it never refuses (S2)", async () => {
+    const backlog = {
+      state: "collected",
+      complete: false,
+      unarchived_files: 40_000,
+      unarchived_bytes: 9_000_000_000,
+      last_success_at: null,
+    } as const;
+    const prompt = fakePrompt({ interactive: true, answers: [FACTORY] });
+    const w = world({
+      workers: { "builder-1": "running", "builder-2": "stopped" },
+      prompt,
+      worker: (key) =>
+        statusAnswers(
+          readyWorker(FACTORY, key, RELEASE),
+          "synchronized",
+          [],
+          undefined,
+          workAnswer(hostname(key), [], true, backlog),
+        ),
+    });
+    const { deps, timeline } = timed(w);
+
+    const result = await teardownFactory(
+      deps,
+      request(w, { confirm: undefined, instance: archivingOf(w.keys) }),
+    );
+
+    const counted = {
+      state: "counted",
+      files: 40_000,
+      bytes: 9_000_000_000,
+      complete: false,
+      last_success_at: null,
+    } as const;
+    expect(reviewOf(w)?.unarchived).toEqual([
+      { hostname: hostname("builder-1"), unarchived: counted },
+      { hostname: hostname("builder-2"), unarchived: UNARCHIVED_UNKNOWN },
+    ]);
+    expect(timeline.indexOf("review")).toBeLessThan(timeline.indexOf("asked"));
+    expect(timeline.indexOf("asked")).toBeLessThan(timeline.indexOf("stopping_dispatch"));
+    expect(result.kind).toBe("done");
+    expectAllRemoved(w);
+  });
+
+  test("a preview that cannot be counted is unknown in the review, never none, and refuses nothing (S1)", async () => {
+    const w = world({ workers: { "builder-1": "running" } });
+    const result = await teardownFactory(w.deps, request(w, { instance: archivingOf(w.keys) }));
+    // Its work inspection carries no backlog, as a release before it answers.
+    expect(reviewOf(w)?.unarchived).toEqual([
+      { hostname: hostname("builder-1"), unarchived: UNARCHIVED_UNKNOWN },
+    ]);
+    expect(result.kind).toBe("done");
+  });
+
+  test("a worker the tailnet does not locate is previewed unknown, and the gates still refuse it", async () => {
+    const w = world({ workers: { "builder-1": "running" }, view: peers() });
+    const result = await teardownFactory(w.deps, request(w, { instance: archivingOf(w.keys) }));
+    expect(reviewOf(w)?.unarchived).toEqual([
+      { hostname: hostname("builder-1"), unarchived: UNARCHIVED_UNKNOWN },
+    ]);
+    expect(result.kind).toBe("refused");
+  });
+
+  test("without the log archive, the review previews nothing and asks no worker for it", async () => {
+    const backlog = {
+      state: "collected",
+      complete: true,
+      unarchived_files: 1,
+      unarchived_bytes: 5,
+      last_success_at: null,
+    } as const;
+    const w = world({
+      workers: { "builder-1": "running", "builder-2": "stopped" },
+      worker: (key) =>
+        statusAnswers(
+          readyWorker(FACTORY, key, RELEASE),
+          "synchronized",
+          [],
+          undefined,
+          workAnswer(hostname(key), [], true, backlog),
+        ),
+    });
+    const result = await teardownFactory(w.deps, request(w));
+    expect(reviewOf(w)?.unarchived).toEqual([]);
+    // Only the gate's work inspection: none for a preview.
+    const inspections = w.transport.calls.filter(
+      ({ command }) => command.join(" ") === INSPECT_WORK_COMMAND.join(" "),
+    );
+    expect(inspections.length).toBe(1);
+    expect(result.kind).toBe("done");
+  });
+
+  test("without the log archive, says only a backlog a worker counted", async () => {
+    const w = world({ workers: { "builder-1": "running", "builder-2": "stopped" } });
+    const result = await teardownFactory(w.deps, request(w));
+    expect(result).toMatchObject({ kind: "done", report: { unarchived: [] } });
+    expect(w.progress.map(({ kind }) => kind)).not.toContain("unarchived");
   });
 
   test("stops dispatch on every running worker before the first inspection", async () => {
@@ -3140,6 +3310,7 @@ describe("fffactory teardown: no state bucket (teardown §No state bucket)", () 
         bucket: { name: BUCKET, outcome: "not_found" },
         withoutLock: ranWithoutLock(BUCKET),
         archive: undefined,
+        unarchived: [],
       },
     });
     expect(w.secrets.secrets()).toEqual([]);
@@ -3425,6 +3596,7 @@ describe("fffactory teardown: no state bucket (teardown §No state bucket)", () 
         bucket: { name: BUCKET, outcome: "not_found" },
         withoutLock: ranWithoutLock(BUCKET),
         archive: undefined,
+        unarchived: [],
       },
     });
     expect(w.progress.slice(progress)).toContainEqual(

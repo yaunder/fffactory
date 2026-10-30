@@ -288,7 +288,7 @@ test_undelivered_accounts_keep_their_logins_and_the_claude_helper_goes() {
   assert_absent "$SETTINGS"
   assert_absent "$KEY_FILE"
   assert_contains "$(cat /var/log/fffactory/credentials.log)" \
-    "anthropic: not delivered; Claude Code's API key helper removed"
+    "anthropic: not delivered; Claude Code's managed settings removed"
   local out
   out="$(cat "$OUT")"
   assert_contains "$out" '"id": "github",
@@ -309,7 +309,7 @@ test_managed_settings_not_fffactorys_are_kept_when_anthropic_is_not_delivered() 
   assert_status 0
   assert_eq "$(cat "$SETTINGS")" "$policy" "$SETTINGS"
   assert_contains "$(cat /var/log/fffactory/credentials.log)" \
-    "anthropic: not delivered; Claude Code's managed settings kept: they do not name fffactory's helper"
+    "anthropic: not delivered; Claude Code's managed settings kept: they are not fffactory's"
 }
 
 test_a_secret_it_cannot_read_fails_the_install_naming_the_account_only() {

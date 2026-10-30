@@ -7,11 +7,13 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { COLLECTOR_CONFIGURATION } from "../../src/domain/collector";
+import { COLLECTOR_UNITS } from "../../src/domain/collector-installation";
 import { WORKER_PATHS } from "../../src/domain/host-protocol";
 import {
   ANTHROPIC_KEY_FILE,
   CLAUDE_MANAGED_SETTINGS,
-  CLAUDE_MANAGED_SETTINGS_JSON,
+  claudeManagedSettingsJson,
 } from "../../src/domain/installation";
 import type { Release } from "../../src/domain/instance";
 import { verificationJson } from "../../src/domain/readiness";
@@ -200,6 +202,29 @@ describe("host verify's software checks (readiness §Verification)", () => {
   });
 });
 
+describe("host verify and the log archive's collector (plan and apply §The workers stage)", () => {
+  test("never checks the collector: a worker with it installed and failing verifies the same", async () => {
+    const without = await verify();
+    await mkdir(join(root, "etc/fffactory"), { recursive: true });
+    await writeFile(join(root, COLLECTOR_CONFIGURATION), "{}");
+    for (const unit of COLLECTOR_UNITS) {
+      await mkdir(join(root, unit.path, ".."), { recursive: true });
+      await writeFile(join(root, unit.path), unit.text);
+    }
+    const failing = exited(3, "failed\n");
+    const installed = await verify({
+      "systemctl is-active fffactory-collector.service": failing,
+      "systemctl is-active fffactory-collector.timer": failing,
+    });
+    expect(verificationJson(installed.verification)).toBe(verificationJson(without.verification));
+    // Checks run concurrently: compare the commands run, not the order they started in.
+    const commands = (calls: typeof without.calls) =>
+      calls.map(({ argv }) => argv.join(" ")).sort();
+    expect(commands(installed.calls)).toEqual(commands(without.calls));
+    for (const { argv } of installed.calls) expect(argv.join(" ")).not.toContain("collector");
+  });
+});
+
 describe("host verify's enrollment (readiness §Enrollment)", () => {
   test("checks each credential as factory: enrolled, pending, or unknown when it cannot tell", async () => {
     const { verification } = await verify({
@@ -287,7 +312,9 @@ describe("host verify's enrollment (readiness §Enrollment)", () => {
   describe("Anthropic delivered through fffactory's key helper (credential delivery §Verify)", () => {
     const KEY_CHECK = "test -r anthropic-api-key -a -s anthropic-api-key";
 
-    async function helperConfigured(text = CLAUDE_MANAGED_SETTINGS_JSON) {
+    async function helperConfigured(
+      text = claudeManagedSettingsJson({ keyHelper: true, keepHistory: false }),
+    ) {
       await mkdir(join(root, "/etc/claude-code"), { recursive: true });
       await writeFile(join(root, CLAUDE_MANAGED_SETTINGS), text);
     }
@@ -307,6 +334,21 @@ describe("host verify's enrollment (readiness §Enrollment)", () => {
         join(root, ANTHROPIC_KEY_FILE),
       ]);
       expect(check?.timeoutMs).toBe(CHECK_TIMEOUT_MS);
+    });
+
+    test("accepts every form the credentials step composes", async () => {
+      for (const [keyHelper, keepHistory] of [
+        [true, false],
+        [true, true],
+        [false, true],
+      ] as const) {
+        await helperConfigured(claudeManagedSettingsJson({ keyHelper, keepHistory }) ?? "");
+        const { verification, calls } = await verify();
+        expect(verification.enrollment[2]).toEqual({ id: "anthropic", state: "enrolled" });
+        expect(verification.checks.every(({ status }) => status === "passed")).toBe(true);
+        // The key file is checked exactly while the settings name fffactory's helper.
+        expect(calls.some(({ argv }) => argv.includes("-s"))).toBe(keyHelper);
+      }
     });
 
     test("a key file missing or empty is pending, though claude auth status passes", async () => {

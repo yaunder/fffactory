@@ -27,6 +27,7 @@ import {
   type TeardownBucket,
   type TeardownReport,
   type TeardownReview,
+  type WorkerUnarchived,
 } from "../../domain/teardown";
 import type { Refusal } from "../../domain/worker-lifecycle";
 import {
@@ -41,6 +42,7 @@ import {
 import { type Selection, withCommands } from "./command-line";
 import { lockRefusalReport } from "./lock";
 import { changeLine, planRefusalReport, targetRows } from "./plan";
+import { unarchivedWords } from "./worker-inspection";
 
 /** What a refusal of teardown is called, as `plan` and `apply` call theirs. */
 const ACTION = "remove the factory";
@@ -155,6 +157,7 @@ export function teardownReviewBlocks(review: TeardownReview, selection: Selectio
   const remove: Row[] = [
     plannedInfrastructure(review),
     ...listRow("EC2 instances", review.machines.map(machineText)),
+    ...unarchivedRow(review.unarchived, PREVIEWED_UNARCHIVED),
     ...listRow("VPCs", review.vpcIds),
     plannedDevices(review, selection),
     ...plannedSecrets(review),
@@ -227,7 +230,37 @@ export function teardownProgressLine(
       return line("Deleting the owned secrets, confirming each is gone.");
     case "deleting_bucket":
       return line([verbatim(`Deleting the state bucket ${event.bucket}`), ", the lock last."]);
+    case "unarchived":
+      return { kind: "text", lines: event.workers.map(unarchivedLine) };
   }
+}
+
+/** A worker's unarchived evidence, destroyed with it: said, never judged (S2). */
+function unarchivedLine({ hostname, unarchived }: WorkerUnarchived): Inline {
+  return shown(`Log archive on ${hostname}: ${unarchivedWords(unarchived)}.`);
+}
+
+/** What the review's unarchived evidence is: a preview, counted again before the destroy. */
+const PREVIEWED_UNARCHIVED =
+  "what each worker's log archive collector has not archived, destroyed with it; counted again before the destroy";
+/** What the report's unarchived evidence is. */
+const REPORTED_UNARCHIVED =
+  "what each worker's log archive collector had not archived, gone with it";
+
+/** Each worker's unarchived evidence, under one row saying what it is, when any is said. */
+function unarchivedRow(workers: readonly WorkerUnarchived[], what: string): Row[] {
+  if (workers.length === 0) return [];
+  const rows: Row[] = workers.map(({ hostname, unarchived }) => ({
+    label: hostname,
+    value: shown(unarchivedWords(unarchived)),
+  }));
+  return [
+    {
+      label: "Unarchived",
+      value: what,
+      details: [{ kind: "rows", rows }],
+    },
+  ];
 }
 
 /** How a teardown that ended was reported: its blocks and Next block, and on which stream. */
@@ -314,6 +347,7 @@ function resultRows(report: TeardownReport): Row[] {
   return [
     infrastructure,
     ...listRow("EC2 instances", report.machines.map(machineText)),
+    ...unarchivedRow(report.unarchived, REPORTED_UNARCHIVED),
     {
       label: "Tailnet devices",
       value:

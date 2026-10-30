@@ -529,16 +529,31 @@ const SHUTTING_DOWN_QUESTION =
 
 describe("fffactory worker terminate --keep (worker-lifecycle §Terminate (keep))", () => {
   test("terminates the worker, deletes its tailnet device and keeps the host", async () => {
-    const cli = setup(TERMINATING);
+    const cli = setup({
+      ...TERMINATING,
+      work: workAnswer(HOSTNAME, [], true, {
+        state: "collected",
+        complete: true,
+        unarchived_files: 3,
+        unarchived_bytes: 70_000,
+        last_success_at: "2026-10-30T10:15:00.000Z",
+      }),
+    });
+    // Its backlog is said before the machine is touched and in the report, and never refuses (S2).
+    const backlog =
+      `Log archive on ${HOSTNAME}: 3 files (70000 bytes) unarchived; last collection ` +
+      "succeeded at 2026-10-30T10:15:00.000Z.";
     expect(await run(TERMINATE(), cli.context)).toBe(0);
     expect(cli.err).toEqual([]);
     expect(cli.out).toEqual([
       `Instance: ${PATH} (nearest .fffactory/factory.json)`,
       `Worker ${KEY} (${HOSTNAME}): EC2 instance ${ID} is running.`,
+      backlog,
       `Terminating EC2 instance ${ID}; waiting for it to be terminated (up to 10 min).`,
       `Deleting the Tailscale devices named ${HOSTNAME}.`,
       `Terminated worker ${KEY} (${HOSTNAME}): its EC2 instance and root volume are gone. ` +
         "factory.json keeps the host, so `fffactory apply` creates it afresh.",
+      backlog,
       `Deleted Tailscale device nWorker1CNTRL (${HOSTNAME}).`,
       expect.stringMatching(/^Operation record: s3:\/\/fff-abcd1234-state\/.+\.json$/),
     ]);
@@ -1092,6 +1107,23 @@ describe("fffactory worker inspect (worker-lifecycle §Inspect)", () => {
     expect(cli.admin.calls).toEqual([]);
   });
 
+  test("with the log archive, each worker's unarchived evidence, unknown when not counted (S1)", async () => {
+    const cli = setup({
+      agents: agentsIn("finished"),
+      instance: { ...declaring(KEY, "builder-2"), log_archive: { enabled: true } },
+    });
+    expect(await run(["worker", "inspect"], cli.context)).toBe(0);
+    expect(cli.out.slice(4, 11)).toEqual([
+      `  ✔ builder-1   removable · ${REMOVABLE_SUMMARY}`,
+      "    Agents    1 finished (idle)",
+      "      finished   agent-1 (dispatched)",
+      "    Archive   unarchived evidence unknown",
+      "",
+      "  ↷ builder-2   not inspected · No EC2 instance carries its key: its machine is already gone.",
+      "    Archive   unarchived evidence unknown",
+    ]);
+  });
+
   test("a refused worker exits 2, its next action repeating the instance given", async () => {
     const cli = setup({ agents: agentsIn("working", "finished") });
     expect(await run(["worker", "inspect", KEY, "--instance", PATH], cli.context)).toBe(2);
@@ -1174,6 +1206,13 @@ describe("fffactory worker inspect (worker-lifecycle §Inspect)", () => {
               reason: null,
               agents: [{ id: "agent-1", state: "working", dispatched: true }],
             },
+            unarchived: {
+              state: "unknown",
+              files: null,
+              bytes: null,
+              complete: null,
+              last_success_at: null,
+            },
           },
           next_action:
             "Wait until no agent there is working or needs input, then rerun " +
@@ -1189,11 +1228,49 @@ describe("fffactory worker inspect (worker-lifecycle §Inspect)", () => {
             summary: "No EC2 instance carries its key: its machine is already gone.",
             details: [],
             activity: { state: "unknown", reason: null, agents: null },
+            unarchived: {
+              state: "unknown",
+              files: null,
+              bytes: null,
+              complete: null,
+              last_success_at: null,
+            },
           },
           next_action: null,
         },
       ],
     });
+  });
+
+  test("--json reports each worker's unarchived evidence, byte for byte (fixtures/worker-inspection.json)", async () => {
+    const cli = setup({
+      agents: agentsIn("finished"),
+      work: workAnswer(HOSTNAME, [], true, {
+        state: "collected",
+        complete: false,
+        unarchived_files: 3,
+        unarchived_bytes: 70_000,
+        last_success_at: "2026-10-30T10:15:00.000Z",
+      }),
+    });
+    // A backlog never refuses a removal (S2): builder-1 stays removable, exit 0.
+    expect(await run(["worker", "inspect", "--json"], cli.context)).toBe(0);
+    expect(`${cli.out[0]}\n`).toBe(
+      await Bun.file(`${import.meta.dir}/fixtures/worker-inspection.json`).text(),
+    );
+    const document = JSON.parse(cli.out[0] ?? "");
+    expect(inspectionSchemaAccepts(document)).toBe(true);
+    const [counted, absent] = document.workers;
+    const accepts = (unarchived: unknown) =>
+      inspectionSchemaAccepts({
+        ...document,
+        workers: [{ ...counted, inspection: { ...counted.inspection, unarchived } }],
+      });
+    // Counts exactly when counted; nothing but the state otherwise.
+    expect(accepts({ ...counted.inspection.unarchived, files: null })).toBe(false);
+    expect(accepts({ ...absent.inspection.unarchived, files: 0 })).toBe(false);
+    expect(accepts({ ...absent.inspection.unarchived, state: "not_collected" })).toBe(true);
+    expect(accepts({ ...absent.inspection.unarchived, state: "archived" })).toBe(false);
   });
 
   test("every verdict and reason validates against the schema; a mismatch does not", async () => {

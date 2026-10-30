@@ -50,6 +50,8 @@ const RELEASE_MESSAGE = "must be a release version like 1.2.3";
 const ACCOUNT_ID = /^\d{12}$/;
 const REGION = /^[a-z]{2}(-[a-z]+)+-\d+$/;
 const BUCKET = /^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/;
+/** The formats factory.json's validation gives an AWS Region and an S3 bucket name. */
+export { BUCKET as S3_BUCKET_NAME, REGION as AWS_REGION };
 /** S3's longest bucket name. */
 const S3_BUCKET_NAME_MAX = 63;
 /** Regions without S3's account-regional namespace, which names the log archive. */
@@ -105,7 +107,7 @@ export interface FactoryInstance {
   readonly name?: string;
   readonly aws?: { readonly account_id?: string; readonly region?: string };
   readonly state_backend?: { readonly bucket?: string };
-  // TODO(re-evaluate when the collector ships): make the archive default-on, absent meaning
+  // TODO(re-evaluate when the reader ships): make the archive default-on, absent meaning
   // enabled and shown in the reviewed plan; `init` never fills it, as it never makes an
   // operator's choice.
   /** The worker log archive; absent or disabled, there is none. Its name is `archiveBucketName`. */

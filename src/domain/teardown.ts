@@ -40,6 +40,7 @@ import {
   type RemovalGateActions,
   TRUST_CREDENTIALS,
 } from "./worker-lifecycle";
+import type { UnarchivedEvidence } from "./worker-removability";
 
 /** The command every next action of teardown's reruns. */
 const TEARDOWN = "`fffactory teardown`";
@@ -416,8 +417,6 @@ export function teardownConfirmMismatch(factoryId: FactoryId): Refusal {
   );
 }
 
-// TODO(re-evaluate when the collector ships): say, at removal, what evidence a worker has not yet
-// archived, which the archive kept would then lack.
 /**
  * The log archive, `archive` (`archiveBucketName`), which teardown keeps: named from factory.json,
  * never asked of AWS, so true whether or not it was ever created (§Report).
@@ -907,6 +906,13 @@ export interface TeardownReview {
   readonly withoutLock: string | undefined;
   /** The log archive kept (`archiveKept`), when factory.json enables one; undefined otherwise. */
   readonly archive: string | undefined;
+  /**
+   * Each worker's evidence its collector has not archived, destroyed with it, as a read-only
+   * preview before the confirmation: as its work inspection counted it then, unknown when it
+   * could not (S1), only those said (`saysUnarchived`). Informational: it never refuses (S2); the
+   * gates count it again once dispatch is stopped (§Unarchived evidence).
+   */
+  readonly unarchived: readonly WorkerUnarchived[];
 }
 
 /**
@@ -952,6 +958,17 @@ export interface TeardownReport {
   readonly withoutLock: string | undefined;
   /** The log archive kept (`archiveKept`), when factory.json enables one; undefined otherwise. */
   readonly archive: string | undefined;
+  /**
+   * Each worker's evidence its collector had not archived, destroyed with it: as its inspection
+   * counted it, unknown for one not inspected (§Report). Empty when no worker was there.
+   */
+  readonly unarchived: readonly WorkerUnarchived[];
+}
+
+/** A worker teardown removed, and its unarchived evidence as its inspection document says. */
+export interface WorkerUnarchived {
+  readonly hostname: string;
+  readonly unarchived: UnarchivedEvidence;
 }
 
 /**

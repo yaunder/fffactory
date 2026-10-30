@@ -12,6 +12,8 @@ import {
   type Fields,
   HOST_PROTOCOL_VERSION,
   Invalid,
+  isoTime,
+  nullable,
   oneOf,
   parseVersioned,
   record,
@@ -73,6 +75,30 @@ export interface RepositoryWork {
   readonly worktrees: readonly WorktreeWork[];
 }
 
+export const ARCHIVE_STATES = ["not_collected", "collected"] as const;
+/**
+ * `not_collected`: no collector is configured on the worker (`/etc/fffactory/collector.json`
+ * absent); `collected`: one is, and its backlog was counted.
+ */
+export type ArchiveState = (typeof ARCHIVE_STATES)[number];
+
+/**
+ * What the log archive's collector has not yet archived on the worker (§work inspect): counted
+ * from its checkpoint against the sources' current stats (`backlog`, `docs/specs/collector.md`
+ * §Backlog), never by reading a source. Counts only: no file's name or content.
+ */
+export type WorkArchive =
+  | { readonly state: "not_collected" }
+  | {
+      readonly state: "collected";
+      /** False when the count stopped at its bound: at least these are unarchived. */
+      readonly complete: boolean;
+      readonly unarchived_files: number;
+      readonly unarchived_bytes: number;
+      /** When the collector's last successful run ended, by its checkpoint; null for none. */
+      readonly last_success_at: string | null;
+    };
+
 /** `host work inspect`'s document. */
 export interface WorkInspection {
   readonly protocol_version: typeof HOST_PROTOCOL_VERSION;
@@ -80,6 +106,12 @@ export interface WorkInspection {
   /** False when the worker ran out of time, or found more than it reports. */
   readonly complete: boolean;
   readonly repositories: readonly RepositoryWork[];
+  /**
+   * The log archive's backlog, never part of `complete`: a removal reports it, never refuses
+   * over it. Absent from a worker whose release predates it, and when the worker's section is
+   * malformed: either way the backlog reads unknown.
+   */
+  readonly archive?: WorkArchive;
 }
 
 /** The work inspection as the CLI observed it: `unknown` when it could not be had. */
@@ -139,7 +171,18 @@ function repositoryJson(repository: RepositoryWork) {
   };
 }
 
-/** The document, two-space indented, keys in a stable order. */
+function archiveJson(archive: WorkArchive) {
+  if (archive.state === "not_collected") return { state: archive.state };
+  return {
+    state: archive.state,
+    complete: archive.complete,
+    unarchived_files: archive.unarchived_files,
+    unarchived_bytes: archive.unarchived_bytes,
+    last_success_at: archive.last_success_at,
+  };
+}
+
+/** The document, two-space indented, keys in a stable order; `archive` only when reported. */
 export function workInspectionJson(inspection: WorkInspection): string {
   return JSON.stringify(
     {
@@ -147,6 +190,7 @@ export function workInspectionJson(inspection: WorkInspection): string {
       hostname: inspection.hostname,
       complete: inspection.complete,
       repositories: inspection.repositories.map(repositoryJson),
+      ...(inspection.archive === undefined ? {} : { archive: archiveJson(inspection.archive) }),
     },
     null,
     2,
@@ -201,16 +245,50 @@ function readRepository(value: unknown, path: string): RepositoryWork {
   };
 }
 
+function flag(value: unknown, path: string): boolean {
+  if (typeof value !== "boolean") throw new Invalid(`${path} must be true or false`);
+  return value;
+}
+
+function readArchive(value: unknown): WorkArchive {
+  const fields: Fields = record(value, "archive");
+  const state = oneOf(fields.state, "archive.state", ARCHIVE_STATES);
+  if (state === "not_collected") return { state };
+  return {
+    state,
+    complete: flag(fields.complete, "archive.complete"),
+    unarchived_files: count(fields.unarchived_files, "archive.unarchived_files"),
+    unarchived_bytes: count(fields.unarchived_bytes, "archive.unarchived_bytes"),
+    last_success_at: nullable(fields.last_success_at, (time) =>
+      isoTime(time, "archive.last_success_at"),
+    ),
+  };
+}
+
+/**
+ * The archive section, or none when absent or malformed: a collector-side fault loses only the
+ * backlog, which then reads unknown, never the work inspection, so it never refuses a removal (S2).
+ */
+function optionalArchive(value: unknown): { readonly archive?: WorkArchive } {
+  if (value === undefined) return {};
+  try {
+    return { archive: readArchive(value) };
+  } catch (error) {
+    if (error instanceof Invalid) return {};
+    throw error;
+  }
+}
+
 function readInspection(document: Fields): WorkInspection {
   const hostname = string(document.hostname, "hostname", TOKEN);
-  if (typeof document.complete !== "boolean") throw new Invalid("complete must be true or false");
+  const complete = flag(document.complete, "complete");
+  const repositories = bounded(document.repositories, "repositories", WORK_LIMITS.repositories);
   return {
     protocol_version: HOST_PROTOCOL_VERSION,
     hostname,
-    complete: document.complete,
-    repositories: bounded(document.repositories, "repositories", WORK_LIMITS.repositories).map(
-      (item, index) => readRepository(item, `repositories[${index}]`),
-    ),
+    complete,
+    repositories: repositories.map((item, index) => readRepository(item, `repositories[${index}]`)),
+    ...optionalArchive(document.archive),
   };
 }
 

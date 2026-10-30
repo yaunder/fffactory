@@ -7,9 +7,14 @@ temporary directories by `worker-scenarios.ts`, never the real `/`.
   contract.
   `protocol-contract.test.ts` runs every fixture through both sides: the worker side must
   produce it byte for byte; the CLI side must parse it and serialize it back unchanged.
+  `work-before-archive.json`, an older worker's work inspection without `archive`, is read by
+  the CLI side only: the worker side no longer produces it.
   `dispatch-not-requested.json`, the projection that stops dispatch, goes the other way: the
   CLI side builds it byte for byte, the worker side parses it unchanged, and `dispatch.test.ts`
   and the reconciler's Python test (`assets/steps/dispatch/tests/`) remove the schedule for it.
+  `projection-log-archive.json`, a host projection carrying the log archive, goes the same way:
+  the CLI side projects it byte for byte, the worker side parses it unchanged, and `host
+  inspect` reports its control-plane part's digest apart.
   `activity-agents.json` is also what `host agents` prints, and the dispatcher's Python test
   (`assets/steps/dispatch/tests/test_factory_dispatch.py`) reads it as its capacity check's
   answer. Change a document, its fixture and the CLI-side parser together.
@@ -20,7 +25,10 @@ temporary directories by `worker-scenarios.ts`, never the real `/`.
 - `work.test.ts` runs `host work inspect` over real Git repositories that `work-scenarios.ts`
   lays out in a temporary worker root, with a remote outside it; its runner checks each command
   drops to `factory`, then runs the rest as the test's user. `protocol-contract.test.ts` builds
-  `fixtures/work-unresolved.json` from the same real Git.
+  `fixtures/work-unresolved.json` from the same real Git, and `work-archive-backlog.json` from
+  `work-scenarios.ts`'s `archivingWorker`. `work-archive.test.ts` runs its archive section over a
+  Claude root, the collector's configuration and a checkpoint laid out there
+  (`configureCollector`, `saveCheckpoint`, `captured`), each write a later modification time.
 - `plugins.test.ts` exercises native plugin installation and verification with local
   metadata and a scripted process runner, including unversioned marketplace entries,
   exact commit/version/content checks, drift repair and undeclared plugin removal.
@@ -35,3 +43,25 @@ temporary directories by `worker-scenarios.ts`, never the real `/`.
   for the password.
 - `verify.test.ts` answers every command with a scripted runner; `inspect.test.ts` covers the
   unprivileged read-only inspection.
+- `collect.test.ts` runs the collection run (`docs/specs/collector.md` §Run) over a Claude root
+  laid out in a temporary worker root, every write a later modification time, writing to
+  `support/memory-archive.ts` (create-once keys, a failure or a crash before or after any put,
+  and a hook before each put that changes the worker mid-run). It reassembles the archive by the
+  reader's rules with `support/archive-reassembly.ts`, checks every reassembled state is a prefix
+  of content the file held and the last equals it, and that the checkpoint names only stored
+  data, also over a seeded random sequence of appends, rewrites and crashes.
+  `collect.test.ts` gives the run no `incarnation.json` unless a test does, so put indices
+  count only the run's own objects.
+- `collector-step.test.ts` runs the `collector` install step over a scripted `systemctl` that
+  writes to the step's log as the real one does. It also spawns
+  `support/aws-endpoint-probe-main.ts` under the service's environment, assembled from the unit
+  text by systemd's rules (the manager's variables, then `Environment=`, then
+  `UnsetEnvironment=`), with a `~/.aws` and inherited settings pointing at closed local ports, and
+  without that environment as the baseline. The probe resolves where instance metadata, STS and S3
+  would be asked and stops each request once built, sending nothing; it is not `fffactory`, so it
+  gets that environment rather than `isolatedAwsEnvironment`, whose settings it exists to test.
+- `s3-archive-writer.test.ts` and `collection.test.ts` run the S3 archive writer and `host
+  collect --once` on the real AWS SDK against `support/loopback-imds.ts`, `support/stub-sts.ts`
+  and `support/stub-s3.ts` (with `requireIfNoneMatch`), the metadata endpoint set only around
+  the open (`withMetadataEndpoint`); nothing reaches AWS. A network failure is a real refused
+  connection to `CLOSED_ENDPOINT`.

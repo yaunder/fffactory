@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Release } from "../../src/domain/instance";
 import type { ApplySystem } from "../../src/host/apply";
+import { localCollectionSystem, workerCollection } from "../../src/host/collection";
 import { workerEndpoint } from "../../src/host/endpoint";
 import { system } from "./worker-scenarios";
 
@@ -27,7 +28,10 @@ describe("the composed worker endpoint", () => {
       release: "0.3.0" as Release,
       lock: async () => ({ release: () => {} }),
     };
-    const endpoint = workerEndpoint(worker);
+    const endpoint = workerEndpoint(
+      worker,
+      workerCollection(localCollectionSystem("0.3.0" as Release, root)),
+    );
 
     const results = await Promise.allSettled([
       endpoint.inspect(),
@@ -44,10 +48,11 @@ describe("the composed worker endpoint", () => {
       endpoint.inspectDispatch(),
       endpoint.inspectWork(),
       endpoint.agents(),
+      endpoint.collect(),
     ]);
 
     expect(endpoint.isRoot()).toBe(false);
-    expect(results).toHaveLength(14);
+    expect(results).toHaveLength(15);
     expect(results.slice(0, 4).every(({ status }) => status === "fulfilled")).toBe(true);
     expect(results[4]?.status).toBe("rejected");
     expect(results.slice(5, 9).every(({ status }) => status === "fulfilled")).toBe(true);
@@ -57,5 +62,7 @@ describe("the composed worker endpoint", () => {
       status: "fulfilled",
       value: { kind: "unknown", reason: "Paseo activity could not be read" },
     });
+    // No collector.json under this root: the collector is not configured.
+    expect(results[14]).toEqual({ status: "fulfilled", value: { kind: "not_configured" } });
   });
 });

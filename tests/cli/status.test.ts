@@ -29,6 +29,8 @@ const EXAMPLE = JSON.parse(await Bun.file("examples/factory.json").text());
 const B1 = "example-builder-1";
 const B2 = "example-builder-2";
 const B1_PASEO_SECRET = EXAMPLE.hosts[0].paseo_password_secret as SecretReference;
+/** The log archive `examples/factory.json` enables, as each host's projection carries it. */
+const EXAMPLE_ARCHIVE = { bucket: "example-logs-123456789012-us-east-1-an", region: "us-east-1" };
 const B2_PASEO_SECRET =
   "arn:aws:secretsmanager:us-east-1:123456789012:secret:example/builder-2/paseo-password-AbCdEf" as SecretReference;
 const BUILDER_2 = {
@@ -58,8 +60,12 @@ const RUNNING = fakeMachineInventory({
 
 function ready() {
   return fakeTransport({
-    [B1]: statusAnswers(readyWorker("example", "builder-1", "0.1.0", B1_PASEO_SECRET)),
-    [B2]: statusAnswers(readyWorker("example", "builder-2", "0.1.0", B2_PASEO_SECRET)),
+    [B1]: statusAnswers(
+      readyWorker("example", "builder-1", "0.1.0", B1_PASEO_SECRET, undefined, EXAMPLE_ARCHIVE),
+    ),
+    [B2]: statusAnswers(
+      readyWorker("example", "builder-2", "0.1.0", B2_PASEO_SECRET, undefined, EXAMPLE_ARCHIVE),
+    ),
   });
 }
 
@@ -377,7 +383,14 @@ describe("fffactory status, a stopped worker (status §Workers)", () => {
 
 describe("fffactory status, enrollment pending (readiness §Enrollment)", () => {
   function pendingScenario() {
-    const pending = readyWorker("example", "builder-1", "0.1.0", B1_PASEO_SECRET);
+    const pending = readyWorker(
+      "example",
+      "builder-1",
+      "0.1.0",
+      B1_PASEO_SECRET,
+      undefined,
+      EXAMPLE_ARCHIVE,
+    );
     const installation = pending.installation.state === "succeeded" ? pending.installation : null;
     return harness(
       store(),
@@ -393,7 +406,16 @@ describe("fffactory status, enrollment pending (readiness §Enrollment)", () => 
               verification: verification(B1, "pending"),
             },
           }),
-          [B2]: statusAnswers(readyWorker("example", "builder-2", "0.1.0", B2_PASEO_SECRET)),
+          [B2]: statusAnswers(
+            readyWorker(
+              "example",
+              "builder-2",
+              "0.1.0",
+              B2_PASEO_SECRET,
+              undefined,
+              EXAMPLE_ARCHIVE,
+            ),
+          ),
         }).transport,
       },
     );
@@ -442,7 +464,14 @@ describe("fffactory status, a delivered credential not accepted (readiness §Enr
   /** builder-1 is delivered the GitHub token, which it did not accept; builder-2 keeps its login. */
   function deliveredScenario() {
     const credentials = { github_token_secret: GITHUB_TOKEN };
-    const pending = readyWorker("example", "builder-1", "0.1.0", B1_PASEO_SECRET, credentials);
+    const pending = readyWorker(
+      "example",
+      "builder-1",
+      "0.1.0",
+      B1_PASEO_SECRET,
+      credentials,
+      EXAMPLE_ARCHIVE,
+    );
     const installation = pending.installation.state === "succeeded" ? pending.installation : null;
     return harness(
       store({
@@ -467,7 +496,16 @@ describe("fffactory status, a delivered credential not accepted (readiness §Enr
               }),
             },
           }),
-          [B2]: statusAnswers(readyWorker("example", "builder-2", "0.1.0", B2_PASEO_SECRET)),
+          [B2]: statusAnswers(
+            readyWorker(
+              "example",
+              "builder-2",
+              "0.1.0",
+              B2_PASEO_SECRET,
+              undefined,
+              EXAMPLE_ARCHIVE,
+            ),
+          ),
         }).transport,
       },
     );

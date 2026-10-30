@@ -346,7 +346,10 @@ skipped: no Terraform apply runs), `applyWorkers`
 3. The release tarball is uploaded and activated with its embedded digest and
    the host projection on standard input ([host protocol §apply](host-protocol.md#apply)):
    the one `projectHosts` builds from factory.json's hosts, Paseo secret
-   reference included, whose digest plan and `status` expect.
+   reference included, whose digest plan and `status` expect. It carries the
+   log archive while factory.json enables it, so enabling or disabling the
+   archive is delivered here, as a host install, and plans no Paseo change
+   ([host protocol §The host projection](host-protocol.md#the-host-projection)).
    While it works apply streams a row per step into its `Applying` section,
    the worker by its key alone: `KEY   uploading N MiB`, then `KEY   installing
    and verifying (can take many minutes)` ([Apply](#apply)).
@@ -361,6 +364,24 @@ skipped: no Terraform apply runs), `applyWorkers`
    activation times out or its connection drops, `host apply` may still be
    installing: the worker fails with that said, and its next action is to wait
    for that install, then rerun.
+
+With the log archive enabled, the install's last step, `collector`, installs the
+collector and enables its timer
+([host protocol §The collector step](host-protocol.md#the-collector-step));
+disabled, it removes them. A worker counts as installed once that step has
+written them and systemd took the timer: it never waits for a collection or an
+upload. The collector's runtime health (its last upload, backlog or last error)
+is no part of `host verify`, of the services a worker reports
+(`WORKER_SERVICES`: `tailscaled` alone) or of any dispatch gate
+([dispatch §Gate matrix](dispatch.md#gate-matrix)): a collector failing, or S3 refusing it, never fails
+an install, never makes a worker unready and never holds dispatch back. It
+shows only in the archive's heartbeats and the worker's journal
+([collector §Credentials and publishing](collector.md#credentials-and-publishing)).
+The `collector` step's own failure is another matter: one that cannot write or
+remove its files, or whose `systemctl` fails, fails the install like any step,
+with its step log, and the worker's `worker_release` dispatch gate
+([dispatch §Gate matrix](dispatch.md#gate-matrix)) stays pending until a
+rerun installs it.
 
 Apply's Result then has a row per worker, in factory.json's order, by its key
 alone: its workers-stage outcome, then, under it, each later stage that ran for

@@ -181,8 +181,9 @@ operation of that activator and lock
 sudo -n /usr/local/libexec/fffactory-activate work inspect
 ```
 
-One subcommand goes neither over SSH nor through the activator: the worker's
-own dispatcher runs `host agents` as `factory` ([agents](#agents)).
+Two subcommands go neither over SSH nor through the activator: the worker's
+own dispatcher runs `host agents` as `factory` ([agents](#agents)), and the log
+archive's timer runs `host collect --once` as `factory` ([collect](#collect)).
 
 ## Versioning
 
@@ -255,7 +256,7 @@ name (`uname -m`). A value that is not a short token of letters, digits, `.`,
 | Field | Values |
 | --- | --- |
 | `release` | `{"state": "none"}`: no `current` link, the explicit empty state. `{"state": "active", "version", "sha256"}`: the link names a release whose marker records it. `{"state": "broken"}`: anything else (not a link, another target, a missing or mismatched marker). |
-| `configuration` | `{"state": "none"}`: no file. `{"state": "present", "sha256"}`, and `control_plane_sha256` after it when the file is a host projection carrying `credentials`: the SHA-256 of its control-plane part, the projection without them. Absent, the whole file is that part, as on a worker from before credential references. `{"state": "unreadable"}`: it exists but cannot be read. |
+| `configuration` | `{"state": "none"}`: no file. `{"state": "present", "sha256"}`, and `control_plane_sha256` after it when the file is a host projection carrying `credentials` or `log_archive`: the SHA-256 of its control-plane part, the projection without them. Absent, the whole file is that part, as on a worker from before credential references. `{"state": "unreadable"}`: it exists but cannot be read. |
 | `installation` | `{"state": "none"}`: no record. `{"state": "unreadable"}`: a record that cannot be read as one. Otherwise the record's `state` (`running`, `succeeded` or `failed`), `release`, `configuration_sha256`, `failed_step` (the first failed step's name, or null), `started_at`, `finished_at`, `verification` (the verify document, or null) and `failure` (the record's, below; absent reads as null). A worker that reports no `installation` field, from before #101, reads as `none`. |
 | `services[].state` | What `systemctl is-active` prints: `active`, `reloading`, `refreshing`, `inactive`, `failed`, `activating`, `deactivating`, `maintenance`; else `unknown`, as when it cannot run. |
 | `evidence.os` | `null` when os-release is unreadable or lacks either value. |
@@ -298,7 +299,7 @@ sudo -n /usr/local/libexec/fffactory-activate /home/fffactory-admin/fffactory-re
    ([worker bootstrap §Activator](worker-bootstrap.md#activator)). The host
    projection is streamed on standard input, which the activator passes to
    `host apply`. The CLI waits for every step's timeout plus verification and
-   five minutes (`ACTIVATION_TIMEOUT_MS`, 82 minutes).
+   five minutes (`ACTIVATION_TIMEOUT_MS`, 84 minutes).
 
 ### The host projection
 
@@ -317,6 +318,10 @@ on standard input and kept as `/var/lib/fffactory/host.json`:
     "github_token_secret": "arn:aws:secretsmanager:eu-west-2:123456789012:secret:fff-aaaa1111/github-token-AbCdEf",
     "anthropic_api_key_secret": "arn:aws:secretsmanager:eu-west-2:123456789012:secret:fff-aaaa1111/anthropic-api-key-AbCdEf",
     "openai_api_key_secret": "arn:aws:secretsmanager:eu-west-2:123456789012:secret:fff-aaaa1111/openai-api-key-AbCdEf"
+  },
+  "log_archive": {
+    "bucket": "fff-aaaa1111-logs-123456789012-eu-west-2-an",
+    "region": "eu-west-2"
   }
 }
 ```
@@ -332,8 +337,19 @@ API credentials delivered to the host
 account the host does not list in `interactive_logins`, under the same field
 name, in this order. It is absent when none is delivered, never empty. The
 `credentials` install step reads them on the worker and delivers each to its
-tool ([credential delivery](credential-delivery.md)). The projection holds
-no secret material, and never appears in an argument, a plan or a log.
+tool ([credential delivery](credential-delivery.md)). `log_archive` is
+present exactly while factory.json sets `log_archive.enabled: true`
+([instance configuration §Log archive](instance-configuration.md#log-archive)):
+`bucket` is the archive's derived name (`archiveBucketName`) and `region` the
+factory's `aws.region`, in the formats factory.json's validation gives them.
+Without it the projection is byte for byte what it was before the archive. It
+is an addition, so the protocol version is kept. On the worker, the
+`credentials` step reads it, to keep Claude Code's history
+([credential delivery §Managed settings](credential-delivery.md#managed-settings)),
+and the `collector` step, to install the collector
+([§The collector step](#the-collector-step)).
+The projection holds no secret material, and never appears in an argument, a
+plan or a log.
 `release` is the release factory.json pins, which the CLI/pin match guard makes
 the running one's. No other factory-wide reference is projected: the worker
 reads its Tailscale key only at first boot, through Terraform, and the
@@ -348,13 +364,15 @@ newline. `host apply` refuses any other text, so the file it keeps has exactly
 the SHA-256 the CLI computes for it.
 
 Its *control-plane part* (`controlPlaneProjection`) is the projection without
-`credentials`: what a projection was before credential references, and all
-the control plane installs from. The control-plane plan digests only that part
+`credentials` and `log_archive`: what a projection was before credential
+references, and all the control plane installs from. The control-plane plan
+digests only that part
 ([control plane §Planned state](control-plane.md#planned-state)), and `host
 inspect` reports its digest apart from the file's, so adding, changing or
-removing a credential reference plans no Paseo change. `status` still compares
-the whole file's digest: a changed reference is a configuration apply has not
-delivered yet.
+removing a credential reference, or turning the log archive on or off, plans
+no Paseo change. `status` still compares the whole file's digest: a changed
+reference, or the archive turned on or off, is a configuration apply has not
+delivered yet, which the workers stage installs.
 
 There is one projection per host, built from factory.json's host as it
 stands, and its delivered references from the instance's `credentials`: the workers stage sends the ones `projectHosts` builds from the
@@ -407,8 +425,8 @@ No arguments: the activator passes none. In order, it:
    renamed over `/opt/fffactory/current`, so the link is never absent or half
    made. From here the requested release is active, healthy or not.
 5. **Runs the install steps** in order, in this one process: `packages`,
-   `user`, `systemd`, `harness`, `plugins`, `credentials` (`INSTALL_STEPS`,
-   `domain/installation.ts`). The first four run `/bin/bash <release>/steps/<name>.sh` as
+   `user`, `systemd`, `harness`, `plugins`, `credentials`, `collector`
+   (`INSTALL_STEPS`, `domain/installation.ts`). The first four run `/bin/bash <release>/steps/<name>.sh` as
    root with their own timeouts and only `PATH`, `HOME=/root`, `LANG` and its
    inputs in the environment: `FFFACTORY_RELEASE`, `FFFACTORY_STEPS` (the
    release's steps directory, holding the pins and plugin manifest),
@@ -422,11 +440,12 @@ No arguments: the activator passes none. In order, it:
    rewritten after each step. It **stops at the first step that fails** (a
    non-zero exit, its timeout, or bash missing or not starting); the later
    steps stay `not_run`. Nothing waits for or polls a marker file: the process
-   orders the steps. The `plugins` and `credentials` steps run in TypeScript
-   inside the same install lock and record, each with its own command budget and
-   log: `plugins` as described below, `credentials` as
+   orders the steps. The `plugins`, `credentials` and `collector` steps run in
+   TypeScript inside the same install lock and record, each with its own command
+   budget and log: `plugins` as described below, `credentials` as
    [credential delivery](credential-delivery.md) describes, given the
-   projection's `credentials` references.
+   projection's `credentials` references, and `collector` as
+   [below](#the-collector-step), given its `log_archive`.
 6. **Verifies**, once every step succeeded: the verifiers of `host verify`, in
    process ([verify](#verify)), within `VERIFY_TIMEOUT_MS` (5 minutes);
    verification that takes longer fails the install.
@@ -463,7 +482,168 @@ reports it and the next apply repairs it. Nothing on this path uses SSM.
 | `systemd` | `tailscaled.service` enabled and active. |
 | `harness` | Codex's system requirements, then Codex and Claude Code for `factory` at the versions and npm integrity values `versions.env` pins ([Agent pins](#agent-pins)). |
 | `plugins` | The Claude Code plugins `plugins.json` pins, from marketplace checkouts at their pinned revisions; undeclared ones removed. |
-| `credentials` | The API credentials delivered to the host, read from Secrets Manager with the instance role and written to each tool's own store, the material only on standard input; Claude Code's key file, and its managed settings while they name fffactory's API key helper, removed when Anthropic is not delivered ([credential delivery](credential-delivery.md)). |
+| `credentials` | The API credentials delivered to the host, read from Secrets Manager with the instance role and written to each tool's own store, the material only on standard input; Claude Code's managed settings composed from what fffactory needs (the API key helper while Anthropic is delivered, `cleanupPeriodDays: 3650` while the projection carries `log_archive`), removed when it needs neither only while they are fffactory's own; Claude Code's key file removed when Anthropic is not delivered ([credential delivery](credential-delivery.md)). |
+| `collector` | With the projection's `log_archive`, the log archive's collector configured and its timer enabled; without it, the collector removed, its state kept ([§The collector step](#the-collector-step)). |
+
+### The collector step
+
+`src/host/collector-step.ts` implements the `collector` step, last of the
+install steps (2 minutes), from what `src/domain/collector-installation.ts`
+defines. It installs the log archive's collector
+([collector](collector.md), [§collect](#collect)) and never runs it: it
+starts no collection, asks systemd nothing about one and waits for no upload,
+so the collector's runtime health is never the install's
+([plan and apply §The workers stage](plan-apply.md#the-workers-stage)).
+
+With `log_archive` in the projection, in order:
+
+1. `/etc/fffactory/collector.json` (`COLLECTOR_CONFIGURATION`): `format` 1,
+   the projection's `factory_id` and `host_key`, and `log_archive`'s `bucket`
+   and `region` ([collector §Credentials and publishing](collector.md#credentials-and-publishing)),
+   with one final newline.
+2. `/etc/systemd/system/fffactory-collector.service` and
+   `fffactory-collector.timer`, the text below.
+3. `systemctl daemon-reload`, then `systemctl enable --now
+   fffactory-collector.timer`.
+
+Without it, on a worker where any of those three files is present: `systemctl
+disable --now fffactory-collector.timer` while the timer's unit file is there,
+`systemctl stop fffactory-collector.service` (a run under way is stopped; a run
+is crash-safe, [collector §Run](collector.md#run)) while the service's is, then
+the configuration and both units removed and, if a unit was there, `systemctl
+daemon-reload`. The collector's state directory, `/var/lib/fffactory-collector`,
+stays. On a worker where none is present, as on one that never had the
+collector, the step changes nothing and runs nothing.
+
+Every file is root's, 0644, written whole or not at all (a flushed copy renamed
+over it) in a 0755 directory, so `factory` reads the configuration and changes
+none of them. Rewriting identical files and repeating the commands converges, so
+a rerun repairs what a failed one left. `systemctl` runs as `/usr/bin/systemctl`
+with only `PATH` and `LANG`, each command within 60 s
+(`COLLECTOR_COMMAND_TIMEOUT_MS`) and what is left of the step's budget, its own
+output into the step's log. A file it cannot write, remove or look at, or a
+`systemctl` that exits non-zero, times out or does not start, fails the step
+(`writing <path> failed (<code>)`, `systemctl daemon-reload exited with status
+1`, ...) and stops the steps there; the step logs its own lines, never a value
+of the configuration.
+
+The service (`COLLECTOR_SERVICE_UNIT`):
+
+```ini
+[Unit]
+Description=fffactory log archive collector: one collection run
+
+[Service]
+Type=oneshot
+User=factory
+Group=factory
+ExecStart=/opt/fffactory/current/bin/fffactory host collect --once
+StateDirectory=fffactory-collector
+StateDirectoryMode=0700
+Environment=AWS_CONFIG_FILE=/dev/null
+Environment=AWS_SHARED_CREDENTIALS_FILE=/dev/null
+Environment=AWS_IGNORE_CONFIGURED_ENDPOINT_URLS=true
+UnsetEnvironment=AWS_EC2_METADATA_SERVICE_ENDPOINT AWS_EC2_METADATA_SERVICE_ENDPOINT_MODE ... AWS_ROLE_ARN
+ProtectSystem=strict
+ProtectHome=read-only
+NoNewPrivileges=true
+PrivateTmp=true
+InaccessiblePaths=-/home/factory/.claude/.credentials.json
+InaccessiblePaths=-/home/factory/.claude/.session_ingress_token
+InaccessiblePaths=-/home/factory/.claude.json
+InaccessiblePaths=-/home/factory/.claude.json.backup
+InaccessiblePaths=-/home/factory/.config/fffactory
+InaccessiblePaths=-/home/factory/.config/gh
+InaccessiblePaths=-/home/factory/.codex
+InaccessiblePaths=-/home/factory/.aws
+InaccessiblePaths=-/home/factory/.ssh
+InaccessiblePaths=-/home/factory/.git-credentials
+InaccessiblePaths=-/home/factory/.paseo/config.json
+MemoryHigh=384M
+MemoryMax=512M
+CPUQuota=50%
+CPUWeight=20
+TasksMax=64
+Nice=10
+IOSchedulingClass=idle
+TimeoutStartSec=55s
+TimeoutStopSec=20s
+```
+
+- It runs the active release's executable, so an upgrade needs no restart, as
+  `factory`, whose Claude files it reads; `StateDirectory` creates
+  `/var/lib/fffactory-collector` (`COLLECTOR_STATE`, [collector §Run](collector.md#run))
+  for `factory`, private.
+- **No tie to Paseo.** Neither unit names `paseo.service`, and the service has
+  no `Requires`, `Requisite`, `BindsTo`, `PartOf`, `After` or `Wants` at all
+  and no `[Install]`: the timer alone starts it. Paseo's restarts never reach
+  it, and it never holds Paseo up.
+- **Sandboxed**: the file system read-only but for its state directory, home
+  directories read-only, no privilege gain, a private `/tmp`.
+- **No credentials.** `factory`'s credential stores are inaccessible to it
+  (`COLLECTOR_INACCESSIBLE`): Claude's credentials, session token and
+  `~/.claude.json`, the Anthropic key directory and GitHub's and Codex's stores
+  ([credential delivery](credential-delivery.md)), `~/.aws`, `~/.ssh`,
+  `~/.git-credentials` and Paseo's `config.json`. The collector never reads
+  them (it never collects them, [collector §Sources](collector.md#sources)),
+  so a defect or a compromised dependency in it cannot read them either. Each
+  is optional (`-`), so a worker without one still starts the run, and none is,
+  or lies above, what a run needs: `/etc/fffactory/collector.json`, the
+  releases and their `steps/versions.env`, its state directory, and `~/.claude`
+  with its collected directories.
+- **Bounded**: memory (`MemoryHigh`, `MemoryMax`), half a CPU at a fifth of
+  the default weight (`CPUWeight=20`) and a lower priority, 64 tasks, idle
+  I/O, and 55 s a run, above its own 40 s time budget
+  ([collector §Budgets](collector.md#budgets)), so it yields to the agents. That
+  budget only bounds when the last upload starts: opening the archive and the
+  last blob, journal and heartbeat puts, each under its 10 s deadline, can take a
+  slow run past 55 s, when systemd kills it before its heartbeat (crash-safe; the
+  failure shows only in the journal). The
+  memory, task, CPU-weight and time limits are provisional until measured on a
+  worker (`TODO(re-evaluate when measured on Acceptance)` at
+  `COLLECTOR_LIMITS`).
+- **Stops in 20 s** (`TimeoutStopSec`): systemd kills a run that has not ended
+  20 s after it is asked to stop, and waits as long again for survivors of that
+  kill, so the removal's `systemctl stop` returns within its 60 s command
+  deadline (systemd's default is 90 s).
+- **AWS settings.** `factory`'s `~/.aws` is the agents' to write: the SDK reads
+  neither its config nor its credentials file (`/dev/null` for both) and
+  ignores configured endpoints, and `UnsetEnvironment` drops any AWS setting
+  the service manager could pass (`INHERITED_AWS_SETTINGS`: instance
+  metadata's endpoint and mode, every `AWS_ENDPOINT_URL*`, FIPS and dual-stack,
+  profile, Region, keys, container and web-identity credentials). So neither an
+  agent nor the manager's environment can redirect the collector's instance
+  metadata, STS or S3 calls, or break them.
+
+The timer (`COLLECTOR_TIMER_UNIT`):
+
+```ini
+[Unit]
+Description=Run the fffactory log archive collector about once a minute
+
+[Timer]
+OnBootSec=60s
+OnUnitInactiveSec=60s
+AccuracySec=5s
+Unit=fffactory-collector.service
+
+[Install]
+WantedBy=timers.target
+```
+
+A minute after boot, then a minute after each run ends; systemd never starts a
+run while one is active.
+
+Tests: `tests/domain/collector-installation.test.ts` reads every directive
+above from the unit text and finds no tie to any unit;
+`tests/host/collector-step.test.ts` runs the step over a worker in a temporary
+directory with a scripted `systemctl` (installing, a rerun, removing with the
+state kept, a worker that never had it, every failure), and runs the AWS SDK
+under the service's environment, assembled from the unit text by systemd's
+rules, against a `~/.aws` and inherited settings pointing elsewhere, sending
+nothing (`tests/support/aws-endpoint-probe-main.ts`); `tests/host/apply.test.ts`
+runs it last inside `host apply` and its record; `tests/host/verify.test.ts`
+finds `host verify` the same with the collector installed and failing.
 
 ### Agent pins
 
@@ -747,12 +927,47 @@ clears it. A clean filter a repository's own configuration defines under
 another name still runs when such a file is compared, as `factory`, the account
 that owns the repository and whose configuration defines it: no more trust
 than the runtime account already has. No file's content or name reaches the
-document, only counts. It starts no Git command after 75 s, nor inspects more
+document, only counts. It starts no Git command 75 s after it started, the
+archive's backlog counted within those 75 s
+([below](#the-archives-backlog)), so with each command's 20 s it ends within
+95 s, inside the CLI's 2 min ([§The CLI side](#the-cli-side)). Nor does it
+inspect more
 than 100 repositories (submodules among them) or 100 worktrees of one; any of
 these, a directory it could not list, a search root reached through a symbolic
 link, a directory at the depth limit that holds directories (or, in a Git
 directory's `modules/`, at 4 levels down), or a bare repository, leaves it
 `complete: false`.
+
+### The archive's backlog
+
+Before any Git command, the worker counts what the log archive's collector has
+not yet archived ([collector §Backlog](collector.md#backlog)), which terminate
+and teardown destroy with the root volume
+([worker lifecycle §Inspect](worker-lifecycle.md#inspect)):
+
+1. Without `/etc/fffactory/collector.json` (nothing there by `lstat`), the
+   collector is not configured: `not_collected`. The `collector` install step
+   writes it exactly while the projection carries `log_archive`
+   ([§The collector step](#the-collector-step)).
+2. Otherwise it reads the collector's checkpoint,
+   `/var/lib/fffactory-collector/checkpoint.json`, as root: opened without
+   following a symbolic link and without blocking, and only a regular file of
+   at most 64 MiB. One missing, unreadable or malformed is none, as it is to
+   the collector, whose next run captures every source whole: every source then
+   counts whole and `last_success_at` is `null`. The backlog is overstated,
+   never understated.
+3. It finds the sources by the collector's own discovery
+   (`discoverSources`, [collector §Sources](collector.md#sources)): the same
+   allowlist, by `lstat`, never through a symbolic link. It reads no source,
+   only stats them, and counts each as `backlog` does.
+
+It counts for at most 10 s, the checkpoint's read included, out of the work
+inspection's own 75 s, and over at most 200,000 entries; past either, or
+past a directory or entry it could not read, it reports what it counted with
+`complete: false`: at least that much is unarchived. This bound is the
+archive section's own and never makes the work inspection incomplete: a backlog
+is reported, never judged, and never refuses a removal (S2). No source's name
+or content reaches the document, only counts and the checkpoint's last success.
 
 ### Document, protocol version 1
 
@@ -780,7 +995,14 @@ directory's `modules/`, at 4 levels down), or a bare repository, leaves it
         }
       ]
     }
-  ]
+  ],
+  "archive": {
+    "state": "collected",
+    "complete": true,
+    "unarchived_files": 2,
+    "unarchived_bytes": 16,
+    "last_success_at": "2026-10-30T10:15:00.000Z"
+  }
 }
 ```
 
@@ -796,6 +1018,7 @@ directory's `modules/`, at 4 levels down), or a bare repository, leaves it
 | `worktrees[].state` | `inspected`, `missing` (listed by Git, its directory gone: only its commits are counted) or `unreadable` (Git could not report on it, warned while reporting, holds an index entry that hides an edit, or another repository is at its path). |
 | `tracked_changes`, `untracked_files` | Counts, 0 unless `inspected`. Ignored files are not counted, nor is anything inside an ignored directory, a repository included. |
 | `operation` | `merge`, `rebase`, `cherry_pick`, `revert`, or `null`. |
+| `archive` | The log archive's backlog ([§The archive's backlog](#the-archives-backlog)): `{"state": "not_collected"}` without the collector's configuration, or `state` `collected` with `complete` (`false` once its bound stopped the count), `unarchived_files`, `unarchived_bytes` and `last_success_at` (the checkpoint's, or `null`). An addition within version 1: absent from a worker whose release predates it. A malformed `archive` section is read as absent, its backlog unknown; it never makes the document invalid. |
 
 The worker exits 0 with the document whatever work it found: it reports, the
 CLI judges ([worker lifecycle §Gates (terminate)](worker-lifecycle.md#gates-terminate),
@@ -816,6 +1039,8 @@ not a work inspection.
 | Exit 65 / 75 | unknown: no active release / another host operation was running |
 | Any other exit status | unknown: "the work inspection exited with status N" |
 | `timed_out` (2 min) and every other transport outcome | unknown, in fffactory's words |
+| A valid document without `archive`, from a worker whose release predates it | `inspected`; its backlog is unknown, never none |
+| A document valid but for a malformed `archive` section | `inspected`, judged as without it; its backlog is unknown, never none, and never refuses a removal (S2) |
 
 The CLI runs it only after reading the worker's agent activity, which goes
 through the same activator lock, and only when that activity does not already
@@ -912,6 +1137,38 @@ agents are unknown. Exiting 1 for unknown agents makes the dispatcher fail its
 tick before it launches anything: an unreadable worker never reads as one
 without agents.
 
+## collect
+
+```text
+/opt/fffactory/current/bin/fffactory host collect --once
+```
+
+One collection run of the log archive's collector
+([collector §Credentials and publishing](collector.md#credentials-and-publishing)):
+it copies Claude Code's session evidence into the archive as the instance
+role and writes the run's heartbeat. The operator's fffactory never runs it,
+and it is not run through the activator: the worker runs it as `factory`, with
+the active release's executable, and it holds only the collector's own lock,
+never the host-operation lock, so it never makes an install, a repository,
+control-plane, dispatch or work operation refuse `busy`, nor waits on one. It
+reads `/etc/fffactory/collector.json`; without it, it does nothing. The
+`collector` install step writes that file and the timer that runs it
+([§The collector step](#the-collector-step)).
+
+| Run | Exit and output |
+| --- | --- |
+| As `factory`, without `/etc/fffactory/collector.json` | 0, nothing: not configured, nothing read, written or asked |
+| As `factory`, another run holding the collector's lock | 0, nothing |
+| As `factory`, the run and its heartbeat written | 0; one line on standard output, `fffactory host collect: succeeded; uploaded <n> bytes, journal <seq or none>, backlog <files> files (<bytes> bytes)`, and `, <bytes or time> budget hit` when a budget stopped it |
+| As `factory`, the run failed | 1; that line on standard error, `failed (<class>)` in place of `succeeded`, the class an AWS error name, network error code or file-system error code |
+| As `factory`, its heartbeat not written | 1; `fffactory host collect: the heartbeat was not written (<class>)` on standard error, after the run's line |
+| As `factory`, it could not start (configuration unreadable or malformed, no boot ID, the archive not opened) | 1; `fffactory host collect: <reason>` on standard error, naming a malformed field, never its value, and an AWS failure by its class; nothing written |
+| As root | 1, nothing: `run it as factory, never root; its timer runs it` on standard error. Its checkpoint and lock are `factory`'s collector state, and Claude's files are `factory`'s. |
+| Without `--once`, or with anything else | 1, nothing |
+
+Its failures are visible in the heartbeat and in the journal (these lines),
+never elsewhere: it prints no path, no AWS or SDK message and no credential.
+
 ## Layer mapping
 
 | Layer | Module | Responsibility |
@@ -923,6 +1180,7 @@ without agents.
 | Domain | `src/domain/control-plane.ts` | fffactory's agent states, the busy rule (`workerActivity`), the activity and action documents, `activityJson`, `parseActivityDocument`. Pure. |
 | Domain | `src/domain/dispatch-projection.ts` | The dispatch projection, adoption and inspection documents, their parsers, and fixed inspect command. Pure. |
 | Domain | `src/domain/installation.ts` | `INSTALL_STEPS`, step results, the install state rule, the apply document and record, `Installation`, and reading the activator's answer. Pure. |
+| Domain | `src/domain/collector-installation.ts` | The collector's service and timer text, limits, state directory and configuration from the projection. Pure. |
 | Domain | `src/domain/readiness.ts` | The verify document, enrollment states, and the next actions the CLI names ([readiness](readiness.md)). Pure. |
 | Domain | `src/domain/rollout.ts` | A worker's outcome from its install and the rollout rule. Pure. |
 | Domain | `src/domain/tailnet.ts` | Peer views, the hostname-match rule and the tag check, `WorkerAddress`, the host key and address checks, the private known_hosts text. Pure. |
@@ -937,13 +1195,17 @@ without agents.
 | Worker | `src/host/apply.ts` | `workerApplier` over an `ApplySystem` (a `WorkerSystem` with the clock, privilege, standard input, release and install lock): the steps, their logs and the record. |
 | Worker | `src/host/install-lock.ts` | `flockExclusive`: the install lock over `flock(2)`, through libc. |
 | Worker | `src/host/credentials.ts` | `workerCredentials`: the `credentials` install step ([credential delivery](credential-delivery.md)). |
+| Worker | `src/host/collector-step.ts` | `workerCollectorStep`: the `collector` install step ([§The collector step](#the-collector-step)). |
 | Worker | `src/host/verify.ts` | `workerVerifier`: the verifiers and enrollment checks. |
 | Worker | `src/host/dispatch.ts` | Dispatch adoption, installation, reconciliation and checked observation, with privilege drop. |
-| Worker | `src/host/work.ts` | `workerWork`: the work inspection, over the worker's working trees, as `factory`, read-only. |
+| Worker | `src/host/work.ts` | `workerWork`: the work inspection, over the worker's working trees, as `factory`, read-only, and the archive's backlog, from the collector's checkpoint and its discovery (`discoverSources` in `src/host/collect.ts`), as root. |
 | Worker | `src/host/control-plane.ts` | `workerControlPlane`: the Paseo activity, install, reload and restart, and `host agents`; `paseoAgents`, the adapter translating Paseo's agents into fffactory's states. |
+| Worker | `src/host/collect.ts` | `collectOnce`: one collection run under the collector's own lock, through an `ArchiveWriter` ([collector §Run](collector.md#run)). |
+| Worker | `src/host/collection.ts` | `workerCollection`: `host collect --once`, its configuration, the run and its heartbeat; `localCollectionSystem`, this worker's, checking open sources in `/proc/self/fd` (`OPEN_FILES`). |
+| Worker | `src/host/s3-archive-writer.ts` | `openInstanceArchive`: the `ArchiveWriter` over S3 with the instance role's IMDSv2 credentials, its incarnation and account from STS. |
 | Worker | `src/host/endpoint.ts` | `workerEndpoint`: all worker endpoints together. |
 | Worker | `assets/steps/` | The wrapped install steps, the pins and the plugin manifest. |
-| CLI adapter | `src/cli/commands/host.ts` | The fixed `fffactory host` inspect, apply, verify, repository, control-plane, dispatch, work and agents operations. |
+| CLI adapter | `src/cli/commands/host.ts` | The fixed `fffactory host` inspect, apply, verify, repository, control-plane, dispatch, work, agents and collect operations. |
 
 Tests: `tests/host/protocol-contract.test.ts` is the contract: four worker
 filesystems (`tests/host/worker-scenarios.ts`: installed with enrollment
@@ -965,10 +1227,17 @@ fixture from the same Paseo, and the dispatcher's Python test reads it as its
 capacity check's answer. `tests/host/control-plane.test.ts` runs `host agents`
 over a scripted Paseo (the auth wrapper run as itself, in `factory`'s
 environment, the budget, an unreadable list, root refused), and
-`tests/cli/host.test.ts` its exit statuses and refusals. The other direction, a document the CLI sends, is
+`tests/cli/host.test.ts` its exit statuses and refusals, and `host collect`'s
+lines, exit statuses and refusals (root, no `--once`); `tests/host/collection.test.ts`
+runs `host collect --once` itself against a loopback instance metadata service
+and stub STS and S3 ([collector §Credentials and publishing](collector.md#credentials-and-publishing)). The other direction, a document the CLI sends, is
 `tests/host/fixtures/dispatch-not-requested.json`, the projection that stops
 dispatch ([dispatch §Stopping dispatch](dispatch.md#stopping-dispatch)): the
 CLI side builds it byte for byte, and the worker side parses it without loss.
+So is `tests/host/fixtures/projection-log-archive.json`, the host projection of
+a factory with the log archive: the CLI side projects it byte for byte, and the
+worker side parses it without loss and `host inspect` reports its control-plane
+part's digest apart, that of the projection without the archive.
 `tests/host/apply.test.ts` runs
 `host apply` over real bash stand-in steps in a temporary worker: the order in
 one process, each step's result recorded before the next, the logs streamed as
@@ -1007,10 +1276,15 @@ classification), `tests/infrastructure/tailscale-peers.test.ts`,
 temporary worker: each kind of work, ignored files, missing and unreadable
 worktrees, a stale worktree registration over an independent clone inside and
 outside the roots, a bare repository, nothing written, the time budget;
-`tests/host/work-scenarios.ts`),
-`tests/host/protocol-contract.test.ts`'s `work-unresolved.json` (the worker
-produces it byte for byte from real Git, the CLI reads it back over the
-transport), `tests/domain/work-inspection.test.ts`,
+`tests/host/work-scenarios.ts`), `tests/host/work-archive.test.ts` (the
+archive's backlog: not collected, nothing unarchived, a new, grown and
+rewritten source, no checkpoint, a checkpoint that is a symbolic link, the
+allowlist and symbolic links, the time budget),
+`tests/host/protocol-contract.test.ts`'s `work-unresolved.json` and
+`work-archive-backlog.json` (the worker produces each byte for byte, the CLI
+reads it back over the transport) and `work-before-archive.json` (an older
+worker's, without `archive`, which the CLI still reads),
+`tests/domain/work-inspection.test.ts`,
 `tests/application/inspect-work.test.ts`, the activator's `work inspect` in
 `tests/bootstrap/activator.test.sh`,
 `tests/assets/steps/steps.test.ts` (one script per shell step, parsing with
@@ -1038,4 +1312,6 @@ Claude Code 2.1.302 pins and Codex's requirements by
 credential references and the control-plane part's digest by
 [#68](https://github.com/yaunder/fffactory/issues/68); the `credentials` step by
 [#69](https://github.com/yaunder/fffactory/issues/69); `host agents` by
-[#100](https://github.com/yaunder/fffactory/issues/100).
+[#100](https://github.com/yaunder/fffactory/issues/100); the projection's
+`log_archive` by [#118](https://github.com/yaunder/fffactory/issues/118); `host
+collect` by [#121](https://github.com/yaunder/fffactory/issues/121).

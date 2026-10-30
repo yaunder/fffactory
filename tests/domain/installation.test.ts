@@ -2,7 +2,8 @@ import { describe, expect, test } from "bun:test";
 import {
   ACTIVATION_TIMEOUT_MS,
   ANTHROPIC_KEY_HELPER,
-  CLAUDE_MANAGED_SETTINGS_JSON,
+  CLAUDE_CLEANUP_PERIOD_DAYS,
+  claudeManagedSettingsJson,
   failedStep,
   type HostApplyRecord,
   hostApplyJson,
@@ -11,6 +12,7 @@ import {
   installationOf,
   installState,
   namesKeyHelper,
+  ownsManagedSettings,
   parseHostApply,
   pendingSteps,
   REFUSALS,
@@ -55,7 +57,7 @@ function record(overrides: Partial<HostApplyRecord> = {}): HostApplyRecord {
 }
 
 describe("the install steps (host protocol §apply)", () => {
-  test("run packages, user, systemd, harness, plugins, then credentials", () => {
+  test("run packages, user, systemd, harness, plugins, credentials, then collector", () => {
     expect(succeeded()).toEqual([
       "packages",
       "user",
@@ -63,6 +65,7 @@ describe("the install steps (host protocol §apply)", () => {
       "harness",
       "plugins",
       "credentials",
+      "collector",
     ]);
     expect(pendingSteps().every((step) => step.status === "not_run")).toBe(true);
   });
@@ -264,13 +267,55 @@ describe("reading the activator's answer", () => {
   });
 });
 
-describe("Claude Code's managed settings (credential delivery §Removal)", () => {
-  test("name fffactory's helper only when apiKeyHelper is exactly it", () => {
-    expect(namesKeyHelper(CLAUDE_MANAGED_SETTINGS_JSON)).toBe(true);
-    expect(namesKeyHelper(JSON.stringify({ apiKeyHelper: ANTHROPIC_KEY_HELPER, model: "x" }))).toBe(
-      true,
+const HELPER_ONLY = claudeManagedSettingsJson({ keyHelper: true, keepHistory: false }) ?? "";
+
+describe("Claude Code's managed settings (credential delivery §Managed settings)", () => {
+  test("are composed of what fffactory needs: the helper, the history, both or nothing", () => {
+    const text = (keyHelper: boolean, keepHistory: boolean) =>
+      claudeManagedSettingsJson({ keyHelper, keepHistory });
+    const json = (value: unknown) => `${JSON.stringify(value, null, 2)}\n`;
+    expect(CLAUDE_CLEANUP_PERIOD_DAYS).toBe(3650);
+    expect(text(true, false)).toBe(json({ apiKeyHelper: ANTHROPIC_KEY_HELPER }));
+    expect(text(false, true)).toBe(json({ cleanupPeriodDays: 3650 }));
+    expect(text(true, true)).toBe(
+      json({ apiKeyHelper: ANTHROPIC_KEY_HELPER, cleanupPeriodDays: 3650 }),
     );
+    expect(text(false, false)).toBeUndefined();
+  });
+
+  test("are fffactory's only when they hold nothing but its own keys, with its values", () => {
     for (const text of [
+      HELPER_ONLY,
+      claudeManagedSettingsJson({ keyHelper: false, keepHistory: true }) ?? "",
+      claudeManagedSettingsJson({ keyHelper: true, keepHistory: true }) ?? "",
+      JSON.stringify({ cleanupPeriodDays: 3650, apiKeyHelper: ANTHROPIC_KEY_HELPER }),
+    ])
+      expect(ownsManagedSettings(text)).toBe(true);
+    for (const text of [
+      JSON.stringify({ apiKeyHelper: ANTHROPIC_KEY_HELPER, model: "x" }),
+      JSON.stringify({ cleanupPeriodDays: 3650, permissions: { deny: ["WebFetch"] } }),
+      JSON.stringify({ apiKeyHelper: "/usr/local/bin/org-key" }),
+      JSON.stringify({ cleanupPeriodDays: 30 }),
+      JSON.stringify({ cleanupPeriodDays: "3650" }),
+      JSON.stringify({ apiKeyHelper: ANTHROPIC_KEY_HELPER, cleanupPeriodDays: 90 }),
+      JSON.stringify({}),
+      JSON.stringify([ANTHROPIC_KEY_HELPER]),
+      "null",
+      "",
+      "not json",
+    ])
+      expect(ownsManagedSettings(text)).toBe(false);
+  });
+
+  test("name fffactory's helper only when apiKeyHelper is exactly it", () => {
+    for (const text of [
+      HELPER_ONLY,
+      claudeManagedSettingsJson({ keyHelper: true, keepHistory: true }) ?? "",
+      JSON.stringify({ apiKeyHelper: ANTHROPIC_KEY_HELPER, model: "x" }),
+    ])
+      expect(namesKeyHelper(text)).toBe(true);
+    for (const text of [
+      claudeManagedSettingsJson({ keyHelper: false, keepHistory: true }) ?? "",
       JSON.stringify({ apiKeyHelper: "/usr/local/bin/org-key" }),
       JSON.stringify({ apiKeyHelper: ` ${ANTHROPIC_KEY_HELPER}` }),
       JSON.stringify({ permissions: { deny: ["WebFetch"] } }),

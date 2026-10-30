@@ -550,6 +550,13 @@ describe("a removal's inspections (worker-lifecycle and teardown §Operation rec
         summary: "--force: the worker is not inspected for busy agents, current work or checkouts.",
         details: [],
         activity: { state: "unknown", reason: null, agents: null },
+        unarchived: {
+          state: "unknown",
+          files: null,
+          bytes: null,
+          complete: null,
+          last_success_at: null,
+        },
       },
     });
     expect(forced.updated_at).toBe(LATER.toISOString());

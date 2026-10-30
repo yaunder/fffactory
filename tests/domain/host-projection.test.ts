@@ -187,6 +187,105 @@ describe("the host's non-secret projection (host protocol §apply)", () => {
     expect(controlPlaneProjection(without)).toEqual(without);
   });
 
+  describe("the log archive's settings (worker log archive phase 2, S3)", () => {
+    const factoryId = "fff-abcd1234" as FactoryId;
+    const release = "0.3.0" as Release;
+    const ARCHIVE = {
+      bucket: "fff-abcd1234-logs-123456789012-eu-west-2-an",
+      region: "eu-west-2",
+    };
+    const base: FactoryInstance = {
+      schema_version: 1,
+      factory_id: factoryId,
+      aws: { account_id: "123456789012", region: "eu-west-2" },
+      hosts: [{ key: "builder-1" as HostKey }],
+    };
+    const enabled: FactoryInstance = { ...base, log_archive: { enabled: true } };
+
+    test("projects the derived bucket and the factory Region only while the archive is enabled", () => {
+      expect(projectHosts(enabled, factoryId, release)).toEqual([
+        hostProjection(factoryId, "builder-1" as HostKey, release, undefined, undefined, ARCHIVE),
+      ]);
+      for (const instance of [base, { ...base, log_archive: { enabled: false } }]) {
+        const [projection] = projectHosts(instance, factoryId, release);
+        expect(projection).toEqual(PROJECTION);
+        // Byte-identical to a projection from before the archive.
+        expect(hostProjectionJson(projection as HostProjection)).toBe(TEXT);
+      }
+    });
+
+    test("is canonical after the credentials, and read back exactly", () => {
+      const projection = hostProjection(
+        factoryId,
+        "builder-1" as HostKey,
+        release,
+        arn("paseo"),
+        { github_token_secret: arn("github-token") },
+        ARCHIVE,
+      );
+      const text = hostProjectionJson(projection);
+      expect(text).toBe(
+        `${JSON.stringify(
+          {
+            protocol_version: 1,
+            factory_id: "fff-abcd1234",
+            host_key: "builder-1",
+            hostname: "fff-abcd1234-builder-1",
+            release: "0.3.0",
+            paseo_password_secret: arn("paseo"),
+            credentials: { github_token_secret: arn("github-token") },
+            log_archive: ARCHIVE,
+          },
+          null,
+          2,
+        )}\n`,
+      );
+      expect(parseHostProjection(text)).toEqual({ ok: true, document: projection });
+    });
+
+    test("is never the control plane's: toggling it changes the host digest alone", () => {
+      const [on] = projectHosts(enabled, factoryId, release);
+      const [off] = projectHosts(base, factoryId, release);
+      if (on === undefined || off === undefined) throw new Error("expected projections");
+      expect(controlPlaneProjection(on)).toEqual(off);
+      const digest = (projection: HostProjection) =>
+        hostProjectionSha256(projection, (text) => `sha256 of ${text}`);
+      expect(digest(on)).not.toBe(digest(off));
+      expect(digest(controlPlaneProjection(on))).toBe(digest(controlPlaneProjection(off)));
+    });
+
+    test("refuses a log archive that is not a bucket name and a Region", () => {
+      const document = { ...JSON.parse(TEXT), log_archive: ARCHIVE };
+      const json = (value: unknown) => `${JSON.stringify(value, null, 2)}\n`;
+      expect(parseHostProjection(json(document)).ok).toBe(true);
+      const cases: [string, string][] = [
+        [json({ ...document, log_archive: "bucket" }), "log_archive must be an object"],
+        [
+          json({ ...document, log_archive: { ...ARCHIVE, bucket: "Not A Bucket" } }),
+          "log_archive.bucket is missing or malformed",
+        ],
+        [
+          json({ ...document, log_archive: { region: ARCHIVE.region } }),
+          "log_archive.bucket is missing or malformed",
+        ],
+        [
+          json({ ...document, log_archive: { ...ARCHIVE, region: "mars" } }),
+          "log_archive.region is missing or malformed",
+        ],
+        [
+          json({ ...document, log_archive: { region: ARCHIVE.region, bucket: ARCHIVE.bucket } }),
+          "the document is not in its canonical form",
+        ],
+        [
+          json({ ...document, log_archive: { ...ARCHIVE, prefix: "workers/" } }),
+          "the document is not in its canonical form",
+        ],
+      ];
+      for (const [text, problem] of cases)
+        expect(parseHostProjection(text)).toEqual({ ok: false, kind: "invalid", problem });
+    });
+  });
+
   test("refuses credentials that are not canonical validated references", () => {
     const document = {
       ...JSON.parse(TEXT),

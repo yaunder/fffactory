@@ -30,6 +30,7 @@ import {
   TEARDOWN_UNCONFIRMABLE,
   type TeardownReport,
   type TeardownReview,
+  type WorkerUnarchived,
   teardownConfirmMismatch,
 } from "../../../src/domain/teardown";
 
@@ -88,6 +89,7 @@ function review(fields: Partial<TeardownReview> = {}): TeardownReview {
     bucket: { name: BUCKET, outcome: "deleted" },
     withoutLock: undefined,
     archive: undefined,
+    unarchived: [],
     ...fields,
   };
 }
@@ -103,6 +105,7 @@ function report(fields: Partial<TeardownReport> = {}): TeardownReport {
     bucket: { name: BUCKET, outcome: "deleted" },
     withoutLock: undefined,
     archive: undefined,
+    unarchived: [],
     ...fields,
   };
 }
@@ -228,6 +231,16 @@ describe("the review (teardown §Order, step 10)", () => {
     expect(lines.join("\n")).not.toContain("deleted last");
   });
 
+  test("each worker's unarchived evidence, previewed after the instances it is destroyed with", () => {
+    const lines = plain(teardownReviewBlocks(review({ unarchived: UNARCHIVED }), {}));
+    expect(lines.slice(8, 12)).toEqual([
+      "  EC2 instances     i-0123 (builder-1, stopped)",
+      "  Unarchived        what each worker's log archive collector has not archived, destroyed with it; counted again before the destroy",
+      "    fff-abcd1234-builder-1   1 file (512 bytes) unarchived; last collection succeeded at 2026-10-30T10:15:00.000Z",
+      "    fff-abcd1234-builder-2   unarchived evidence unknown",
+    ]);
+  });
+
   test("the log archive kept, named, with nothing else kept", () => {
     const lines = plain(teardownReviewBlocks(review({ archive: ARCHIVE }), {}));
     expect(lines.slice(-4)).toEqual([
@@ -290,7 +303,41 @@ describe("the steps as they run", () => {
       `  Deleting the state bucket ${BUCKET}, the lock last.`,
     ]);
   });
+
+  test("each worker's unarchived evidence, before the destroy", () => {
+    const lines = renderInSection(plainStyle, [
+      teardownProgressLine({ kind: "unarchived", workers: UNARCHIVED }),
+    ]);
+    expect(lines).toEqual([
+      "  Log archive on fff-abcd1234-builder-1: 1 file (512 bytes) unarchived; last collection succeeded at 2026-10-30T10:15:00.000Z.",
+      "  Log archive on fff-abcd1234-builder-2: unarchived evidence unknown.",
+    ]);
+  });
 });
+
+/** A worker whose collector counted its backlog, and a stopped one, never inspected (S1). */
+const UNARCHIVED: readonly WorkerUnarchived[] = [
+  {
+    hostname: "fff-abcd1234-builder-1",
+    unarchived: {
+      state: "counted",
+      files: 1,
+      bytes: 512,
+      complete: true,
+      last_success_at: "2026-10-30T10:15:00.000Z",
+    },
+  },
+  {
+    hostname: "fff-abcd1234-builder-2",
+    unarchived: {
+      state: "unknown",
+      files: null,
+      bytes: null,
+      complete: null,
+      last_success_at: null,
+    },
+  },
+];
 
 const ADVICE = [rule("Next"), `  ${REVOKE_SOURCES}`, `  ${factoryJsonKept(undefined)}`];
 
@@ -388,7 +435,9 @@ describe("a finished teardown (teardown §Report)", () => {
   });
 
   test("the log archive kept, in the Kept section and the factory.json advice", () => {
-    expect(outcome({ kind: "done", report: report({ archive: ARCHIVE }) })).toEqual({
+    expect(
+      outcome({ kind: "done", report: report({ archive: ARCHIVE, unarchived: UNARCHIVED }) }),
+    ).toEqual({
       stream: "out",
       lines: [
         "✔ Removed factory fff-abcd1234: only what it kept remains",
@@ -398,6 +447,9 @@ describe("a finished teardown (teardown §Report)", () => {
         `    - ${HOST}`,
         "    - module.network.aws_vpc.this",
         "  EC2 instances     i-0123 (builder-1, stopped)",
+        "  Unarchived        what each worker's log archive collector had not archived, gone with it",
+        "    fff-abcd1234-builder-1   1 file (512 bytes) unarchived; last collection succeeded at 2026-10-30T10:15:00.000Z",
+        "    fff-abcd1234-builder-2   unarchived evidence unknown",
         "  Tailnet devices   deleted n1CNTRL",
         `  Owned secrets     deleted ${OWNED.join(", ")}, each confirmed gone`,
         `  State bucket      ${BUCKET}, deleted`,

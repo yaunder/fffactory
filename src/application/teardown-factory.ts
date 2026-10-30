@@ -118,6 +118,7 @@ import {
   type TeardownBucket,
   type TeardownInterruption,
   type TeardownReport,
+  type WorkerUnarchived,
   type TeardownReview,
   type TeardownStep,
   type TeardownStop,
@@ -137,7 +138,12 @@ import {
   type UnresolvedSecret,
 } from "../domain/teardown";
 import { type Refusal, removalGate } from "../domain/worker-lifecycle";
-import { workerRemovability } from "../domain/worker-removability";
+import {
+  saysUnarchived,
+  UNARCHIVED_UNKNOWN,
+  workerRemovability,
+  workUnarchived,
+} from "../domain/worker-removability";
 import type { OperationLocation } from "./apply-factory";
 import { stateBucketState } from "./bootstrap-backend";
 import type { CallerIdentity } from "./caller-identity";
@@ -164,6 +170,7 @@ import type { SecretDescription, SecretPresence, SecretStore } from "./secret-st
 import { stopDispatch } from "./stop-dispatch";
 import type { TailnetAdmin, TailnetAdminSession } from "./tailnet-admin";
 import type { TailnetPeers } from "./tailnet-peers";
+import { inspectWork } from "./inspect-work";
 import { deleteDevices, inspectForRemoval, openTailnetAdmin } from "./worker-removal";
 import type { WorkflowQueue } from "./workflow-queue";
 
@@ -220,6 +227,12 @@ export type TeardownProgress =
   | { readonly kind: "stopping_dispatch"; readonly hostname: string }
   /** A stopped worker passes the gates uninspected. */
   | { readonly kind: "uninspected_stopped"; readonly hostname: string }
+  /**
+   * Each worker's unarchived evidence, once every running one is inspected and before anything
+   * is destroyed: as its inspection counted it, unknown for one not inspected (S1). It never
+   * refuses (S2).
+   */
+  | { readonly kind: "unarchived"; readonly workers: readonly WorkerUnarchived[] }
   | { readonly kind: "destroying" }
   | { readonly kind: "removing_devices" }
   | { readonly kind: "removing_secrets" }
@@ -593,6 +606,8 @@ interface Progress {
   secrets: readonly string[];
   /** What became of the lock once the bucket's deletion started; undefined before. */
   lock: LockAfterDeletion | undefined;
+  /** Each worker's unarchived evidence, once the gates inspected them: the report's. */
+  unarchived: readonly WorkerUnarchived[];
 }
 
 /** How far a teardown got, and what it knows is left, before anything is removed. */
@@ -605,6 +620,7 @@ function progressFrom(bucket: string | undefined): Progress {
     listedDevices: NO_LISTED_DEVICES,
     secrets: [],
     lock: undefined,
+    unarchived: [],
   };
 }
 
@@ -1157,7 +1173,9 @@ async function planned(
     ...run.inventory.machines.flatMap(({ hostKey }) => (hostKey === undefined ? [] : [hostKey])),
     ...remembered,
   ];
-  const removal = reviewed(deps, teardown, run, {
+  const unarchived = await previewUnarchived(deps, teardown, run.inventory.machines);
+  if (deps.interrupted()) return interruptedUnder(log, run.progress);
+  const removal = reviewed(deps, teardown, run, unarchived, {
     keys,
     changes: planning.changes,
     destroys: planning.destroys,
@@ -1180,6 +1198,7 @@ function reviewed(
   deps: TeardownDependencies,
   teardown: Teardown,
   run: Run,
+  unarchived: readonly WorkerUnarchived[],
   removing: Omit<Removal, keyof Run | "shownDeleted">,
 ): Removal {
   const devices = selectFactoryDevices(
@@ -1194,8 +1213,42 @@ function reviewed(
     shownDeleted: devices.deleted.map(({ id }) => id),
   };
   run.progress.devices = run.admin === undefined ? "unchecked" : removal.shownDeleted;
-  deps.progress({ kind: "review", review: reviewOf(teardown, removal, devices) });
+  deps.progress({ kind: "review", review: reviewOf(teardown, removal, devices, unarchived) });
   return removal;
+}
+
+/**
+ * The review's preview of each worker's unarchived evidence (§Unarchived evidence), only while
+ * factory.json enables the log archive: without it the collector step removes the collector's
+ * configuration, so a worker counts no backlog, and no worker is asked. Each running worker the
+ * tailnet locates is read by its work inspection alone, read-only, all at once; any other
+ * worker, or one whose inspection cannot be had or carries no backlog, is unknown (S1). In EC2's
+ * order. Never judged: the gates read it again once dispatch is stopped (D3), and only they
+ * refuse.
+ */
+async function previewUnarchived(
+  deps: TeardownDependencies,
+  teardown: Teardown,
+  machines: readonly Machine[],
+): Promise<WorkerUnarchived[]> {
+  if (teardown.archive === undefined) return [];
+  const workers = machines.flatMap((machine) => {
+    const worker = workerOf(teardown, machine);
+    return worker === undefined ? [] : [{ worker, running: machine.state === "running" }];
+  });
+  const view = workers.some(({ running }) => running) ? await deps.peers.view() : undefined;
+  const previews = await Promise.all(
+    workers.map(async ({ worker, running }) => {
+      const location =
+        view === undefined || !running ? undefined : locateWorker(view, worker, teardown.tag);
+      const unarchived =
+        location?.kind === "found"
+          ? workUnarchived(await inspectWork(deps.transport, location.worker))
+          : UNARCHIVED_UNKNOWN;
+      return { hostname: worker.hostname, unarchived };
+    }),
+  );
+  return previews;
 }
 
 /**
@@ -1227,7 +1280,8 @@ async function cleanUp(
   const tagged: Judged = (machines, vpcIds) => taggedRefusals(teardown, machines, vpcIds);
   const begun = await inventoried(deps, teardown, log, progress, tagged);
   if (begun.kind !== "run") return begun;
-  const removal = reviewed(deps, teardown, begun.run, {
+  // Refused while EC2 lists any instance: there is no worker to preview.
+  const removal = reviewed(deps, teardown, begun.run, [], {
     keys: declaredKeys(teardown),
     changes: [],
     destroys: false,
@@ -1298,7 +1352,12 @@ function remainsBeforeDevices(
 }
 
 /** What will be removed and kept, as shown before the confirmation. */
-function reviewOf(teardown: Teardown, run: Removal, devices: FactoryDevices): TeardownReview {
+function reviewOf(
+  teardown: Teardown,
+  run: Removal,
+  devices: FactoryDevices,
+  unarchived: readonly WorkerUnarchived[],
+): TeardownReview {
   const { instance, release, instancePath } = teardown.request;
   const target: PlanTarget = {
     instancePath,
@@ -1324,6 +1383,7 @@ function reviewOf(teardown: Teardown, run: Removal, devices: FactoryDevices): Te
     bucket: bucketOf(teardown, run),
     withoutLock: run.withoutLock,
     archive: teardown.archive,
+    unarchived,
   };
 }
 
@@ -1406,6 +1466,7 @@ async function gated(
   if (gates === undefined || deps.interrupted()) return interruptedUnder(log, progress);
   await log.inspections(gates.inspections);
   if (deps.interrupted()) return interruptedUnder(log, progress);
+  sayUnarchived(deps, progress, unarchivedOn(teardown, run.inventory.machines, gates.inspections));
   if (gates.refusals.length > 0) return refusedUnder(log, progress, gates.refusals);
   return destroy(deps, teardown, log, run);
 }
@@ -1469,6 +1530,38 @@ function passStopped(deps: TeardownDependencies, teardown: Teardown, machines: r
     if (worker !== undefined && machine.state === "stopped")
       deps.progress({ kind: "uninspected_stopped", hostname: worker.hostname });
   }
+}
+
+/** Keeps the workers' unarchived evidence for the report, and says it now, when any is said. */
+function sayUnarchived(
+  deps: TeardownDependencies,
+  progress: Progress,
+  workers: readonly WorkerUnarchived[],
+): void {
+  progress.unarchived = workers;
+  if (workers.length > 0) deps.progress({ kind: "unarchived", workers });
+}
+
+/**
+ * Each worker on a machine EC2 listed, in its order: its unarchived evidence as its inspection
+ * document says, unknown for one the gates did not inspect, stopped or shutting down (S1); only
+ * those said (`saysUnarchived`): every one with the log archive enabled.
+ */
+function unarchivedOn(
+  teardown: Teardown,
+  machines: readonly Machine[],
+  inspections: readonly InspectionRecord[],
+): WorkerUnarchived[] {
+  const counted = new Map(
+    inspections.map(({ document }) => [document.hostname, document.unarchived]),
+  );
+  return machines.flatMap((machine) => {
+    const worker = workerOf(teardown, machine);
+    if (worker === undefined) return [];
+    const unarchived = counted.get(worker.hostname) ?? UNARCHIVED_UNKNOWN;
+    if (!saysUnarchived(teardown.archive !== undefined, unarchived)) return [];
+    return [{ hostname: worker.hostname, unarchived }];
+  });
 }
 
 /** What the gates made of the running workers: their refusals, and each one's inspection. */
@@ -1687,6 +1780,7 @@ async function removeSecrets(
     bucket: bucketOf(teardown, run),
     withoutLock: run.withoutLock,
     archive: teardown.archive,
+    unarchived: progress.unarchived,
   };
   return removeLast(deps, teardown, log, progress, report);
 }

@@ -1,0 +1,11 @@
+{
+  "format": 1,
+  "factory_id": "fff-r29c2un6",
+  "host_key": "builder-1",
+  "role_id": "AROAEXAMPLEROLEID1234",
+  "instance_id": "i-0123456789abcdef0",
+  "created_at": "2026-10-30T10:15:00.000Z",
+  "release": "0.0.9",
+  "claude_code_version": "2.1.302",
+  "claude_root": "/home/factory/.claude"
+}

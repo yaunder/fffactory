@@ -9,6 +9,7 @@ import { type HostRepositories, workerRepositories } from "./repositories";
 import { type HostControlPlane, workerControlPlane } from "./control-plane";
 import { type HostDispatch, workerDispatch } from "./dispatch";
 import { type HostWork, workerWork } from "./work";
+import type { HostCollector } from "./collection";
 
 export interface WorkerEndpoint
   extends HostInspector,
@@ -17,12 +18,14 @@ export interface WorkerEndpoint
     HostRepositories,
     HostControlPlane,
     HostDispatch,
-    HostWork {
+    HostWork,
+    HostCollector {
   /** Whether this process runs as root, as `host apply` and `host verify` need. */
   isRoot(): boolean;
 }
 
-export function workerEndpoint(system: ApplySystem): WorkerEndpoint {
+/** `collector` is the log archive's (`collection.ts`), over a system of its own. */
+export function workerEndpoint(system: ApplySystem, collector: HostCollector): WorkerEndpoint {
   const inspector = workerInspector(system);
   const verifier = workerVerifier(system);
   const applier = workerApplier(system, verifier);
@@ -45,6 +48,7 @@ export function workerEndpoint(system: ApplySystem): WorkerEndpoint {
     reconcileDispatch: () => dispatch.reconcileDispatch(),
     inspectDispatch: () => dispatch.inspectDispatch(),
     inspectWork: () => work.inspectWork(),
+    collect: () => collector.collect(),
     isRoot: system.isRoot,
   };
 }

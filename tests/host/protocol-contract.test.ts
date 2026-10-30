@@ -1,10 +1,10 @@
 /**
  * The host protocol's contract: one set of fixtures, produced by the worker side and read by
- * the CLI side, and one, `dispatch-not-requested.json`, produced by the CLI side and read by
- * the worker side. A change that breaks either side against the fixtures breaks the protocol.
+ * the CLI side (but `work-before-archive.json`, an older worker's, read only), and two, `dispatch-not-requested.json` and `projection-log-archive.json`,
+ * produced by the CLI side and read by the worker side. A change that breaks either side against the fixtures breaks the protocol.
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { inspectWork } from "../../src/application/inspect-work";
@@ -20,13 +20,19 @@ import {
   parseDispatchProjection,
 } from "../../src/domain/dispatch-projection";
 import {
+  hostProjectionJson,
+  parseHostProjection,
+  projectHosts,
+} from "../../src/domain/host-projection";
+import {
   HOST_PROTOCOL_VERSION,
   hostInspectionJson,
   INSPECT_COMMAND,
   parseHostInspection,
+  WORKER_PATHS,
 } from "../../src/domain/host-protocol";
 import { hostApplyJson, parseHostApply, readActivation } from "../../src/domain/installation";
-import type { HostKey } from "../../src/domain/instance";
+import type { FactoryId, FactoryInstance, HostKey, Release } from "../../src/domain/instance";
 import { enrollmentReport, parseVerification, verificationJson } from "../../src/domain/readiness";
 import { activationOutcome } from "../../src/domain/rollout";
 import { inspectionVerdict } from "../../src/domain/status";
@@ -44,6 +50,7 @@ import { flockExclusive } from "../../src/host/install-lock";
 import { workerVerifier } from "../../src/host/verify";
 import { workerWork } from "../../src/host/work";
 import type { ProcessRunner } from "../../src/infrastructure/local-tool-probe";
+import { sha256Text } from "../../src/infrastructure/release-tarball";
 import { paseoControlPlane } from "../../src/infrastructure/paseo-control-plane";
 import { fakeTransport, peer, TAG } from "../support/fake-workers";
 import {
@@ -51,10 +58,11 @@ import {
   HOST_CONFIGURATION_SHA256,
   installedTools,
   SCENARIOS,
+  system,
   unpackedWorker,
   WORKER_HOSTNAME,
 } from "./worker-scenarios";
-import { gitWorld, unresolvedWorker } from "./work-scenarios";
+import { archivingWorker, gitWorld, unresolvedWorker } from "./work-scenarios";
 
 const FIXTURES = join(import.meta.dir, "fixtures");
 
@@ -361,6 +369,45 @@ describe("host work inspect, both sides", () => {
     });
   });
 
+  test("the worker produces work-archive-backlog.json byte for byte for an archiving worker", async () => {
+    const world = await gitWorld();
+    try {
+      await archivingWorker(world);
+      const document = await workerWork(world.system()).inspectWork();
+      expect(`${workInspectionJson(document)}\n`).toBe(await fixture("work-archive-backlog.json"));
+    } finally {
+      await world.remove();
+    }
+  });
+
+  test("the CLI reads the archive's backlog back without loss, never as work", async () => {
+    const text = await fixture("work-archive-backlog.json");
+    const parsed = parseWorkInspection(text);
+    if (!parsed.ok) throw new Error(`rejected: ${JSON.stringify(parsed)}`);
+    expect(`${workInspectionJson(parsed.document)}\n`).toBe(text);
+    expect(parsed.document.archive).toEqual({
+      state: "collected",
+      complete: true,
+      unarchived_files: 2,
+      unarchived_bytes: 16,
+      last_success_at: "2026-10-30T10:15:00.000Z",
+    });
+    expect(workFindings(parsed.document, [])).toEqual({ unresolved: [], uninspected: [] });
+  });
+
+  test("an older worker's document, without the archive, still reads (work-before-archive.json)", async () => {
+    // The worker side no longer produces it: an older release's worker does.
+    const text = await fixture("work-before-archive.json");
+    const parsed = parseWorkInspection(text);
+    if (!parsed.ok) throw new Error(`rejected: ${JSON.stringify(parsed)}`);
+    expect(parsed.document.archive).toBeUndefined();
+    expect(`${workInspectionJson(parsed.document)}\n`).toBe(text);
+    const current = parseWorkInspection(await fixture("work-unresolved.json"));
+    if (!current.ok) throw new Error("rejected");
+    const { archive: _, ...withoutArchive } = current.document;
+    expect(parsed.document).toEqual(withoutArchive);
+  });
+
   test("an addition within the major version is ignored; another major is rejected", async () => {
     const document = JSON.parse(await fixture("work-unresolved.json"));
     expect(parseWorkInspection(JSON.stringify({ ...document, later: [1] })).ok).toBe(true);
@@ -458,5 +505,39 @@ describe("the not-requested dispatch projection, both sides", () => {
     const parsed = parseDispatchProjection(text);
     if (!parsed.ok) throw new Error(`rejected: ${parsed.reason}`);
     expect(dispatchProjectionJson(parsed.projection)).toBe(text);
+  });
+});
+
+describe("the host projection with the log archive, both sides (host protocol §The host projection)", () => {
+  // The CLI projects this for builder-1 of an archiving fff-aaaa1111 on 0.3.0; `host apply`
+  // keeps it, the credentials step reads its `log_archive`, and `host inspect` reports it.
+  const archiving: FactoryInstance = {
+    schema_version: 1,
+    factory_id: "fff-aaaa1111" as FactoryId,
+    aws: { account_id: "123456789012", region: "eu-west-2" },
+    log_archive: { enabled: true },
+    hosts: [{ key: "builder-1" as HostKey }],
+  };
+
+  test("the CLI produces projection-log-archive.json byte for byte", async () => {
+    const [projection] = projectHosts(archiving, "fff-aaaa1111" as FactoryId, "0.3.0" as Release);
+    expect(projection && hostProjectionJson(projection)).toBe(
+      await fixture("projection-log-archive.json"),
+    );
+  });
+
+  test("the worker reads it back without loss, and reports its control-plane part apart", async () => {
+    const text = await fixture("projection-log-archive.json");
+    const parsed = parseHostProjection(text);
+    if (!parsed.ok) throw new Error(`rejected: ${parsed.kind}`);
+    expect(hostProjectionJson(parsed.document)).toBe(text);
+    await mkdir(join(root, "var/lib/fffactory"), { recursive: true });
+    await writeFile(join(root, WORKER_PATHS.configuration), text);
+    const { configuration } = await workerInspector(system(root)).inspect();
+    expect(configuration).toEqual({
+      state: "present",
+      sha256: sha256Text(text),
+      control_plane_sha256: HOST_CONFIGURATION_SHA256,
+    });
   });
 });
