@@ -89,6 +89,7 @@ function review(fields: Partial<TeardownReview> = {}): TeardownReview {
     bucket: { name: BUCKET, outcome: "deleted" },
     withoutLock: undefined,
     archive: undefined,
+    unarchived: [],
     ...fields,
   };
 }
@@ -228,6 +229,16 @@ describe("the review (teardown §Order, step 10)", () => {
       `  ${ranWithoutLock(BUCKET)}`,
     ]);
     expect(lines.join("\n")).not.toContain("deleted last");
+  });
+
+  test("each worker's unarchived evidence, previewed after the instances it is destroyed with", () => {
+    const lines = plain(teardownReviewBlocks(review({ unarchived: UNARCHIVED }), {}));
+    expect(lines.slice(8, 12)).toEqual([
+      "  EC2 instances     i-0123 (builder-1, stopped)",
+      "  Unarchived        what each worker's log archive collector has not archived, destroyed with it; counted again before the destroy",
+      "    fff-abcd1234-builder-1   1 file (512 bytes) unarchived; last collection succeeded at 2026-10-30T10:15:00.000Z",
+      "    fff-abcd1234-builder-2   unarchived evidence unknown",
+    ]);
   });
 
   test("the log archive kept, named, with nothing else kept", () => {

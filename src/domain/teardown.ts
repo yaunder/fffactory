@@ -906,6 +906,13 @@ export interface TeardownReview {
   readonly withoutLock: string | undefined;
   /** The log archive kept (`archiveKept`), when factory.json enables one; undefined otherwise. */
   readonly archive: string | undefined;
+  /**
+   * Each worker's evidence its collector has not archived, destroyed with it, as a read-only
+   * preview before the confirmation: as its work inspection counted it then, unknown when it
+   * could not (S1), only those said (`saysUnarchived`). Informational: it never refuses (S2); the
+   * gates count it again once dispatch is stopped (§Unarchived evidence).
+   */
+  readonly unarchived: readonly WorkerUnarchived[];
 }
 
 /**

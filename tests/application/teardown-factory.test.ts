@@ -602,6 +602,126 @@ describe("fffactory teardown: the happy path (teardown §Order)", () => {
     expectAllRemoved(w);
   });
 
+  /** `w.deps` with every progress event and the question asked in one timeline, in order. */
+  function timed(w: World) {
+    const timeline: string[] = [];
+    const deps: TeardownDependencies = {
+      ...w.deps,
+      progress: (event) => {
+        timeline.push(event.kind);
+        w.deps.progress(event);
+      },
+      prompt: {
+        ...w.deps.prompt,
+        ask: async (question) => {
+          timeline.push("asked");
+          return w.deps.prompt.ask(question);
+        },
+      },
+    };
+    return { deps, timeline };
+  }
+
+  const reviewOf = (w: World) => {
+    const event = w.progress.find((each) => each.kind === "review");
+    return event?.kind === "review" ? event.review : undefined;
+  };
+
+  test("previews each worker's unarchived evidence in the review, before the question; it never refuses (S2)", async () => {
+    const backlog = {
+      state: "collected",
+      complete: false,
+      unarchived_files: 40_000,
+      unarchived_bytes: 9_000_000_000,
+      last_success_at: null,
+    } as const;
+    const prompt = fakePrompt({ interactive: true, answers: [FACTORY] });
+    const w = world({
+      workers: { "builder-1": "running", "builder-2": "stopped" },
+      prompt,
+      worker: (key) =>
+        statusAnswers(
+          readyWorker(FACTORY, key, RELEASE),
+          "synchronized",
+          [],
+          undefined,
+          workAnswer(hostname(key), [], true, backlog),
+        ),
+    });
+    const { deps, timeline } = timed(w);
+
+    const result = await teardownFactory(
+      deps,
+      request(w, { confirm: undefined, instance: archivingOf(w.keys) }),
+    );
+
+    const counted = {
+      state: "counted",
+      files: 40_000,
+      bytes: 9_000_000_000,
+      complete: false,
+      last_success_at: null,
+    } as const;
+    expect(reviewOf(w)?.unarchived).toEqual([
+      { hostname: hostname("builder-1"), unarchived: counted },
+      { hostname: hostname("builder-2"), unarchived: UNARCHIVED_UNKNOWN },
+    ]);
+    expect(timeline.indexOf("review")).toBeLessThan(timeline.indexOf("asked"));
+    expect(timeline.indexOf("asked")).toBeLessThan(timeline.indexOf("stopping_dispatch"));
+    expect(result.kind).toBe("done");
+    expectAllRemoved(w);
+  });
+
+  test("a preview that cannot be counted is unknown in the review, never none, and refuses nothing (S1)", async () => {
+    const w = world({ workers: { "builder-1": "running" } });
+    const result = await teardownFactory(w.deps, request(w, { instance: archivingOf(w.keys) }));
+    // Its work inspection carries no backlog, as a release before it answers.
+    expect(reviewOf(w)?.unarchived).toEqual([
+      { hostname: hostname("builder-1"), unarchived: UNARCHIVED_UNKNOWN },
+    ]);
+    expect(result.kind).toBe("done");
+  });
+
+  test("a worker the tailnet does not locate is previewed unknown, and the gates still refuse it", async () => {
+    const w = world({ workers: { "builder-1": "running" }, view: peers() });
+    const result = await teardownFactory(w.deps, request(w, { instance: archivingOf(w.keys) }));
+    expect(reviewOf(w)?.unarchived).toEqual([
+      { hostname: hostname("builder-1"), unarchived: UNARCHIVED_UNKNOWN },
+    ]);
+    expect(result.kind).toBe("refused");
+  });
+
+  test("without the log archive, the review previews only a backlog a worker counted", async () => {
+    const quiet = world({ workers: { "builder-1": "running", "builder-2": "stopped" } });
+    await teardownFactory(quiet.deps, request(quiet));
+    expect(reviewOf(quiet)?.unarchived).toEqual([]);
+    const backlog = {
+      state: "collected",
+      complete: true,
+      unarchived_files: 1,
+      unarchived_bytes: 5,
+      last_success_at: null,
+    } as const;
+    const counting = world({
+      workers: { "builder-1": "running" },
+      worker: (key) =>
+        statusAnswers(
+          readyWorker(FACTORY, key, RELEASE),
+          "synchronized",
+          [],
+          undefined,
+          workAnswer(hostname(key), [], true, backlog),
+        ),
+    });
+    await teardownFactory(counting.deps, request(counting));
+    expect(reviewOf(counting)?.unarchived).toEqual([
+      {
+        hostname: hostname("builder-1"),
+        unarchived: { state: "counted", files: 1, bytes: 5, complete: true, last_success_at: null },
+      },
+    ]);
+  });
+
   test("without the log archive, says only a backlog a worker counted", async () => {
     const w = world({ workers: { "builder-1": "running", "builder-2": "stopped" } });
     const result = await teardownFactory(w.deps, request(w));

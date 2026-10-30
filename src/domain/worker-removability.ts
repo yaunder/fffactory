@@ -10,6 +10,7 @@ import { type AgentActivity, type AgentsObservation, agentActivity } from "./con
 import type { HostKey } from "./instance";
 import type { WorkerIdentity } from "./rollout";
 import type { Then } from "./status";
+import type { WorkObservation } from "./work-inspection";
 import {
   CHECK_STATUS,
   forcedUninspected,
@@ -80,9 +81,16 @@ export function saysUnarchived(archiving: boolean, unarchived: UnarchivedEvidenc
 
 /** What the work inspection `observed` says of the archive's backlog, if it was read at all. */
 export function unarchivedEvidence(observed: RemovalObservation): UnarchivedEvidence {
-  if (observed.kind !== "inspected" || observed.work.kind !== "inspected")
-    return UNARCHIVED_UNKNOWN;
-  const { archive } = observed.work.inspection;
+  return observed.kind === "inspected" ? workUnarchived(observed.work) : UNARCHIVED_UNKNOWN;
+}
+
+/**
+ * What a work inspection says of the archive's backlog: unknown unless it was read and carries
+ * one (S1).
+ */
+export function workUnarchived(work: WorkObservation): UnarchivedEvidence {
+  if (work.kind !== "inspected") return UNARCHIVED_UNKNOWN;
+  const { archive } = work.inspection;
   if (archive === undefined) return UNARCHIVED_UNKNOWN;
   if (archive.state === "not_collected") return { ...UNARCHIVED_UNKNOWN, state: "not_collected" };
   return {

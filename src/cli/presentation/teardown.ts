@@ -157,6 +157,7 @@ export function teardownReviewBlocks(review: TeardownReview, selection: Selectio
   const remove: Row[] = [
     plannedInfrastructure(review),
     ...listRow("EC2 instances", review.machines.map(machineText)),
+    ...unarchivedRow(review.unarchived, PREVIEWED_UNARCHIVED),
     ...listRow("VPCs", review.vpcIds),
     plannedDevices(review, selection),
     ...plannedSecrets(review),
@@ -239,8 +240,15 @@ function unarchivedLine({ hostname, unarchived }: WorkerUnarchived): Inline {
   return shown(`Log archive on ${hostname}: ${unarchivedWords(unarchived)}.`);
 }
 
-/** Each removed worker's unarchived evidence, under one row, when any worker was there. */
-function unarchivedRow(workers: readonly WorkerUnarchived[]): Row[] {
+/** What the review's unarchived evidence is: a preview, counted again before the destroy. */
+const PREVIEWED_UNARCHIVED =
+  "what each worker's log archive collector has not archived, destroyed with it; counted again before the destroy";
+/** What the report's unarchived evidence is. */
+const REPORTED_UNARCHIVED =
+  "what each worker's log archive collector had not archived, gone with it";
+
+/** Each worker's unarchived evidence, under one row saying what it is, when any is said. */
+function unarchivedRow(workers: readonly WorkerUnarchived[], what: string): Row[] {
   if (workers.length === 0) return [];
   const rows: Row[] = workers.map(({ hostname, unarchived }) => ({
     label: hostname,
@@ -249,7 +257,7 @@ function unarchivedRow(workers: readonly WorkerUnarchived[]): Row[] {
   return [
     {
       label: "Unarchived",
-      value: "what each worker's log archive collector had not archived, gone with it",
+      value: what,
       details: [{ kind: "rows", rows }],
     },
   ];
@@ -339,7 +347,7 @@ function resultRows(report: TeardownReport): Row[] {
   return [
     infrastructure,
     ...listRow("EC2 instances", report.machines.map(machineText)),
-    ...unarchivedRow(report.unarchived),
+    ...unarchivedRow(report.unarchived, REPORTED_UNARCHIVED),
     {
       label: "Tailnet devices",
       value:
