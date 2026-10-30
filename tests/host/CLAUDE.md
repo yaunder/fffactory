@@ -38,3 +38,10 @@ temporary directories by `worker-scenarios.ts`, never the real `/`.
   for the password.
 - `verify.test.ts` answers every command with a scripted runner; `inspect.test.ts` covers the
   unprivileged read-only inspection.
+- `collect.test.ts` runs the collection run (`docs/specs/collector.md` §Run) over a Claude root
+  laid out in a temporary worker root, every write a later modification time, writing to
+  `support/memory-archive.ts` (create-once keys, a failure or a crash before or after any put,
+  and a hook before each put that changes the worker mid-run). It reassembles the archive by the
+  reader's rules with `support/archive-reassembly.ts`, checks every reassembled state is a prefix
+  of content the file held and the last equals it, and that the checkpoint names only stored
+  data, also over a seeded random sequence of appends, rewrites and crashes.

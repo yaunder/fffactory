@@ -156,7 +156,7 @@ An orphan nothing superseded still holds bytes the file held when it was read.
 | `outcome` | `succeeded`, or `failed` when any write or read failed. |
 | `failure` | The failure's class (an AWS error name or a network error code, never a message), or `null`; always `null` when `outcome` is `succeeded`. |
 | `budget_hit` | `bytes` or `time` when the run stopped at a budget, else `null`. |
-| `uploaded_bytes` | The blob bytes this run uploaded. |
+| `uploaded_bytes` | The bytes of the blobs this run created ([Run](#run)). |
 | `journal_seq` | The sequence of the record this run wrote, or `null`. |
 | `last_success_at` | When the last run that succeeded ended, this one included, or `null`. |
 | `backlog` | `{ "files", "bytes" }` still unarchived after the run ([Backlog](#backlog)). |
@@ -217,6 +217,21 @@ first 64 MiB, an append with its next 64 MiB, and later runs append the rest,
 at most the budget per run. The budget exceeds `SMALL_FILE_BYTES`, so a cut
 capture's rest is always appended, never captured whole again.
 
+The time budget also bounds the decisions, so a run reaches its checkpoint
+within it however much there is to verify. Sources are decided in the same
+order, most recently modified first. Decisions get the first half of the time
+budget (20 s), leaving the rest to the uploads: once it has passed, no verify
+starts, and one still hashing gives up between chunks (1 MiB). Those sources
+stay undecided, counting in the backlog, and the run reports `budget_hit:
+"time"`; what stat alone decides (a new, replaced, shrunk or small changed
+source) is still decided, and what was decided in time is uploaded, journaled
+and checkpointed as usual. A verify found unchanged is touched, so the next run
+decides it by stat and reaches further. A source whose captured prefix alone
+takes longer than the decisions' half to hash never finishes a verify, and the
+sources modified more recently than it are verified first every run; at disk
+speed that is a prefix of gigabytes (`TODO(re-evaluate when T7 measures run
+time on Acceptance)`).
+
 ## Backlog
 
 What is unarchived is computed from a checkpoint and current source stats
@@ -238,3 +253,74 @@ checkpoint (`touchedEntry`), so it is no longer backlog.
 
 A source the checkpoint names but no longer present is not backlog: what was
 captured of it stays in the archive.
+
+## Run
+
+One run (`collectOnce`, `src/host/collect.ts`) is one pass, in this order:
+
+1. **Lock.** It takes its own lock, `collect.lock` in its state directory
+   (`COLLECTOR_STATE`, `/var/lib/fffactory-collector`), an exclusive `flock`
+   without waiting. Held elsewhere, the run ends at once, quietly (`busy`):
+   nothing is read, written or saved. It never takes, opens or creates the install
+   lock (`/run/fffactory-host-apply.lock`), so it never makes `host apply`,
+   `repositories`, `control-plane`, `dispatch` or `work inspect` refuse `busy`, and
+   they never stop it.
+2. **Checkpoint.** It reads `checkpoint.json` beside the lock; missing or
+   unreadable, it starts a new one ([Checkpoint](#checkpoint)).
+3. **Discovery.** It walks `CLAUDE_ROOT` with `lstat`, descending only into
+   walkable directories and finding only collectable files ([Sources](#sources)).
+   A symbolic link is neither descended into nor collected, nor is `CLAUDE_ROOT`
+   when it is one; a path neither walkable nor collectable is not even `lstat`ed.
+4. **Decision.** Each source is decided from its entry and its `lstat`
+   ([Capture](#capture)), most recently modified first. A verify opens the
+   source and hashes its captured prefix a chunk at a time; unchanged, its entry
+   is touched. Once half the time budget has passed since the run started, no
+   verify starts and one under way gives up; those sources are left to the next
+   run ([Budgets](#budgets)).
+5. **Budget.** The pending captures are admitted by the byte budget
+   ([Budgets](#budgets)).
+6. **Blobs.** Each admitted capture, in that order, is read and its blob put. No
+   upload starts once the time budget has passed since the run started. A put
+   answered `exists` (S3's 412) is stored: a blob's key is its content. The first
+   put that fails stops the uploads.
+7. **Journal.** If any blob was stored, one record naming exactly the stored
+   captures is put at the checkpoint's `next_seq`. A key already taken (`exists`,
+   an orphan's) advances the sequence and the record is put again there, at most
+   1000 times in one run (then the run fails `JournalKeysTaken`).
+8. **Checkpoint.** It saves the checkpoint whole or not at all (a private
+   `0600` copy, flushed and renamed over it). Its entries take the run's captures
+   only when their journal record was stored, so it never names a blob or record
+   that is not stored; `next_seq` passes every key this run found taken or wrote.
+
+A source is opened only with `O_NOFOLLOW`, and read only while the open file is
+still the device and inode discovery found, the kernel finds it open at its own
+path under the Claude root's real path (`/proc/self/fd`; the Claude root's parent
+resolved once per run and its own name kept, so a link above it, such as `/home`
+on a data volume, is followed, and the Claude root itself never is), and it
+holds the bytes decided: one replaced, shortened, turned into a link, or reached
+through a directory turned into a link in between is left for the next run,
+whose decision sees it. A source that vanished is no failure, but the same file
+found open at another path fails the run `SourcePathMismatch`, and one whose open
+path cannot be read (no `/proc`) fails it `OpenPathUnverified`: either is left
+for the next run, the other sources still collected, so a worker where every open
+is refused never reports success with a backlog that only grows. A run never
+writes, truncates, renames or deletes a source, or changes its times.
+
+The run reports, in the heartbeat's terms ([Heartbeats](#heartbeats)), its
+epoch, start and end, `outcome` (`failed` when a source or directory could not be
+read for another reason than vanishing, a put failed, or the checkpoint could not
+be saved, or a source was not found open at its own path; `failure` the first
+one's class: the file-system error code, `SourcePathMismatch`,
+`OpenPathUnverified` or the writer's), `budget_hit` (`time` over `bytes`; `time`
+when the decisions or the uploads ran out of it), `uploaded_bytes` (the blobs it
+created; one that existed is not counted), the journal sequence it wrote, the
+last success (the checkpoint's, this run's when it succeeded and was saved) and
+the backlog by the checkpoint in force after it and the stats it discovered.
+
+The archive is written through an `ArchiveWriter` (`put(key, bytes)` answering
+`created`, `exists` or `failed` with a class; `src/domain/archive-format.ts`),
+so the run is tested against an in-memory archive with failures and crashes
+injected at every put (`tests/host/collect.test.ts`). A run that dies at any
+point leaves the checkpoint as it was; the next run resumes from it, and
+reassembling the archive gives, per source, only states the file held, the last
+equal to the file.

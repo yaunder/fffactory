@@ -11,7 +11,10 @@ its text).
 Each test maps to a section of a spec in `docs/specs/`.
 `domain/fixtures/archive/` holds archive format v1's documents and the collector's checkpoint
 (`docs/specs/collector.md`), each its serializer's output byte for byte; the collection run
-and the archive's reader read the same fixtures. Areas with their own rules:
+and the archive's reader read the same fixtures. The collection run (`host/collect.test.ts`)
+writes to `support/memory-archive.ts`, an in-memory `ArchiveWriter` with failures and crashes
+injected per put, and reads it back by the reader's rules with `support/archive-reassembly.ts`.
+Areas with their own rules:
 
 - [`host/`](host/CLAUDE.md): the worker side of the host protocol, and its shared contract
   fixtures.

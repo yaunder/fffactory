@@ -90,6 +90,20 @@ over SSH as `fffactory-admin`, all but `host agents`, which the dispatcher runs 
   worker that reads `log_archive` so far. Its log holds its own lines only, never a tool's
   output, and a failure names the account (or the log archive) and the AWS error name, exit
   status or deadline.
+- `collect.ts` is one collection run (`docs/specs/collector.md` §Run), run as `factory`, not
+  through the activator: it takes `collect.lock` in its own state directory (`COLLECTOR_STATE`)
+  and ends `busy` when another holds it; it never names `WORKER_PATHS.applyLock`, so it never
+  blocks or waits on an install. It decides by `domain/collector.ts` alone and writes only
+  through an injected `ArchiveWriter` (`domain/archive-format.ts`): blobs, then the journal
+  record, then the checkpoint (atomically), whose entries take a capture only once its record
+  is stored. It finds sources by `lstat`, opens them `O_NOFOLLOW` and reads one only while it is
+  still the device and inode found and `/proc/self/fd` (`CollectSystem.openFiles`) shows it
+  open at its own path under the Claude root's real path (its parent resolved, its own name
+  kept); found open elsewhere or unverifiable, it fails the run (`SourcePathMismatch`,
+  `OpenPathUnverified`) and leaves the source, never silently. It never changes a source. Its
+  time budget bounds the decisions' hashing too, newest first, with half the budget, so a run always reaches its checkpoint (§Budgets). File-system failures are
+  reported by their error code, a vanished source is none, and an error without a code is
+  thrown. Tests run it over a worker in a temporary directory and `tests/support/memory-archive.ts`.
 - A step's output goes only to its log under `WORKER_PATHS.logs`, written by the step itself as
   it runs (`ProcessOptions.output`), never collected and written afterwards; a verifier's tool
   output goes nowhere. Documents carry fffactory's own words and states, never a tool's output.

@@ -115,6 +115,24 @@ export function archiveKeys(factoryId: FactoryId, incarnation: WorkerIncarnation
   };
 }
 
+/**
+ * What creating one archive object answered: `exists` is S3's 412 to `If-None-Match: *`, the
+ * key already holding an object; `failed` names an AWS error name or a network error code,
+ * never a message.
+ */
+export type PutOutcome =
+  | { readonly kind: "created" }
+  | { readonly kind: "exists" }
+  | { readonly kind: "failed"; readonly failure: string };
+
+/**
+ * Creates archive objects, each once (`docs/specs/collector.md` §Run): a put never replaces an
+ * object. The collection run writes through it; an adapter writes to S3.
+ */
+export interface ArchiveWriter {
+  put(key: string, bytes: Uint8Array): Promise<PutOutcome>;
+}
+
 const MAX_PATH = 4096;
 
 /**

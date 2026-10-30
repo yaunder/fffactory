@@ -345,6 +345,12 @@ export interface PendingCapture {
   readonly captured: Captured;
 }
 
+/** The budget's order (§Budgets): most recently modified first, ties by source ID. */
+export const newestFirst = (
+  a: { readonly source: string; readonly mtime_ms: number },
+  b: { readonly source: string; readonly mtime_ms: number },
+) => b.mtime_ms - a.mtime_ms || bySource(a, b);
+
 /**
  * The captures one run uploads (§Budgets): most recently modified first, ties by source ID,
  * admitted while the bytes stay within `budgetBytes`, stopping at the first that would exceed
@@ -355,7 +361,7 @@ export function budgetedCaptures<T extends PendingCapture>(
   pending: readonly T[],
   budgetBytes: number,
 ): { readonly admitted: readonly T[]; readonly budget_hit: boolean } {
-  const ordered = [...pending].sort((a, b) => b.mtime_ms - a.mtime_ms || bySource(a, b));
+  const ordered = [...pending].sort(newestFirst);
   const admitted: T[] = [];
   let bytes = 0;
   for (const capture of ordered) {
