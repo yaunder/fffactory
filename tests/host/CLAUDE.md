@@ -10,6 +10,9 @@ temporary directories by `worker-scenarios.ts`, never the real `/`.
   `dispatch-not-requested.json`, the projection that stops dispatch, goes the other way: the
   CLI side builds it byte for byte, the worker side parses it unchanged, and `dispatch.test.ts`
   and the reconciler's Python test (`assets/steps/dispatch/tests/`) remove the schedule for it.
+  `projection-log-archive.json`, a host projection carrying the log archive, goes the same way:
+  the CLI side projects it byte for byte, the worker side parses it unchanged, and `host
+  inspect` reports its control-plane part's digest apart.
   `activity-agents.json` is also what `host agents` prints, and the dispatcher's Python test
   (`assets/steps/dispatch/tests/test_factory_dispatch.py`) reads it as its capacity check's
   answer. Change a document, its fixture and the CLI-side parser together.

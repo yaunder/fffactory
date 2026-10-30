@@ -130,10 +130,11 @@ summary and next action, the rest its details, in this order:
 
 The expected digest is that of the projection apply sends the host, built from
 factory.json's host for the pinned release by the same `projectHost`
-(`src/domain/host-projection.ts`), Paseo secret reference and delivered
-credential references included. Status compares the whole file, so a changed
-credential reference reads as a configuration to repair with `fffactory apply`,
-which is how a credential is delivered.
+(`src/domain/host-projection.ts`), Paseo secret reference, delivered
+credential references and the log archive included. Status compares the whole
+file, so a changed credential reference, or the log archive turned on or off,
+reads as a configuration to repair with `fffactory apply`, which is how either
+is delivered.
 
 A running record may belong to an install that is still going, since an
 interrupted or timed-out `fffactory apply` stops waiting but `host apply`

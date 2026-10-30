@@ -229,6 +229,7 @@ describe("factory status", () => {
       release: "0.1.0",
       paseo_password_secret:
         "arn:aws:secretsmanager:us-east-1:123456789012:secret:example/builder-1/paseo-password-AbCdEf",
+      log_archive: { bucket: "example-logs-123456789012-us-east-1-an", region: "us-east-1" },
     });
     const { "builder-1": one, "builder-2": two } = byKey(outcome.report.workers);
     expect(one?.status).toBe("ready");

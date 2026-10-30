@@ -81,11 +81,15 @@ over SSH as `fffactory-admin`, all but `host agents`, which the dispatcher runs 
   root into a `SecretMaterial`, checks every one before any tool runs, and reveals material only
   onto a delivering command's standard input (`ProcessOptions.stdin`), never an argument, an
   environment or the log. Tools run as `factory` through `AS_FACTORY`, files in `factory`'s home
-  are written as `factory`, and only `/etc/claude-code` is written by root. With Anthropic not
-  delivered it removes Claude Code's managed settings only while they name fffactory's helper
-  (`namesKeyHelper`, the test `verify.ts` uses): anyone else's, or unreadable ones, stay. Its
-  log holds its own lines only, never a tool's output, and a failure names the account and the
-  AWS error name, exit status or deadline.
+  are written as `factory`, and only `/etc/claude-code` is written by root. It composes Claude
+  Code's managed settings from what fffactory needs (`claudeManagedSettingsJson`: the helper
+  while Anthropic is delivered, `cleanupPeriodDays` while the projection carries `log_archive`),
+  replacing whatever was there; needing neither, it removes them only while they are
+  fffactory's own (`ownsManagedSettings`): anyone else's, or unreadable ones, stay. `verify.ts`
+  checks the key file while they name the helper (`namesKeyHelper`). It is the only code on the
+  worker that reads `log_archive` so far. Its log holds its own lines only, never a tool's
+  output, and a failure names the account (or the log archive) and the AWS error name, exit
+  status or deadline.
 - A step's output goes only to its log under `WORKER_PATHS.logs`, written by the step itself as
   it runs (`ProcessOptions.output`), never collected and written afterwards; a verifier's tool
   output goes nowhere. Documents carry fffactory's own words and states, never a tool's output.

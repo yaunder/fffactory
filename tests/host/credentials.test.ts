@@ -8,12 +8,12 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { HostCredentials } from "../../src/domain/host-projection";
+import type { HostCredentials, HostLogArchive } from "../../src/domain/host-projection";
 import {
   ANTHROPIC_KEY_FILE,
   ANTHROPIC_KEY_HELPER,
   CLAUDE_MANAGED_SETTINGS,
-  CLAUDE_MANAGED_SETTINGS_JSON,
+  claudeManagedSettingsJson,
   CREDENTIAL_COMMAND_TIMEOUT_MS,
   CREDENTIAL_LOGIN_TIMEOUT_MS,
 } from "../../src/domain/installation";
@@ -42,6 +42,15 @@ const ANTHROPIC_KEY = "sk-ant-api03-SECRETanthropicKEY";
 const OPENAI_KEY = "sk-proj-SECRETopenaiKEY0123456789";
 const MATERIAL = [GITHUB_TOKEN, ANTHROPIC_KEY, OPENAI_KEY];
 const BUDGET_MS = 10 * 60_000;
+const ARCHIVE: HostLogArchive = {
+  bucket: "fff-aaaa1111-logs-123456789012-eu-west-2-an",
+  region: "eu-west-2",
+};
+/** The managed settings' text for what fffactory needs. */
+const composed = (keyHelper: boolean, keepHistory: boolean) =>
+  claudeManagedSettingsJson({ keyHelper, keepHistory }) ?? "";
+const HELPER_ONLY = composed(true, false);
+const KEEPS_HISTORY = "log_archive: Claude Code keeps its history (cleanupPeriodDays 3650)";
 
 let root: string;
 beforeEach(async () => {
@@ -121,10 +130,22 @@ function worker(answers: Record<string, ProcessOutcome> = {}) {
     return answers[key] ?? defaults[key] ?? exited(argv[0] === "/usr/bin/aws" ? 254 : 0);
   };
   const lines: string[] = [];
-  const deliver = (credentials: HostCredentials | undefined, budgetMs = BUDGET_MS) =>
-    workerCredentials(system(root, { run }), credentials, budgetMs, async (line) => {
-      lines.push(line);
-    });
+  const deliver = (
+    credentials: HostCredentials | undefined,
+    budgetMs = BUDGET_MS,
+    logArchive?: HostLogArchive,
+  ) =>
+    workerCredentials(
+      system(root, { run }),
+      {
+        ...(credentials === undefined ? {} : { credentials }),
+        ...(logArchive === undefined ? {} : { log_archive: logArchive }),
+      },
+      budgetMs,
+      async (line) => {
+        lines.push(line);
+      },
+    );
   return {
     calls,
     lines,
@@ -309,7 +330,7 @@ describe("delivery of every configured account (credential delivery §Recipes)",
 });
 
 describe("accounts not delivered (credential delivery §Removal)", () => {
-  const REMOVED = "anthropic: not delivered; Claude Code's API key helper removed";
+  const REMOVED = "anthropic: not delivered; Claude Code's managed settings removed";
   const KEY_FILE_REMOVAL = [["rm -f -- anthropic-api-key", true]];
 
   async function managedSettings(text: string): Promise<void> {
@@ -317,10 +338,12 @@ describe("accounts not delivered (credential delivery §Removal)", () => {
     await writeFile(settings(), text);
   }
 
-  test("GitHub and OpenAI stores are untouched, and Claude Code's helper and key file go", async () => {
+  test("GitHub and OpenAI stores are untouched, and fffactory's settings and key file go", async () => {
     for (const text of [
-      CLAUDE_MANAGED_SETTINGS_JSON,
+      HELPER_ONLY,
       JSON.stringify({ apiKeyHelper: ANTHROPIC_KEY_HELPER }),
+      composed(false, true),
+      composed(true, true),
     ]) {
       await managedSettings(text);
       const { calls, lines, deliver } = worker();
@@ -332,9 +355,11 @@ describe("accounts not delivered (credential delivery §Removal)", () => {
     }
   });
 
-  test("managed settings that do not name fffactory's helper are kept; its key file goes", async () => {
+  test("managed settings that are not fffactory's are kept; its key file goes", async () => {
     for (const text of [
       JSON.stringify({ apiKeyHelper: "/usr/local/bin/org-key" }, null, 2),
+      JSON.stringify({ apiKeyHelper: ANTHROPIC_KEY_HELPER, model: "org-model" }),
+      JSON.stringify({ cleanupPeriodDays: 30 }),
       JSON.stringify({ permissions: { deny: ["WebFetch"] } }),
       "null",
       "not json",
@@ -345,7 +370,7 @@ describe("accounts not delivered (credential delivery §Removal)", () => {
       expect(await readFile(settings(), "utf8")).toBe(text);
       expect(calls.map(({ command, asFactory }) => [command, asFactory])).toEqual(KEY_FILE_REMOVAL);
       expect(lines).toEqual([
-        "anthropic: not delivered; Claude Code's managed settings kept: they do not name fffactory's helper",
+        "anthropic: not delivered; Claude Code's managed settings kept: they are not fffactory's",
       ]);
     }
   });
@@ -369,7 +394,7 @@ describe("accounts not delivered (credential delivery §Removal)", () => {
       "rm -f -- anthropic-api-key",
       "rm -f -- anthropic-api-key",
     ]);
-    const none = "anthropic: not delivered; no API key helper of fffactory's to remove";
+    const none = "anthropic: not delivered; no managed settings of fffactory's to remove";
     expect(lines).toEqual([none, none]);
   });
 
@@ -383,7 +408,87 @@ describe("accounts not delivered (credential delivery §Removal)", () => {
     await managedSettings(JSON.stringify({ apiKeyHelper: "/usr/local/bin/org-key" }));
     const { deliver } = worker();
     expect(await deliver({ anthropic_api_key_secret: ANTHROPIC_ARN })).toBeUndefined();
-    expect(await readFile(settings(), "utf8")).toBe(CLAUDE_MANAGED_SETTINGS_JSON);
+    expect(await readFile(settings(), "utf8")).toBe(HELPER_ONLY);
+  });
+});
+
+describe("Claude Code keeps its history while the log archive is enabled (credential delivery §Managed settings)", () => {
+  async function managedSettings(text: string): Promise<void> {
+    await mkdir(join(root, "/etc/claude-code"), { recursive: true });
+    await writeFile(settings(), text);
+  }
+
+  test("with Anthropic delivered, the settings name the helper and keep the history", async () => {
+    const { lines, deliver } = worker();
+    expect(await deliver(ALL, BUDGET_MS, ARCHIVE)).toBeUndefined();
+    expect(await readFile(settings(), "utf8")).toBe(composed(true, true));
+    expect(JSON.parse(await readFile(settings(), "utf8"))).toEqual({
+      apiKeyHelper: ANTHROPIC_KEY_HELPER,
+      cleanupPeriodDays: 3650,
+    });
+    expect((await stat(settings())).mode & 0o777).toBe(0o644);
+    expect(lines).toEqual([
+      "github: delivered",
+      "openai: delivered",
+      "anthropic: delivered",
+      KEEPS_HISTORY,
+    ]);
+  });
+
+  test("without Anthropic, the settings keep the history alone, and the key file goes", async () => {
+    await managedSettings(HELPER_ONLY);
+    const { calls, lines, deliver } = worker();
+    expect(await deliver(undefined, BUDGET_MS, ARCHIVE)).toBeUndefined();
+    expect(await readFile(settings(), "utf8")).toBe(composed(false, true));
+    expect(JSON.parse(await readFile(settings(), "utf8"))).toEqual({ cleanupPeriodDays: 3650 });
+    expect(calls.map(({ command, asFactory }) => [command, asFactory])).toEqual([
+      ["rm -f -- anthropic-api-key", true],
+    ]);
+    expect(lines).toEqual([
+      "anthropic: not delivered; Claude Code's managed settings name no API key helper",
+      KEEPS_HISTORY,
+    ]);
+  });
+
+  test("a file fffactory needs replaces others' settings, which it keeps when it needs none", async () => {
+    const foreign = JSON.stringify({ apiKeyHelper: "/usr/local/bin/org-key", model: "x" });
+    await managedSettings(foreign);
+    expect(await worker().deliver(undefined)).toBeUndefined();
+    expect(await readFile(settings(), "utf8")).toBe(foreign);
+    expect(await worker().deliver(undefined, BUDGET_MS, ARCHIVE)).toBeUndefined();
+    expect(await readFile(settings(), "utf8")).toBe(composed(false, true));
+  });
+
+  test("turning the archive off drops the history, and with nothing needed removes the file", async () => {
+    expect(await worker().deliver(ALL, BUDGET_MS, ARCHIVE)).toBeUndefined();
+    expect(await worker().deliver(ALL)).toBeUndefined();
+    expect(await readFile(settings(), "utf8")).toBe(HELPER_ONLY);
+    expect(await worker().deliver(undefined, BUDGET_MS, ARCHIVE)).toBeUndefined();
+    expect(await readFile(settings(), "utf8")).toBe(composed(false, true));
+    const { lines, deliver } = worker();
+    expect(await deliver(undefined)).toBeUndefined();
+    expect(await Bun.file(settings()).exists()).toBe(false);
+    expect(lines).toEqual(["anthropic: not delivered; Claude Code's managed settings removed"]);
+  });
+
+  test("a rerun leaves the same bytes", async () => {
+    const first = worker();
+    expect(await first.deliver(undefined, BUDGET_MS, ARCHIVE)).toBeUndefined();
+    const written = await readFile(settings(), "utf8");
+    const second = worker();
+    expect(await second.deliver(undefined, BUDGET_MS, ARCHIVE)).toBeUndefined();
+    expect(second.calls.map(({ argv }) => argv)).toEqual(first.calls.map(({ argv }) => argv));
+    expect(await readFile(settings(), "utf8")).toBe(written);
+  });
+
+  test("settings it cannot write fail the step for the log archive, before the key file goes", async () => {
+    await mkdir(join(settings(), "inside"), { recursive: true });
+    const { calls, lines, deliver } = worker();
+    expect(await deliver(undefined, BUDGET_MS, ARCHIVE)).toMatch(
+      /^log_archive: writing Claude Code's managed settings failed \([A-Z]+\)$/,
+    );
+    expect(calls).toEqual([]);
+    expect(lines).toEqual([]);
   });
 });
 

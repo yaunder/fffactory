@@ -11,7 +11,7 @@ import { WORKER_PATHS } from "../../src/domain/host-protocol";
 import {
   ANTHROPIC_KEY_FILE,
   CLAUDE_MANAGED_SETTINGS,
-  CLAUDE_MANAGED_SETTINGS_JSON,
+  claudeManagedSettingsJson,
 } from "../../src/domain/installation";
 import type { Release } from "../../src/domain/instance";
 import { verificationJson } from "../../src/domain/readiness";
@@ -287,7 +287,9 @@ describe("host verify's enrollment (readiness §Enrollment)", () => {
   describe("Anthropic delivered through fffactory's key helper (credential delivery §Verify)", () => {
     const KEY_CHECK = "test -r anthropic-api-key -a -s anthropic-api-key";
 
-    async function helperConfigured(text = CLAUDE_MANAGED_SETTINGS_JSON) {
+    async function helperConfigured(
+      text = claudeManagedSettingsJson({ keyHelper: true, keepHistory: false }),
+    ) {
       await mkdir(join(root, "/etc/claude-code"), { recursive: true });
       await writeFile(join(root, CLAUDE_MANAGED_SETTINGS), text);
     }
@@ -307,6 +309,21 @@ describe("host verify's enrollment (readiness §Enrollment)", () => {
         join(root, ANTHROPIC_KEY_FILE),
       ]);
       expect(check?.timeoutMs).toBe(CHECK_TIMEOUT_MS);
+    });
+
+    test("accepts every form the credentials step composes", async () => {
+      for (const [keyHelper, keepHistory] of [
+        [true, false],
+        [true, true],
+        [false, true],
+      ] as const) {
+        await helperConfigured(claudeManagedSettingsJson({ keyHelper, keepHistory }) ?? "");
+        const { verification, calls } = await verify();
+        expect(verification.enrollment[2]).toEqual({ id: "anthropic", state: "enrolled" });
+        expect(verification.checks.every(({ status }) => status === "passed")).toBe(true);
+        // The key file is checked exactly while the settings name fffactory's helper.
+        expect(calls.some(({ argv }) => argv.includes("-s"))).toBe(keyHelper);
+      }
     });
 
     test("a key file missing or empty is pending, though claude auth status passes", async () => {

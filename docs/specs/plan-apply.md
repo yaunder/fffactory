@@ -346,7 +346,10 @@ skipped: no Terraform apply runs), `applyWorkers`
 3. The release tarball is uploaded and activated with its embedded digest and
    the host projection on standard input ([host protocol §apply](host-protocol.md#apply)):
    the one `projectHosts` builds from factory.json's hosts, Paseo secret
-   reference included, whose digest plan and `status` expect.
+   reference included, whose digest plan and `status` expect. It carries the
+   log archive while factory.json enables it, so enabling or disabling the
+   archive is delivered here, as a host install, and plans no Paseo change
+   ([host protocol §The host projection](host-protocol.md#the-host-projection)).
    While it works apply streams a row per step into its `Applying` section,
    the worker by its key alone: `KEY   uploading N MiB`, then `KEY   installing
    and verifying (can take many minutes)` ([Apply](#apply)).

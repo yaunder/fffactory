@@ -255,7 +255,7 @@ async function runImplementation(
         ? undefined
         : "plugin installation or verification failed";
     case "credentials":
-      return workerCredentials(system, projection.credentials, step.timeoutMs, async (line) => {
+      return workerCredentials(system, projection, step.timeoutMs, async (line) => {
         await log.write(`${line}\n`);
       });
     case undefined: {

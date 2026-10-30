@@ -17,6 +17,7 @@ import type { CredentialSelection } from "../../src/domain/aws-account";
 import {
   controlPlaneProjection,
   type HostCredentials,
+  type HostLogArchive,
   hostProjection,
   hostProjectionJson,
   parseHostProjection,
@@ -222,6 +223,7 @@ export function projectionSha256(
   release: string,
   paseoPasswordSecret?: SecretReference,
   credentials?: HostCredentials,
+  logArchive?: HostLogArchive,
 ): string {
   return sha256Text(
     hostProjectionJson(
@@ -231,6 +233,7 @@ export function projectionSha256(
         release as Release,
         paseoPasswordSecret,
         credentials,
+        logArchive,
       ),
     ),
   );
@@ -246,9 +249,17 @@ export function readyWorker(
   release: string,
   paseoPasswordSecret?: SecretReference,
   credentials?: HostCredentials,
+  logArchive?: HostLogArchive,
 ): HostInspection {
   const hostname = `${factoryId}-${key}`;
-  const sha256 = projectionSha256(factoryId, key, release, paseoPasswordSecret, credentials);
+  const sha256 = projectionSha256(
+    factoryId,
+    key,
+    release,
+    paseoPasswordSecret,
+    credentials,
+    logArchive,
+  );
   return inspection(
     hostname,
     {
@@ -397,21 +408,18 @@ const NOT_REQUESTED: DispatchInspection = {
 /**
  * `document` as the worker reports it once it keeps `projection`: its configuration, and its
  * install record's, are that text's real SHA-256, as `host apply` records them, and a
- * projection carrying credential references has its control-plane part digested apart, as
- * `host inspect` does.
+ * projection carrying credential references or the log archive has its control-plane part
+ * digested apart, as `host inspect` does.
  */
 function holding(document: HostInspection, projection: string | undefined): HostInspection {
   if (projection === undefined) return document;
   const sha256 = sha256Text(projection);
   const parsed = parseHostProjection(projection);
+  const controlPlane = parsed.ok
+    ? hostProjectionJson(controlPlaneProjection(parsed.document))
+    : projection;
   const part =
-    parsed.ok && parsed.document.credentials !== undefined
-      ? {
-          control_plane_sha256: sha256Text(
-            hostProjectionJson(controlPlaneProjection(parsed.document)),
-          ),
-        }
-      : {};
+    controlPlane === projection ? {} : { control_plane_sha256: sha256Text(controlPlane) };
   const { installation } = document;
   return {
     ...document,

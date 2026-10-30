@@ -108,11 +108,13 @@ async function configuration(root: string): Promise<ConfigurationState> {
   try {
     const bytes = await readFile(join(root, WORKER_PATHS.configuration));
     const sha256 = sha256Hex(bytes);
-    const projection = parseHostProjection(new TextDecoder().decode(bytes));
-    // Only the file's credential references are not the control plane's (D3).
-    if (!projection.ok || projection.document.credentials === undefined)
-      return { state: "present", sha256 };
+    const text = new TextDecoder().decode(bytes);
+    const projection = parseHostProjection(text);
+    if (!projection.ok) return { state: "present", sha256 };
+    // Only the file's credential references and log archive are not the control plane's (D3):
+    // a file without either is that part whole, and reports its digest alone.
     const part = hostProjectionJson(controlPlaneProjection(projection.document));
+    if (part === text) return { state: "present", sha256 };
     return { state: "present", sha256, control_plane_sha256: sha256Text(part) };
   } catch (error) {
     return errorCode(error) === "ENOENT" ? { state: "none" } : { state: "unreadable" };

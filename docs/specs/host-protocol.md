@@ -255,7 +255,7 @@ name (`uname -m`). A value that is not a short token of letters, digits, `.`,
 | Field | Values |
 | --- | --- |
 | `release` | `{"state": "none"}`: no `current` link, the explicit empty state. `{"state": "active", "version", "sha256"}`: the link names a release whose marker records it. `{"state": "broken"}`: anything else (not a link, another target, a missing or mismatched marker). |
-| `configuration` | `{"state": "none"}`: no file. `{"state": "present", "sha256"}`, and `control_plane_sha256` after it when the file is a host projection carrying `credentials`: the SHA-256 of its control-plane part, the projection without them. Absent, the whole file is that part, as on a worker from before credential references. `{"state": "unreadable"}`: it exists but cannot be read. |
+| `configuration` | `{"state": "none"}`: no file. `{"state": "present", "sha256"}`, and `control_plane_sha256` after it when the file is a host projection carrying `credentials` or `log_archive`: the SHA-256 of its control-plane part, the projection without them. Absent, the whole file is that part, as on a worker from before credential references. `{"state": "unreadable"}`: it exists but cannot be read. |
 | `installation` | `{"state": "none"}`: no record. `{"state": "unreadable"}`: a record that cannot be read as one. Otherwise the record's `state` (`running`, `succeeded` or `failed`), `release`, `configuration_sha256`, `failed_step` (the first failed step's name, or null), `started_at`, `finished_at`, `verification` (the verify document, or null) and `failure` (the record's, below; absent reads as null). A worker that reports no `installation` field, from before #101, reads as `none`. |
 | `services[].state` | What `systemctl is-active` prints: `active`, `reloading`, `refreshing`, `inactive`, `failed`, `activating`, `deactivating`, `maintenance`; else `unknown`, as when it cannot run. |
 | `evidence.os` | `null` when os-release is unreadable or lacks either value. |
@@ -317,6 +317,10 @@ on standard input and kept as `/var/lib/fffactory/host.json`:
     "github_token_secret": "arn:aws:secretsmanager:eu-west-2:123456789012:secret:fff-aaaa1111/github-token-AbCdEf",
     "anthropic_api_key_secret": "arn:aws:secretsmanager:eu-west-2:123456789012:secret:fff-aaaa1111/anthropic-api-key-AbCdEf",
     "openai_api_key_secret": "arn:aws:secretsmanager:eu-west-2:123456789012:secret:fff-aaaa1111/openai-api-key-AbCdEf"
+  },
+  "log_archive": {
+    "bucket": "fff-aaaa1111-logs-123456789012-eu-west-2-an",
+    "region": "eu-west-2"
   }
 }
 ```
@@ -332,8 +336,17 @@ API credentials delivered to the host
 account the host does not list in `interactive_logins`, under the same field
 name, in this order. It is absent when none is delivered, never empty. The
 `credentials` install step reads them on the worker and delivers each to its
-tool ([credential delivery](credential-delivery.md)). The projection holds
-no secret material, and never appears in an argument, a plan or a log.
+tool ([credential delivery](credential-delivery.md)). `log_archive` is
+present exactly while factory.json sets `log_archive.enabled: true`
+([instance configuration §Log archive](instance-configuration.md#log-archive)):
+`bucket` is the archive's derived name (`archiveBucketName`) and `region` the
+factory's `aws.region`, in the formats factory.json's validation gives them.
+Without it the projection is byte for byte what it was before the archive. It
+is an addition, so the protocol version is kept. On the worker, only the
+`credentials` step reads it, to keep Claude Code's history
+([credential delivery §Managed settings](credential-delivery.md#managed-settings)).
+The projection holds no secret material, and never appears in an argument, a
+plan or a log.
 `release` is the release factory.json pins, which the CLI/pin match guard makes
 the running one's. No other factory-wide reference is projected: the worker
 reads its Tailscale key only at first boot, through Terraform, and the
@@ -348,13 +361,15 @@ newline. `host apply` refuses any other text, so the file it keeps has exactly
 the SHA-256 the CLI computes for it.
 
 Its *control-plane part* (`controlPlaneProjection`) is the projection without
-`credentials`: what a projection was before credential references, and all
-the control plane installs from. The control-plane plan digests only that part
+`credentials` and `log_archive`: what a projection was before credential
+references, and all the control plane installs from. The control-plane plan
+digests only that part
 ([control plane §Planned state](control-plane.md#planned-state)), and `host
 inspect` reports its digest apart from the file's, so adding, changing or
-removing a credential reference plans no Paseo change. `status` still compares
-the whole file's digest: a changed reference is a configuration apply has not
-delivered yet.
+removing a credential reference, or turning the log archive on or off, plans
+no Paseo change. `status` still compares the whole file's digest: a changed
+reference, or the archive turned on or off, is a configuration apply has not
+delivered yet, which the workers stage installs.
 
 There is one projection per host, built from factory.json's host as it
 stands, and its delivered references from the instance's `credentials`: the workers stage sends the ones `projectHosts` builds from the
@@ -463,7 +478,7 @@ reports it and the next apply repairs it. Nothing on this path uses SSM.
 | `systemd` | `tailscaled.service` enabled and active. |
 | `harness` | Codex's system requirements, then Codex and Claude Code for `factory` at the versions and npm integrity values `versions.env` pins ([Agent pins](#agent-pins)). |
 | `plugins` | The Claude Code plugins `plugins.json` pins, from marketplace checkouts at their pinned revisions; undeclared ones removed. |
-| `credentials` | The API credentials delivered to the host, read from Secrets Manager with the instance role and written to each tool's own store, the material only on standard input; Claude Code's key file, and its managed settings while they name fffactory's API key helper, removed when Anthropic is not delivered ([credential delivery](credential-delivery.md)). |
+| `credentials` | The API credentials delivered to the host, read from Secrets Manager with the instance role and written to each tool's own store, the material only on standard input; Claude Code's managed settings composed from what fffactory needs (the API key helper while Anthropic is delivered, `cleanupPeriodDays: 3650` while the projection carries `log_archive`), removed when it needs neither only while they are fffactory's own; Claude Code's key file removed when Anthropic is not delivered ([credential delivery](credential-delivery.md)). |
 
 ### Agent pins
 
@@ -969,6 +984,10 @@ environment, the budget, an unreadable list, root refused), and
 `tests/host/fixtures/dispatch-not-requested.json`, the projection that stops
 dispatch ([dispatch §Stopping dispatch](dispatch.md#stopping-dispatch)): the
 CLI side builds it byte for byte, and the worker side parses it without loss.
+So is `tests/host/fixtures/projection-log-archive.json`, the host projection of
+a factory with the log archive: the CLI side projects it byte for byte, and the
+worker side parses it without loss and `host inspect` reports its control-plane
+part's digest apart, that of the projection without the archive.
 `tests/host/apply.test.ts` runs
 `host apply` over real bash stand-in steps in a temporary worker: the order in
 one process, each step's result recorded before the next, the logs streamed as
@@ -1038,4 +1057,5 @@ Claude Code 2.1.302 pins and Codex's requirements by
 credential references and the control-plane part's digest by
 [#68](https://github.com/yaunder/fffactory/issues/68); the `credentials` step by
 [#69](https://github.com/yaunder/fffactory/issues/69); `host agents` by
-[#100](https://github.com/yaunder/fffactory/issues/100).
+[#100](https://github.com/yaunder/fffactory/issues/100); the projection's
+`log_archive` by [#118](https://github.com/yaunder/fffactory/issues/118).

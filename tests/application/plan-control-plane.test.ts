@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { planControlPlane } from "../../src/application/plan-control-plane";
 import type { ConfigurationState } from "../../src/domain/host-protocol";
 import {
+  controlPlaneProjection,
   hostProjection,
   hostProjectionJson,
   type HostProjection,
@@ -151,7 +152,10 @@ describe("control-plane planning", () => {
   });
 
   test("a credential reference added to factory.json plans no Paseo change on a worker from before credentials (D3)", async () => {
-    const before = projectHost(INSTANCE, TARGET.factoryId, TARGET.release, HOST);
+    // A release from before credential references held no log archive either.
+    const before = controlPlaneProjection(
+      projectHost(INSTANCE, TARGET.factoryId, TARGET.release, HOST),
+    );
     const instance = withCredentials({ github_token_secret: credentialArn("github-token") });
     const [plan] = await planKeeping(keeping(before, false), instance);
     expect(plan?.changes).toEqual([]);
@@ -173,6 +177,16 @@ describe("control-plane planning", () => {
       const [plan] = await planKeeping(keeping(kept, true), instance);
       expect(plan?.changes).toEqual([]);
     }
+  });
+
+  test("turning the log archive on or off plans no Paseo change", async () => {
+    // The example factory enables the archive.
+    const archived = projectHost(INSTANCE, TARGET.factoryId, TARGET.release, HOST);
+    expect(archived.log_archive).toBeDefined();
+    const disabled: FactoryInstance = { ...INSTANCE, log_archive: { enabled: false } };
+    const plain = projectHost(disabled, TARGET.factoryId, TARGET.release, HOST);
+    expect((await planKeeping(keeping(archived, true), disabled))[0]?.changes).toEqual([]);
+    expect((await planKeeping(keeping(plain, false), INSTANCE))[0]?.changes).toEqual([]);
   });
 
   test("still plans the Paseo settings when the control plane's own part changed", async () => {

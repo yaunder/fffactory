@@ -9,7 +9,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { WORKER_PATHS } from "../../src/domain/host-protocol";
 import { hostProjection, hostProjectionJson } from "../../src/domain/host-projection";
-import { type HostApplyRecord, INSTALL_STEPS, parseHostApply } from "../../src/domain/installation";
+import {
+  CLAUDE_MANAGED_SETTINGS,
+  type HostApplyRecord,
+  INSTALL_STEPS,
+  parseHostApply,
+} from "../../src/domain/installation";
 import type { FactoryId, HostKey, Release, SecretReference } from "../../src/domain/instance";
 import { ENROLLMENTS, type Verification } from "../../src/domain/readiness";
 import {
@@ -486,11 +491,39 @@ describe("host apply's native credentials step (credential delivery)", () => {
     const log = await readFile(at(join(WORKER_PATHS.logs, "credentials.log")), "utf8");
     expect(log).toBe(
       "github: delivered\n" +
-        "anthropic: not delivered; no API key helper of fffactory's to remove\n" +
+        "anthropic: not delivered; no managed settings of fffactory's to remove\n" +
         "--- fffactory: step credentials succeeded\n",
     );
     expect(log).not.toContain(TOKEN);
     expect(await readFile(at(WORKER_PATHS.lastApply), "utf8")).not.toContain(TOKEN);
+  });
+
+  test("gives the step the projection's log archive, so Claude Code keeps its history", async () => {
+    await nativeWorker();
+    const { run } = tools({ kind: "exited", exitCode: 254, stdout: "", stderr: "" });
+    const archiving = hostProjectionJson(
+      hostProjection(
+        "fff-aaaa1111" as FactoryId,
+        "builder-1" as HostKey,
+        RELEASE,
+        undefined,
+        undefined,
+        { bucket: "fff-aaaa1111-logs-123456789012-eu-west-2-an", region: "eu-west-2" },
+      ),
+    );
+    const result = await realWorkerApplier(
+      applySystem({ run, readInput: async () => archiving }),
+      fakeVerifier().verifier,
+    ).apply();
+    expect(result.state).toBe("succeeded");
+    expect(await readFile(at(CLAUDE_MANAGED_SETTINGS), "utf8")).toBe(
+      `${JSON.stringify({ cleanupPeriodDays: 3650 }, null, 2)}\n`,
+    );
+    expect(await readFile(at(join(WORKER_PATHS.logs, "credentials.log")), "utf8")).toBe(
+      "anthropic: not delivered; Claude Code's managed settings name no API key helper\n" +
+        "log_archive: Claude Code keeps its history (cleanupPeriodDays 3650)\n" +
+        "--- fffactory: step credentials succeeded\n",
+    );
   });
 
   test("a secret it cannot read fails the step and the install, naming the account", async () => {

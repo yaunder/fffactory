@@ -34,6 +34,8 @@ import {
   verification,
 } from "../support/fake-workers";
 import {
+  ARCHIVE,
+  archiving,
   currentWorker,
   declaring,
   FACTORY,
@@ -786,5 +788,77 @@ describe("a host delivered credential references (control plane §Planned state,
     expect(await status(delivering({ github_token_secret: ROTATED_ARN }))).toMatchObject({
       status: "not_ready",
     });
+  });
+});
+
+describe("a factory with the log archive (host protocol §The host projection, worker log archive S3)", () => {
+  const ARCHIVE_SETTINGS = { bucket: ARCHIVE, region: "eu-west-2" };
+
+  test("toggling the archive plans a host install, never a Paseo change, and apply delivers it", async () => {
+    const { controlPlane, installed } = fakeControlPlane("healthy", agentsIn());
+    // The worker holds the projection from before the archive was enabled.
+    const fleet = enrolledFleet(currentWorker("builder-1", PASEO_PASSWORD_ARN));
+    const instance = archiving({ key: "builder-1", paseo_password_secret: PASEO_PASSWORD_ARN });
+    const plain = declaring({ key: "builder-1", paseo_password_secret: PASEO_PASSWORD_ARN });
+    const { deps, request, world } = pipeline(instance, { controlPlane }, fleet);
+    const plan = async (planned: FactoryInstance, offset: number) => {
+      const result = await planFactory(
+        world.deps,
+        planRequest({
+          instance: planned,
+          now: new Date(NOW.getTime() + offset),
+          randomBytes: (count) => new Uint8Array(count).fill(offset / 500),
+        }),
+      );
+      if (result.kind !== "planned") throw new Error(`expected planned, got ${result.kind}`);
+      return result.saved.control_plane;
+    };
+    const status = async (judged: FactoryInstance) => {
+      const report = await factoryStatus(
+        {
+          identity: fakeCallerIdentity().identity,
+          machines: fakeMachineInventory({ kind: "machines", machines: [machine("builder-1")] })
+            .machines,
+          peers: fleet.tailnet.tailnet,
+          transport: fleet.transport.transport,
+          controlPlane: undefined,
+          sha256: sha256Text,
+        },
+        { instance: judged, credentials: request.credentials },
+      );
+      if (report.kind !== "report") throw new Error(`expected a report, got ${report.kind}`);
+      return report.report.workers[0];
+    };
+
+    // 1. Enabling the archive: the worker's configuration is pending, Paseo unchanged.
+    expect(await status(instance)).toMatchObject({ status: "not_ready" });
+    expect(await plan(instance, 500)).toMatchObject([{ key: "builder-1", changes: [] }]);
+
+    const applied = await applyFactory(deps, request);
+    if (applied.kind !== "applied") throw new Error(`expected applied, got ${applied.kind}`);
+
+    // 2. The workers stage streamed the projection carrying the archive.
+    const sent = hostProjectionJson(
+      hostProjection(
+        FACTORY,
+        "builder-1" as HostKey,
+        RELEASE,
+        PASEO_PASSWORD_ARN,
+        undefined,
+        ARCHIVE_SETTINGS,
+      ),
+    );
+    expect(fleet.worker.projections).toEqual([sent]);
+    expect(installed.map(hostProjectionJson).every((text) => text === sent)).toBe(true);
+
+    // 3. Applied, the archive is current; disabling it again plans no Paseo change either, and
+    // status sees it as a configuration to deliver.
+    expect(await status(instance)).toMatchObject({ status: "ready" });
+    for (const [planned, offset] of [
+      [instance, 2000],
+      [plain, 3000],
+    ] as const)
+      expect(await plan(planned, offset)).toMatchObject([{ key: "builder-1", changes: [] }]);
+    expect(await status(plain)).toMatchObject({ status: "not_ready" });
   });
 });

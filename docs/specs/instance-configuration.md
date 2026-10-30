@@ -120,6 +120,16 @@ generates, never an operator's choice. Enabling it makes `fffactory plan` and
 ([plan and apply §The infrastructure stage](plan-apply.md#the-infrastructure-stage)),
 and lets each host's role write new objects under its own prefix of the bucket
 ([provisioning §Log archive access](provisioning.md#log-archive-access)).
+Each host's projection then carries the archive's bucket and Region
+([host protocol §The host projection](host-protocol.md#the-host-projection)),
+and its `credentials` step keeps Claude Code's session history
+(`cleanupPeriodDays: 3650`,
+[credential delivery §Managed settings](credential-delivery.md#managed-settings))
+so nothing is cleaned up before it is collected. Enabling or disabling the
+archive therefore changes every worker's projection digest: `status` reads it
+as a configuration `fffactory apply` has not delivered yet, and the next
+apply's workers stage installs it, with no Paseo change
+([control plane §Planned state](control-plane.md#planned-state)).
 fffactory itself writes nothing in the archive yet, and never removes it:
 [teardown](teardown.md) keeps it and says so.
 
