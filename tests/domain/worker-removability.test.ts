@@ -3,7 +3,12 @@ import { type Agent, OUTDATED_AGENTS } from "../../src/domain/control-plane";
 import { HOST_PROTOCOL_VERSION } from "../../src/domain/host-protocol";
 import type { HostKey } from "../../src/domain/instance";
 import type { RepositoryObservation } from "../../src/domain/repository-placement";
-import type { WorkObservation } from "../../src/domain/work-inspection";
+import {
+  parseWorkInspection,
+  type WorkArchive,
+  type WorkObservation,
+  workInspectionJson,
+} from "../../src/domain/work-inspection";
 import {
   powerStep,
   replaceOutdatedWorker,
@@ -18,6 +23,7 @@ import {
   type RemovalObservation,
   removalExitCode,
   thenRerunInspect,
+  UNARCHIVED_UNKNOWN,
   workerRemovability,
 } from "../../src/domain/worker-removability";
 
@@ -26,6 +32,21 @@ const WORKER = { key: KEY, hostname: "fff-abcd1234-builder-1" };
 const ID = "i-0123456789abcdef0";
 const INSPECT = "`fffactory worker inspect builder-1`";
 const TERMINATE_FORCE = "`fffactory worker terminate builder-1 --force`";
+
+const UNKNOWN = {
+  state: "unknown",
+  files: null,
+  bytes: null,
+  complete: null,
+  last_success_at: null,
+} as const;
+const BACKLOG: WorkArchive = {
+  state: "collected",
+  complete: true,
+  unarchived_files: 3,
+  unarchived_bytes: 70_000,
+  last_success_at: "2026-10-30T10:15:00.000Z",
+};
 
 const FINISHED: readonly Agent[] = [
   { id: "agent-1", state: "finished", dispatched: true },
@@ -37,14 +58,18 @@ const SYNCHRONIZED: RepositoryObservation = {
   unmanaged: [],
 };
 
-/** The work inspection of a worker whose one checkout holds `untracked` untracked files. */
-function work(untracked: number): WorkObservation {
+/**
+ * The work inspection of a worker whose one checkout holds `untracked` untracked files, and the
+ * archive's backlog as it reports it (`archive`; none from an older worker).
+ */
+function work(untracked: number, archive?: WorkArchive): WorkObservation {
   return {
     kind: "inspected",
     inspection: {
       protocol_version: HOST_PROTOCOL_VERSION,
       hostname: WORKER.hostname,
       complete: true,
+      ...(archive === undefined ? {} : { archive }),
       repositories: [
         {
           path: "/workspace/repos/acme/widget",
@@ -73,12 +98,13 @@ function work(untracked: number): WorkObservation {
 function inspected(
   agents: readonly Agent[],
   untracked = 0,
+  archive?: WorkArchive,
 ): Extract<TerminateInspection, { readonly kind: "inspected" }> {
   return {
     kind: "inspected",
     agents,
     repositories: SYNCHRONIZED,
-    work: work(untracked),
+    work: work(untracked, archive),
     placed: [],
   };
 }
@@ -105,6 +131,7 @@ describe("worker inspect's verdict (worker-lifecycle §Inspect)", () => {
           "no work or checkout would be lost",
         details: [],
         activity: { state: "idle", reason: null, agents: FINISHED },
+        unarchived: UNKNOWN,
       },
       next_action: null,
     });
@@ -129,6 +156,7 @@ describe("worker inspect's verdict (worker-lifecycle §Inspect)", () => {
       summary: "1 agent is working on fff-abcd1234-builder-1: terminating it would end it",
       details: [],
       activity: { state: "busy", reason: null, agents },
+      unarchived: UNKNOWN,
     });
     expect(next_action).toBe(
       `Wait until no agent there is working or needs input, then rerun ${INSPECT}, or ` +
@@ -234,6 +262,7 @@ describe("worker inspect's verdict (worker-lifecycle §Inspect)", () => {
           "The machine is stopped: the worker is not inspected, and unpushed work on its disk is not reported.",
         details: [],
         activity: { state: "unknown", reason: null, agents: null },
+        unarchived: UNKNOWN,
       },
       next_action: null,
     });
@@ -278,6 +307,7 @@ describe("worker inspect's verdict (worker-lifecycle §Inspect)", () => {
           summary: `EC2 instance ${ID} is pending`,
           details: [],
           activity: { state: "unknown", reason: null, agents: null },
+          unarchived: UNKNOWN,
         },
         next_action: `Wait until it is running, then rerun ${INSPECT}.`,
       },
@@ -322,6 +352,92 @@ describe("the inspection document a removal record carries (worker-lifecycle §I
     expect(workerRemovability(WORKER, busy, teardownGateActions(WORKER)).next_action).not.toBe(
       nextActionOf(busy),
     );
+  });
+});
+
+describe("each worker's unarchived evidence (worker-lifecycle §Inspect)", () => {
+  test("an inspected worker reports what its collector has not archived, as counted", () => {
+    expect(inspectionOf(inspected(FINISHED, 0, BACKLOG)).unarchived).toEqual({
+      state: "counted",
+      files: 3,
+      bytes: 70_000,
+      complete: true,
+      last_success_at: "2026-10-30T10:15:00.000Z",
+    });
+    const partly = { ...BACKLOG, complete: false, last_success_at: null };
+    expect(inspectionOf(inspected(FINISHED, 0, partly)).unarchived).toEqual({
+      state: "counted",
+      files: 3,
+      bytes: 70_000,
+      complete: false,
+      last_success_at: null,
+    });
+    expect(inspectionOf(inspected(FINISHED, 0, { state: "not_collected" })).unarchived).toEqual({
+      state: "not_collected",
+      files: null,
+      bytes: null,
+      complete: null,
+      last_success_at: null,
+    });
+  });
+
+  test("a backlog never changes the verdict: removable stays removable, refused stays refused (S2)", () => {
+    for (const archive of [BACKLOG, { ...BACKLOG, complete: false }, undefined]) {
+      expect(inspectionOf(inspected(FINISHED, 0, archive)).verdict).toBe("removable");
+      expect(nextActionOf(inspected(FINISHED, 0, archive))).toBeNull();
+      expect(inspectionOf(inspected(FINISHED, 1, archive)).verdict).toBe("refused");
+      expect(inspectionOf(inspected(FINISHED, 1, archive)).summary).toBe(
+        inspectionOf(inspected(FINISHED, 1)).summary,
+      );
+    }
+    // Unpushed work still refuses it, and its backlog is reported beside the refusal.
+    expect(inspectionOf(inspected(FINISHED, 1, BACKLOG)).unarchived.state).toBe("counted");
+  });
+
+  test("a malformed archive section reads unknown and leaves the verdict as without it (S2)", () => {
+    for (const untracked of [0, 1]) {
+      const read = work(untracked);
+      if (read.kind !== "inspected") throw new Error(read.kind);
+      const value = JSON.parse(workInspectionJson(read.inspection));
+      value.archive = { state: "collected", complete: "yes" };
+      const parsed = parseWorkInspection(JSON.stringify(value));
+      if (!parsed.ok) throw new Error(parsed.kind);
+      const observed: TerminateInspection = {
+        ...inspected(FINISHED),
+        work: { kind: "inspected", inspection: parsed.document },
+      };
+      expect(inspectionOf(observed)).toEqual(inspectionOf(inspected(FINISHED, untracked)));
+      expect(inspectionOf(observed).unarchived).toEqual(UNARCHIVED_UNKNOWN);
+      expect(nextActionOf(observed)).toBe(nextActionOf(inspected(FINISHED, untracked)));
+    }
+  });
+
+  test("a worker that cannot be inspected reads unknown, never nothing unarchived (S1)", () => {
+    const uninspectable: readonly RemovalObservation[] = [
+      { kind: "stopped" },
+      { kind: "shutting_down" },
+      { kind: "absent" },
+      { kind: "forced" },
+      {
+        kind: "unlocated",
+        verdict: { status: "error", summary: "Offline", details: [], nextAction: null },
+      },
+      {
+        kind: "activity",
+        activity: { kind: "busy", working: 1, needsInput: 0 },
+        agents: { kind: "listed", agents: [{ id: "agent-1", state: "working", dispatched: true }] },
+      },
+      {
+        ...inspected(FINISHED),
+        work: { kind: "unknown", reason: "no answer", unsupported: false },
+      },
+      // An older worker's work inspection says nothing of the archive.
+      inspected(FINISHED),
+    ];
+    for (const observed of uninspectable) {
+      expect(inspectionOf(observed).unarchived).toEqual(UNKNOWN);
+      expect(inspectionOf(observed).unarchived).toEqual(UNARCHIVED_UNKNOWN);
+    }
   });
 });
 

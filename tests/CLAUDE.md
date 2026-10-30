@@ -100,7 +100,8 @@ records every call, so a test can assert EC2 was never asked to change anything
 recording every call and the secret each `open` got, and `fake-secrets.ts`'s
 `fakeSecretStore` reading the admin client by its ARN. Terminate's work inspection answers
 through the same scripted transport: `statusAnswers` answers it, by default with no work, or
-with `workAnswer`'s document or any outcome a test gives. `worker inspect` runs terminate's
+with `workAnswer`'s document (without the log archive's backlog, as an older worker answers,
+unless a test gives one) or any outcome a test gives. `worker inspect` runs terminate's
 inspection over the same fakes, and a test asserts it took no lock and asked EC2 and the admin
 client nothing. Terminate's and teardown's records are compared with `worker inspect`'s
 documents (`printedBy`), each run in its own world built with the same options, so neither

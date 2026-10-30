@@ -1,0 +1,13 @@
+{
+  "protocol_version": 1,
+  "hostname": "fff-aaaa1111-builder-1",
+  "complete": true,
+  "repositories": [],
+  "archive": {
+    "state": "collected",
+    "complete": true,
+    "unarchived_files": 2,
+    "unarchived_bytes": 16,
+    "last_success_at": "2026-10-30T10:15:00.000Z"
+  }
+}

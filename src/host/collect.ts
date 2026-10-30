@@ -56,7 +56,8 @@ import {
 import type { RandomBytes } from "../domain/initialization";
 import type { ExclusiveLock } from "./install-lock";
 
-const CHECKPOINT = "checkpoint.json";
+/** The checkpoint's file in the collector's state directory (§Checkpoint). */
+export const CHECKPOINT = "checkpoint.json";
 const LOCK = "collect.lock";
 /** How many taken journal keys one run steps past before it gives up for this run. */
 const JOURNAL_ATTEMPTS = 1000;
@@ -154,7 +155,7 @@ const PATH_MISMATCH = "SourcePathMismatch";
 const PATH_UNVERIFIED = "OpenPathUnverified";
 
 /** A collectable source as discovery found it. */
-interface Observed {
+export interface Observed {
   readonly source: string;
   readonly path: string;
   readonly stat: SourceStat;
@@ -177,36 +178,75 @@ async function lstatOf(root: string, path: string, failures: Failures) {
   }
 }
 
-/** Every source, by `lstat`: a symbolic link is neither descended into nor collected. */
-async function discover(root: string, failures: Failures): Promise<Observed[]> {
-  const found: Observed[] = [];
-  if ((await lstatOf(root, CLAUDE_ROOT, failures))?.isDirectory())
-    await walk(root, CLAUDE_ROOT, found, failures);
-  return found;
+/** One discovery: where it looks, what it found, and whether it may go on. */
+interface Walk {
+  readonly root: string;
+  readonly found: Observed[];
+  readonly failures: Failures;
+  /** Asked before each entry is looked at; false stops discovery there (`cut`). */
+  readonly more: () => boolean;
+  cut: boolean;
+}
+
+/**
+ * Every source, by `lstat`: a symbolic link is neither descended into nor collected. Stops,
+ * `cut`, once `more` says no; a run never stops it.
+ */
+async function discover(
+  root: string,
+  failures: Failures,
+  more: () => boolean = () => true,
+): Promise<Walk> {
+  const walking: Walk = { root, found: [], failures, more, cut: false };
+  if ((await lstatOf(root, CLAUDE_ROOT, failures))?.isDirectory()) await walk(walking, CLAUDE_ROOT);
+  return walking;
+}
+
+/** What discovery found under `root`, and whether it found everything. */
+export interface Discovery {
+  readonly observed: readonly Observed[];
+  /** False when `more` stopped it, or a directory or entry could not be read. */
+  readonly complete: boolean;
+}
+
+/**
+ * The collector's discovery for a reader other than the run (`host work inspect`'s backlog):
+ * the same allowlist, never through a symbolic link, stopped once `more` says no.
+ */
+export async function discoverSources(root: string, more: () => boolean): Promise<Discovery> {
+  const failures: Failures = { first: null };
+  const walking = await discover(root, failures, more);
+  return { observed: walking.found, complete: !walking.cut && failures.first === null };
 }
 
 const asFile = (path: string) => collectable({ path, kind: "file", viaSymlink: false });
 
-async function walk(root: string, directory: string, found: Observed[], failures: Failures) {
+async function walk(walking: Walk, directory: string) {
   let names: string[];
   try {
-    names = (await readdir(join(root, directory))).sort();
+    names = (await readdir(join(walking.root, directory))).sort();
   } catch (error) {
-    note(failures, error);
+    note(walking.failures, error);
     return;
   }
-  for (const name of names) await visit(root, `${directory}/${name}`, found, failures);
+  for (const name of names) {
+    if (walking.cut || !walking.more()) {
+      walking.cut = true;
+      return;
+    }
+    await visit(walking, `${directory}/${name}`);
+  }
 }
 
 /** Descends into a collected directory, or finds a source; `lstat`s nothing else. */
-async function visit(root: string, path: string, found: Observed[], failures: Failures) {
+async function visit(walking: Walk, path: string) {
   const descend = walkable(path);
   const source = asFile(path);
   if (!descend && !source) return;
-  const stats = await lstatOf(root, path, failures);
-  if (descend && stats?.isDirectory()) await walk(root, path, found, failures);
+  const stats = await lstatOf(walking.root, path, walking.failures);
+  if (descend && stats?.isDirectory()) await walk(walking, path);
   else if (source && stats?.isFile())
-    found.push({ source: sourceId(path), path, stat: sourceStat(stats) });
+    walking.found.push({ source: sourceId(path), path, stat: sourceStat(stats) });
 }
 
 /**
@@ -618,7 +658,7 @@ async function run(system: CollectSystem): Promise<CollectionReport> {
     (await loadCheckpoint(system.stateDirectory)) ??
     newCheckpoint(newEpoch(started, system.randomBytes), run_started_at);
   const entries = new Map(loaded.sources.map((entry) => [entry.source, entry]));
-  const observed = await discover(root, failures);
+  const observed = (await discover(root, failures)).found;
   const decisionEnd = started.getTime() + system.budget.milliseconds * DECISION_SHARE;
   let passed = false;
   const past = () => {

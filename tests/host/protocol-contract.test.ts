@@ -1,6 +1,6 @@
 /**
  * The host protocol's contract: one set of fixtures, produced by the worker side and read by
- * the CLI side, and two, `dispatch-not-requested.json` and `projection-log-archive.json`,
+ * the CLI side (but `work-before-archive.json`, an older worker's, read only), and two, `dispatch-not-requested.json` and `projection-log-archive.json`,
  * produced by the CLI side and read by the worker side. A change that breaks either side against the fixtures breaks the protocol.
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
@@ -62,7 +62,7 @@ import {
   unpackedWorker,
   WORKER_HOSTNAME,
 } from "./worker-scenarios";
-import { gitWorld, unresolvedWorker } from "./work-scenarios";
+import { archivingWorker, gitWorld, unresolvedWorker } from "./work-scenarios";
 
 const FIXTURES = join(import.meta.dir, "fixtures");
 
@@ -367,6 +367,45 @@ describe("host work inspect, both sides", () => {
       ],
       uninspected: [],
     });
+  });
+
+  test("the worker produces work-archive-backlog.json byte for byte for an archiving worker", async () => {
+    const world = await gitWorld();
+    try {
+      await archivingWorker(world);
+      const document = await workerWork(world.system()).inspectWork();
+      expect(`${workInspectionJson(document)}\n`).toBe(await fixture("work-archive-backlog.json"));
+    } finally {
+      await world.remove();
+    }
+  });
+
+  test("the CLI reads the archive's backlog back without loss, never as work", async () => {
+    const text = await fixture("work-archive-backlog.json");
+    const parsed = parseWorkInspection(text);
+    if (!parsed.ok) throw new Error(`rejected: ${JSON.stringify(parsed)}`);
+    expect(`${workInspectionJson(parsed.document)}\n`).toBe(text);
+    expect(parsed.document.archive).toEqual({
+      state: "collected",
+      complete: true,
+      unarchived_files: 2,
+      unarchived_bytes: 16,
+      last_success_at: "2026-10-30T10:15:00.000Z",
+    });
+    expect(workFindings(parsed.document, [])).toEqual({ unresolved: [], uninspected: [] });
+  });
+
+  test("an older worker's document, without the archive, still reads (work-before-archive.json)", async () => {
+    // The worker side no longer produces it: an older release's worker does.
+    const text = await fixture("work-before-archive.json");
+    const parsed = parseWorkInspection(text);
+    if (!parsed.ok) throw new Error(`rejected: ${JSON.stringify(parsed)}`);
+    expect(parsed.document.archive).toBeUndefined();
+    expect(`${workInspectionJson(parsed.document)}\n`).toBe(text);
+    const current = parseWorkInspection(await fixture("work-unresolved.json"));
+    if (!current.ok) throw new Error("rejected");
+    const { archive: _, ...withoutArchive } = current.document;
+    expect(parsed.document).toEqual(withoutArchive);
   });
 
   test("an addition within the major version is ignored; another major is rejected", async () => {

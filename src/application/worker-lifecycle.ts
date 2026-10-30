@@ -116,7 +116,12 @@ import {
   type WorkerCommand,
   WORKER_OPERATIONS,
 } from "../domain/worker-lifecycle";
-import { type RemovalObservation, workerRemovability } from "../domain/worker-removability";
+import {
+  type RemovalObservation,
+  saysUnarchived,
+  type UnarchivedEvidence,
+  workerRemovability,
+} from "../domain/worker-removability";
 import type { OperationLocation } from "./apply-factory";
 import type { CallerIdentity } from "./caller-identity";
 import { type ControlPlane, readAgents } from "./control-plane";
@@ -250,7 +255,17 @@ export type PowerProgress =
   /** Terraform applies the removal plan. */
   | { readonly kind: "applying_removal" }
   /** factory.json no longer declares the host. */
-  | { readonly kind: "configuration_written"; readonly key: HostKey; readonly path: string };
+  | { readonly kind: "configuration_written"; readonly key: HostKey; readonly path: string }
+  /**
+   * Terminate: the worker's unarchived evidence, as its inspection document records it, shown
+   * before any question when it is said (`saysUnarchived`); unknown when it was not inspected
+   * (S1). It never refuses (S2).
+   */
+  | {
+      readonly kind: "unarchived";
+      readonly hostname: string;
+      readonly unarchived: UnarchivedEvidence;
+    };
 
 export type WorkerPower =
   /** No terminal to confirm at, and no `--yes`. */
@@ -322,6 +337,8 @@ export type WorkerPower =
       readonly changed: boolean;
       readonly awaited: boolean;
       readonly verdict?: Verdict;
+      /** Terminate: the worker's unarchived evidence its inspection recorded, when it is said. */
+      readonly unarchived?: UnarchivedEvidence;
       readonly devices?: DeviceRemoval;
       readonly leftover?: Refusal | undefined;
       readonly operation: OperationLocation;
@@ -542,6 +559,13 @@ export type Removal = "applying" | "written";
 interface Progress {
   requested: boolean;
   removal?: Removal;
+  /** Terminate's worker's unarchived evidence, once its inspection is recorded. */
+  unarchived?: UnarchivedEvidence;
+}
+
+/** The unarchived evidence a terminate's result says, when its inspection said it. */
+function unarchivedOf({ unarchived }: Progress): { readonly unarchived?: UnarchivedEvidence } {
+  return unarchived === undefined ? {} : { unarchived };
 }
 
 function interruptedUnder(log: PowerLog, progress: Progress): WorkerPower {
@@ -689,7 +713,7 @@ async function awaitUnderWay(
   machine: Machine,
 ): Promise<WorkerPower> {
   // Terminate only waits for a machine already being terminated: no gate runs for it.
-  await recordInspection(power, log, { kind: "shutting_down" });
+  await recordInspection(deps, power, log, progress, { kind: "shutting_down" });
   const admin = await adminFor(deps, power, log);
   if (deps.interrupted()) return interruptedUnder(log, progress);
   if (admin.kind === "refused") return refusedUnder(log, admin.refusal);
@@ -749,13 +773,14 @@ function gates(
   deps: WorkerLifecycleDependencies,
   power: Power,
   log: PowerLog,
+  progress: Progress,
   machine: Machine,
 ): Promise<Refusal | undefined> {
   switch (power.action) {
     case "stop":
       return stopGates(deps, power, log);
     case "terminate":
-      return terminateGates(deps, power, log, machine);
+      return terminateGates(deps, power, log, progress, machine);
     case "start":
       return Promise.resolve(undefined);
   }
@@ -772,7 +797,7 @@ async function act(
   progress: Progress,
   machine: Machine,
 ): Promise<WorkerPower> {
-  const refusal = await gates(deps, power, log, machine);
+  const refusal = await gates(deps, power, log, progress, machine);
   if (deps.interrupted()) return interruptedUnder(log, progress);
   if (refusal !== undefined) return refusedUnder(log, refusal);
   const admin = await adminFor(deps, power, log);
@@ -887,11 +912,12 @@ async function terminateGates(
   deps: WorkerLifecycleDependencies,
   power: Power,
   log: PowerLog,
+  progress: Progress,
   machine: Machine,
 ): Promise<Refusal | undefined> {
   const observed = await terminateObservation(deps, power, log, machine);
   if (observed === undefined) return undefined;
-  await recordInspection(power, log, observed);
+  await recordInspection(deps, power, log, progress, observed);
   return terminateGate(observed, power.worker, power.command as TerminateCommand);
 }
 
@@ -924,13 +950,25 @@ async function terminateObservation(
 
 /**
  * Records terminate's inspection of the worker (§Operation record): whether `--force` was given,
- * and the inspection document `worker inspect --json` prints for what it `observed`. Stop and
- * start record none.
+ * and the inspection document `worker inspect --json` prints for what it `observed`; and shows
+ * its unarchived evidence, before any question, keeping it for the result, when it is said
+ * (`saysUnarchived`). Stop and start record none.
  */
-async function recordInspection(power: Power, log: PowerLog, observed: RemovalObservation) {
+async function recordInspection(
+  deps: WorkerLifecycleDependencies,
+  power: Power,
+  log: PowerLog,
+  progress: Progress,
+  observed: RemovalObservation,
+) {
   if (power.action !== "terminate") return;
   const actions = terminateGateActions(power.command as TerminateCommand, power.worker.key);
   const { inspection } = workerRemovability(power.worker, observed, actions);
+  const { unarchived } = inspection;
+  if (saysUnarchived(power.request.instance.log_archive?.enabled === true, unarchived)) {
+    progress.unarchived = unarchived;
+    deps.progress({ kind: "unarchived", hostname: power.worker.hostname, unarchived });
+  }
   return log.inspection({ forced: power.request.force, document: inspection });
 }
 
@@ -1145,6 +1183,7 @@ async function reached(
     changed,
     awaited,
     ...(verdict === undefined ? {} : { verdict }),
+    ...unarchivedOf(progress),
     ...(removal ?? {}),
     operation: log.location,
     recordFailure,
@@ -1268,7 +1307,7 @@ async function terminateAbsent(
   progress: Progress,
 ): Promise<WorkerPower> {
   deps.progress({ kind: "absent", ...power.worker });
-  await recordInspection(power, log, { kind: "absent" });
+  await recordInspection(deps, power, log, progress, { kind: "absent" });
   const admin = await adminFor(deps, power, log);
   if (deps.interrupted()) return interruptedUnder(log, progress);
   if (admin.kind === "refused") return refusedUnder(log, admin.refusal);
@@ -1549,6 +1588,7 @@ async function writeAndClean(
     changed: true,
     awaited: removing.awaited,
     removed: true,
+    ...unarchivedOf(progress),
     ...(removal ?? {}),
     operation: log.location,
     recordFailure,

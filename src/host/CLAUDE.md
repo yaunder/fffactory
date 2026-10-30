@@ -72,7 +72,15 @@ and `host collect --once`, which the log archive's timer runs as `factory`
   its first worktree. What Git cannot fully report reads `unreadable`, never clean: a `git
   status` that writes to standard error (it exits 0 past a directory it cannot open), an index
   entry assumed unchanged or skip-worktree with its file on disk, a submodule's directory with
-  files but no repository, an unused submodule Git directory.
+  files but no repository, an unused submodule Git directory. Before any Git command it counts
+  the log archive's backlog (`archive`, `docs/specs/host-protocol.md` §The archive's backlog):
+  `not_collected` without `/etc/fffactory/collector.json`; otherwise the collector's checkpoint,
+  read as root never through a link and only as a bounded regular file (none if not), against
+  the collector's own discovery (`discoverSources` in `collect.ts`, never a copy of it), stat
+  only, within `ARCHIVE_BUDGET_MS` (the checkpoint's read included) and `ARCHIVE_ENTRY_LIMIT`,
+  `complete: false` past them, all out of `WORK_BUDGET_MS`, whose clock starts before it, so the
+  whole inspection ends well inside the CLI's `INSPECT_WORK_TIMEOUT_MS`. It
+  never touches the document's `complete`: a backlog never refuses a removal.
 - `plugins.ts` implements the plugin install step and its read-only verifier. It reads
   `plugins.json` through `plugin-manifest.ts`, uses one command deadline for the whole
   operation, and runs tools through `runtime-account.ts` as `factory`. Only locked

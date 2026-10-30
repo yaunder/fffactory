@@ -45,6 +45,7 @@ import {
 import { ENROLLMENTS, type EnrollmentState, type Verification } from "../../src/domain/readiness";
 import {
   type RepositoryWork,
+  type WorkArchive,
   type WorkInspection,
   workInspectionJson,
 } from "../../src/domain/work-inspection";
@@ -329,18 +330,21 @@ function repositoriesAnswer(
 
 /**
  * `host work inspect`'s answer for `hostname`: its checkouts and worktrees as `repositories`
- * (none by default), inspected to the end unless `complete` says otherwise.
+ * (none by default), inspected to the end unless `complete` says otherwise, and the log
+ * archive's backlog as `archive` (none, as an older worker answers, unless given).
  */
 export function workAnswer(
   hostname: string,
   repositories: readonly RepositoryWork[] = [],
   complete = true,
+  archive?: WorkArchive,
 ): HostCommandOutcome {
   const document: WorkInspection = {
     protocol_version: HOST_PROTOCOL_VERSION,
     hostname,
     complete,
     repositories,
+    ...(archive === undefined ? {} : { archive }),
   };
   return { kind: "completed", exitCode: 0, stdout: workInspectionJson(document) };
 }

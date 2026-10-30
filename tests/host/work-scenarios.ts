@@ -5,11 +5,21 @@
  * drop to the runtime account.
  */
 import { expect } from "bun:test";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
-import type { Release } from "../../src/domain/instance";
+import { dirname, join } from "node:path";
+import { CLAUDE_ROOT } from "../../src/domain/archive-format";
+import {
+  type Checkpoint,
+  checkpointJson,
+  COLLECTOR_CONFIGURATION,
+  collectorConfigurationJson,
+  type SourceCheckpoint,
+} from "../../src/domain/collector";
+import { COLLECTOR_STATE } from "../../src/domain/collector-installation";
+import type { FactoryId, HostKey, Release } from "../../src/domain/instance";
 import type { ApplySystem } from "../../src/host/apply";
+import { CHECKPOINT, sourceId } from "../../src/host/collect";
 import { bunProcessRunner, type ProcessRunner } from "../../src/infrastructure/local-tool-probe";
 import { system } from "./worker-scenarios";
 
@@ -164,4 +174,82 @@ export function addSubmodule(
   world.git(directory, "commit", "--quiet", "-m", `add ${path}`);
   world.git(directory, "push", "--quiet", "origin", "main");
   return join(directory, path);
+}
+
+/** A Claude project's session evidence on the worker, as the log archive's collector finds it. */
+export const PROJECT = `${CLAUDE_ROOT}/projects/-workspace-repos-acme-widget`;
+export const SESSION = `${PROJECT}/0b6e1c3a.jsonl`;
+export const SUBAGENT = `${PROJECT}/0b6e1c3a/subagents/agent-1.jsonl`;
+export const TOOL_RESULT = `${PROJECT}/0b6e1c3a/tool-results/toolu_01.txt`;
+/** When the checkpoint `saveCheckpoint` writes says the collector last succeeded. */
+export const LAST_SUCCESS = "2026-10-30T10:15:00.000Z";
+
+let written = 1_793_000_000;
+
+/** Writes `content` to the worker's `path`, each write a later modification time. */
+export async function putFile(world: GitWorld, path: string, content: string): Promise<void> {
+  await mkdir(dirname(world.at(path)), { recursive: true });
+  await writeFile(world.at(path), content);
+  written += 1;
+  await utimes(world.at(path), written, written);
+}
+
+/** The collector's configuration, as the `collector` install step writes it. */
+export async function configureCollector(world: GitWorld): Promise<void> {
+  await putFile(
+    world,
+    COLLECTOR_CONFIGURATION,
+    collectorConfigurationJson({
+      format: 1,
+      factory_id: "fff-aaaa1111" as FactoryId,
+      host_key: "builder-1" as HostKey,
+      bucket: "fff-aaaa1111-logs-123456789012-eu-west-2-an",
+      region: "eu-west-2",
+    }),
+  );
+}
+
+/** The checkpoint entry of `path` as a run captures it now: its identity, size and time. */
+export async function captured(world: GitWorld, path: string): Promise<SourceCheckpoint> {
+  const stats = await lstat(world.at(path), { bigint: true });
+  return {
+    source: sourceId(path),
+    path,
+    identity: `${stats.dev}:${stats.ino}`,
+    mtime_ms: Number(stats.mtimeMs),
+    generation: 1,
+    length: Number(stats.size),
+    prefix_sha256: "a".repeat(64),
+  };
+}
+
+/** The collector's checkpoint holding `sources`, its last success `LAST_SUCCESS`. */
+export async function saveCheckpoint(
+  world: GitWorld,
+  sources: readonly SourceCheckpoint[],
+): Promise<void> {
+  const checkpoint: Checkpoint = {
+    format: 1,
+    epoch: "20261030T101500Z-0123456789abcdef",
+    next_seq: 2,
+    saved_at: LAST_SUCCESS,
+    last_success_at: LAST_SUCCESS,
+    sources,
+  };
+  const directory = world.at(COLLECTOR_STATE);
+  await mkdir(directory, { recursive: true, mode: 0o700 });
+  await writeFile(join(directory, CHECKPOINT), `${checkpointJson(checkpoint)}\n`);
+}
+
+/**
+ * The archiving worker (`fixtures/work-archive-backlog.json`): collected, no checkout, a session
+ * grown by 6 bytes since its capture and a tool result never captured, 10 bytes: 2 files, 16
+ * bytes unarchived.
+ */
+export async function archivingWorker(world: GitWorld): Promise<void> {
+  await configureCollector(world);
+  await putFile(world, SESSION, "0123456789");
+  await saveCheckpoint(world, [await captured(world, SESSION)]);
+  await putFile(world, SESSION, "0123456789+grown");
+  await putFile(world, TOOL_RESULT, "new result");
 }

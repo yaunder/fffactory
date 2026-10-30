@@ -34,11 +34,72 @@ export type NotInspected = (typeof NOT_INSPECTED)[number];
  */
 export type RemovalVerdict = "removable" | "refused" | "not_inspected";
 
+export const UNARCHIVED_STATES = ["unknown", "not_collected", "counted"] as const;
+/**
+ * `counted`: the worker's work inspection counted its log archive backlog; `not_collected`: no
+ * collector runs there; `unknown`: the worker was not inspected, its work inspection could not
+ * be had, its release predates the backlog, or its count was malformed.
+ */
+export type UnarchivedState = (typeof UNARCHIVED_STATES)[number];
+
+/**
+ * The worker's evidence its log archive collector has not yet archived, which a removal destroys
+ * with its root volume (`docs/specs/worker-lifecycle.md` §Inspect). Reported, never judged: it
+ * never changes the verdict (S2). Every field but `state` is null unless `counted`.
+ */
+export interface UnarchivedEvidence {
+  readonly state: UnarchivedState;
+  readonly files: number | null;
+  readonly bytes: number | null;
+  /** False when the worker stopped counting at its bound: at least `files` and `bytes`. */
+  readonly complete: boolean | null;
+  /** When the collector last succeeded, by its checkpoint; null for never, or not counted. */
+  readonly last_success_at: string | null;
+}
+
+// TODO(re-evaluate when the reader ships): read an uninspectable worker's last heartbeat from
+// the archive and say when it last archived (S1), rather than only that its backlog is unknown.
+/** A worker's unarchived evidence when it could not be counted: never read as none (S1). */
+export const UNARCHIVED_UNKNOWN: UnarchivedEvidence = {
+  state: "unknown",
+  files: null,
+  bytes: null,
+  complete: null,
+  last_success_at: null,
+};
+
+/**
+ * Whether a removal's human output says a worker's unarchived evidence: while factory.json
+ * enables the log archive (`archiving`), or whenever the worker counted a backlog, so a factory
+ * without the archive is never told its workers' evidence is unknown. Records and `--json` always
+ * carry it.
+ */
+export function saysUnarchived(archiving: boolean, unarchived: UnarchivedEvidence): boolean {
+  return archiving || unarchived.state === "counted";
+}
+
+/** What the work inspection `observed` says of the archive's backlog, if it was read at all. */
+export function unarchivedEvidence(observed: RemovalObservation): UnarchivedEvidence {
+  if (observed.kind !== "inspected" || observed.work.kind !== "inspected")
+    return UNARCHIVED_UNKNOWN;
+  const { archive } = observed.work.inspection;
+  if (archive === undefined) return UNARCHIVED_UNKNOWN;
+  if (archive.state === "not_collected") return { ...UNARCHIVED_UNKNOWN, state: "not_collected" };
+  return {
+    state: "counted",
+    files: archive.unarchived_files,
+    bytes: archive.unarchived_bytes,
+    complete: archive.complete,
+    last_success_at: archive.last_success_at,
+  };
+}
+
 /**
  * One worker's inspection document: its verdict, why it was not inspected, the findings in
- * fffactory's words (a refusal's summary and details), and its agents, each in its state,
- * finished ones too: the conversations a removal would end. The same whichever command judged
- * it, so a removal record carries it as `worker inspect --json` prints it.
+ * fffactory's words (a refusal's summary and details), its agents, each in its state, finished
+ * ones too: the conversations a removal would end, and its unarchived evidence. The same
+ * whichever command judged it, so a removal record carries it as `worker inspect --json` prints
+ * it.
  */
 export interface RemovalInspection {
   readonly key: HostKey;
@@ -49,6 +110,7 @@ export interface RemovalInspection {
   readonly summary: string;
   readonly details: readonly string[];
   readonly activity: AgentActivity;
+  readonly unarchived: UnarchivedEvidence;
 }
 
 /**
@@ -122,6 +184,7 @@ function notInspected(
   why: NotInspected,
   activity: AgentActivity,
 ): WorkerRemovability {
+  // Not inspected, its backlog is unknown (S1).
   return {
     inspection: {
       key: worker.key,
@@ -131,6 +194,7 @@ function notInspected(
       summary: NOT_INSPECTED_SUMMARIES[why],
       details: [],
       activity,
+      unarchived: UNARCHIVED_UNKNOWN,
     },
     next_action: null,
   };
@@ -140,7 +204,7 @@ function notInspected(
 function judged(
   worker: WorkerIdentity,
   refusal: Refusal | undefined,
-  activity: AgentActivity,
+  { activity, unarchived }: Pick<RemovalInspection, "activity" | "unarchived">,
 ): WorkerRemovability {
   const identity = { key: worker.key, hostname: worker.hostname, not_inspected: null };
   if (refusal === undefined)
@@ -153,6 +217,7 @@ function judged(
           "work or checkout would be lost",
         details: [],
         activity,
+        unarchived,
       },
       next_action: null,
     };
@@ -163,6 +228,7 @@ function judged(
       summary: refusal.summary,
       details: [...refusal.details],
       activity,
+      unarchived,
     },
     next_action: refusal.nextAction,
   };
@@ -180,6 +246,8 @@ export function workerRemovability(
   actions: RemovalGateActions,
 ): WorkerRemovability {
   const activity = agentActivity(agentsOf(observed));
+  // Reported beside the verdict, never judged: a backlog refuses nothing (S2).
+  const seen = { activity, unarchived: unarchivedEvidence(observed) };
   switch (observed.kind) {
     case "stopped":
     case "shutting_down":
@@ -187,9 +255,9 @@ export function workerRemovability(
     case "forced":
       return notInspected(worker, observed.kind, activity);
     case "machine":
-      return judged(worker, observed.refusal, activity);
+      return judged(worker, observed.refusal, seen);
     default:
-      return judged(worker, removalGate(observed, worker, actions), activity);
+      return judged(worker, removalGate(observed, worker, actions), seen);
   }
 }
 

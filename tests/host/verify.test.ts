@@ -217,7 +217,10 @@ describe("host verify and the log archive's collector (plan and apply §The work
       "systemctl is-active fffactory-collector.timer": failing,
     });
     expect(verificationJson(installed.verification)).toBe(verificationJson(without.verification));
-    expect(installed.calls.map(({ argv }) => argv)).toEqual(without.calls.map(({ argv }) => argv));
+    // Checks run concurrently: compare the commands run, not the order they started in.
+    const commands = (calls: typeof without.calls) =>
+      calls.map(({ argv }) => argv.join(" ")).sort();
+    expect(commands(installed.calls)).toEqual(commands(without.calls));
     for (const { argv } of installed.calls) expect(argv.join(" ")).not.toContain("collector");
   });
 });

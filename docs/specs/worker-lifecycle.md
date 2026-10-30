@@ -702,6 +702,33 @@ a stopped worker's disk is not reported, and is destroyed with it. A machine
 already `shutting-down` runs no gates. The race stop accepts ([Gates](#gates)) applies to
 terminate too, marked in the same place.
 
+### Unarchived evidence (terminate)
+
+What the log archive's collector has not yet archived on the worker is lost
+with its root volume. Terminate reports it and never refuses over it, with or
+without `--force` (S2; refusing, or a final collection before removal, is out
+of scope, A9): the work inspection counts it
+([host protocol §The archive's backlog](host-protocol.md#the-archives-backlog)),
+and the inspection document carries it as `unarchived`
+([JSON, schema version 1](#json-schema-version-1)), whatever the gates
+decide. Once the inspection is recorded, before any question, and again in
+the report once the worker is terminated or removed, terminate prints `Log
+archive on HOSTNAME: WORDS.`:
+
+| `unarchived.state` | WORDS |
+| --- | --- |
+| `counted` | `N files (B bytes) unarchived` (`nothing unarchived` for none), `at least N files (B bytes) unarchived, not all counted` when the worker stopped counting at its bound; then `; last collection succeeded at T` or `; no collection has succeeded yet` |
+| `not_collected` | `not collected: no log archive collector runs there` |
+| `unknown` | `unarchived evidence unknown`: never inspected (stopped, already being terminated, gone, `--force`), not located, refused before its work was read, its work inspection not had, its release predates the count, or its count was malformed (the rest of its work inspection still judged: [host protocol §The CLI side](host-protocol.md#the-cli-side)). Never read as nothing unarchived (S1). |
+
+The line is printed while factory.json enables the log archive, and whenever
+the worker counted a backlog (`saysUnarchived`): a factory without the archive
+is never told its workers' evidence is unknown. The record carries the
+evidence either way. An uninspectable worker's last archived time, read from
+its heartbeat in the archive, is not reported yet: the marker
+`TODO(re-evaluate when the reader ships)` by `UNARCHIVED_UNKNOWN` in
+`src/domain/worker-removability.ts` records the gap (S1).
+
 ## Inspect
 
 `fffactory worker inspect [KEY] [--json]` tells whether `fffactory worker
@@ -793,6 +820,11 @@ state: they never refuse a removal, but they are the conversations a terminate
 would end (D6). A worker whose agents were not read (not inspected, or not
 located) is `unknown` without a reason.
 
+Each worker also carries its unarchived evidence, as terminate reads it
+([Unarchived evidence (terminate)](#unarchived-evidence-terminate)): counted,
+not collected, or unknown for a worker whose work inspection was not had or
+says nothing of the archive. It never changes the verdict or the exit code.
+
 ### Output
 
 The report goes to standard output, on the [layout blocks](cli-output.md#layout-blocks):
@@ -803,15 +835,18 @@ Instance  ~/factory/.fffactory/factory.json (nearest .fffactory/factory.json)
 
 ── Workers ──────────────────────────────────────────
   ✔ builder-1   removable · fff-abcd1234-builder-1 can be terminated: no agent is working or needs input, and no work or checkout would be lost
-    Agents   1 finished (idle)
+    Agents    1 finished (idle)
       finished   agent-1 (dispatched)
+    Archive   3 files (70000 bytes) unarchived; last collection succeeded at 2026-10-30T10:15:00.000Z
 
   ! builder-2   refused · 1 agent is working on fff-abcd1234-builder-2: terminating it would end it
-    Agents   1 working, 2 finished (busy)
+    Agents    1 working, 2 finished (busy)
       working    agent-1 (dispatched)
       finished   agent-2, agent-3 (dispatched)
+    Archive   unarchived evidence unknown
 
   ◼ builder-3   not inspected · The machine is stopped: the worker is not inspected, and unpushed work on its disk is not reported.
+    Archive   unarchived evidence unknown
 
 ! 1 removable, 1 refused, 1 not inspected
 
@@ -822,7 +857,9 @@ Instance  ~/factory/.fffactory/factory.json (nearest .fffactory/factory.json)
 A refusal's details are listed under its worker. Each state's agents are
 labelled with the state in the words the count uses (`needing input` for
 `needs_input`). A worker not inspected has a `◼` (stopped) or `↷` glyph and no
-agents. Every `fffactory` command a next
+agents. `Archive` is the worker's unarchived evidence in terminate's words,
+shown as terminate shows it: with the log archive enabled (as above), or for a
+backlog the worker counted. Every `fffactory` command a next
 action names repeats the `--instance` and `--profile` given. A factory that
 declares no worker says `none declared`.
 
@@ -842,7 +879,12 @@ nothing else. Its structure is published as
     `not_inspected`), `summary`, `details`, and `activity`: `state` (`busy`,
     `idle`, `unknown`), `reason` (why the agents could not be read, else null)
     and `agents` (each agent's `id`, `state` and `dispatched`; null unless
-    listed), the same object status reports;
+    listed), the same object status reports; and `unarchived`: `state`
+    (`counted`, `not_collected`, `unknown`), and, null unless `counted`,
+    `files`, `bytes`, `complete` (`false` once the worker stopped counting at
+    its bound) and `last_success_at` (null too when no collection has
+    succeeded), an addition within schema version 1
+    ([Unarchived evidence (terminate)](#unarchived-evidence-terminate));
   - `next_action`: inspect's own next action, null exactly when the verdict is
     not `refused`.
 
@@ -972,7 +1014,7 @@ from the record alone whether the gates ran and what they found:
 - `document`: the worker's inspection document, exactly as `worker inspect
   --json` prints it for the same inspection ([JSON, schema version
   1](#json-schema-version-1): `key`, `hostname`, `verdict`, `not_inspected`,
-  `summary`, `details`, `activity`), built by the same code
+  `summary`, `details`, `activity`, `unarchived`), built by the same code
   (`workerRemovability`). It is embedded unchanged, `forced` beside it rather
   than inside, so a reader of either takes it by the same schema
   (`$defs/inspection`).
@@ -990,7 +1032,7 @@ that (no single instance, `pending` or `stopping`) carries none, its `failure`
 naming why. Stop's record carries none: it has no work gate.
 
 ```json
-{ "operation": "worker-terminate", "stages": [{ "name": "terminate", "status": "terminated" }], "inspection": { "forced": true, "document": { "key": "builder-1", "hostname": "fff-abcd1234-builder-1", "verdict": "not_inspected", "not_inspected": "forced", "summary": "--force: the worker is not inspected for busy agents, current work or checkouts.", "details": [], "activity": { "state": "unknown", "reason": null, "agents": null } } }, "...": "as every record" }
+{ "operation": "worker-terminate", "stages": [{ "name": "terminate", "status": "terminated" }], "inspection": { "forced": true, "document": { "key": "builder-1", "hostname": "fff-abcd1234-builder-1", "verdict": "not_inspected", "not_inspected": "forced", "summary": "--force: the worker is not inspected for busy agents, current work or checkouts.", "details": [], "activity": { "state": "unknown", "reason": null, "agents": null }, "unarchived": { "state": "unknown", "files": null, "bytes": null, "complete": null, "last_success_at": null } } }, "...": "as every record" }
 ```
 
 ## Interruption
@@ -1066,7 +1108,7 @@ what status prints of a worker.
 | Layer | Module | Responsibility |
 | --- | --- | --- |
 | Domain | `src/domain/worker-lifecycle.ts` | The host key check, the one target machine, what each EC2 state means for an action (`powerStep`), the gates of stop and terminate (`stopGate`, `terminateGate`, the stopped pass, the current work and the repository result; `removalGate` judges them with the next actions `RemovalGateActions` completes, terminate's own (`terminateGateActions`), [teardown](teardown.md)'s or inspect's; terminate's inspection carries the agents it read, `TerminateInspection`), selecting the machine and judging its state with another command's rerun (`selectMachine`, `powerStep`, inspect's), the confirmation rules (y/N, the typed key, `--confirm`), the admin client's refusals, the device removal's outcome (`deviceRemovalRefusal`), the waits' bounds and steps, the words of every refusal and next action. Pure. |
-| Domain | `src/domain/worker-removability.ts` | Inspect's verdict and its inspection document, free of next actions (`RemovalInspection`: removable, refused or not inspected and why, from terminate's inspection or what its machine decides, judged by `removalGate`), with a refusal's next action beside it, completed by the judging command's `RemovalGateActions` (`WorkerRemovability`, `workerRemovability`), inspect's next actions (`inspectGateActions`, `thenRerunInspect`) and its exit code (`removalExitCode`). Pure. |
+| Domain | `src/domain/worker-removability.ts` | Inspect's verdict and its inspection document, free of next actions (`RemovalInspection`: removable, refused or not inspected and why, from terminate's inspection or what its machine decides, judged by `removalGate`, and the worker's unarchived evidence, `UnarchivedEvidence` from `unarchivedEvidence`, unknown as `UNARCHIVED_UNKNOWN`, said by `saysUnarchived`), with a refusal's next action beside it, completed by the judging command's `RemovalGateActions` (`WorkerRemovability`, `workerRemovability`), inspect's next actions (`inspectGateActions`, `thenRerunInspect`) and its exit code (`removalExitCode`). Pure. |
 | Domain | `src/domain/control-plane.ts` | `agentActivity`: a worker's agents as inspect and status report them. Pure. |
 | Domain | `src/domain/work-inspection.ts` | The work inspection's document, its parser, the fixed command, and what counts as unresolved work (`workFindings`). Pure. |
 | Domain | `src/domain/host-removal.ts` | Terminate's removal: factory.json without the host by own entries (`withoutHost`; the last host leaves `hosts` empty), the scoped removal rule over Terraform's JSON plan (`removalPlanRefusal`, the secret-reading policy's allowed update included), and the words of its refusals and failures. Pure; the removal plan as shown is the CLI's. |
@@ -1083,7 +1125,7 @@ what status prints of a worker.
 | Infrastructure | `src/infrastructure/aws-secrets-manager-store.ts` | `GetSecretValue` by ARN, within 30 s. |
 | Infrastructure | `src/infrastructure/tailscale-api-admin.ts` | `tailscaleApiAdmin`: the token exchange, the device list and deletion over HTTPS with `fetch` (plain HTTP only to a loopback stand-in run from source), each within 15 s, no redirects, failures by HTTP status or network code; `tailscaleApiBase`, the API, or the loopback stand-in `FFFACTORY_TAILSCALE_API` names, refusing anything else unechoed. |
 | CLI adapter | `src/cli/commands/worker.ts` | Arguments, progress, the removal plan (the `removal_plan` progress event carries its target, Terraform's changes and the worker, which `describeRemovalPlan` in `src/cli/presentation/plan.ts` lays out before the typed host key is asked for), the reports, Terraform's diagnostics path, the exit code; `waitsOnInterrupt`; this release's Terraform tree, materialized only when a removal runs. |
-| CLI adapter | `src/cli/commands/worker-inspect.ts` | `worker inspect`'s arguments, refusals, report, `--json` document (`inspectionJson`, `WORKER_INSPECTION_SCHEMA_VERSION`, published as `schemas/worker-inspection.schema.json`) and exit code; its report and its refusal of a `KEY` (`keyRefusalReport`) laid out by `src/cli/presentation/worker-inspection.ts`, each worker's agents by `src/cli/presentation/agents.ts`. |
+| CLI adapter | `src/cli/commands/worker-inspect.ts` | `worker inspect`'s arguments, refusals, report, `--json` document (`inspectionJson`, `WORKER_INSPECTION_SCHEMA_VERSION`, published as `schemas/worker-inspection.schema.json`) and exit code; its report and its refusal of a `KEY` (`keyRefusalReport`) laid out by `src/cli/presentation/worker-inspection.ts` (with `unarchivedWords`, the words terminate and teardown say a worker's unarchived evidence in), each worker's agents by `src/cli/presentation/agents.ts`. |
 
 Tests: `tests/domain/worker-lifecycle.test.ts` (the host key check, an argument
 never echoed, the one machine, every state for each action, each gate, a
@@ -1151,7 +1193,10 @@ client still required, an unreadable inventory refused, and an interrupted
 `--keep` finished by its rerun; only tagged devices deleted, an untagged one
 reported, a deletion or listing failure leaving the terminate partial; the
 secret in no record, progress or result; status reporting the host not
-provisioned afterwards; an interrupt during the wait and between deletions),
+provisioned afterwards; an interrupt during the wait and between deletions;
+the unarchived evidence shown before anything is asked, recorded and reported,
+never refusing, unpushed work beside a backlog still refusing, forced or
+stopped unknown, and never said without the log archive),
 `tests/infrastructure/tailscale-api-admin.test.ts` (against
 `tests/support/stub-tailscale-api.ts`: the token request with its placeholder
 client ID, the listing and deletion, 404 as deleted, an unusable ID never in a
@@ -1225,7 +1270,14 @@ before AWS, another account before the inventory; an interrupt),
 `tests/cli/presentation/worker-inspection.test.ts` and
 `tests/cli/presentation/agents.test.ts` (the report as laid out, each state's
 agents labelled in the count's words, a worker's own words as data, the
-refusal of a `KEY`), and `tests/cli/worker.test.ts` (the report, exit 0 and 2,
+refusal of a `KEY`, the unarchived evidence in words and said only with the
+log archive or a counted backlog), `tests/domain/worker-removability.test.ts`
+(the unarchived evidence counted, not collected, or unknown for every worker
+not inspected, not located, refused before its work or answering without the
+archive, never changing the verdict), and `tests/cli/worker.test.ts` (the
+report, exit 0 and 2, `--json` byte for byte as `tests/cli/fixtures/worker-inspection.json`
+with a backlog that leaves the worker removable, the `unarchived` definition's
+conditions,
 no lock taken and nothing changed, the next action repeating `--instance`, a
 stopped worker, `--json` against the schema and its conditions, a next action
 exactly when refused and none inside the inspection document, the activity

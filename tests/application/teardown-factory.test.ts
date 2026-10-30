@@ -59,7 +59,10 @@ import {
   readyWorker,
   statusAnswers,
   tailnetDevice,
+  workAnswer,
 } from "../support/fake-workers";
+import { UNARCHIVED_UNKNOWN } from "../../src/domain/worker-removability";
+import type { WorkerUnarchived } from "../../src/domain/teardown";
 import {
   ARCHIVE,
   BUCKET,
@@ -556,6 +559,54 @@ describe("fffactory teardown: the happy path (teardown §Order)", () => {
     expect(w.terraform.calls.map(({ request }) => request.configuration.root)).not.toContain(
       "archive",
     );
+  });
+
+  test("says each worker's unarchived evidence before the destroy and in the report; never refuses (S2)", async () => {
+    const backlog = {
+      state: "collected",
+      complete: true,
+      unarchived_files: 3,
+      unarchived_bytes: 70_000,
+      last_success_at: "2026-10-30T10:15:00.000Z",
+    } as const;
+    const w = world({
+      workers: { "builder-1": "running", "builder-2": "stopped" },
+      worker: (key) =>
+        statusAnswers(
+          readyWorker(FACTORY, key, RELEASE),
+          "synchronized",
+          [],
+          undefined,
+          workAnswer(hostname(key), [], true, backlog),
+        ),
+    });
+    const result = await teardownFactory(w.deps, request(w, { instance: archivingOf(w.keys) }));
+    const unarchived: readonly WorkerUnarchived[] = [
+      {
+        hostname: hostname("builder-1"),
+        unarchived: {
+          state: "counted",
+          files: 3,
+          bytes: 70_000,
+          complete: true,
+          last_success_at: "2026-10-30T10:15:00.000Z",
+        },
+      },
+      // Stopped, never inspected: unknown, never nothing unarchived (S1).
+      { hostname: hostname("builder-2"), unarchived: UNARCHIVED_UNKNOWN },
+    ];
+    expect(result).toMatchObject({ kind: "done", report: { unarchived } });
+    const kinds = w.progress.map(({ kind }) => kind);
+    expect(w.progress).toContainEqual({ kind: "unarchived", workers: unarchived });
+    expect(kinds.indexOf("unarchived")).toBeLessThan(kinds.indexOf("destroying"));
+    expectAllRemoved(w);
+  });
+
+  test("without the log archive, says only a backlog a worker counted", async () => {
+    const w = world({ workers: { "builder-1": "running", "builder-2": "stopped" } });
+    const result = await teardownFactory(w.deps, request(w));
+    expect(result).toMatchObject({ kind: "done", report: { unarchived: [] } });
+    expect(w.progress.map(({ kind }) => kind)).not.toContain("unarchived");
   });
 
   test("stops dispatch on every running worker before the first inspection", async () => {
@@ -3140,6 +3191,7 @@ describe("fffactory teardown: no state bucket (teardown §No state bucket)", () 
         bucket: { name: BUCKET, outcome: "not_found" },
         withoutLock: ranWithoutLock(BUCKET),
         archive: undefined,
+        unarchived: [],
       },
     });
     expect(w.secrets.secrets()).toEqual([]);
@@ -3425,6 +3477,7 @@ describe("fffactory teardown: no state bucket (teardown §No state bucket)", () 
         bucket: { name: BUCKET, outcome: "not_found" },
         withoutLock: ranWithoutLock(BUCKET),
         archive: undefined,
+        unarchived: [],
       },
     });
     expect(w.progress.slice(progress)).toContainEqual(

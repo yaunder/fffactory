@@ -257,6 +257,12 @@ checkpoint (`touchedEntry`), so it is no longer backlog.
 A source the checkpoint names but no longer present is not backlog: what was
 captured of it stays in the archive.
 
+Two readers count it by this rule: each run, for its heartbeat, from the
+checkpoint it keeps, and `host work inspect`, as root, from the checkpoint
+saved last and the collector's own discovery (`discoverSources`), so terminate
+and teardown can say what a worker's removal destroys
+([host protocol §The archive's backlog](host-protocol.md#the-archives-backlog)).
+
 ## Run
 
 One run (`collectOnce`, `src/host/collect.ts`) is one pass, in this order:

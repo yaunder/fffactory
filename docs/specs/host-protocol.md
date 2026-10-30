@@ -927,12 +927,47 @@ clears it. A clean filter a repository's own configuration defines under
 another name still runs when such a file is compared, as `factory`, the account
 that owns the repository and whose configuration defines it: no more trust
 than the runtime account already has. No file's content or name reaches the
-document, only counts. It starts no Git command after 75 s, nor inspects more
+document, only counts. It starts no Git command 75 s after it started, the
+archive's backlog counted within those 75 s
+([below](#the-archives-backlog)), so with each command's 20 s it ends within
+95 s, inside the CLI's 2 min ([§The CLI side](#the-cli-side)). Nor does it
+inspect more
 than 100 repositories (submodules among them) or 100 worktrees of one; any of
 these, a directory it could not list, a search root reached through a symbolic
 link, a directory at the depth limit that holds directories (or, in a Git
 directory's `modules/`, at 4 levels down), or a bare repository, leaves it
 `complete: false`.
+
+### The archive's backlog
+
+Before any Git command, the worker counts what the log archive's collector has
+not yet archived ([collector §Backlog](collector.md#backlog)), which terminate
+and teardown destroy with the root volume
+([worker lifecycle §Inspect](worker-lifecycle.md#inspect)):
+
+1. Without `/etc/fffactory/collector.json` (nothing there by `lstat`), the
+   collector is not configured: `not_collected`. The `collector` install step
+   writes it exactly while the projection carries `log_archive`
+   ([§The collector step](#the-collector-step)).
+2. Otherwise it reads the collector's checkpoint,
+   `/var/lib/fffactory-collector/checkpoint.json`, as root: opened without
+   following a symbolic link and without blocking, and only a regular file of
+   at most 64 MiB. One missing, unreadable or malformed is none, as it is to
+   the collector, whose next run captures every source whole: every source then
+   counts whole and `last_success_at` is `null`. The backlog is overstated,
+   never understated.
+3. It finds the sources by the collector's own discovery
+   (`discoverSources`, [collector §Sources](collector.md#sources)): the same
+   allowlist, by `lstat`, never through a symbolic link. It reads no source,
+   only stats them, and counts each as `backlog` does.
+
+It counts for at most 10 s, the checkpoint's read included, out of the work
+inspection's own 75 s, and over at most 200,000 entries; past either, or
+past a directory or entry it could not read, it reports what it counted with
+`complete: false`: at least that much is unarchived. This bound is the
+archive section's own and never makes the work inspection incomplete: a backlog
+is reported, never judged, and never refuses a removal (S2). No source's name
+or content reaches the document, only counts and the checkpoint's last success.
 
 ### Document, protocol version 1
 
@@ -960,7 +995,14 @@ directory's `modules/`, at 4 levels down), or a bare repository, leaves it
         }
       ]
     }
-  ]
+  ],
+  "archive": {
+    "state": "collected",
+    "complete": true,
+    "unarchived_files": 2,
+    "unarchived_bytes": 16,
+    "last_success_at": "2026-10-30T10:15:00.000Z"
+  }
 }
 ```
 
@@ -976,6 +1018,7 @@ directory's `modules/`, at 4 levels down), or a bare repository, leaves it
 | `worktrees[].state` | `inspected`, `missing` (listed by Git, its directory gone: only its commits are counted) or `unreadable` (Git could not report on it, warned while reporting, holds an index entry that hides an edit, or another repository is at its path). |
 | `tracked_changes`, `untracked_files` | Counts, 0 unless `inspected`. Ignored files are not counted, nor is anything inside an ignored directory, a repository included. |
 | `operation` | `merge`, `rebase`, `cherry_pick`, `revert`, or `null`. |
+| `archive` | The log archive's backlog ([§The archive's backlog](#the-archives-backlog)): `{"state": "not_collected"}` without the collector's configuration, or `state` `collected` with `complete` (`false` once its bound stopped the count), `unarchived_files`, `unarchived_bytes` and `last_success_at` (the checkpoint's, or `null`). An addition within version 1: absent from a worker whose release predates it. A malformed `archive` section is read as absent, its backlog unknown; it never makes the document invalid. |
 
 The worker exits 0 with the document whatever work it found: it reports, the
 CLI judges ([worker lifecycle §Gates (terminate)](worker-lifecycle.md#gates-terminate),
@@ -996,6 +1039,8 @@ not a work inspection.
 | Exit 65 / 75 | unknown: no active release / another host operation was running |
 | Any other exit status | unknown: "the work inspection exited with status N" |
 | `timed_out` (2 min) and every other transport outcome | unknown, in fffactory's words |
+| A valid document without `archive`, from a worker whose release predates it | `inspected`; its backlog is unknown, never none |
+| A document valid but for a malformed `archive` section | `inspected`, judged as without it; its backlog is unknown, never none, and never refuses a removal (S2) |
 
 The CLI runs it only after reading the worker's agent activity, which goes
 through the same activator lock, and only when that activity does not already
@@ -1153,7 +1198,7 @@ never elsewhere: it prints no path, no AWS or SDK message and no credential.
 | Worker | `src/host/collector-step.ts` | `workerCollectorStep`: the `collector` install step ([§The collector step](#the-collector-step)). |
 | Worker | `src/host/verify.ts` | `workerVerifier`: the verifiers and enrollment checks. |
 | Worker | `src/host/dispatch.ts` | Dispatch adoption, installation, reconciliation and checked observation, with privilege drop. |
-| Worker | `src/host/work.ts` | `workerWork`: the work inspection, over the worker's working trees, as `factory`, read-only. |
+| Worker | `src/host/work.ts` | `workerWork`: the work inspection, over the worker's working trees, as `factory`, read-only, and the archive's backlog, from the collector's checkpoint and its discovery (`discoverSources` in `src/host/collect.ts`), as root. |
 | Worker | `src/host/control-plane.ts` | `workerControlPlane`: the Paseo activity, install, reload and restart, and `host agents`; `paseoAgents`, the adapter translating Paseo's agents into fffactory's states. |
 | Worker | `src/host/collect.ts` | `collectOnce`: one collection run under the collector's own lock, through an `ArchiveWriter` ([collector §Run](collector.md#run)). |
 | Worker | `src/host/collection.ts` | `workerCollection`: `host collect --once`, its configuration, the run and its heartbeat; `localCollectionSystem`, this worker's, checking open sources in `/proc/self/fd` (`OPEN_FILES`). |
@@ -1231,10 +1276,15 @@ classification), `tests/infrastructure/tailscale-peers.test.ts`,
 temporary worker: each kind of work, ignored files, missing and unreadable
 worktrees, a stale worktree registration over an independent clone inside and
 outside the roots, a bare repository, nothing written, the time budget;
-`tests/host/work-scenarios.ts`),
-`tests/host/protocol-contract.test.ts`'s `work-unresolved.json` (the worker
-produces it byte for byte from real Git, the CLI reads it back over the
-transport), `tests/domain/work-inspection.test.ts`,
+`tests/host/work-scenarios.ts`), `tests/host/work-archive.test.ts` (the
+archive's backlog: not collected, nothing unarchived, a new, grown and
+rewritten source, no checkpoint, a checkpoint that is a symbolic link, the
+allowlist and symbolic links, the time budget),
+`tests/host/protocol-contract.test.ts`'s `work-unresolved.json` and
+`work-archive-backlog.json` (the worker produces each byte for byte, the CLI
+reads it back over the transport) and `work-before-archive.json` (an older
+worker's, without `archive`, which the CLI still reads),
+`tests/domain/work-inspection.test.ts`,
 `tests/application/inspect-work.test.ts`, the activator's `work inspect` in
 `tests/bootstrap/activator.test.sh`,
 `tests/assets/steps/steps.test.ts` (one script per shell step, parsing with

@@ -42,7 +42,7 @@ import {
   POWER_POLL_MS,
   replaceOutdatedWorker,
 } from "../../src/domain/worker-lifecycle";
-import type { RemovalInspection } from "../../src/domain/worker-removability";
+import { type RemovalInspection, UNARCHIVED_UNKNOWN } from "../../src/domain/worker-removability";
 import { sha256Text } from "../../src/infrastructure/release-tarball";
 import { FAKE_CALLER, fakeCallerIdentity } from "../support/doctor-fakes";
 import { agentsIn, fakeControlPlane } from "../support/fake-control-plane";
@@ -1519,6 +1519,13 @@ describe("terminate's record carries its inspection (worker-lifecycle §Operatio
         summary: "--force: the worker is not inspected for busy agents, current work or checkouts.",
         details: [],
         activity: { state: "unknown", reason: null, agents: null },
+        unarchived: {
+          state: "unknown",
+          files: null,
+          bytes: null,
+          complete: null,
+          last_success_at: null,
+        },
       },
     });
     // No gate ran: the record never went `inspecting`.
@@ -1607,6 +1614,88 @@ function synchronizedButAnswering(work: HostCommandOutcome): Answer {
 const DIRTIED_SINCE = synchronizedButAnswering(
   workAnswer(HOSTNAME, [widget({ untracked_files: 1 })]),
 );
+
+describe("terminate's unarchived evidence (worker-lifecycle §Gates (terminate))", () => {
+  const BACKLOG = {
+    state: "collected",
+    complete: true,
+    unarchived_files: 3,
+    unarchived_bytes: 70_000,
+    last_success_at: "2026-10-30T10:15:00.000Z",
+  } as const;
+  const COUNTED = {
+    state: "counted",
+    files: 3,
+    bytes: 70_000,
+    complete: true,
+    last_success_at: "2026-10-30T10:15:00.000Z",
+  } as const;
+
+  test("a backlog is shown before anything is asked, recorded, and reported; it never refuses (S2)", async () => {
+    const w = world({
+      ...TERMINATING,
+      worker: synchronizedButAnswering(workAnswer(HOSTNAME, [], true, BACKLOG)),
+    });
+    const result = await terminateWorker(w.deps, terminating(w));
+    expect(result).toMatchObject({ kind: "done", changed: true, unarchived: COUNTED });
+    expect(w.progress).toContainEqual({
+      kind: "unarchived",
+      hostname: HOSTNAME,
+      unarchived: COUNTED,
+    });
+    expect(records(w)[0]?.inspection).toMatchObject({
+      forced: false,
+      document: { verdict: "removable", unarchived: COUNTED },
+    });
+  });
+
+  test("with unpushed work beside it, the work refuses, as without a backlog", async () => {
+    const w = world({
+      ...TERMINATING,
+      worker: synchronizedButAnswering(
+        workAnswer(HOSTNAME, [widget({ untracked_files: 1 })], true, BACKLOG),
+      ),
+    });
+    const result = await terminateWorker(w.deps, terminating(w));
+    expect(result).toMatchObject({
+      kind: "refused",
+      refusal: {
+        summary: `${HOSTNAME} holds work not pushed to any remote: terminating it would lose it`,
+      },
+    });
+    expect(records(w)[0]?.inspection?.document.unarchived).toEqual(COUNTED);
+  });
+
+  test("forced or stopped, it was not counted: unknown, never nothing unarchived (S1)", async () => {
+    for (const options of [{ force: true }, {}]) {
+      const w = world({
+        ...TERMINATING,
+        ...(options.force
+          ? {}
+          : { inventory: { kind: "machines" as const, machines: [machine(KEY, "stopped", ID)] } }),
+        worker: synchronizedButAnswering(workAnswer(HOSTNAME, [], true, BACKLOG)),
+      });
+      const instance = { ...withAdmin(), log_archive: { enabled: true } };
+      const result = await terminateWorker(w.deps, terminating(w, { ...options, instance }));
+      expect(result).toMatchObject({ unarchived: UNARCHIVED_UNKNOWN });
+      expect(w.progress).toContainEqual({
+        kind: "unarchived",
+        hostname: HOSTNAME,
+        unarchived: UNARCHIVED_UNKNOWN,
+      });
+      expect(records(w)[0]?.inspection?.document.unarchived).toEqual(UNARCHIVED_UNKNOWN);
+    }
+  });
+
+  test("without the log archive, an unknown backlog is recorded, never said", async () => {
+    const w = world({ ...TERMINATING, worker: CLEAN });
+    const result = await terminateWorker(w.deps, terminating(w));
+    expect(result).toMatchObject({ kind: "done" });
+    expect(result).not.toHaveProperty("unarchived");
+    expect(w.progress.map((event) => (event as { kind: string }).kind)).not.toContain("unarchived");
+    expect(records(w)[0]?.inspection?.document.unarchived).toEqual(UNARCHIVED_UNKNOWN);
+  });
+});
 
 describe("terminate's work inspection (worker-lifecycle §Gates (terminate))", () => {
   test("work made after the last synchronization refuses it without --force", async () => {

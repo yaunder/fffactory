@@ -56,11 +56,15 @@ export type Removability =
     }
   /** Interrupted: the workers were asked nothing more, and there is nothing to report. */
   | { readonly kind: "interrupted" }
-  /** Each worker inspected, in factory.json's order, with inspect's next action. */
+  /**
+   * Each worker inspected, in factory.json's order, with inspect's next action; `archiving`
+   * when factory.json enables the log archive, for what its report says (`saysUnarchived`).
+   */
   | {
       readonly kind: "inspected";
       readonly target: StatusTarget;
       readonly workers: readonly WorkerRemovability[];
+      readonly archiving: boolean;
     };
 
 /** What every worker's inspection shares: the factory, its tag and the EC2 inventory read once. */
@@ -153,5 +157,6 @@ export async function inspectRemovability(
     kind: "inspected",
     target,
     workers: workers.filter((worker) => worker !== undefined),
+    archiving: instance.log_archive?.enabled === true,
   };
 }

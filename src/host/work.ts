@@ -10,9 +10,16 @@
  * own. What it cannot search to the end, it reports incomplete; what Git cannot fully report on
  * (a file it is told to assume unchanged, a directory it warns it cannot open), unreadable.
  */
-import type { Dirent } from "node:fs";
-import { lstat, readdir, realpath } from "node:fs/promises";
+import { constants, type Dirent } from "node:fs";
+import { lstat, open, readdir, realpath } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
+import {
+  backlog,
+  COLLECTOR_CONFIGURATION,
+  type Checkpoint,
+  parseCheckpoint,
+} from "../domain/collector";
+import { COLLECTOR_STATE } from "../domain/collector-installation";
 import { HOST_PROTOCOL_VERSION, TOKEN } from "../domain/protocol-fields";
 import { RUNTIME_ACCOUNT } from "../domain/readiness";
 import {
@@ -20,20 +27,35 @@ import {
   printableBranch,
   printablePath,
   type RepositoryWork,
+  type WorkArchive,
   WORK_LIMITS,
   WORK_ROOTS,
   type WorkInspection,
   type WorktreeWork,
 } from "../domain/work-inspection";
 import type { ApplySystem } from "./apply";
+import { CHECKPOINT, discoverSources } from "./collect";
 
 /** Each Git command's bound. */
 export const WORK_GIT_TIMEOUT_MS = 20_000;
 /**
- * How long the inspection starts Git commands for: past it, it reports what it has, incomplete,
- * well within the CLI's deadline (`INSPECT_WORK_TIMEOUT_MS`).
+ * How long after it starts the inspection starts Git commands for, the archive's count and the
+ * checkpoint's read included: past it, it reports what it has, incomplete. The last command
+ * started may run `WORK_GIT_TIMEOUT_MS` more, so it ends within 95 s, 25 s inside the CLI's
+ * 120 s deadline (`INSPECT_WORK_TIMEOUT_MS`) for SSH and the activator.
  */
 export const WORK_BUDGET_MS = 75_000;
+
+/**
+ * How long, the checkpoint's read included, and over how many entries, the archive's backlog is
+ * counted (§work inspect): past either it reports what it counted, `complete: false`. Counted
+ * before Git runs, out of `WORK_BUDGET_MS`, so it never lengthens the inspection.
+ * TODO(re-evaluate when measured on Acceptance): set from a real worker's Claude root.
+ */
+export const ARCHIVE_BUDGET_MS = 10_000;
+export const ARCHIVE_ENTRY_LIMIT = 200_000;
+/** The largest checkpoint read; a larger one is read as none, which overstates the backlog. */
+const CHECKPOINT_LIMIT_BYTES = 64 * 1024 * 1024;
 
 /** How deep below each root a checkout or worktree is looked for. */
 const SEARCH_DEPTH = { repositories: 4, paseoWorktrees: 3 } as const;
@@ -780,8 +802,69 @@ async function submoduleCommon(
     : undefined;
 }
 
+/** Whether a path is absent: a lookup that fails otherwise finds something there. */
+async function absent(path: string): Promise<boolean> {
+  try {
+    await lstat(path);
+    return false;
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    return code === "ENOENT" || code === "ENOTDIR";
+  }
+}
+
+/**
+ * The collector's checkpoint, read as root: never through a symbolic link, never anything but
+ * a regular file of at most `CHECKPOINT_LIMIT_BYTES`. One that cannot be read is none, as it is
+ * to the collector, whose next run captures every source whole.
+ */
+async function savedCheckpoint(root: string): Promise<Checkpoint | null> {
+  const flags = constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK;
+  try {
+    const handle = await open(join(root, COLLECTOR_STATE, CHECKPOINT), flags);
+    try {
+      const stats = await handle.stat();
+      if (!stats.isFile() || stats.size > CHECKPOINT_LIMIT_BYTES) return null;
+      const parsed = parseCheckpoint(await handle.readFile("utf8"));
+      return parsed.ok ? parsed.document : null;
+    } finally {
+      await handle.close();
+    }
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The log archive's backlog (§work inspect): not collected without the collector's
+ * configuration; otherwise its checkpoint against the sources' current stats, found by the
+ * collector's own discovery, within `ARCHIVE_BUDGET_MS` and `ARCHIVE_ENTRY_LIMIT`.
+ */
+async function archiveBacklog(system: ApplySystem): Promise<WorkArchive> {
+  const root = await realOrSelf(system.root);
+  if (await absent(join(root, COLLECTOR_CONFIGURATION))) return { state: "not_collected" };
+  const deadline = system.now().getTime() + ARCHIVE_BUDGET_MS;
+  const checkpoint = await savedCheckpoint(root);
+  let entries = 0;
+  const more = () => {
+    entries += 1;
+    return entries <= ARCHIVE_ENTRY_LIMIT && system.now().getTime() < deadline;
+  };
+  const discovery = await discoverSources(root, more);
+  const unarchived = backlog(checkpoint, discovery.observed);
+  return {
+    state: "collected",
+    complete: discovery.complete,
+    unarchived_files: unarchived.files,
+    unarchived_bytes: unarchived.bytes,
+    last_success_at: checkpoint?.last_success_at ?? null,
+  };
+}
+
 async function inspectWork(system: ApplySystem): Promise<WorkInspection> {
+  // The budget starts before the archive's count, so its time comes out of the same total.
   const inspection = new Inspection(system);
+  const archive = await archiveBacklog(system);
   const roots = [...new Set([system.root, await realOrSelf(system.root)])];
   const covered = new Set<string>();
   const repositories: RepositoryWork[] = [];
@@ -796,6 +879,7 @@ async function inspectWork(system: ApplySystem): Promise<WorkInspection> {
     hostname: TOKEN.test(hostname) ? hostname : "unknown",
     complete: inspection.complete,
     repositories,
+    archive,
   };
 }
 

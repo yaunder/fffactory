@@ -7,6 +7,8 @@ temporary directories by `worker-scenarios.ts`, never the real `/`.
   contract.
   `protocol-contract.test.ts` runs every fixture through both sides: the worker side must
   produce it byte for byte; the CLI side must parse it and serialize it back unchanged.
+  `work-before-archive.json`, an older worker's work inspection without `archive`, is read by
+  the CLI side only: the worker side no longer produces it.
   `dispatch-not-requested.json`, the projection that stops dispatch, goes the other way: the
   CLI side builds it byte for byte, the worker side parses it unchanged, and `dispatch.test.ts`
   and the reconciler's Python test (`assets/steps/dispatch/tests/`) remove the schedule for it.
@@ -23,7 +25,10 @@ temporary directories by `worker-scenarios.ts`, never the real `/`.
 - `work.test.ts` runs `host work inspect` over real Git repositories that `work-scenarios.ts`
   lays out in a temporary worker root, with a remote outside it; its runner checks each command
   drops to `factory`, then runs the rest as the test's user. `protocol-contract.test.ts` builds
-  `fixtures/work-unresolved.json` from the same real Git.
+  `fixtures/work-unresolved.json` from the same real Git, and `work-archive-backlog.json` from
+  `work-scenarios.ts`'s `archivingWorker`. `work-archive.test.ts` runs its archive section over a
+  Claude root, the collector's configuration and a checkpoint laid out there
+  (`configureCollector`, `saveCheckpoint`, `captured`), each write a later modification time.
 - `plugins.test.ts` exercises native plugin installation and verification with local
   metadata and a scripted process runner, including unversioned marketplace entries,
   exact commit/version/content checks, drift repair and undeclared plugin removal.

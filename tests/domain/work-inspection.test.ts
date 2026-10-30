@@ -6,6 +6,7 @@ import {
   printableBranch,
   printablePath,
   type RepositoryWork,
+  type WorkArchive,
   type WorkInspection,
   type WorktreeWork,
   workFindings,
@@ -13,6 +14,13 @@ import {
 } from "../../src/domain/work-inspection";
 
 const HOSTNAME = "fff-abcd1234-builder-1";
+const COUNTED = {
+  state: "collected",
+  complete: true,
+  unarchived_files: 0,
+  unarchived_bytes: 0,
+  last_success_at: null,
+};
 
 function worktree(overrides: Partial<WorktreeWork> = {}): WorktreeWork {
   return {
@@ -99,6 +107,66 @@ describe("the work inspection document (host-protocol §work inspect)", () => {
     const parsed = parseWorkInspection(text);
     expect(parsed).toEqual({ ok: true, document });
     if (parsed.ok) expect(workInspectionJson(parsed.document)).toBe(text);
+  });
+
+  test("carries the archive's backlog: not collected, or counted from the checkpoint", () => {
+    const counted: WorkArchive = {
+      state: "collected",
+      complete: false,
+      unarchived_files: 3,
+      unarchived_bytes: 70_000,
+      last_success_at: "2026-10-30T10:15:00.000Z",
+    };
+    for (const archive of [{ state: "not_collected" } as const, counted]) {
+      const document = inspection([], { archive });
+      const text = workInspectionJson(document);
+      expect(Object.keys(JSON.parse(text))).toEqual([
+        "protocol_version",
+        "hostname",
+        "complete",
+        "repositories",
+        "archive",
+      ]);
+      expect(parseWorkInspection(text)).toEqual({ ok: true, document });
+    }
+    expect(
+      Object.keys(JSON.parse(workInspectionJson(inspection([], { archive: counted }))).archive),
+    ).toEqual(["state", "complete", "unarchived_files", "unarchived_bytes", "last_success_at"]);
+    const never = { ...counted, last_success_at: null };
+    expect(parseWorkInspection(workInspectionJson(inspection([], { archive: never })))).toEqual({
+      ok: true,
+      document: inspection([], { archive: never }),
+    });
+  });
+
+  test("an older worker's document, without the archive, still reads: its backlog is not reported", () => {
+    const text = workInspectionJson(inspection([repository()]));
+    expect(Object.keys(JSON.parse(text))).not.toContain("archive");
+    const parsed = parseWorkInspection(text);
+    expect(parsed).toEqual({ ok: true, document: inspection([repository()]) });
+    if (parsed.ok) expect(parsed.document.archive).toBeUndefined();
+  });
+
+  test("a malformed archive section loses only the backlog: the work still reads and is judged", () => {
+    const dirty = [repository({ worktrees: [worktree({ untracked_files: 2 })] })];
+    const malformed: [string, unknown][] = [
+      ["not an object", []],
+      ["an unknown state", { state: "archived" }],
+      ["complete", { ...COUNTED, complete: 1 }],
+      ["files", { ...COUNTED, unarchived_files: 1.5 }],
+      ["bytes", { ...COUNTED, unarchived_bytes: "1" }],
+      ["last success", { ...COUNTED, last_success_at: "yesterday" }],
+      ["null", null],
+    ];
+    for (const [, archive] of malformed) {
+      const value = JSON.parse(workInspectionJson(inspection(dirty)));
+      value.archive = archive;
+      const parsed = parseWorkInspection(JSON.stringify(value));
+      expect(parsed).toEqual({ ok: true, document: inspection(dirty) });
+      if (!parsed.ok) continue;
+      expect(parsed.document.archive).toBeUndefined();
+      expect(workFindings(parsed.document, [])).toEqual(workFindings(inspection(dirty), []));
+    }
   });
 
   test("ignores fields it does not know", () => {

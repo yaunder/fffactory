@@ -41,7 +41,16 @@
     "inspection": {
       "description": "One worker's removability, the document removal records carry: removable when terminate's gates pass, refused when they refuse it (a worker whose agents or work could not be read among them), not_inspected when they never run for it, not_inspected saying why. summary and details are the findings in fffactory's words. It names no next action, which is the judging command's.",
       "type": "object",
-      "required": ["key", "hostname", "verdict", "not_inspected", "summary", "details", "activity"],
+      "required": [
+        "key",
+        "hostname",
+        "verdict",
+        "not_inspected",
+        "summary",
+        "details",
+        "activity",
+        "unarchived"
+      ],
       "properties": {
         "key": { "type": "string", "pattern": "^[a-z][a-z0-9-]*$" },
         "hostname": { "type": "string", "minLength": 1 },
@@ -52,7 +61,8 @@
         },
         "summary": { "type": "string", "minLength": 1 },
         "details": { "type": "array", "items": { "type": "string" } },
-        "activity": { "$ref": "#/$defs/activity" }
+        "activity": { "$ref": "#/$defs/activity" },
+        "unarchived": { "$ref": "#/$defs/unarchived" }
       },
       "if": { "properties": { "verdict": { "const": "not_inspected" } } },
       "then": { "properties": { "not_inspected": { "type": "string" } } },
@@ -70,6 +80,34 @@
       "if": { "properties": { "state": { "const": "unknown" } } },
       "then": { "properties": { "agents": { "type": "null" } } },
       "else": { "properties": { "reason": { "type": "null" }, "agents": { "type": "array" } } }
+    },
+    "unarchived": {
+      "description": "The worker's evidence its log archive collector has not yet archived, which removing it destroys: counted by its work inspection from the collector's checkpoint against the sources' current sizes, not_collected when no collector runs there, unknown when the worker was not inspected, its work inspection could not be had or its release predates the count. Reported, never judged: it never changes the verdict. complete is false when the worker stopped counting at its bound (at least these); last_success_at is when the collector last succeeded, null for never.",
+      "type": "object",
+      "required": ["state", "files", "bytes", "complete", "last_success_at"],
+      "properties": {
+        "state": { "enum": ["unknown", "not_collected", "counted"] },
+        "files": { "type": ["integer", "null"], "minimum": 0 },
+        "bytes": { "type": ["integer", "null"], "minimum": 0 },
+        "complete": { "type": ["boolean", "null"] },
+        "last_success_at": { "type": ["string", "null"], "minLength": 1 }
+      },
+      "if": { "properties": { "state": { "const": "counted" } } },
+      "then": {
+        "properties": {
+          "files": { "type": "integer" },
+          "bytes": { "type": "integer" },
+          "complete": { "type": "boolean" }
+        }
+      },
+      "else": {
+        "properties": {
+          "files": { "type": "null" },
+          "bytes": { "type": "null" },
+          "complete": { "type": "null" },
+          "last_success_at": { "type": "null" }
+        }
+      }
     },
     "agent": {
       "type": "object",
