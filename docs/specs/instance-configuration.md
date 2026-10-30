@@ -131,7 +131,8 @@ as a configuration `fffactory apply` has not delivered yet, and the next
 apply's workers stage installs it, with no Paseo change
 ([control plane §Planned state](control-plane.md#planned-state)).
 fffactory itself writes nothing in the archive yet, and never removes it:
-[teardown](teardown.md) keeps it and says so.
+[teardown](teardown.md) keeps it and says so. What workers collect into it,
+and the archive's format, are in [collector](collector.md).
 
 The archive's bucket name is derived, never configured:
 `<factory_id>-logs-<aws.account_id>-<aws.region>-an`, such as

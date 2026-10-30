@@ -8,7 +8,10 @@ colors one with `styles`, and which keeps both streams' lines in the order writt
 (`written`), and the spawned `main.ts`; `cli/presentation/` checks the text laid
 out from domain data, pure like `domain/`, while `application/` tests assert that data, never
 its text).
-Each test maps to a section of a spec in `docs/specs/`. Areas with their own rules:
+Each test maps to a section of a spec in `docs/specs/`.
+`domain/fixtures/archive/` holds archive format v1's documents and the collector's checkpoint
+(`docs/specs/collector.md`), each its serializer's output byte for byte; the collection run
+and the archive's reader read the same fixtures. Areas with their own rules:
 
 - [`host/`](host/CLAUDE.md): the worker side of the host protocol, and its shared contract
   fixtures.

@@ -1,0 +1,18 @@
+{
+  "format": 1,
+  "at": "2026-10-30T10:16:02.345Z",
+  "epoch": "20261030T101500Z-0123456789abcdef",
+  "boot_id": "6f2c1d9e-3b4a-4c5d-8e7f-0123456789ab",
+  "release": "0.0.9",
+  "claude_code_version": null,
+  "outcome": "failed",
+  "failure": "AccessDenied",
+  "budget_hit": "bytes",
+  "uploaded_bytes": 632,
+  "journal_seq": null,
+  "last_success_at": "2026-10-30T10:15:01.000Z",
+  "backlog": {
+    "files": 3,
+    "bytes": 70000000
+  }
+}
