@@ -496,6 +496,91 @@ describe("live sessions between runs", () => {
     await run(archive);
     await expectReassembles(archive);
   });
+
+  test("an append's tail is never spliced onto a prefix rewritten after the decision", async () => {
+    await put(SESSION, "a".repeat(80_000));
+    const archive = memoryArchive();
+    await run(archive);
+    await append(SESSION, "old-tail");
+    await put(TOOL_RESULT, "newer evidence");
+    const first = archive.puts.length;
+    archive.beforePut = async (_key, index) => {
+      if (index === first) await put(SESSION, `${"b".repeat(80_000)}new-tail`);
+    };
+
+    const report = await run(archive);
+
+    expect(lastRecord(archive)?.captures.map((capture) => capture.path)).toEqual([TOOL_RESULT]);
+    expect(report).toMatchObject({ outcome: "succeeded", backlog: { files: 1 } });
+    await expectCheckpointBacked(archive);
+    archive.beforePut = () => {};
+    await run(archive);
+    expect(captureOf(lastRecord(archive), SESSION)).toMatchObject({
+      generation: 2,
+      offset: 0,
+      base_sha256: null,
+    });
+    await expectReassembles(archive);
+  });
+
+  test("a source still growing after its append was decided is appended up to the length decided", async () => {
+    await put(SESSION, transcript(800));
+    const archive = memoryArchive();
+    await run(archive);
+    await append(SESSION, transcript(5, "b"));
+    await put(TOOL_RESULT, "newer evidence");
+    const first = archive.puts.length;
+    archive.beforePut = async (_key, index) => {
+      if (index === first) await append(SESSION, transcript(3, "c"));
+    };
+
+    await run(archive);
+
+    expect(captureOf(lastRecord(archive), SESSION)).toMatchObject({
+      generation: 1,
+      offset: 800 * 100,
+      length: 500,
+    });
+    archive.beforePut = () => {};
+    await run(archive);
+    expect(captureOf(lastRecord(archive), SESSION)).toMatchObject({
+      generation: 1,
+      offset: 805 * 100,
+      length: 300,
+    });
+    await expectCheckpointBacked(archive);
+    await expectReassembles(archive);
+  });
+
+  test("an append whose prefix is still hashing when the time budget passes is left", async () => {
+    await put(SESSION, transcript(30_000));
+    const archive = memoryArchive();
+    await run(archive);
+    await append(SESSION, transcript(5, "b"));
+    await put(TOOL_RESULT, "newer evidence");
+    const readings: number[] = [];
+    const now = () => {
+      const reading = time.now();
+      readings.push(reading.getTime());
+      return reading;
+    };
+    const first = archive.puts.length;
+    archive.beforePut = (_key, index) => {
+      const started = readings[0] ?? 0;
+      const last = readings.at(-1) ?? 0;
+      if (index === first) time.advance(started + 40_000 - 150 - last);
+    };
+
+    const report = await run(archive, { now });
+
+    expect(report).toMatchObject({ budget_hit: "time", backlog: { files: 1 } });
+    expect(lastRecord(archive)?.captures.map((capture) => capture.path)).toEqual([TOOL_RESULT]);
+    await expectCheckpointBacked(archive);
+    archive.beforePut = () => {};
+    await run(archive);
+    expect(captureOf(lastRecord(archive), SESSION)).toMatchObject({ generation: 1, length: 500 });
+    await expectReassembles(archive);
+  });
 });
 
 describe("a source turned into a symbolic link while the run reads", () => {

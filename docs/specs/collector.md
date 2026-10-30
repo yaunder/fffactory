@@ -190,6 +190,20 @@ prefix hash covers the whole captured prefix, never only its
 tail, so an edit of the same length anywhere before the end is a rewrite.
 Captured bytes are raw: a partial last line is completed by the next append.
 
+An append is recorded only as bytes the file held together. The decision's
+verify and the upload's read are apart in time, so the upload reads the tail,
+then hashes the prefix again on the same open file, and keeps the tail only
+while that hash is still the checkpoint's prefix hash. A source rewritten at
+any time from the decision until that hash is never recorded as the old prefix
+with its new tail: it is left, uncaptured, for the next run, whose verify sees
+the rewrite and records a new generation. A source only appended to since the
+decision keeps its prefix, so it is appended up to the length decided, and the
+next run appends the rest. The one change this cannot see is a prefix rewritten
+and then restored byte for byte between the tail's read and the hash. An
+append's prefix is therefore hashed twice per run, once to decide and once to
+upload; the second hash gives up between chunks once the time budget has
+passed, leaving the source to the next run with `budget_hit: "time"`.
+
 ## Checkpoint
 
 The collector's checkpoint is its own local state (`checkpoint.json`), saved
@@ -294,7 +308,9 @@ One run (`collectOnce`, `src/host/collect.ts`) is one pass, in this order:
    run ([Budgets](#budgets)).
 5. **Budget.** The pending captures are admitted by the byte budget
    ([Budgets](#budgets)).
-6. **Blobs.** Each admitted capture, in that order, is read and its blob put. No
+6. **Blobs.** Each admitted capture, in that order, is read and its blob put; an
+   append's tail is read, then its prefix hashed again and the tail kept only
+   while the prefix is still the one captured ([Capture](#capture)). No
    upload starts once the time budget has passed since the run started. A put
    answered `exists` (S3's 412) is stored: a blob's key is its content. The first
    put that fails stops the uploads.
@@ -312,8 +328,9 @@ still the device and inode discovery found, the kernel finds it open at its own
 path under the Claude root's real path (`/proc/self/fd`; the Claude root's parent
 resolved once per run and its own name kept, so a link above it, such as `/home`
 on a data volume, is followed, and the Claude root itself never is), and it
-holds the bytes decided: one replaced, shortened, turned into a link, or reached
-through a directory turned into a link in between is left for the next run,
+holds the bytes decided: one replaced, shortened, rewritten before an append's
+tail, turned into a link, or reached through a directory turned into a link in
+between is left for the next run,
 whose decision sees it. A source that vanished is no failure, but the same file
 found open at another path fails the run `SourcePathMismatch`, and one whose open
 path cannot be read (no `/proc`) fails it `OpenPathUnverified`: either is left

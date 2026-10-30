@@ -121,7 +121,9 @@ and `host collect --once`, which the log archive's timer runs as `factory`
   still the device and inode found and `/proc/self/fd` (`CollectSystem.openFiles`) shows it
   open at its own path under the Claude root's real path (its parent resolved, its own name
   kept); found open elsewhere or unverifiable, it fails the run (`SourcePathMismatch`,
-  `OpenPathUnverified`) and leaves the source, never silently. It never changes a source. Its
+  `OpenPathUnverified`) and leaves the source, never silently. An append's tail is kept only
+  while its prefix, hashed again after the tail's read on the same open file, is still the one
+  captured, so a rewrite is never spliced (§Capture). It never changes a source. Its
   time budget bounds the decisions' hashing too, newest first, with half the budget, so a run always reaches its checkpoint (§Budgets). File-system failures are
   reported by their error code, a vanished source is none, and an error without a code is
   thrown. Tests run it over a worker in a temporary directory and `tests/support/memory-archive.ts`.

@@ -361,8 +361,6 @@ async function reading<T>(
 /** A capture to upload, with what it needs to become a journal capture and checkpoint entry. */
 interface Pending extends PendingCapture, Observed {
   readonly entry: SourceCheckpoint | undefined;
-  /** For an append, the hash of the generation's bytes before it, to extend. */
-  readonly base: Hash | undefined;
 }
 
 /**
@@ -393,51 +391,80 @@ async function decide(
 ): Promise<Pending | TimedOut | undefined> {
   const entry = entries.get(observed.source);
   let decision = captureDecision(entry, observed.stat);
-  let base: Hash | undefined;
   if (decision.kind === "verify") {
     const hashed = await verify(reach, observed, decision.length, past, failures);
     if (hashed === undefined || hashed === TIMED_OUT) return hashed;
-    base = hashed;
-    decision = captureDecision(entry, observed.stat, base.copy().digest("hex"));
+    decision = captureDecision(entry, observed.stat, hashed.digest("hex"));
     if (decision.kind === "unchanged" && entry !== undefined)
       entries.set(observed.source, touchedEntry(entry, observed.stat));
   }
   if (decision.kind === "unchanged" || decision.kind === "verify") return undefined;
-  return {
-    ...observed,
-    mtime_ms: observed.stat.mtime_ms,
-    captured: decision,
-    entry,
-    base: decision.kind === "append" ? base : undefined,
-  };
+  return { ...observed, mtime_ms: observed.stat.mtime_ms, captured: decision, entry };
 }
 
 const offsetOf = (captured: Captured) => (captured.kind === "append" ? captured.offset : 0);
 
-/** The journal capture of `bytes`, read for `pending`. */
-function captureOf(pending: Pending, bytes: Uint8Array): Capture {
+/** A pending capture's bytes as read, and for an append the hash of its prefix, to extend. */
+interface Read {
+  readonly bytes: Uint8Array;
+  readonly base: Hash | undefined;
+}
+
+/** The journal capture of what was read for `pending`. */
+function captureOf(pending: Pending, read: Read): Capture {
   const offset = offsetOf(pending.captured);
-  const blob = createHash("sha256").update(bytes).digest("hex");
+  const blob = createHash("sha256").update(read.bytes).digest("hex");
   return {
     source: pending.source,
     path: pending.path,
     generation: pending.captured.generation,
     offset,
-    length: bytes.length,
+    length: read.bytes.length,
     blob,
     base_sha256: offset === 0 ? null : (pending.entry?.prefix_sha256 ?? null),
-    prefix_sha256: pending.base?.copy().update(bytes).digest("hex") ?? blob,
+    prefix_sha256: read.base?.update(read.bytes).digest("hex") ?? blob,
     mtime_ms: pending.mtime_ms,
   };
 }
 
-/** Reads a pending capture's bytes; undefined once the source is no longer what was decided. */
-function readPending(reach: Reach, pending: Pending, failures: Failures) {
+/**
+ * An append's tail, already read, kept only while the open source's first `offset` bytes still
+ * hash to `captured`, the prefix the tail extends.
+ */
+async function withPrefix(
+  handle: FileHandle,
+  offset: number,
+  bytes: Uint8Array,
+  captured: string | undefined,
+  past: Past,
+): Promise<Read | TimedOut | undefined> {
+  const base = await hashHead(handle, offset, past);
+  if (base === undefined || base === TIMED_OUT) return base;
+  return base.copy().digest("hex") === captured ? { bytes, base } : undefined;
+}
+
+/**
+ * Reads a pending capture's bytes, unless the time budget has passed; undefined once the source
+ * is no longer what was decided. An append's tail is read first, then its prefix hashed again on
+ * the same open file: the tail is kept only while that prefix is still the one captured, so a
+ * prefix rewritten at any time before the hash is never spliced to the tail (§Capture). The hash
+ * gives up between chunks once the time budget has passed.
+ */
+async function readPending(
+  reach: Reach,
+  pending: Pending,
+  past: Past,
+  failures: Failures,
+): Promise<Read | TimedOut | undefined> {
+  if (past()) return TIMED_OUT;
   const offset = offsetOf(pending.captured);
   const { length } = pending.captured;
-  return reading(reach, pending, failures, async (handle, size) =>
-    size < offset + length ? undefined : readExactly(handle, offset, length),
-  );
+  return reading(reach, pending, failures, async (handle, size) => {
+    if (size < offset + length) return undefined;
+    const bytes = await readExactly(handle, offset, length);
+    if (bytes === undefined || offset === 0) return bytes && { bytes, base: undefined };
+    return withPrefix(handle, offset, bytes, pending.entry?.prefix_sha256, past);
+  });
 }
 
 interface Stored {
@@ -465,12 +492,13 @@ async function upload(
 ): Promise<Upload> {
   const stored: Stored[] = [];
   let uploaded = 0;
+  const past = () => system.now().getTime() - startedMs >= system.budget.milliseconds;
   for (const pending of admitted) {
-    if (system.now().getTime() - startedMs >= system.budget.milliseconds)
-      return { stored, uploaded, timeHit: true };
-    const bytes = await readPending(reach, pending, failures);
-    if (bytes === undefined) continue;
-    const capture = captureOf(pending, bytes);
+    const read = await readPending(reach, pending, past, failures);
+    if (read === TIMED_OUT) return { stored, uploaded, timeHit: true };
+    if (read === undefined) continue;
+    const { bytes } = read;
+    const capture = captureOf(pending, read);
     const outcome = await system.writer.put(system.keys.blob(capture.blob), bytes);
     if (outcome.kind === "failed") {
       failures.first ??= outcome.failure;
