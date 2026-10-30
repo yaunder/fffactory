@@ -29,6 +29,7 @@ import type { Verification } from "../domain/readiness";
 import { MATERIALIZED_MARKER } from "../domain/release-assets";
 import type { ProcessOutcome } from "../infrastructure/local-tool-probe";
 import { sha256Text } from "../infrastructure/release-tarball";
+import { workerCollectorStep } from "./collector-step";
 import { workerCredentials } from "./credentials";
 import { exists, markerRecords, operatingSystem, tokenOr, type WorkerSystem } from "./inspect";
 import type { ExclusiveLock } from "./install-lock";
@@ -56,7 +57,7 @@ export interface HostApplier {
 export interface InstallStep {
   readonly name: string;
   readonly timeoutMs: number;
-  readonly implementation?: "plugins" | "credentials";
+  readonly implementation?: "plugins" | "credentials" | "collector";
 }
 
 /** A step's environment; the release's steps directory is always part of it. */
@@ -249,15 +250,18 @@ async function runImplementation(
   projection: HostProjection,
   log: FileHandle,
 ): Promise<string | undefined> {
+  const note = async (line: string) => {
+    await log.write(`${line}\n`);
+  };
   switch (step.implementation) {
     case "plugins":
       return (await workerPlugins(system, env.FFFACTORY_STEPS, "install", step.timeoutMs, log.fd))
         ? undefined
         : "plugin installation or verification failed";
     case "credentials":
-      return workerCredentials(system, projection, step.timeoutMs, async (line) => {
-        await log.write(`${line}\n`);
-      });
+      return workerCredentials(system, projection, step.timeoutMs, note);
+    case "collector":
+      return workerCollectorStep(system, projection, step.timeoutMs, { output: log.fd, note });
     case undefined: {
       const script = join(env.FFFACTORY_STEPS, `${step.name}.sh`);
       const outcome = await system.run(["/bin/bash", script], step.timeoutMs, {

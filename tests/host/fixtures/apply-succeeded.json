@@ -36,6 +36,11 @@
       "name": "credentials",
       "status": "succeeded",
       "reason": null
+    },
+    {
+      "name": "collector",
+      "status": "succeeded",
+      "reason": null
     }
   ],
   "verification": {

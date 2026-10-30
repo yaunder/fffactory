@@ -9,8 +9,7 @@
  * it needs neither only while they are fffactory's own. Runs only inside locked `host apply`. No
  * tool's output is kept: the step's log and every failure carry fffactory's words only.
  */
-import { randomUUID } from "node:crypto";
-import { chmod, mkdir, open, readFile, rename, rm } from "node:fs/promises";
+import { readFile, rm } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type { HostCredentials, HostProjection } from "../domain/host-projection";
 import {
@@ -27,6 +26,7 @@ import { ENROLLMENTS, type EnrollmentId } from "../domain/readiness";
 import { SecretMaterial } from "../domain/secrets";
 import type { ProcessOutcome } from "../infrastructure/local-tool-probe";
 import type { WorkerSystem } from "./inspect";
+import { writeRootFile } from "./root-files";
 import { AS_FACTORY, FACTORY_HOME } from "./runtime-account";
 import { AWS_ENV, readSecretValue } from "./secret-value";
 
@@ -199,26 +199,6 @@ async function deliverOpenai(run: Commands, key: SecretMaterial): Promise<void> 
     CREDENTIAL_LOGIN_TIMEOUT_MS,
     key,
   );
-}
-
-/** Writes `text` to the root-owned `path` whole or not at all, in a root 0755 directory. */
-async function writeRootFile(path: string, text: string): Promise<void> {
-  await mkdir(dirname(path), { recursive: true, mode: 0o755 });
-  await chmod(dirname(path), 0o755);
-  const staging = `${path}.${randomUUID()}.tmp`;
-  try {
-    const handle = await open(staging, "wx", 0o644);
-    try {
-      await handle.chmod(0o644);
-      await handle.writeFile(text);
-      await handle.sync();
-    } finally {
-      await handle.close();
-    }
-    await rename(staging, path);
-  } finally {
-    await rm(staging, { force: true });
-  }
 }
 
 /**

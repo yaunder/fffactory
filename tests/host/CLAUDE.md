@@ -47,6 +47,14 @@ temporary directories by `worker-scenarios.ts`, never the real `/`.
   data, also over a seeded random sequence of appends, rewrites and crashes.
   `collect.test.ts` gives the run no `incarnation.json` unless a test does, so put indices
   count only the run's own objects.
+- `collector-step.test.ts` runs the `collector` install step over a scripted `systemctl` that
+  writes to the step's log as the real one does. It also spawns
+  `support/aws-endpoint-probe-main.ts` under the service's environment, assembled from the unit
+  text by systemd's rules (the manager's variables, then `Environment=`, then
+  `UnsetEnvironment=`), with a `~/.aws` and inherited settings pointing at closed local ports, and
+  without that environment as the baseline. The probe resolves where instance metadata, STS and S3
+  would be asked and stops each request once built, sending nothing; it is not `fffactory`, so it
+  gets that environment rather than `isolatedAwsEnvironment`, whose settings it exists to test.
 - `s3-archive-writer.test.ts` and `collection.test.ts` run the S3 archive writer and `host
   collect --once` on the real AWS SDK against `support/loopback-imds.ts`, `support/stub-sts.ts`
   and `support/stub-s3.ts` (with `requireIfNoneMatch`), the metadata endpoint set only around

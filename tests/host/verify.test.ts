@@ -7,6 +7,8 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { COLLECTOR_CONFIGURATION } from "../../src/domain/collector";
+import { COLLECTOR_UNITS } from "../../src/domain/collector-installation";
 import { WORKER_PATHS } from "../../src/domain/host-protocol";
 import {
   ANTHROPIC_KEY_FILE,
@@ -197,6 +199,26 @@ describe("host verify's software checks (readiness §Verification)", () => {
     expect(plugins?.timeoutMs).toBeLessThanOrEqual(PLUGINS_TIMEOUT_MS);
     expect(plugins?.timeoutMs).toBeGreaterThan(0);
     expect(PLUGINS_TIMEOUT_MS).toBe(120_000);
+  });
+});
+
+describe("host verify and the log archive's collector (plan and apply §The workers stage)", () => {
+  test("never checks the collector: a worker with it installed and failing verifies the same", async () => {
+    const without = await verify();
+    await mkdir(join(root, "etc/fffactory"), { recursive: true });
+    await writeFile(join(root, COLLECTOR_CONFIGURATION), "{}");
+    for (const unit of COLLECTOR_UNITS) {
+      await mkdir(join(root, unit.path, ".."), { recursive: true });
+      await writeFile(join(root, unit.path), unit.text);
+    }
+    const failing = exited(3, "failed\n");
+    const installed = await verify({
+      "systemctl is-active fffactory-collector.service": failing,
+      "systemctl is-active fffactory-collector.timer": failing,
+    });
+    expect(verificationJson(installed.verification)).toBe(verificationJson(without.verification));
+    expect(installed.calls.map(({ argv }) => argv)).toEqual(without.calls.map(({ argv }) => argv));
+    for (const { argv } of installed.calls) expect(argv.join(" ")).not.toContain("collector");
   });
 });
 

@@ -121,7 +121,7 @@ summary and next action, the rest its details, in this order:
 | A host configuration whose SHA-256 is not that of the [host projection](host-protocol.md#the-host-projection) apply would send it | Repair the worker with `fffactory apply`. |
 | No host configuration, or one `fffactory-admin` cannot read | Repair the worker with `fffactory apply`. |
 | A service not `active` | Repair the worker with `fffactory apply`. |
-| With a release active: an install recorded as running: "An install of release R started at T has not finished; it may still be running" | If it started more than 82 min ago (apply's activation timeout), repair the worker with `fffactory apply`; otherwise wait for it to finish. |
+| With a release active: an install recorded as running: "An install of release R started at T has not finished; it may still be running" | If it started more than 84 min ago (apply's activation timeout), repair the worker with `fffactory apply`; otherwise wait for it to finish. |
 | With a release active: no install record, one that cannot be read, one that failed at a step, outside its steps (naming why) or in verification (naming the failed checks), or one of another release than the active one | Repair the worker with `fffactory apply`. |
 | Base software ready, but repositories are unresolved or have never synchronized | Resolve the reported checkouts or run `fffactory apply`. |
 | The repository result is unreadable or cannot be observed | Repair the worker with `fffactory apply`. |

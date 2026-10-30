@@ -11,7 +11,8 @@ evidence: [collector validation](../research/worker-log-archive-collector.md).
 The rules are pure (`src/domain/collector.ts`, `src/domain/archive-format.ts`);
 the run that reads the files and writes the archive builds on them, and
 `fffactory host collect --once` ([host protocol §collect](host-protocol.md#collect))
-runs it on a worker against S3.
+runs it on a worker against S3, about once a minute from the timer `host apply`'s
+`collector` step installs ([host protocol §The collector step](host-protocol.md#the-collector-step)).
 Collection is raw: nothing is redacted, so the archive may hold anything an
 agent saw and is treated as sensitive.
 
@@ -261,7 +262,9 @@ captured of it stays in the archive.
 One run (`collectOnce`, `src/host/collect.ts`) is one pass, in this order:
 
 1. **Lock.** It takes its own lock, `collect.lock` in its state directory
-   (`COLLECTOR_STATE`, `/var/lib/fffactory-collector`), an exclusive `flock`
+   (`COLLECTOR_STATE`, `/var/lib/fffactory-collector`, the service unit's
+   `StateDirectory`, [host protocol §The collector step](host-protocol.md#the-collector-step)),
+   an exclusive `flock`
    without waiting. Held elsewhere, the run ends at once, quietly (`busy`):
    nothing is read, written or saved. It never takes, opens or creates the install
    lock (`/run/fffactory-host-apply.lock`), so it never makes `host apply`,

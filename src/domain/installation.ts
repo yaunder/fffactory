@@ -26,8 +26,8 @@ import { readVerification, type Verification, verificationFields } from "./readi
 const MINUTE_MS = 60_000;
 
 /**
- * The install steps (shell assets, then the native TypeScript plugins and credentials steps),
- * run in this order in one process. Each is idempotent, so a rerun repairs what a failed one
+ * The install steps (shell assets, then the native TypeScript plugins, credentials and collector
+ * steps), run in this order in one process. Each is idempotent, so a rerun repairs what a failed one
  * left.
  */
 export const INSTALL_STEPS = [
@@ -43,6 +43,8 @@ export const INSTALL_STEPS = [
   { name: "plugins", timeoutMs: 15 * MINUTE_MS, implementation: "plugins" },
   /** The API credentials delivered to the host, in each tool's own store. */
   { name: "credentials", timeoutMs: 10 * MINUTE_MS, implementation: "credentials" },
+  /** The log archive's collector: its timer enabled, or it removed (`collector-installation.ts`). */
+  { name: "collector", timeoutMs: 2 * MINUTE_MS, implementation: "collector" },
 ] as const;
 export type StepName = (typeof INSTALL_STEPS)[number]["name"];
 

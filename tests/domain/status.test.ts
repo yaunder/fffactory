@@ -134,7 +134,7 @@ describe("readiness from a worker's inspection", () => {
       summary:
         "An install of release 0.3.0 started at 2026-09-30T10:55:00.000Z has not finished; it may still be running",
       nextAction:
-        "If it started more than 82 min ago (apply's activation timeout), repair the worker " +
+        "If it started more than 84 min ago (apply's activation timeout), repair the worker " +
         `with \`fffactory apply\`; otherwise wait for it to finish${RERUN}`,
     });
     expect(

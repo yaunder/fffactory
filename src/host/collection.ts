@@ -22,11 +22,12 @@ import {
   type CollectorConfiguration,
   parseCollectorConfiguration,
 } from "../domain/collector";
+import { COLLECTOR_STATE } from "../domain/collector-installation";
 import { WORKER_PATHS } from "../domain/host-protocol";
 import type { RandomBytes } from "../domain/initialization";
 import type { Release } from "../domain/instance";
 import { TOKEN } from "../domain/protocol-fields";
-import { COLLECTOR_STATE, type CollectionReport, collectOnce } from "./collect";
+import { type CollectionReport, collectOnce } from "./collect";
 import { type ExclusiveLock, flockExclusive } from "./install-lock";
 import { type ArchiveSession, type ArchiveTarget, openInstanceArchive } from "./s3-archive-writer";
 

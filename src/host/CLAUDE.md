@@ -87,13 +87,24 @@ and `host collect --once`, which the log archive's timer runs as `factory`
   while Anthropic is delivered, `cleanupPeriodDays` while the projection carries `log_archive`),
   replacing whatever was there; needing neither, it removes them only while they are
   fffactory's own (`ownsManagedSettings`): anyone else's, or unreadable ones, stay. `verify.ts`
-  checks the key file while they name the helper (`namesKeyHelper`). It is the only code on the
-  worker that reads `log_archive` so far. Its log holds its own lines only, never a tool's
-  output, and a failure names the account (or the log archive) and the AWS error name, exit
-  status or deadline.
+  checks the key file while they name the helper (`namesKeyHelper`). Its log holds its own lines
+  only, never a tool's output, and a failure names the account (or the log archive) and the AWS
+  error name, exit status or deadline.
+- `collector-step.ts` implements the `collector` install step, last in `INSTALL_STEPS`
+  (`docs/specs/host-protocol.md` §The collector step), the only other code on the worker that
+  reads `log_archive`: with it, `/etc/fffactory/collector.json` and the service and timer
+  `domain/collector-installation.ts` defines, written by root (`root-files.ts`, shared with
+  `credentials.ts`), then `/usr/bin/systemctl daemon-reload` and `enable --now` of the timer;
+  without it, the timer disabled and a run stopped (each only while its unit file is there), the
+  files removed and systemd reloaded, the state directory kept, and nothing at all where none of
+  them is. It never starts, inspects or waits for a collection: the collector's health is never
+  the install's, so neither `verify.ts`, `WORKER_SERVICES` nor a dispatch gate names it. Its log
+  holds systemctl's output and its own lines, never a configuration value. Change the unit's
+  directives and the spec's unit text together.
 - `collect.ts` is one collection run (`docs/specs/collector.md` §Run), run as `factory`, not
-  through the activator: it takes `collect.lock` in its own state directory (`COLLECTOR_STATE`)
-  and ends `busy` when another holds it; it never names `WORKER_PATHS.applyLock`, so it never
+  through the activator: it takes `collect.lock` in its own state directory (`COLLECTOR_STATE`,
+  the unit's `StateDirectory`, `domain/collector-installation.ts`) and ends `busy` when another
+  holds it; it never names `WORKER_PATHS.applyLock`, so it never
   blocks or waits on an install. It decides by `domain/collector.ts` alone and writes only
   through an injected `ArchiveWriter` (`domain/archive-format.ts`): `incarnation.json` when it
   is given one, blobs, then the journal

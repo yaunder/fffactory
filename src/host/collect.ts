@@ -56,11 +56,6 @@ import {
 import type { RandomBytes } from "../domain/initialization";
 import type { ExclusiveLock } from "./install-lock";
 
-/**
- * The collector's state directory on a worker: its checkpoint and its lock, nothing else.
- * TODO(re-evaluate when the collector unit is installed, task 5): match its `StateDirectory=`.
- */
-export const COLLECTOR_STATE = "/var/lib/fffactory-collector";
 const CHECKPOINT = "checkpoint.json";
 const LOCK = "collect.lock";
 /** How many taken journal keys one run steps past before it gives up for this run. */

@@ -57,7 +57,7 @@ function record(overrides: Partial<HostApplyRecord> = {}): HostApplyRecord {
 }
 
 describe("the install steps (host protocol §apply)", () => {
-  test("run packages, user, systemd, harness, plugins, then credentials", () => {
+  test("run packages, user, systemd, harness, plugins, credentials, then collector", () => {
     expect(succeeded()).toEqual([
       "packages",
       "user",
@@ -65,6 +65,7 @@ describe("the install steps (host protocol §apply)", () => {
       "harness",
       "plugins",
       "credentials",
+      "collector",
     ]);
     expect(pendingSteps().every((step) => step.status === "not_run")).toBe(true);
   });

@@ -25,7 +25,7 @@ every other account stays on a human's login.
 
 ## The `credentials` step
 
-The last install step, after `plugins` (`INSTALL_STEPS`,
+The install step after `plugins` and before `collector` (`INSTALL_STEPS`,
 [host protocol §`host apply` on the worker](host-protocol.md#host-apply-on-the-worker)):
 native TypeScript (`src/host/credentials.ts`), run as root inside `host
 apply`'s install lock and record, within a 10-minute budget. In order:

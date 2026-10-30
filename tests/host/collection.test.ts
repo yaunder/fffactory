@@ -19,7 +19,7 @@ import {
 import { COLLECTOR_CONFIGURATION, parseCheckpoint } from "../../src/domain/collector";
 import { WORKER_PATHS } from "../../src/domain/host-protocol";
 import type { FactoryId, HostKey, Release } from "../../src/domain/instance";
-import { COLLECTOR_STATE } from "../../src/host/collect";
+import { COLLECTOR_STATE } from "../../src/domain/collector-installation";
 import {
   BOOT_ID,
   type CollectionSystem,

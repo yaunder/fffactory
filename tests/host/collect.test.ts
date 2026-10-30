@@ -31,10 +31,10 @@ import {
   parseCheckpoint,
   SMALL_FILE_BYTES,
 } from "../../src/domain/collector";
+import { COLLECTOR_STATE } from "../../src/domain/collector-installation";
 import { WORKER_PATHS } from "../../src/domain/host-protocol";
 import type { FactoryId } from "../../src/domain/instance";
 import {
-  COLLECTOR_STATE,
   type CollectionReport,
   type CollectSystem,
   collectOnce,
