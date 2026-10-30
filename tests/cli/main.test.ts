@@ -5,6 +5,7 @@ import { join, resolve } from "node:path";
 import { stripVTControlCharacters } from "node:util";
 import manifest from "../../package.json";
 import { isolatedAwsEnvironment } from "../support/aws-isolation";
+import { loopbackImds } from "../support/loopback-imds";
 import { goneWithin, killSurvivors, recordedPids } from "../support/processes";
 import { checkStatuses, doctorCheck, MAIN, spawnCli } from "../support/spawn-cli";
 import { EXAMPLE_CREDENTIALS, type StubSts, stubSts } from "../support/stub-sts";
@@ -386,26 +387,11 @@ describe("fffactory doctor executable, AWS account", () => {
   test("an AWS_PROFILE that does not exist never falls back to instance metadata", async () => {
     // A stand-in IMDS that hands out credentials: the SDK's default chain would fall
     // through to it and succeed, so a ready result here would mean a silent fallback.
-    const imds = Bun.serve({
-      hostname: "127.0.0.1",
-      port: 0,
-      fetch: (request) => {
-        const { pathname } = new URL(request.url);
-        if (pathname === "/latest/api/token") return new Response("example-imds-token");
-        if (pathname.endsWith("/security-credentials/")) return new Response("FactoryHost");
-        return Response.json({
-          Code: "Success",
-          AccessKeyId: EXAMPLE_CREDENTIALS.accessKeyId,
-          SecretAccessKey: EXAMPLE_CREDENTIALS.secretAccessKey,
-          Token: "example-session-token",
-          Expiration: new Date(Date.now() + 3_600_000).toISOString(),
-        });
-      },
-    });
+    const imds = loopbackImds();
     try {
       const result = await doctorWithAws({
         aws: {
-          AWS_EC2_METADATA_SERVICE_ENDPOINT: `http://127.0.0.1:${imds.port}`,
+          AWS_EC2_METADATA_SERVICE_ENDPOINT: imds.endpoint,
           AWS_PROFILE: "missing",
         },
         args: ["--json"],
@@ -418,7 +404,7 @@ describe("fffactory doctor executable, AWS account", () => {
       });
       expect(result.requests).toEqual([]);
     } finally {
-      imds.stop(true);
+      imds.stop();
     }
   });
 

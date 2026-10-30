@@ -14,7 +14,10 @@
  * DeleteObjects by version (at most 1000 keys, quiet or verbose, each key's failure in the
  * answer) and DeleteBucket (refused with `BucketNotEmpty` while any version or delete marker
  * is left). Deleting a key's current version, or current delete marker, makes the newest left
- * current. Point an S3 client at `endpoint` with `forcePathStyle`.
+ * current. With `requireIfNoneMatch` it refuses a PutObject without `If-None-Match: *` (403
+ * AccessDenied), as the log archive's hosts policy does; `refuse` answers any request with an
+ * error a test chooses, and `sessionTokens` records the session each request was signed with.
+ * Point an S3 client at `endpoint` with `forcePathStyle`.
  */
 
 export interface StubBucket {
@@ -55,6 +58,17 @@ export interface StubS3Options {
   readonly listPageSize?: number;
   /** Runs after each ListObjectVersions answer is made, as a write racing the deletion would. */
   readonly afterListing?: () => void;
+  /**
+   * Refuses a PutObject without `If-None-Match: *` with 403 AccessDenied, as the log archive's
+   * hosts policy does.
+   */
+  readonly requireIfNoneMatch?: boolean;
+}
+
+/** An S3 error the stub answers a request with instead of handling it. */
+export interface StubS3Error {
+  readonly status: number;
+  readonly code: string;
 }
 
 export interface StubObject {
@@ -99,6 +113,13 @@ export interface StubS3 {
   stored(bucket: string): number;
   /** Makes the next conditional PutObject answer 409 ConditionalRequestConflict. */
   conflictNextPut(): void;
+  /**
+   * Decides, per request, an error to answer instead of handling it (after it is recorded), or
+   * undefined to handle it; a test changes it between runs.
+   */
+  refuse: (method: string, key: string) => StubS3Error | undefined;
+  /** Each request's `x-amz-security-token`, or null: the session the caller signed with. */
+  readonly sessionTokens: readonly (string | null)[];
   stop(): void;
 }
 
@@ -213,6 +234,7 @@ const WRITTEN = Date.parse("2026-09-30T10:00:00.000Z");
 
 export function stubS3(options: StubS3Options = {}): StubS3 {
   const requests: string[] = [];
+  const sessionTokens: (string | null)[] = [];
   const objects = new Map<string, StubObject>();
   const history: StubVersion[] = [];
   const deleteBatches: string[][] = [];
@@ -230,13 +252,21 @@ export function stubS3(options: StubS3Options = {}): StubS3 {
 
   const versioning = (settings: StubBucket) => settings.versioned ?? true;
 
-  function put(request: Addressed): Response {
+  /** Why a PutObject is refused before anything is stored, if it is. */
+  function putRefusal(request: Addressed): Response | undefined {
+    if (options.requireIfNoneMatch && request.condition !== "*") return error(403, "AccessDenied");
     if (conflict) {
       conflict = false;
       return error(409, "ConditionalRequestConflict");
     }
     if (request.condition === "*" && objects.has(request.path))
       return error(412, "PreconditionFailed");
+    return undefined;
+  }
+
+  function put(request: Addressed): Response {
+    const refused = putRefusal(request);
+    if (refused) return refused;
     versions += 1;
     const id = versioning(request.settings) === true ? `stub-version-${versions}` : "null";
     const etag = `stub-etag-${versions}`;
@@ -579,6 +609,9 @@ export function stubS3(options: StubS3Options = {}): StubS3 {
     const version = url.searchParams.get("versionId");
     const setting = key ? undefined : BUCKET_QUERIES.find((name) => url.searchParams.has(name));
     requests.push(requestLine(request.method, bucket, key, setting, { condition, version, owner }));
+    sessionTokens.push(request.headers.get("x-amz-security-token"));
+    const injected = stub.refuse(request.method, key);
+    if (injected) return error(injected.status, injected.code);
     const refused = refusal(request.method, bucket, owner);
     if (refused) return refused;
     const method = METHODS[request.method] ?? (() => error(405, "MethodNotAllowed"));
@@ -607,9 +640,11 @@ export function stubS3(options: StubS3Options = {}): StubS3 {
       return handle(request, raw);
     },
   });
-  return {
+  const stub: StubS3 = {
     endpoint: `http://127.0.0.1:${server.port}`,
     requests,
+    sessionTokens,
+    refuse: () => undefined,
     objects,
     versions: history,
     deleteBatches,
@@ -635,4 +670,5 @@ export function stubS3(options: StubS3Options = {}): StubS3 {
     },
     stop: () => server.stop(true),
   };
+  return stub;
 }

@@ -181,8 +181,9 @@ operation of that activator and lock
 sudo -n /usr/local/libexec/fffactory-activate work inspect
 ```
 
-One subcommand goes neither over SSH nor through the activator: the worker's
-own dispatcher runs `host agents` as `factory` ([agents](#agents)).
+Two subcommands go neither over SSH nor through the activator: the worker's
+own dispatcher runs `host agents` as `factory` ([agents](#agents)), and the log
+archive's timer runs `host collect --once` as `factory` ([collect](#collect)).
 
 ## Versioning
 
@@ -927,6 +928,36 @@ agents are unknown. Exiting 1 for unknown agents makes the dispatcher fail its
 tick before it launches anything: an unreadable worker never reads as one
 without agents.
 
+## collect
+
+```text
+/opt/fffactory/current/bin/fffactory host collect --once
+```
+
+One collection run of the log archive's collector
+([collector §Credentials and publishing](collector.md#credentials-and-publishing)):
+it copies Claude Code's session evidence into the archive as the instance
+role and writes the run's heartbeat. The operator's fffactory never runs it,
+and it is not run through the activator: the worker runs it as `factory`, with
+the active release's executable, and it holds only the collector's own lock,
+never the host-operation lock, so it never makes an install, a repository,
+control-plane, dispatch or work operation refuse `busy`, nor waits on one. It
+reads `/etc/fffactory/collector.json`; without it, it does nothing.
+
+| Run | Exit and output |
+| --- | --- |
+| As `factory`, without `/etc/fffactory/collector.json` | 0, nothing: not configured, nothing read, written or asked |
+| As `factory`, another run holding the collector's lock | 0, nothing |
+| As `factory`, the run and its heartbeat written | 0; one line on standard output, `fffactory host collect: succeeded; uploaded <n> bytes, journal <seq or none>, backlog <files> files (<bytes> bytes)`, and `, <bytes or time> budget hit` when a budget stopped it |
+| As `factory`, the run failed | 1; that line on standard error, `failed (<class>)` in place of `succeeded`, the class an AWS error name, network error code or file-system error code |
+| As `factory`, its heartbeat not written | 1; `fffactory host collect: the heartbeat was not written (<class>)` on standard error, after the run's line |
+| As `factory`, it could not start (configuration unreadable or malformed, no boot ID, the archive not opened) | 1; `fffactory host collect: <reason>` on standard error, naming a malformed field, never its value, and an AWS failure by its class; nothing written |
+| As root | 1, nothing: `run it as factory, never root; its timer runs it` on standard error. Its checkpoint and lock are `factory`'s collector state, and Claude's files are `factory`'s. |
+| Without `--once`, or with anything else | 1, nothing |
+
+Its failures are visible in the heartbeat and in the journal (these lines),
+never elsewhere: it prints no path, no AWS or SDK message and no credential.
+
 ## Layer mapping
 
 | Layer | Module | Responsibility |
@@ -956,9 +987,12 @@ without agents.
 | Worker | `src/host/dispatch.ts` | Dispatch adoption, installation, reconciliation and checked observation, with privilege drop. |
 | Worker | `src/host/work.ts` | `workerWork`: the work inspection, over the worker's working trees, as `factory`, read-only. |
 | Worker | `src/host/control-plane.ts` | `workerControlPlane`: the Paseo activity, install, reload and restart, and `host agents`; `paseoAgents`, the adapter translating Paseo's agents into fffactory's states. |
+| Worker | `src/host/collect.ts` | `collectOnce`: one collection run under the collector's own lock, through an `ArchiveWriter` ([collector §Run](collector.md#run)). |
+| Worker | `src/host/collection.ts` | `workerCollection`: `host collect --once`, its configuration, the run and its heartbeat; `localCollectionSystem`, this worker's, checking open sources in `/proc/self/fd` (`OPEN_FILES`). |
+| Worker | `src/host/s3-archive-writer.ts` | `openInstanceArchive`: the `ArchiveWriter` over S3 with the instance role's IMDSv2 credentials, its incarnation and account from STS. |
 | Worker | `src/host/endpoint.ts` | `workerEndpoint`: all worker endpoints together. |
 | Worker | `assets/steps/` | The wrapped install steps, the pins and the plugin manifest. |
-| CLI adapter | `src/cli/commands/host.ts` | The fixed `fffactory host` inspect, apply, verify, repository, control-plane, dispatch, work and agents operations. |
+| CLI adapter | `src/cli/commands/host.ts` | The fixed `fffactory host` inspect, apply, verify, repository, control-plane, dispatch, work, agents and collect operations. |
 
 Tests: `tests/host/protocol-contract.test.ts` is the contract: four worker
 filesystems (`tests/host/worker-scenarios.ts`: installed with enrollment
@@ -980,7 +1014,10 @@ fixture from the same Paseo, and the dispatcher's Python test reads it as its
 capacity check's answer. `tests/host/control-plane.test.ts` runs `host agents`
 over a scripted Paseo (the auth wrapper run as itself, in `factory`'s
 environment, the budget, an unreadable list, root refused), and
-`tests/cli/host.test.ts` its exit statuses and refusals. The other direction, a document the CLI sends, is
+`tests/cli/host.test.ts` its exit statuses and refusals, and `host collect`'s
+lines, exit statuses and refusals (root, no `--once`); `tests/host/collection.test.ts`
+runs `host collect --once` itself against a loopback instance metadata service
+and stub STS and S3 ([collector §Credentials and publishing](collector.md#credentials-and-publishing)). The other direction, a document the CLI sends, is
 `tests/host/fixtures/dispatch-not-requested.json`, the projection that stops
 dispatch ([dispatch §Stopping dispatch](dispatch.md#stopping-dispatch)): the
 CLI side builds it byte for byte, and the worker side parses it without loss.
@@ -1058,4 +1095,5 @@ credential references and the control-plane part's digest by
 [#68](https://github.com/yaunder/fffactory/issues/68); the `credentials` step by
 [#69](https://github.com/yaunder/fffactory/issues/69); `host agents` by
 [#100](https://github.com/yaunder/fffactory/issues/100); the projection's
-`log_archive` by [#118](https://github.com/yaunder/fffactory/issues/118).
+`log_archive` by [#118](https://github.com/yaunder/fffactory/issues/118); `host
+collect` by [#121](https://github.com/yaunder/fffactory/issues/121).

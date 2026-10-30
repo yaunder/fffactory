@@ -11,6 +11,7 @@ import {
   dispatchInspectionJson,
 } from "../../domain/dispatch-projection";
 import { workInspectionJson } from "../../domain/work-inspection";
+import type { CollectionReport } from "../../host/collect";
 import type { CliContext, Command } from "../context";
 
 const USAGE = [
@@ -22,6 +23,7 @@ const USAGE = [
   "       fffactory host dispatch (adoption | reconcile | inspect)",
   "       fffactory host work inspect",
   "       fffactory host agents --json",
+  "       fffactory host collect --once",
   "",
   "The worker side of the host protocol. The operator's fffactory runs these on a",
   "worker over SSH as fffactory-admin, and the dispatcher runs agents as factory;",
@@ -45,6 +47,10 @@ const USAGE = [
   "                  fffactory's states as the activity document; exits 1 when they",
   "                  cannot be read, the reason on standard error. Reads only;",
   "                  changes nothing.",
+  "  collect --once  As factory, run by the log archive's timer: copy Claude Code's",
+  "                  session evidence into the log archive once, as the instance",
+  "                  role, and write a heartbeat; one line for the journal. Does",
+  "                  nothing without /etc/fffactory/collector.json.",
 ];
 
 function jsonOnly(args: readonly string[]): boolean {
@@ -189,6 +195,54 @@ async function agents(args: readonly string[], context: CliContext): Promise<num
   return 1;
 }
 
+/** One line for the journal: the run's outcome and progress, in counts and failure classes. */
+function collectionLine(report: CollectionReport): string {
+  const outcome =
+    report.failure === null ? report.outcome : `${report.outcome} (${report.failure})`;
+  const progress = [
+    `uploaded ${report.uploaded_bytes} bytes`,
+    `journal ${report.journal_seq ?? "none"}`,
+    `backlog ${report.backlog.files} files (${report.backlog.bytes} bytes)`,
+    ...(report.budget_hit === null ? [] : [`${report.budget_hit} budget hit`]),
+  ];
+  return `fffactory host collect: ${outcome}; ${progress.join(", ")}`;
+}
+
+/**
+ * One collection run of the log archive's collector, run as `factory` by its timer, never through
+ * the activator. Its failures go to the heartbeat and to standard error, the journal; exit 1
+ * whenever the run or its heartbeat failed. Without configuration, or busy, it is quiet.
+ */
+async function collect(args: readonly string[], context: CliContext): Promise<number> {
+  const { values } = parseArgs({
+    args: [...args],
+    options: { once: { type: "boolean", default: false } },
+    strict: true,
+    allowPositionals: false,
+  });
+  if (!values.once) {
+    context.err("fffactory host collect: it runs once at a time; pass --once");
+    return 1;
+  }
+  if (context.worker.isRoot()) {
+    context.err("fffactory host collect: run it as factory, never root; its timer runs it");
+    return 1;
+  }
+  const result = await context.worker.collect();
+  if (result.kind === "not_configured" || result.kind === "busy") return 0;
+  if (result.kind === "failed") {
+    context.err(`fffactory host collect: ${result.reason}`);
+    return 1;
+  }
+  const succeeded = result.report.outcome === "succeeded";
+  (succeeded ? context.out : context.err)(collectionLine(result.report));
+  if (result.heartbeat.kind !== "failed") return succeeded ? 0 : 1;
+  context.err(
+    `fffactory host collect: the heartbeat was not written (${result.heartbeat.failure})`,
+  );
+  return 1;
+}
+
 const SUBCOMMANDS: Readonly<
   Record<string, (args: readonly string[], context: CliContext) => Promise<number>>
 > = {
@@ -200,6 +254,7 @@ const SUBCOMMANDS: Readonly<
   dispatch,
   work,
   agents,
+  collect,
 };
 
 async function host(args: readonly string[], context: CliContext): Promise<number> {

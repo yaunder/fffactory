@@ -12,6 +12,8 @@ import { repositoryInspectionJson } from "../../src/domain/repository-placement"
 import { type Agent, activityJson, controlPlaneActionJson } from "../../src/domain/control-plane";
 import { dispatchAdoptionJson, dispatchInspectionJson } from "../../src/domain/dispatch-projection";
 import { type WorkInspection, workInspectionJson } from "../../src/domain/work-inspection";
+import type { CollectionReport } from "../../src/host/collect";
+import type { HostCollection } from "../../src/host/collection";
 import { harness } from "../support/cli-harness";
 import { fakeWorker, inspection, verification } from "../support/fake-workers";
 import { MemoryInstanceStore } from "../support/memory-instance-store";
@@ -72,6 +74,7 @@ describe("fffactory host inspect", () => {
     expect(out).toContain("       fffactory host dispatch (adoption | reconcile | inspect)");
     expect(out).toContain("       fffactory host work inspect");
     expect(out).toContain("       fffactory host agents --json");
+    expect(out).toContain("       fffactory host collect --once");
   });
 });
 
@@ -222,6 +225,109 @@ describe("fffactory host agents (host protocol §agents)", () => {
     await run(["host", "agents", "--json"], cli.context);
     expect(cli.err).toEqual([
       "fffactory host agents: run it as factory, never root; the dispatcher runs it",
+    ]);
+  });
+});
+
+describe("fffactory host collect (host protocol §collect)", () => {
+  const REPORT: CollectionReport = {
+    epoch: "20261030T101500Z-0123456789abcdef",
+    run_started_at: "2026-10-30T10:15:00.000Z",
+    ended_at: "2026-10-30T10:15:02.000Z",
+    outcome: "succeeded",
+    failure: null,
+    budget_hit: null,
+    uploaded_bytes: 2048,
+    journal_seq: 3,
+    last_success_at: "2026-10-30T10:15:02.000Z",
+    backlog: { files: 0, bytes: 0 },
+  };
+
+  function collecting(result: HostCollection, root = false) {
+    let ran = false;
+    const worker = fakeWorker(inspection(HOST), {
+      isRoot: () => root,
+      collect: async () => {
+        ran = true;
+        return result;
+      },
+    });
+    const cli = harness(new MemoryInstanceStore(), {}, { worker });
+    return { cli, ran: () => ran };
+  }
+
+  test("a successful run exits 0 with one line for the journal", async () => {
+    const { cli } = collecting({ kind: "ran", report: REPORT, heartbeat: { kind: "created" } });
+    expect(await run(["host", "collect", "--once"], cli.context)).toBe(0);
+    expect(cli.out).toEqual([
+      "fffactory host collect: succeeded; uploaded 2048 bytes, journal 3, backlog 0 files (0 bytes)",
+    ]);
+    expect(cli.err).toEqual([]);
+  });
+
+  test("a failed run exits 1 naming its failure class, never anything else", async () => {
+    const report = {
+      ...REPORT,
+      outcome: "failed" as const,
+      failure: "AccessDenied",
+      budget_hit: "time" as const,
+      uploaded_bytes: 0,
+      journal_seq: null,
+      backlog: { files: 2, bytes: 31 },
+    };
+    const { cli } = collecting({ kind: "ran", report, heartbeat: { kind: "created" } });
+    expect(await run(["host", "collect", "--once"], cli.context)).toBe(1);
+    expect(cli.err).toEqual([
+      "fffactory host collect: failed (AccessDenied); uploaded 0 bytes, journal none, backlog 2 files (31 bytes), time budget hit",
+    ]);
+    expect(cli.out).toEqual([]);
+  });
+
+  test("a heartbeat that was not written exits 1 and says so", async () => {
+    const { cli } = collecting({
+      kind: "ran",
+      report: REPORT,
+      heartbeat: { kind: "failed", failure: "ECONNREFUSED" },
+    });
+    expect(await run(["host", "collect", "--once"], cli.context)).toBe(1);
+    expect(cli.err).toEqual([
+      "fffactory host collect: the heartbeat was not written (ECONNREFUSED)",
+    ]);
+  });
+
+  test("a run that could not start exits 1 with its reason", async () => {
+    const { cli } = collecting({
+      kind: "failed",
+      reason: "the archive could not be opened (InstanceMetadataV1FallbackError)",
+    });
+    expect(await run(["host", "collect", "--once"], cli.context)).toBe(1);
+    expect(cli.err).toEqual([
+      "fffactory host collect: the archive could not be opened (InstanceMetadataV1FallbackError)",
+    ]);
+  });
+
+  test("without configuration, or while another run holds its lock, exits 0 having done nothing", async () => {
+    for (const result of [{ kind: "not_configured" }, { kind: "busy" }] as const) {
+      const { cli } = collecting(result);
+      expect(await run(["host", "collect", "--once"], cli.context)).toBe(0);
+      expect({ out: cli.out, err: cli.err }).toEqual({ out: [], err: [] });
+    }
+  });
+
+  test("refuses root, needs --once and takes nothing else", async () => {
+    for (const [args, root] of [
+      [["host", "collect", "--once"], true],
+      [["host", "collect"], false],
+      [["host", "collect", "--once", "extra"], false],
+    ] as const) {
+      const { cli, ran } = collecting({ kind: "not_configured" }, root);
+      expect(await run([...args], cli.context)).toBe(1);
+      expect({ out: cli.out, ran: ran() }).toEqual({ out: [], ran: false });
+    }
+    const { cli } = collecting({ kind: "not_configured" }, true);
+    await run(["host", "collect", "--once"], cli.context);
+    expect(cli.err).toEqual([
+      "fffactory host collect: run it as factory, never root; its timer runs it",
     ]);
   });
 });

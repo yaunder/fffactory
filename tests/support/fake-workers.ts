@@ -550,6 +550,7 @@ export function fakeWorker(
     inspectWork: async () => {
       throw new Error("host work inspect was not expected");
     },
+    collect: async () => ({ kind: "not_configured" }),
     isRoot: () => false,
     ...overrides,
   };

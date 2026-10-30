@@ -236,7 +236,8 @@ export function incarnationJson(document: Incarnation): string {
   );
 }
 
-function valid<T>(
+/** A field read by one of `instance.ts`'s parsers, named and never quoted when malformed. */
+export function valid<T>(
   value: unknown,
   path: string,
   parse: (value: string) => { ok: true; value: T } | { ok: false },

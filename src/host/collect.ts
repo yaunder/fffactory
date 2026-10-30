@@ -3,8 +3,9 @@
  * Claude's root, decides each capture from the checkpoint, uploads the admitted captures' blobs,
  * then the run's journal record, then saves the checkpoint, so the checkpoint never names data
  * that was not stored. It holds its own lock in its state directory, never the install lock, and
- * only reads sources: never through a symbolic link, never one the allowlist refuses. The rules
- * are `domain/collector.ts`'s; the archive is reached only through an `ArchiveWriter`.
+ * only reads sources: never through a symbolic link, never one the allowlist refuses. Under the
+ * lock it first creates the incarnation's `incarnation.json`. The rules are
+ * `domain/collector.ts`'s; the archive is reached only through an `ArchiveWriter`.
  */
 import { createHash, type Hash, randomUUID } from "node:crypto";
 import type { BigIntStats } from "node:fs";
@@ -87,6 +88,12 @@ export interface CollectSystem {
    * elsewhere.
    */
   readonly openFiles: string | null;
+  /**
+   * This incarnation's `incarnation.json`, created first under the lock every run: one already
+   * there (`exists`) is written. Null writes none, for tests of the run alone; a worker's run
+   * always gives it (`host/collection.ts`).
+   */
+  readonly incarnation: Uint8Array | null;
 }
 
 /** What a run did, in the heartbeat's terms (§Heartbeats), for its caller to publish. */
@@ -599,11 +606,19 @@ async function claudeRealPath(
   }
 }
 
+/** Creates `incarnation.json`, once: a later run finds it there. A failure fails the run. */
+async function writeIncarnation(system: CollectSystem, failures: Failures): Promise<void> {
+  if (system.incarnation === null) return;
+  const outcome = await system.writer.put(system.keys.incarnation, system.incarnation);
+  if (outcome.kind === "failed") failures.first ??= outcome.failure;
+}
+
 async function run(system: CollectSystem): Promise<CollectionReport> {
   const root = await realpath(system.root);
   const started = system.now();
   const run_started_at = started.toISOString();
   const failures: Failures = { first: null };
+  await writeIncarnation(system, failures);
   const loaded =
     (await loadCheckpoint(system.stateDirectory)) ??
     newCheckpoint(newEpoch(started, system.randomBytes), run_started_at);

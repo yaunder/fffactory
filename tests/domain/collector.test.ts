@@ -13,11 +13,15 @@ import {
   captureDecision,
   capturedEntry,
   checkpointJson,
+  COLLECTOR_CONFIGURATION,
+  type CollectorConfiguration,
   collectable,
+  collectorConfigurationJson,
   type EntryKind,
   NEVER_COLLECTED,
   newCheckpoint,
   parseCheckpoint,
+  parseCollectorConfiguration,
   SMALL_FILE_BYTES,
   type SourceCheckpoint,
   type SourceStat,
@@ -485,5 +489,58 @@ describe("backlog", () => {
 
   test("a source gone from disk is not backlog", () => {
     expect(backlog(CHECKPOINT, [])).toEqual({ files: 0, bytes: 0 });
+  });
+});
+
+describe("the collector's configuration (§Credentials and publishing)", () => {
+  const CONFIGURATION: CollectorConfiguration = {
+    format: 1,
+    factory_id: "fff-r29c2un6",
+    host_key: "builder-1",
+    bucket: "fff-r29c2un6-logs-123456789012-us-east-1-an",
+    region: "us-east-1",
+  } as CollectorConfiguration;
+  const text = () => Bun.file(join(FIXTURES, "collector.json")).text();
+
+  test("lives in /etc/fffactory, beside nothing secret", () => {
+    expect(COLLECTOR_CONFIGURATION).toBe("/etc/fffactory/collector.json");
+  });
+
+  test("is its serializer's output byte for byte, and parses back without loss", async () => {
+    const fixture = await text();
+    expect(`${collectorConfigurationJson(CONFIGURATION)}\n`).toBe(fixture);
+    expect(parseCollectorConfiguration(fixture)).toEqual({ ok: true, document: CONFIGURATION });
+  });
+
+  test("ignores fields it does not know, and rejects another format first", async () => {
+    const fields = JSON.parse(await text());
+    expect(parseCollectorConfiguration(JSON.stringify({ ...fields, later: 1 }))).toEqual({
+      ok: true,
+      document: CONFIGURATION,
+    });
+    expect(parseCollectorConfiguration(JSON.stringify({ format: 2 }))).toEqual({
+      ok: false,
+      kind: "unsupported_format",
+      format: 2,
+    });
+  });
+
+  test("names a malformed field without quoting it", async () => {
+    const fields = JSON.parse(await text());
+    for (const [field, value] of [
+      ["factory_id", "not a factory"],
+      ["host_key", "Builder 1"],
+      ["bucket", "Not_A_Bucket"],
+      ["region", "the moon"],
+    ] as const) {
+      const parsed = parseCollectorConfiguration(JSON.stringify({ ...fields, [field]: value }));
+      expect(parsed).toEqual({
+        ok: false,
+        kind: "invalid",
+        problem: expect.stringContaining(field),
+      });
+      expect(JSON.stringify(parsed)).not.toContain(value);
+    }
+    expect(parseCollectorConfiguration("{")).toMatchObject({ ok: false, kind: "invalid" });
   });
 });

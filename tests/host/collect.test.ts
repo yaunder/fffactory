@@ -48,6 +48,7 @@ const KEYS: ArchiveKeys = archiveKeys("fff-aaaa1111" as FactoryId, {
   role_id: "AROAEXAMPLEROLEID1234",
   instance_id: "i-0123456789abcdef0",
 });
+const INCARNATION = new TextEncoder().encode('{"format":1}');
 const PROJECT = `${CLAUDE_ROOT}/projects/-home-factory--paseo-worktrees-1zu9oxdf-x`;
 const SESSION = `${PROJECT}/0b6e1c3a.jsonl`;
 const SUBAGENT = `${PROJECT}/0b6e1c3a/subagents/agent-1.jsonl`;
@@ -134,6 +135,7 @@ function system(archive: MemoryArchive, overrides: Partial<CollectSystem> = {}):
     lock: flockExclusive,
     budget: { milliseconds: 40_000, bytes: 64 * 1024 * 1024 },
     openFiles: platform() === "linux" ? "/proc/self/fd" : null,
+    incarnation: null,
     ...overrides,
   };
 }
@@ -322,6 +324,39 @@ describe("a fresh worker's history", () => {
         size: was.size,
       });
     }
+  });
+});
+
+describe("incarnation.json (§Credentials and publishing)", () => {
+  test("is created first, under the lock, and found already written by every later run", async () => {
+    await put(SESSION, "{}\n");
+    const archive = memoryArchive();
+
+    const first = await run(archive, { incarnation: INCARNATION });
+    const second = await run(archive, { incarnation: INCARNATION });
+
+    expect(archive.puts[0]).toBe(KEYS.incarnation);
+    expect(archive.objects.get(KEYS.incarnation)).toEqual(INCARNATION);
+    expect(archive.puts.filter((key) => key === KEYS.incarnation)).toHaveLength(2);
+    expect(first).toMatchObject({ outcome: "succeeded", journal_seq: 1 });
+    expect(second).toMatchObject({ outcome: "succeeded", journal_seq: null });
+  });
+
+  test("one that cannot be created fails the run, which still collects, and is retried", async () => {
+    await put(SESSION, "{}\n");
+    const archive = memoryArchive();
+    archive.fault = (key) =>
+      key === KEYS.incarnation ? { kind: "failed", failure: "AccessDenied" } : undefined;
+
+    const failed = await run(archive, { incarnation: INCARNATION });
+
+    expect(failed).toMatchObject({ outcome: "failed", failure: "AccessDenied", journal_seq: 1 });
+    expect(failed.last_success_at).toBeNull();
+    expect((await checkpoint())?.last_success_at).toBeNull();
+    archive.fault = () => undefined;
+    const retried = await run(archive, { incarnation: INCARNATION });
+    expect(retried).toMatchObject({ outcome: "succeeded", failure: null });
+    expect(archive.objects.get(KEYS.incarnation)).toEqual(INCARNATION);
   });
 });
 
@@ -754,7 +789,7 @@ describe("the lock", () => {
     const held = await flockExclusive(at(`${COLLECTOR_STATE}/collect.lock`));
     const archive = memoryArchive();
 
-    const result = await collectOnce(system(archive));
+    const result = await collectOnce(system(archive, { incarnation: INCARNATION }));
     held?.release();
 
     expect(result).toEqual({ kind: "busy" });

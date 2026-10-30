@@ -53,7 +53,11 @@ shown as `archiveShown` when set), which can replace a host or change its instan
 `showPlan` gives every change a `before` and an `after` as `terraform show -json` does;
 `support/factory-world.ts` builds the plan and apply fixtures on it, `archiving` enabling the
 log archive, `ARCHIVE`), stubbed SDK calls,
-or the real SDK pointed at `support/stub-sts.ts`, `support/stub-vpc-quota.ts` (EC2 and
+or the real SDK pointed at `support/stub-sts.ts` (whose caller's `UserId` a test may give, and
+which records each request's session token), `support/loopback-imds.ts` (a loopback IMDSv2:
+token, role credentials with a known session token, and identity document, refusing a request
+without its token; the SDK reads its endpoint only from `AWS_EC2_METADATA_SERVICE_ENDPOINT`, which
+`withMetadataEndpoint` sets in the test process for one call and restores), `support/stub-vpc-quota.ts` (EC2 and
 Service Quotas), `support/stub-s3.ts` (a versioned, never-versioned or suspended bucket
 with conditional writes and bootstrap's settings, and the log archive's ownership controls and
 ABAC status, some of them lackable, older versions and
@@ -63,7 +67,9 @@ ListObjectVersions with `IsLatest` and `LastModified`, in pages resumed after th
 once those versions are deleted, and refusing with `InvalidArgument` a version marker it never
 gave, DeleteObjects with per-key
 failures (`undeletable`) recorded in `deleteBatches`, DeleteBucket refused while
-anything is left, and ListObjectsV2 under a prefix in pages of `listPageSize`, `forcePathStyle`) or `support/stub-secrets-manager.ts` (which also answers `GetSecretValue`, and ListSecrets,
+anything is left, ListObjectsV2 under a prefix in pages of `listPageSize`, a PutObject without
+`If-None-Match: *` refused as the archive's hosts policy does (`requireIfNoneMatch`), any request
+refused with an error a test chooses (`refuse`), and each request's session token, `forcePathStyle`) or `support/stub-secrets-manager.ts` (which also answers `GetSecretValue`, and ListSecrets,
 RestoreSecret, DeleteSecret and DescribeSecret (name, ARN, tags and deleted date) as AWS documents them: tag filters by prefix,
 scheduled secrets, pages of `pageSize`, a forced deletion of a scheduled secret refused and one
 still described for `lingering` looks), with AWS's documentation example

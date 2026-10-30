@@ -45,3 +45,10 @@ temporary directories by `worker-scenarios.ts`, never the real `/`.
   reader's rules with `support/archive-reassembly.ts`, checks every reassembled state is a prefix
   of content the file held and the last equals it, and that the checkpoint names only stored
   data, also over a seeded random sequence of appends, rewrites and crashes.
+  `collect.test.ts` gives the run no `incarnation.json` unless a test does, so put indices
+  count only the run's own objects.
+- `s3-archive-writer.test.ts` and `collection.test.ts` run the S3 archive writer and `host
+  collect --once` on the real AWS SDK against `support/loopback-imds.ts`, `support/stub-sts.ts`
+  and `support/stub-s3.ts` (with `requireIfNoneMatch`), the metadata endpoint set only around
+  the open (`withMetadataEndpoint`); nothing reaches AWS. A network failure is a real refused
+  connection to `CLOSED_ENDPOINT`.

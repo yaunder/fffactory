@@ -27,6 +27,7 @@
     "@aws-sdk/client-service-quotas": "3.1143.0",
     "@aws-sdk/client-sts": "3.1143.0",
     "@aws-sdk/credential-provider-ini": "3.973.17",
+    "@smithy/credential-provider-imds": "4.5.2",
     "bcryptjs": "3.0.3"
   }
 }

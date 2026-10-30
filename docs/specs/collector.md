@@ -9,7 +9,9 @@ run decides by. Design: [worker log archive](../designs/worker-log-archive.md);
 evidence: [collector validation](../research/worker-log-archive-collector.md).
 
 The rules are pure (`src/domain/collector.ts`, `src/domain/archive-format.ts`);
-the run that reads the files and writes the archive builds on them.
+the run that reads the files and writes the archive builds on them, and
+`fffactory host collect --once` ([host protocol §collect](host-protocol.md#collect))
+runs it on a worker against S3.
 Collection is raw: nothing is redacted, so the archive may hold anything an
 agent saw and is treated as sensitive.
 
@@ -265,6 +267,10 @@ One run (`collectOnce`, `src/host/collect.ts`) is one pass, in this order:
    lock (`/run/fffactory-host-apply.lock`), so it never makes `host apply`,
    `repositories`, `control-plane`, `dispatch` or `work inspect` refuse `busy`, and
    they never stop it.
+   Holding it, it first creates `incarnation.json`
+   ([Credentials and publishing](#credentials-and-publishing)); one already
+   there (`exists`) is written, and one that cannot be created fails the run,
+   which still collects.
 2. **Checkpoint.** It reads `checkpoint.json` beside the lock; missing or
    unreadable, it starts a new one ([Checkpoint](#checkpoint)).
 3. **Discovery.** It walks `CLAUDE_ROOT` with `lstat`, descending only into
@@ -308,7 +314,8 @@ writes, truncates, renames or deletes a source, or changes its times.
 
 The run reports, in the heartbeat's terms ([Heartbeats](#heartbeats)), its
 epoch, start and end, `outcome` (`failed` when a source or directory could not be
-read for another reason than vanishing, a put failed, or the checkpoint could not
+read for another reason than vanishing, a put failed (`incarnation.json`'s
+among them), or the checkpoint could not
 be saved, or a source was not found open at its own path; `failure` the first
 one's class: the file-system error code, `SourcePathMismatch`,
 `OpenPathUnverified` or the writer's), `budget_hit` (`time` over `bytes`; `time`
@@ -324,3 +331,78 @@ injected at every put (`tests/host/collect.test.ts`). A run that dies at any
 point leaves the checkpoint as it was; the next run resumes from it, and
 reassembling the archive gives, per source, only states the file held, the last
 equal to the file.
+
+## Credentials and publishing
+
+`fffactory host collect --once` ([host protocol §collect](host-protocol.md#collect))
+runs one collection on a worker as `factory`, in this order
+(`workerCollection`, `src/host/collection.ts`):
+
+1. **Configuration.** It reads `/etc/fffactory/collector.json`
+   (`COLLECTOR_CONFIGURATION`): JSON with `"format": 1`, the worker's
+   `factory_id` and `host_key`, and the archive's `bucket` and `region`
+   (`parseCollectorConfiguration`; shared fixture
+   `tests/domain/fixtures/archive/collector.json`). It holds no secret. Absent,
+   the collector is not configured: the run does nothing at all and exits 0,
+   asking instance metadata, STS and S3 nothing. Unreadable or malformed, it
+   fails, naming the field, never its value.
+2. **Identity.** It reads the boot ID (`/proc/sys/kernel/random/boot_id`;
+   unreadable, it fails before anything is asked) and Claude Code's version as
+   the running release pins it (`steps/versions.env`'s `CLAUDE_CODE_VERSION`,
+   which `host apply` installed and verified), `null` when that cannot be read.
+3. **Credentials.** It opens the archive as the instance role
+   (`openInstanceArchive`, `src/host/s3-archive-writer.ts`): credentials from
+   the instance metadata service alone, IMDSv2 only (a session token, never the
+   IMDSv1 fallback), never the SDK's default chain, a profile, the environment's
+   keys or any static key. Then `sts:GetCallerIdentity`, which needs no
+   permission, names the caller: its `UserId` (`aws:userid`) must be
+   `<role ID>:<instance ID>` (`callerIncarnation`), the prefix the hosts' policy
+   lets it write, and its `Account` the account that must own the bucket. Any
+   other caller fails the run `NotAnInstanceRole`, writing nothing. Instance
+   metadata that answers no token fails it by the SDK's provider error
+   (`InstanceMetadataV1FallbackError`, since the IMDSv1 fallback is refused).
+4. **Run.** It runs one collection ([Run](#run)) through the S3
+   `ArchiveWriter`, which creates `incarnation.json` first under the
+   collector's lock. Busy, it ends there, quietly, having written nothing.
+5. **Heartbeat.** It writes the run's heartbeat
+   ([Heartbeats](#heartbeats)) under `heartbeat/<yyyy-mm-dd>/<ts>.json` for the
+   run's end: the report in heartbeat terms, the boot ID, the release and
+   Claude Code's version.
+
+Every object is one `PutObject` with `If-None-Match: *` and
+`ExpectedBucketOwner` set to the caller's account; S3's 412 is `exists`, and
+any other failure is its AWS error name (`AccessDenied`,
+`ConditionalRequestConflict`, ...) or network error code (`ECONNREFUSED`, ...),
+never a message. Every AWS call has a deadline (`ARCHIVE_CALL_DEADLINE_MS`,
+10 s: opening, instance metadata and STS together, then each put; instance
+metadata's own requests time out after 1 s, retried twice); one that passes it
+fails `DeadlineExceeded`. The SDK makes one attempt per call and logs nothing.
+
+`incarnation.json` is created by every run and found already written (412) by
+all but the first of an incarnation: no local marker can then disagree with the
+archive. `created_at` is when the first run that stored it ran.
+
+Failures are visible in the heartbeat and in the journal (the run's standard
+output and error), never elsewhere. A failure before the run (configuration,
+boot ID, credentials, caller) has no heartbeat, since the prefix or the
+credentials to write it are missing: it is one line on standard error and exit
+1. A run that fails records its class in its heartbeat, its checkpoint left
+behind the data, and the next run retries. A heartbeat that cannot be written
+is one more line on standard error, and exit 1.
+
+Tests: `tests/host/s3-archive-writer.test.ts` runs the adapter on the real AWS
+SDK against `tests/support/loopback-imds.ts` (IMDSv2: token, role credentials,
+identity document), `tests/support/stub-sts.ts` (the caller's `UserId`) and
+`tests/support/stub-s3.ts` (refusing a PutObject without `If-None-Match`, as
+the hosts' policy does): the credentials and session token used, a non-role
+caller, instance metadata failing or unreachable, STS refusing or hanging, 412,
+AccessDenied, a conflict, another account's bucket, a refused connection and a
+hanging S3. `tests/host/collection.test.ts` runs `host collect --once` over a
+worker in a temporary directory against the same stand-ins: incarnation, blobs,
+journal record and heartbeat under the incarnation's own prefix, all with
+`If-None-Match`; the 412 of a second run; a denied blob and a refused
+connection in the heartbeat with the checkpoint behind the data, then retried;
+a heartbeat refused; no configuration, a malformed one, no instance metadata,
+no boot ID, and a busy lock; and that the worker's own system checks open
+sources in `/proc/self/fd` (`OPEN_FILES`), as `src/cli/main.ts` wires it.
+`tests/infrastructure/aws-isolation.test.ts` keeps every test from real AWS.

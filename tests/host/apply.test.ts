@@ -22,6 +22,7 @@ import {
   readLimited,
   workerApplier as realWorkerApplier,
 } from "../../src/host/apply";
+import { localCollectionSystem, workerCollection } from "../../src/host/collection";
 import { workerEndpoint } from "../../src/host/endpoint";
 import { flockExclusive } from "../../src/host/install-lock";
 import type { HostVerifier } from "../../src/host/verify";
@@ -708,7 +709,10 @@ describe("the worker endpoint", () => {
       stdout: "active\n",
       stderr: "",
     });
-    const endpoint = workerEndpoint(applySystem({ run }));
+    const endpoint = workerEndpoint(
+      applySystem({ run }),
+      workerCollection(localCollectionSystem(RELEASE, root)),
+    );
     expect(endpoint.isRoot()).toBe(true);
     expect((await endpoint.inspect()).release).toEqual({ state: "none" });
     expect((await endpoint.verify()).hostname).toBe(WORKER_HOSTNAME);

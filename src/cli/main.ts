@@ -4,6 +4,7 @@ import { resolve } from "node:path";
 import { cacheDirectoryPath } from "../application/cache-directory";
 import { planStoreDirectory } from "../application/plan-store";
 import { readLimited } from "../host/apply";
+import { localCollectionSystem, workerCollection } from "../host/collection";
 import { workerEndpoint } from "../host/endpoint";
 import { localWorkerSystem } from "../host/inspect";
 import { flockExclusive } from "../host/install-lock";
@@ -142,14 +143,17 @@ await interrupts.run(
       transport,
       controlPlane: paseoControlPlane(transport),
       workflowQueue: ffflowGithubWorkflowQueue(transport),
-      worker: workerEndpoint({
-        ...localWorkerSystem(),
-        release: RELEASE,
-        isRoot: () => process.getuid?.() === 0,
-        readInput: () => readLimited(Bun.stdin.stream(), 1024 * 1024),
-        now: () => new Date(),
-        lock: flockExclusive,
-      }),
+      worker: workerEndpoint(
+        {
+          ...localWorkerSystem(),
+          release: RELEASE,
+          isRoot: () => process.getuid?.() === 0,
+          readInput: () => readLimited(Bun.stdin.stream(), 1024 * 1024),
+          now: () => new Date(),
+          lock: flockExclusive,
+        },
+        workerCollection(localCollectionSystem(RELEASE)),
+      ),
       interrupted: interrupts.interrupted,
       hostname: hostname(),
       now: () => new Date(),

@@ -15,7 +15,16 @@ import {
   parseFormatted,
   sequence,
   sourcePath,
+  valid,
 } from "./archive-format";
+import {
+  AWS_REGION,
+  type FactoryId,
+  type HostKey,
+  parseFactoryId,
+  parseHostKey,
+  S3_BUCKET_NAME,
+} from "./instance";
 import {
   array,
   type Fields,
@@ -410,4 +419,50 @@ export function backlog(
     bytes += unarchivedBytes(entry, stat);
   }
   return { files, bytes };
+}
+
+/**
+ * Where the collector reads its configuration on a worker (§Credentials and publishing): root's,
+ * readable by `factory`, holding no secret. Absent, the collector is not configured and a run does
+ * nothing.
+ */
+export const COLLECTOR_CONFIGURATION = "/etc/fffactory/collector.json";
+
+/** The collector's configuration: the worker it is and the archive it writes to. */
+export interface CollectorConfiguration {
+  readonly format: typeof ARCHIVE_FORMAT;
+  readonly factory_id: FactoryId;
+  readonly host_key: HostKey;
+  /** The log archive's bucket (`archiveBucketName`). */
+  readonly bucket: string;
+  /** Its Region: the factory's. */
+  readonly region: string;
+}
+
+export function collectorConfigurationJson(configuration: CollectorConfiguration): string {
+  return JSON.stringify(
+    {
+      format: ARCHIVE_FORMAT,
+      factory_id: configuration.factory_id,
+      host_key: configuration.host_key,
+      bucket: configuration.bucket,
+      region: configuration.region,
+    },
+    null,
+    2,
+  );
+}
+
+function readConfiguration(document: Fields): CollectorConfiguration {
+  return {
+    format: ARCHIVE_FORMAT,
+    factory_id: valid(document.factory_id, "factory_id", parseFactoryId),
+    host_key: valid(document.host_key, "host_key", parseHostKey),
+    bucket: string(document.bucket, "bucket", S3_BUCKET_NAME),
+    region: string(document.region, "region", AWS_REGION),
+  };
+}
+
+export function parseCollectorConfiguration(text: string): ArchiveParse<CollectorConfiguration> {
+  return parseFormatted(text, readConfiguration);
 }
