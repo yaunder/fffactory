@@ -61,6 +61,7 @@ import {
   tailnetDevice,
   workAnswer,
 } from "../support/fake-workers";
+import { INSPECT_WORK_COMMAND } from "../../src/domain/work-inspection";
 import { UNARCHIVED_UNKNOWN } from "../../src/domain/worker-removability";
 import type { WorkerUnarchived } from "../../src/domain/teardown";
 import {
@@ -691,10 +692,7 @@ describe("fffactory teardown: the happy path (teardown §Order)", () => {
     expect(result.kind).toBe("refused");
   });
 
-  test("without the log archive, the review previews only a backlog a worker counted", async () => {
-    const quiet = world({ workers: { "builder-1": "running", "builder-2": "stopped" } });
-    await teardownFactory(quiet.deps, request(quiet));
-    expect(reviewOf(quiet)?.unarchived).toEqual([]);
+  test("without the log archive, the review previews nothing and asks no worker for it", async () => {
     const backlog = {
       state: "collected",
       complete: true,
@@ -702,8 +700,8 @@ describe("fffactory teardown: the happy path (teardown §Order)", () => {
       unarchived_bytes: 5,
       last_success_at: null,
     } as const;
-    const counting = world({
-      workers: { "builder-1": "running" },
+    const w = world({
+      workers: { "builder-1": "running", "builder-2": "stopped" },
       worker: (key) =>
         statusAnswers(
           readyWorker(FACTORY, key, RELEASE),
@@ -713,13 +711,14 @@ describe("fffactory teardown: the happy path (teardown §Order)", () => {
           workAnswer(hostname(key), [], true, backlog),
         ),
     });
-    await teardownFactory(counting.deps, request(counting));
-    expect(reviewOf(counting)?.unarchived).toEqual([
-      {
-        hostname: hostname("builder-1"),
-        unarchived: { state: "counted", files: 1, bytes: 5, complete: true, last_success_at: null },
-      },
-    ]);
+    const result = await teardownFactory(w.deps, request(w));
+    expect(reviewOf(w)?.unarchived).toEqual([]);
+    // Only the gate's work inspection: none for a preview.
+    const inspections = w.transport.calls.filter(
+      ({ command }) => command.join(" ") === INSPECT_WORK_COMMAND.join(" "),
+    );
+    expect(inspections.length).toBe(1);
+    expect(result.kind).toBe("done");
   });
 
   test("without the log archive, says only a backlog a worker counted", async () => {

@@ -325,14 +325,35 @@ async function revisit(walk: Walk, recent: readonly SourceCheckpoint[], more: ()
 
 /** How often, in entries, discovery reads the run's clock. */
 const CLOCK_EVERY = 64;
-/** The share of the time budget discovery may take. */
+/** The share of the time budget discovery may take; the recheck, the first half of it. */
 const DISCOVERY_SHARE = 0.25;
+/** The entries a walk looks at whatever the time, so its place moves on every run. */
+const WALK_MINIMUM = 64;
 
 /**
- * A run's discovery (§Budgets), within its share of the time budget and the budget's entries:
- * first the sources the checkpoint saw modified last, at most half the entries, then the walk,
- * resumed after where the last run's stopped. A walk that reaches the end starts the next run's
- * from the beginning.
+ * Says yes to at most `entries` entries, the first `minimum` whatever the time, then while the
+ * clock, read every `CLOCK_EVERY`, is before `end`. `looked` counts the yeses.
+ */
+function bounded(system: CollectSystem, entries: number, end: number, minimum = 0) {
+  const bound = { looked: 0, more: () => false };
+  let late = false;
+  bound.more = () => {
+    if (late || bound.looked >= entries) return false;
+    bound.looked += 1;
+    late =
+      bound.looked > minimum && bound.looked % CLOCK_EVERY === 0 && system.now().getTime() >= end;
+    return !late;
+  };
+  return bound;
+}
+
+/**
+ * A run's discovery (§Budgets), within its share of the time budget and the budget's entries.
+ * First the recheck of the sources the checkpoint saw modified last, within at most half the
+ * entries and the first half of the share; then the walk, resumed after where the last run's
+ * stopped, within the entries left and the rest of the share, and never fewer than
+ * `WALK_MINIMUM` entries, so a slow recheck never keeps the walk's place from moving. A walk that
+ * reaches the end starts the next run's from the beginning.
  */
 async function discoverForRun(
   system: CollectSystem,
@@ -341,19 +362,15 @@ async function discoverForRun(
   startedMs: number,
   failures: Failures,
 ): Promise<Walk> {
-  const end = startedMs + system.budget.milliseconds * DISCOVERY_SHARE;
-  let looked = 0;
-  let late = false;
-  const within = (entries: number) => () => {
-    if (late || looked >= entries) return false;
-    looked += 1;
-    late = looked % CLOCK_EVERY === 0 && system.now().getTime() >= end;
-    return !late;
-  };
-  const walk = walking(root, failures, within(system.budget.entries), loaded.discovery_after);
+  const share = system.budget.milliseconds * DISCOVERY_SHARE;
   const hot = Math.floor(system.budget.entries / 2);
+  const recheck = bounded(system, hot, startedMs + share / 2);
   const recent = loaded.sources.toSorted(newestFirst).slice(0, hot);
-  await revisit(walk, recent, within(hot));
+  let walk = walking(root, failures, () => false, loaded.discovery_after);
+  await revisit(walk, recent, recheck.more);
+  const left = system.budget.entries - recheck.looked;
+  const walkBound = bounded(system, left, startedMs + share, Math.min(WALK_MINIMUM, left));
+  walk = { ...walk, more: walkBound.more };
   return discover(walk);
 }
 

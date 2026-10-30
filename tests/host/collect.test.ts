@@ -1059,6 +1059,34 @@ describe("discovery's budget", () => {
     await expectReassembles(archive);
   });
 
+  test("a recheck of recent sources that outlasts its time share never stalls the walk", async () => {
+    const history = Array.from({ length: 100 }, (_, n) => older(n));
+    for (const path of history) await put(path, "old");
+    const archive = memoryArchive();
+    await run(archive);
+    expect(archived(archive).size).toBe(history.length);
+    const fresh = `${CLAUDE_ROOT}/file-history/zz-new/v1`;
+    await put(fresh, "new evidence, after every other");
+    // Every reading of the clock is 11 s later: the recheck passes its share at its first.
+    const slow = clock(Date.parse("2026-10-30T11:00:00.000Z"), 11_000);
+    const cursors: (string | null | undefined)[] = [];
+    const hits: (string | null)[] = [];
+    const found = async () => {
+      const report = await run(archive, { now: slow.now });
+      cursors.push((await checkpoint())?.discovery_after);
+      hits.push(report.budget_hit);
+      return report.backlog.files > 0 || archived(archive).has(fresh);
+    };
+    let runs = 1;
+    while (!(await found()) && runs < 6) runs += 1;
+    expect(runs).toBeLessThan(6);
+    expect(runs).toBeGreaterThan(1);
+    // Every run before the one that found it stopped at the time share, its walk moved on.
+    expect(hits.slice(0, -1).every((hit) => hit === "time")).toBe(true);
+    expect(cursors[0]).toBeString();
+    expect(new Set(cursors.slice(0, -1)).size).toBe(runs - 1);
+  });
+
   test("discovery stops at its share of the time budget; the run still reaches its checkpoint", async () => {
     const history = Array.from({ length: 70 }, (_, n) => older(n));
     for (const path of history) await put(path, "old");

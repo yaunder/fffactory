@@ -364,6 +364,10 @@ export function parseJournal(text: string): ArchiveParse<JournalRecord> {
 
 export const RUN_OUTCOMES = ["succeeded", "failed"] as const;
 export type RunOutcome = (typeof RUN_OUTCOMES)[number];
+/**
+ * The budget a run stopped at: `bytes`, or `time`, which also covers discovery stopped at its
+ * entries (`docs/specs/collector.md` §Budgets).
+ */
 export const BUDGETS_HIT = ["bytes", "time"] as const;
 export type BudgetHit = (typeof BUDGETS_HIT)[number];
 

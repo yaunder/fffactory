@@ -1218,17 +1218,20 @@ function reviewed(
 }
 
 /**
- * The review's preview of each worker's unarchived evidence (§Unarchived evidence): each running
- * worker the tailnet locates read by its work inspection alone, read-only, all at once; any other
- * worker, or one whose inspection cannot be had or carries no backlog, unknown (S1). Only those
- * said (`saysUnarchived`), in EC2's order. Never judged: the gates read it again once dispatch is
- * stopped (D3), and only they refuse.
+ * The review's preview of each worker's unarchived evidence (§Unarchived evidence), only while
+ * factory.json enables the log archive: without it the collector step removes the collector's
+ * configuration, so a worker counts no backlog, and no worker is asked. Each running worker the
+ * tailnet locates is read by its work inspection alone, read-only, all at once; any other
+ * worker, or one whose inspection cannot be had or carries no backlog, is unknown (S1). In EC2's
+ * order. Never judged: the gates read it again once dispatch is stopped (D3), and only they
+ * refuse.
  */
 async function previewUnarchived(
   deps: TeardownDependencies,
   teardown: Teardown,
   machines: readonly Machine[],
 ): Promise<WorkerUnarchived[]> {
+  if (teardown.archive === undefined) return [];
   const workers = machines.flatMap((machine) => {
     const worker = workerOf(teardown, machine);
     return worker === undefined ? [] : [{ worker, running: machine.state === "running" }];
@@ -1245,9 +1248,7 @@ async function previewUnarchived(
       return { hostname: worker.hostname, unarchived };
     }),
   );
-  return previews.filter(({ unarchived }) =>
-    saysUnarchived(teardown.archive !== undefined, unarchived),
-  );
+  return previews;
 }
 
 /**

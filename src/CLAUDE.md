@@ -308,8 +308,8 @@ Dependencies point inward: `domain <- application <- infrastructure, cli`, and
   enabled it keeps it, named from factory.json alone (`archiveBucketName`), never asked of AWS,
   in its question, review, report and factory.json advice (`archiveKept`, `factoryJsonKept`),
   and never touches the `archive` root. Its review previews each worker's unarchived evidence
-  (`previewUnarchived`: the work inspection alone, read-only, before the confirmation, unknown
-  when it cannot be had), never a refusal; the gates count it again once dispatch is stopped
+  (`previewUnarchived`: only with the log archive enabled, the work inspection alone, read-only,
+  before the confirmation, unknown when it cannot be had), never a refusal; the gates count it again once dispatch is stopped
   (D3). It never deletes the archive as the state bucket,
   because validation refuses `state_backend.bucket` equal to the archive's derived name,
   enabled or not (`docs/specs/instance-configuration.md` §State bucket): the use case trusts

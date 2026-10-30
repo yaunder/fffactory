@@ -229,12 +229,16 @@ a worker that counted a backlog (`saysUnarchived`).
 
 The review comes before the confirmation and the gates' inspection after it
 (D3), so the review carries a preview, so that the operator knows what is
-lost before confirming, not after. Right before the review, each running
-worker the tailnet locates is asked for its work inspection alone
-(`previewUnarchived`), every one at once: read-only, while dispatch still
-runs, and never its activity, so it never holds the activator for a gate. Its
-count is the review's `unarchived` (`WorkerUnarchived`, in EC2's order, by the
-same `saysUnarchived` rule), shown under `Unarchived` after the instances. A
+lost before confirming, not after. While factory.json enables the log archive,
+right before the review, each running worker the tailnet locates is asked for
+its work inspection alone (`previewUnarchived`), every one at once: read-only,
+while dispatch still runs, and never its activity, so it never holds the
+activator for a gate. Its count is the review's `unarchived`
+(`WorkerUnarchived`, in EC2's order), shown under `Unarchived` after the
+instances. Without the archive no worker is asked and the review previews
+nothing: the collector step removes the collector's configuration
+([host protocol §The collector step](host-protocol.md#the-collector-step)), so
+`work inspect` reports `not_collected` and no worker can count a backlog. A
 worker stopped or not located, or whose inspection cannot be had or carries no
 backlog (a release before it), is `unarchived evidence unknown`, never nothing
 unarchived (S1). The preview is information only: it never refuses, never
@@ -1168,7 +1172,7 @@ before the destroy and reported, never refusing, and none said without the log
 archive; its preview in the review, before the question and before dispatch is
 stopped, unknown for a release without a backlog and for a worker not located
 (which the gates still refuse), never refusing, and without the log archive
-only a backlog counted;
+none, no worker asked for it;
 and each refusal
 deleting nothing and leaving the lock released: a held lock, busy agents, a
 worker on a release from before agent states,

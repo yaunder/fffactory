@@ -158,7 +158,7 @@ An orphan nothing superseded still holds bytes the file held when it was read.
 | `release`, `claude_code_version` | As in `incarnation.json`. |
 | `outcome` | `succeeded`, or `failed` when any write or read failed. |
 | `failure` | The failure's class (an AWS error name or a network error code, never a message), or `null`; always `null` when `outcome` is `succeeded`. |
-| `budget_hit` | `bytes` or `time` when the run stopped at a budget, else `null`. |
+| `budget_hit` | `bytes` or `time` when the run stopped at a budget, else `null`. `time` also covers discovery stopped at its entries ([Budgets](#budgets)). |
 | `uploaded_bytes` | The bytes of the blobs this run created ([Run](#run)). |
 | `journal_seq` | The sequence of the record this run wrote, or `null`. |
 | `last_success_at` | When the last run that succeeded ended, this one included, or `null`. |
@@ -252,33 +252,51 @@ speed that is a prefix of gigabytes (`TODO(re-evaluate when T7 measures run
 time on Acceptance)`).
 
 Discovery is bounded too, so a history of any size never keeps a run from its
-captures, its checkpoint or its heartbeat, and never holds more than the
-budget's entries in memory. It takes at most the first quarter of the time
-budget (10 s, the clock read every 64 entries) and the budget's entries, each
-name it looks at counted, in two parts:
+captures, its checkpoint or its heartbeat. It holds at most the budget's
+entries of what it found; what it lists is bounded only by the largest single
+directory, whose names `readdir` reads and sorts at once, every run (a
+directory holds one session's or one project's entries, never the history).
+It takes at most the first quarter of the time budget (10 s, the clock read
+every 64 entries) and the budget's entries, each name it looks at counted, in
+two parts:
 
 1. **Recent sources.** The checkpoint's most recently modified sources, at most
-   half the entries, are looked at again by path, each found only as the walk
-   would find it: collectable, its every directory walkable and a directory by
-   `lstat`, never a link. A source being written, such as a live transcript, is
-   so appended to every run, wherever the walk is.
+   half the entries, within the first half of discovery's time (5 s), are
+   looked at again by path, each found only as the walk would find it:
+   collectable, its every directory walkable and a directory by `lstat`, never
+   a link. A source being written, such as a live transcript, is so appended to
+   every run, wherever the walk is.
 2. **The walk.** The walk goes on from the checkpoint's `discovery_after`, in
    its own order (each directory's names sorted, a directory before what it
    holds): it looks at no path up to that one but the directories on the way to
-   it. Stopped by the budget, it saves the last path it looked at as the next
-   run's `discovery_after`; reaching the end, it saves `null`, and the next run
-   starts from the beginning.
+   it. It has the entries the recheck left and discovery's time to its end,
+   and looks at no fewer than 64 entries (`WALK_MINIMUM`) whatever the time, so
+   a recheck that took all its time, or more, as on a cold inode cache, never
+   keeps the walk from moving on. Stopped by the budget, it saves the last path
+   it looked at as the next run's `discovery_after`; reaching the end, it saves
+   `null`, and the next run starts from the beginning.
 
-Every path is so looked at at least once in every cycle of runs, each run
-looking at least at half the entries, so a new file anywhere, however much
-history comes before it, is found within a bounded number of runs (about the
-number of entries over half the budget's, plus one), and once captured it is a
-recent source. A backlog drains: each cycle finds every source, and what is
-found is decided and captured within the other budgets. A walk resumed by
-position rather than by modification time needs no order of directories by
-time, which a file's append does not change. A run whose discovery stopped
-reports `budget_hit: "time"`, and its backlog counts only the sources it
-found.
+Every run's walk so moves on by at least 64 entries, and by up to half the
+budget's entries or more when there is time, so every path is looked at at
+least once in every cycle of runs, and a new file anywhere, however much
+history comes before it, is found within a bounded number of runs: at most the
+walk's entries over 64, plus one, and about that number over half the budget's
+when the disk keeps up. Once captured it is a recent source. A backlog drains:
+each cycle finds every source, and what is found is decided and captured within
+the other budgets. A walk resumed by position rather than by modification time
+needs no order of directories by time, which a file's append does not change.
+A run whose discovery stopped, at its time share or at its entries, reports
+`budget_hit: "time"` (the heartbeat has no value of its own for the entries),
+and its backlog counts only the sources it found.
+
+A new file in a directory the walk has passed waits for the next cycle: on a
+history of a million entries, about 40 runs, or 40 minutes. Re-listing first
+the directories whose modification time is newer than the last run (one
+changes when an entry is created in it) would find it sooner, but it compares
+the file system's times with the run's clock, and sees no new file below a
+directory that already existed. `TODO(re-evaluate when measured on Acceptance)`:
+measure the walk's cycle on a real history and add the re-listing if new
+sessions wait too long.
 
 ## Backlog
 
