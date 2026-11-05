@@ -420,7 +420,7 @@ describe("host work inspect, both sides", () => {
 });
 
 /**
- * A worker's Paseo, as 0.13.2 answers: a dispatched agent waiting on a permission, an agent at
+ * A worker's Paseo, as 0.15.0 answers: a dispatched agent waiting on a permission, an agent at
  * work, a dispatched agent whose turn ended, and one not loaded.
  */
 const PASEO: ProcessRunner = async (argv) => {

@@ -37,7 +37,7 @@ temporary directories by `worker-scenarios.ts`, never the real `/`.
   argument, environment value and log line for the material it used.
 - `control-plane.test.ts` runs the control-plane endpoint over a scripted runner: for
   activity and `host agents`, a scripted Paseo (`paseo`) answering its lists and each agent's
-  inspection, as 0.13.2 prints them, after the auth wrapper however it was run; for install,
+  inspection, as 0.15.0 prints them, after the auth wrapper however it was run; for install,
   Secrets Manager answering the Paseo password: it checks the hash setup is sent with
   `bcryptjs`'s `compareSync`, and searches every argument, environment value and setup input
   for the password.

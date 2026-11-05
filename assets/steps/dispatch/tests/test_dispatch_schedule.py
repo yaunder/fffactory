@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-"""Exercise schedule reconciliation with the pinned CLI's (Paseo 0.13.2) JSON contract."""
+"""Exercise schedule reconciliation with the pinned CLI's (Paseo 0.15.0) JSON contract."""
 
 import json
 import os

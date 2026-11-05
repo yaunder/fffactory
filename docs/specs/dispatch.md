@@ -191,7 +191,7 @@ reports drift nor stops reconciliation
 
 Paseo keeps every run of a schedule in its record
 (`~/.paseo/schedules/<id>.json`), and `schedule inspect` returns all of them.
-0.13.2 has no setting that bounds or prunes that history, so it grows by one
+0.15.0 has no setting that bounds or prunes that history, so it grows by one
 entry per dispatch run for as long as the schedule lives. fffactory does not
 edit Paseo's private state to trim it.
 
