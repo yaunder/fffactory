@@ -72,7 +72,7 @@ const AS_FACTORY = [
   AUTH,
 ];
 
-/** A row of `paseo ls --json`, as Paseo 0.13.2 prints it. */
+/** A row of `paseo ls --json`, as Paseo 0.15.0 prints it. */
 function row(id: string, status: string) {
   return {
     id,
@@ -86,7 +86,7 @@ function row(id: string, status: string) {
   };
 }
 
-/** `paseo agent inspect ID --json`, as Paseo 0.13.2 prints it, trimmed to what matters. */
+/** `paseo agent inspect ID --json`, as Paseo 0.15.0 prints it, trimmed to what matters. */
 function inspection(id: string, pending: readonly { id: string; tool: string }[]): ProcessOutcome {
   const stdout = JSON.stringify({
     Id: id,

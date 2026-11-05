@@ -345,7 +345,7 @@ of dispatch scheduling.
 
 ## The Paseo pin
 
-`assets/steps/control-plane/versions.env` pins `@getpaseo/cli` 0.13.2 with its
+`assets/steps/control-plane/versions.env` pins `@getpaseo/cli` 0.15.0 with its
 npm registry integrity value. Setup downloads the package with `npm pack` as
 `factory`, refuses one whose integrity differs from the pin, installs it into
 `factory`'s npm prefix, and fails unless `paseo --version` then prints exactly
@@ -357,9 +357,10 @@ applied by `fffactory upgrade` or `apply`: the release plans `paseo-package` and
 agents may be busy, and the restart that follows installation starts the new
 daemon.
 
-fffactory relies on these Paseo contracts, held by 0.13.2
+fffactory relies on these Paseo contracts, held by 0.15.0
 ([#46](https://github.com/yaunder/fffactory/issues/46), re-checked for 0.13.2 in
-[#97](https://github.com/yaunder/fffactory/issues/97)):
+[#97](https://github.com/yaunder/fffactory/issues/97) and for 0.15.0 in
+[Paseo 0.15.0](../research/paseo-0.15.0.md)):
 
 - The service runs `paseo daemon run --home /home/factory/.paseo`. With a
   bcrypt hash in `config.json`'s `daemon.auth.password` (and no
@@ -392,7 +393,10 @@ fffactory relies on these Paseo contracts, held by 0.13.2
   and a workspace an agent in one creates is one too; `ls` hides their agents
   unless given `--background`. Without `--global`, `ls` keeps only the agents
   of active, non-archived workspaces. The [agent adapter](#agent-states) lists
-  with both.
+  with both. From 0.14 the daemon closes an agent's runtime once it has been
+  `idle` for an hour and stores it `closed`; it stays listed and is not
+  archived, so a `finished` agent later reads `stopped`, which the
+  [busy rule](#the-busy-rule) and dispatch's duplicate check treat alike.
 - `paseo agent inspect ID --json` prints one agent as an object whose `Id` is
   its ID and whose `PendingPermissions` is an array, empty unless it waits on a
   person approving something.
@@ -406,11 +410,16 @@ fffactory relies on these Paseo contracts, held by 0.13.2
 - From 0.13 the daemon rewrites a stored `running` or `initializing` agent to
   `closed` at startup, before any client connects: a restart never resumes a
   turn, so an agent a crash, a kill or a restart interrupted no longer reads
-  `running`.
-- 0.13.2 needs no migration of Paseo's persisted state from 0.11.4: a 0.11.4
-  home's `config.json`, agents and schedules load unchanged, and a workspace
-  record without `background` is not a background workspace. It needs the same
-  Node.js 22 runtime.
+  `running`. 0.15 resumes such agents at startup only with
+  `agents.resumeOnStartup` true in `config.json`; it defaults to false, and the
+  release never sets it.
+- 0.15.0 needs no migration of Paseo's persisted state from 0.13.2: a 0.13.2
+  home's `config.json`, agents, workspaces and schedules load unchanged. It
+  needs the same Node.js 22 runtime. A worker cannot always return to an
+  earlier pin: a `config.json` holding `agents.idleRuntimeCleanup`,
+  `agents.resumeOnStartup` or `daemon.usage`, which only a Paseo client's
+  settings write and the release never merges, stops a pre-0.14 daemon from
+  starting.
 
 At start, with dictation or voice mode on, the daemon downloads its local
 speech-to-text and text-to-speech models into `~/.paseo/models/local-speech`,
@@ -418,7 +427,7 @@ about 765 MB, that workers never use
 ([#73](https://github.com/yaunder/fffactory/issues/73)). `paseo-config.sh`
 therefore merges `features.dictation.enabled` and `features.voiceMode.enabled`
 as `false` ([§Release-owned installation](#release-owned-installation)), with
-which 0.13.2 requests no model and starts no download. Paseo's equivalent
+which 0.15.0 requests no model and starts no download. Paseo's equivalent
 environment variables (`PASEO_DICTATION_ENABLED`, `PASEO_VOICE_MODE_ENABLED`)
 are not used, so the setting lives in the release-owned config. Models a worker
 downloaded before are left where they are: nothing deletes them.
