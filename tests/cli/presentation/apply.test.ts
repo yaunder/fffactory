@@ -182,7 +182,7 @@ describe("the motivating run (plan-apply §Apply)", () => {
       },
     ],
     repositories: [{ key: KEY, hostname: HOST, placed: [] }],
-    dispatch: [{ key: KEY, hostname: HOST, requested: false, schedule: null }],
+    dispatch: [{ key: KEY, hostname: HOST, requested: false, schedule: null, registers: 0 }],
     stopped: [],
   };
   const workers = [{ ...installed(KEY, ALL, HOST), release: "0.0.0" }];

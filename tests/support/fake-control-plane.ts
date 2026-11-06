@@ -8,6 +8,7 @@ import type { AgentState, AgentsObservation, WorkerAgents } from "../../src/doma
 import type { WorkflowAdoption, WorkflowQueue } from "../../src/application/workflow-queue";
 import type { DispatchInspection } from "../../src/domain/dispatch-projection";
 import type { HostProjection } from "../../src/domain/host-projection";
+import type { RepositoryRegistration } from "../../src/domain/repository-registration";
 
 /** A worker listing one agent in each of `states`, the first dispatched. */
 export function agentsIn(...states: AgentState[]): WorkerAgents {
@@ -76,11 +77,18 @@ function dispatchInspection(
 
 /**
  * A workflow queue reporting `adoption` (passed by default) and reconciling every projection it
- * is sent, unless `failure` makes reconciling fail. It counts adoption checks in `adoptions` and
- * records each projection's `active` in `reconcile`: both stay empty for a worker sent nothing.
+ * is sent, unless `failure` makes reconciling fail; its inspection carries `registration` when
+ * given, as a worker whose release registers the placed checkouts reports it, and none otherwise,
+ * as an older worker's. It counts adoption checks in `adoptions` and records each projection's
+ * `active` in `reconcile`: both stay empty for a worker sent nothing.
  */
 export function fakeWorkflowQueue(
-  options: { adoption?: WorkflowAdoption; changed?: boolean; failure?: string } = {},
+  options: {
+    adoption?: WorkflowAdoption;
+    changed?: boolean;
+    failure?: string;
+    registration?: RepositoryRegistration;
+  } = {},
 ) {
   const reconcile: boolean[] = [];
   const adoptions = { count: 0 };
@@ -95,7 +103,12 @@ export function fakeWorkflowQueue(
       return {
         kind: "reconciled",
         changed: options.changed ?? true,
-        inspection: dispatchInspection(projection, options.changed ?? true),
+        inspection: {
+          ...dispatchInspection(projection, options.changed ?? true),
+          ...(options.registration === undefined
+            ? {}
+            : { repository_registration: options.registration }),
+        },
       };
     },
     inspectDispatch: async () => ({ protocol_version: 1, state: "none" }),

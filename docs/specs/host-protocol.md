@@ -173,6 +173,48 @@ outside apply ([dispatch §Stopping dispatch](dispatch.md#stopping-dispatch)).
 genuine adoption/readiness pending state; malformed input or reconciliation
 failure exits 1. See [dispatch](dispatch.md).
 
+#### The dispatch inspection document
+
+`reconcile` and `inspect` answer, and `reconcile` persists, the dispatch
+inspection document (`DispatchInspection`, `src/domain/dispatch-projection.ts`),
+as `tests/host/fixtures/dispatch-registered.json` shows:
+
+```json
+{
+  "protocol_version": 1,
+  "state": "active",
+  "blockers": [],
+  "changed": true,
+  "repository_registration": {
+    "backend": "paseo",
+    "changed": true,
+    "checkouts": [
+      { "path": "/workspace/repos/alpha", "state": "present" },
+      { "path": "/workspace/repos/team/beta", "state": "registered" },
+      {
+        "path": "/workspace/repos/delta",
+        "state": "failed",
+        "reason": "registering it as a Paseo project exited with status 1"
+      }
+    ]
+  }
+}
+```
+
+| Field | Meaning |
+| --- | --- |
+| `state` | `active`, `pending`, `not_requested` or `failed`; `none` (no result recorded) and `unreadable`, which carry nothing else. |
+| `blockers` | The dispatch gates blocking a pending (or failed) projection; empty for `active` and `not_requested`. |
+| `changed` | Whether reconciling changed the schedule or the release-owned dispatch assets; `active`, `pending` and `not_requested` only. `inspect` reports `false`. |
+| `reason` | A `failed` state's reason, in fffactory's words. |
+| `repository_registration` | Optional, last: what registering the placed checkouts present on disk did ([dispatch §Repository registration](dispatch.md#repository-registration)), the execution backend's document: `backend`, `changed` (whether any checkout was newly registered, apart from the schedule's) and each checkout's `path`, `state` (`registered`, `present`, `failed` with a `reason`, or `not_applicable`). Every `reconcile` of a projection for this worker records it, whatever the state; `inspect` returns the stored one unchanged. Absent when the worker could not read its repository manifest or the registration threw unexpectedly, and from a worker whose release predates registration: no registration. A malformed one reads as absent too, never invalidating the document. It never decides `state`, `blockers`, `changed` or the exit status. |
+
+The keys come in that order. Adding `repository_registration` keeps protocol
+version 1 ([Versioning](#versioning)): the CLI ignores fields it does not know,
+and `tests/host/fixtures/dispatch-before-registration.json`, an older worker's
+answer, still reads. The `WorkflowQueue` adapter returns the parsed document,
+registration included, from `reconcileDispatch`.
+
 Terminate reads a worker's current work through one more, read-only, fixed
 operation of that activator and lock
 ([work inspect](#work-inspect)):
@@ -1197,7 +1239,7 @@ never elsewhere: it prints no path, no AWS or SDK message and no credential.
 | Worker | `src/host/credentials.ts` | `workerCredentials`: the `credentials` install step ([credential delivery](credential-delivery.md)). |
 | Worker | `src/host/collector-step.ts` | `workerCollectorStep`: the `collector` install step ([§The collector step](#the-collector-step)). |
 | Worker | `src/host/verify.ts` | `workerVerifier`: the verifiers and enrollment checks. |
-| Worker | `src/host/dispatch.ts` | Dispatch adoption, installation, reconciliation and checked observation, with privilege drop. |
+| Worker | `src/host/dispatch.ts` | Dispatch adoption, installation, reconciliation and checked observation, with privilege drop, and registering the placed checkouts through the execution backend after the schedule. |
 | Worker | `src/host/work.ts` | `workerWork`: the work inspection, over the worker's working trees, as `factory`, read-only, and the archive's backlog, from the collector's checkpoint and its discovery (`discoverSources` in `src/host/collect.ts`), as root. |
 | Worker | `src/host/control-plane.ts` | `workerControlPlane`: the Paseo activity, install, reload and restart, and `host agents`; `paseoAgents`, the adapter translating Paseo's agents into fffactory's states. |
 | Worker | `src/host/collect.ts` | `collectOnce`: one collection run under the collector's own lock, through an `ArchiveWriter` ([collector §Run](collector.md#run)). |
@@ -1238,6 +1280,13 @@ So is `tests/host/fixtures/projection-log-archive.json`, the host projection of
 a factory with the log archive: the CLI side projects it byte for byte, and the
 worker side parses it without loss and `host inspect` reports its control-plane
 part's digest apart, that of the projection without the archive.
+`tests/host/fixtures/dispatch-registered.json`, a reconcile's inspection with
+its repository registration, goes the first way: the worker's `dispatch
+reconcile` produces it byte for byte from a scripted schedule and Paseo, and the
+CLI reads it back without loss, and over the transport through the
+`WorkflowQueue` into the reconcile's inspection;
+`dispatch-before-registration.json`, an older worker's answer without it, is
+read by the CLI side only, as no registration.
 `tests/host/apply.test.ts` runs
 `host apply` over real bash stand-in steps in a temporary worker: the order in
 one process, each step's result recorded before the next, the logs streamed as

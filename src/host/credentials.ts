@@ -25,6 +25,7 @@ import { CREDENTIAL_SECRET_FIELDS, type SecretReference } from "../domain/instan
 import { ENROLLMENTS, type EnrollmentId } from "../domain/readiness";
 import { SecretMaterial } from "../domain/secrets";
 import type { ProcessOutcome } from "../infrastructure/local-tool-probe";
+import { ended, errorCode } from "./failures";
 import type { WorkerSystem } from "./inspect";
 import { writeRootFile } from "./root-files";
 import { AS_FACTORY, FACTORY_HOME } from "./runtime-account";
@@ -37,7 +38,6 @@ const GITHUB = ["--hostname", "github.com"] as const;
  * else is never passed to `gh auth logout`.
  */
 const GITHUB_LOGIN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,99}$/;
-const ERROR_CODE = /^[A-Z0-9_]{1,32}$/;
 
 /**
  * Why the step failed, in fffactory's own words, for one account or, for managed settings that
@@ -49,25 +49,6 @@ class Refused extends Error {
     readonly reason: string,
   ) {
     super(`${subject}: ${reason}`);
-  }
-}
-
-function errorCode(error: unknown): string {
-  const code = (error as NodeJS.ErrnoException | undefined)?.code;
-  return typeof code === "string" && ERROR_CODE.test(code) ? code : "unexpected error";
-}
-
-/** How a command that did not succeed ended, as `<what> ...`; undefined when it succeeded. */
-function ended(what: string, outcome: ProcessOutcome): string | undefined {
-  switch (outcome.kind) {
-    case "exited":
-      return outcome.exitCode === 0 ? undefined : `${what} exited with status ${outcome.exitCode}`;
-    case "timed_out":
-      return `${what} timed out`;
-    case "not_found":
-      return `${what} could not be started (ENOENT)`;
-    case "not_started":
-      return `${what} could not be started (${ERROR_CODE.test(outcome.code) ? outcome.code : "unexpected error"})`;
   }
 }
 

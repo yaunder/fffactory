@@ -38,23 +38,45 @@ and `host collect --once`, which the log archive's timer runs as `factory`
   agents, and answers `unknown` for anything it cannot read, all its calls within one budget
   (`ACTIVITY_BUDGET_MS`) under the CLI's wait; no Paseo status, field or label
   reaches its document. It takes a `PaseoCommand`, so another caller can run Paseo its own
-  way; install reads the host projection from standard input, reads the Paseo password
-  by its reference as root and hashes it (bcryptjs at Paseo's cost), and invokes only the
-  active release's setup program, the reference and the hash on its standard input; the
-  password reaches only the hash function. Restart is the fixed Paseo systemd action.
+  way; from root that is `factoryPaseo`, within a budget its caller gives. Install reads the
+  host projection from standard input, reads the Paseo password by its reference as root and
+  hashes it (bcryptjs at Paseo's cost), and invokes only the active release's setup program,
+  the reference and the hash on its standard input; the password reaches only the hash
+  function. Restart is the fixed Paseo systemd action.
 - `host agents --json` is the one subcommand neither the operator's fffactory nor the
   activator runs: the worker's dispatcher runs it as `factory` for its capacity check, so a
   dispatch tick never waits on the install lock. It refuses root, runs `paseoAgents` through
   the active release's auth wrapper itself in `factory`'s clean environment
   (`FACTORY_ENV`), within the activity's budget, prints the activity document, and exits 1
   when the agents are unknown, so dispatch fails safe.
+- `execution-backend.ts` is the worker-side `ExecutionBackend` seam (`docs/specs/dispatch.md`
+  §Repository registration), not an `application/` port: one operation,
+  `registerRepositories`, the one with a caller. Run operations join it only when dispatch moves
+  behind it. `executionBackend` is the one place a backend is chosen, hardwired to Paseo until a
+  second adapter exists (its TODO). A backend only adds: it never deletes, renames or archives
+  what the backend holds, and never reloads or restarts it. Its result is
+  `domain/repository-registration.ts`'s, failures in fffactory's words.
+- `paseo-backend.ts`, the Paseo adapter, is the only code naming Paseo's project commands:
+  `project ls --json`, then `project create PATH --json` for each checkout not listed, each
+  through the `PaseoCommand` it is given (the auth wrapper as `factory`), never a `runuser` of
+  its own. A failed list fails every checkout; a failed create fails only its own.
 - `secret-value.ts` reads a delivered secret by its ARN with `/usr/bin/aws` as root, for the
   `credentials` step and the control-plane install: a `SecretMaterial`, or why not in
   fffactory's words (the AWS error's name at most).
+- `failures.ts` is how a failure is said in fffactory's words, shared rather than copied: a
+  system error's code at most (`systemCode`, `errorCode`, else `unexpected error`), and how a
+  command ended (`ended`), never its output.
 - `host dispatch` runs only through the activator's fixed `adoption`, `reconcile` and
   `inspect` actions and shares that lock. It installs only the active release's assets,
   persists canonical desired and observed state, and drops to `factory` for FFFlow,
   repository and Paseo commands. Inspection checks the schedule before reporting active.
+  After the schedule, every reconcile registers the manifest's placed checkouts present on disk
+  as directories, none reached through a link from the repository root down, as sync refuses
+  them, through `executionBackend` over `factoryPaseo` (`control-plane.ts`, the
+  `PaseoCommand` root runs, activity's too), never Paseo directly, and records the result as
+  `repository_registration`; it never changes the state, blockers or `changed`. No manifest is
+  no checkouts; an unreadable or invalid one, or a registration that throws, records no
+  registration, and the schedule's result is still persisted.
 - `host work inspect` runs only through the activator's fixed `work inspect` operation and
   shares that lock. It lists directories as root but runs every Git command as `factory`
   (`runuser`, `env -i`) with `GIT_OPTIONAL_LOCKS=0`, no fsmonitor and no LFS filter, so it

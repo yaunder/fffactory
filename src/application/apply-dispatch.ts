@@ -16,6 +16,11 @@
  * so its existing schedule stays as it is until a later apply reconciles it. Its gates would
  * read its unverified release as failing and turn off a schedule that was dispatching fine.
  * A worker whose machine is stopped is sent nothing either, and reported `stopped`: not a skip.
+ *
+ * A reconciled worker's outcome carries the repository registration its dispatch reconcile
+ * reported (`docs/specs/dispatch.md` §Repository registration), never changing its kind: a
+ * checkout that failed to register is a gap a rerun closes (`registrationGap`), never a failure.
+ * An older worker reports none, and so carries none.
  */
 import {
   type AdoptionState,
@@ -31,6 +36,7 @@ import type { WorkerIdentity } from "../domain/rollout";
 import type { WorkerAddress } from "../domain/tailnet";
 import { dispatchProjection } from "../domain/dispatch-projection";
 import type { DispatchSettings } from "../domain/instance";
+import type { RepositoryRegistration } from "../domain/repository-registration";
 import type { WorkflowAdoption, WorkflowQueue } from "./workflow-queue";
 
 export interface DispatchStageDependencies {
@@ -89,24 +95,34 @@ export interface DispatchStageRequest {
   readonly workers: readonly DispatchWorker[];
 }
 
+/**
+ * What dispatch reconcile reported registering on a reconciled worker: absent when it reported
+ * nothing, as a worker whose release predates registration does.
+ */
+interface Registered {
+  readonly registration?: RepositoryRegistration;
+}
+
 /** One worker's dispatch reconciliation outcome. */
 export type DispatchOutcome =
   /** factory.json does not request dispatch here; any existing schedule was removed. */
-  | (WorkerIdentity & { readonly kind: "not_requested" })
+  | (WorkerIdentity & Registered & { readonly kind: "not_requested" })
   /** Every gate passes: dispatch is active. `changed` is false when it already was. */
-  | (WorkerIdentity & {
-      readonly kind: "active";
-      readonly changed: boolean;
-      readonly gates: readonly DispatchGateResult[];
-    })
+  | (WorkerIdentity &
+      Registered & {
+        readonly kind: "active";
+        readonly changed: boolean;
+        readonly gates: readonly DispatchGateResult[];
+      })
   /** A gate blocks dispatch: it is kept inactive, with the blocking gates and their next actions. */
-  | (WorkerIdentity & {
-      readonly kind: "pending";
-      readonly gates: readonly DispatchGateResult[];
-      readonly blocking: readonly DispatchGateResult[];
-      readonly summary: string;
-      readonly nextActions: readonly string[];
-    })
+  | (WorkerIdentity &
+      Registered & {
+        readonly kind: "pending";
+        readonly gates: readonly DispatchGateResult[];
+        readonly blocking: readonly DispatchGateResult[];
+        readonly summary: string;
+        readonly nextActions: readonly string[];
+      })
   /** Reconciling the schedule did not complete; the schedule may be unchanged. */
   | (WorkerIdentity & {
       readonly kind: "failed";
@@ -120,6 +136,29 @@ export type DispatchOutcome =
 
 export interface DispatchStage {
   readonly outcomes: readonly DispatchOutcome[];
+}
+
+/** What a registration gap leaves the operator: dispatch reconcile registers again on a rerun. */
+export const REGISTRATION_NEXT_ACTION = "Rerun `fffactory apply`";
+
+/**
+ * A worker's checkouts its execution backend did not register, each said with fffactory's reason
+ * as the worker reported it, and the next action that registers them; undefined when every
+ * checkout was registered or already present, or nothing was reported.
+ */
+export interface RegistrationGap {
+  readonly unregistered: readonly string[];
+  readonly nextAction: string;
+}
+
+export function registrationGap(outcome: DispatchOutcome): RegistrationGap | undefined {
+  const checkouts = "registration" in outcome ? (outcome.registration?.checkouts ?? []) : [];
+  const unregistered = checkouts.flatMap((checkout) =>
+    checkout.state === "failed" ? [`${checkout.path} is not registered: ${checkout.reason}`] : [],
+  );
+  return unregistered.length === 0
+    ? undefined
+    : { unregistered, nextAction: REGISTRATION_NEXT_ACTION };
 }
 
 function adoptionState(adoption: WorkflowAdoption): AdoptionState {
@@ -141,6 +180,15 @@ function pending(
   };
 }
 
+/** The registration a reconciled worker's inspection reported, none from an older worker. */
+function registeredBy(
+  inspection: Extract<ReconciledDispatch, { readonly kind: "reconciled" }>["inspection"],
+): Registered {
+  return "repository_registration" in inspection && inspection.repository_registration
+    ? { registration: inspection.repository_registration }
+    : {};
+}
+
 type DesiredDispatchState = ReturnType<typeof dispatchState>;
 type ReconciledDispatch = Awaited<ReturnType<WorkflowQueue["reconcileDispatch"]>>;
 
@@ -156,12 +204,19 @@ function reconciledOutcome(
       summary: `Reconciling dispatch on ${worker.hostname} failed: ${result.reason}`,
       nextAction: `Check \`systemctl status paseo.service\` on ${worker.hostname}, then rerun \`fffactory apply\``,
     };
+  const registered = registeredBy(result.inspection);
   if (state.kind === "not_requested" && result.inspection.state === "not_requested")
-    return { ...worker, kind: "not_requested" };
+    return { ...worker, kind: "not_requested", ...registered };
   if (state.kind === "active" && result.inspection.state === "active")
-    return { ...worker, kind: "active", changed: result.changed, gates: state.gates };
+    return {
+      ...worker,
+      kind: "active",
+      changed: result.changed,
+      gates: state.gates,
+      ...registered,
+    };
   if (state.kind === "pending" && result.inspection.state === "pending")
-    return pending(worker, state);
+    return { ...pending(worker, state), ...registered };
   return {
     ...worker,
     kind: "failed",

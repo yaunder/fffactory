@@ -5,6 +5,7 @@ import type { RepositoryOutcome } from "../../src/application/apply-repositories
 import { verifyFactory, type VerifyFactoryRequest } from "../../src/application/verify-factory";
 import type { HostKey } from "../../src/domain/instance";
 import type { Verification } from "../../src/domain/readiness";
+import { repositoryRegistration } from "../../src/domain/repository-registration";
 import type { WorkerIdentity, WorkerOutcome } from "../../src/domain/rollout";
 
 function identity(key: string): WorkerIdentity {
@@ -242,5 +243,66 @@ describe("end-to-end verification (dispatch §End-to-end verification)", () => {
       "builder-2",
     ]);
     expect(verification.ready).toBe(true);
+  });
+});
+
+describe("a worker's repository registration in the verification (plan-apply §Apply)", () => {
+  const PRODUCT = "/workspace/repos/product";
+  const TOOLS = "/workspace/repos/tools";
+
+  test("a failed checkout leaves the worker not ready, naming it and a rerun, its dispatch verdict unchanged", () => {
+    const dispatch: DispatchOutcome = {
+      ...identity("builder-1"),
+      kind: "active",
+      changed: false,
+      gates: [],
+      registration: repositoryRegistration("paseo", [
+        { path: PRODUCT, state: "failed", reason: "registering it as a Paseo project timed out" },
+        { path: TOOLS, state: "present" },
+      ]),
+    };
+    const verification = verifyFactory(request({ dispatch: [dispatch] }));
+    expect(verification.ready).toBe(false);
+    expect(verification.summary).toBe("The factory is not ready: 1 of 1 workers need attention");
+    expect(verification.workers[0]).toMatchObject({
+      release: "healthy",
+      repositories: "synchronized",
+      controlPlane: "applied",
+      dispatch: "active",
+      ready: false,
+      details: [
+        `${PRODUCT} is not registered: registering it as a Paseo project timed out`,
+        "Rerun `fffactory apply`",
+      ],
+    });
+  });
+
+  test("a gap on a worker whose dispatch is not requested also leaves it not ready", () => {
+    const dispatch: DispatchOutcome = {
+      ...identity("builder-1"),
+      kind: "not_requested",
+      registration: repositoryRegistration("paseo", [
+        { path: PRODUCT, state: "failed", reason: "Paseo's project list was invalid" },
+      ]),
+    };
+    const verification = verifyFactory(request({ dispatch: [dispatch] }));
+    expect(verification.ready).toBe(false);
+    expect(verification.workers[0]?.dispatch).toBe("not_requested");
+  });
+
+  test("every checkout registered or present leaves the worker ready, saying nothing more", () => {
+    const dispatch: DispatchOutcome = {
+      ...identity("builder-1"),
+      kind: "active",
+      changed: false,
+      gates: [],
+      registration: repositoryRegistration("paseo", [
+        { path: PRODUCT, state: "registered" },
+        { path: TOOLS, state: "present" },
+      ]),
+    };
+    const verification = verifyFactory(request({ dispatch: [dispatch] }));
+    expect(verification.ready).toBe(true);
+    expect(verification.workers[0]?.details).toEqual([]);
   });
 });

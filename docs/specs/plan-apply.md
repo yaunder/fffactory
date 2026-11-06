@@ -202,6 +202,24 @@ keeps Terraform's state lock as well.
    ([An empty factory](#an-empty-factory)). A saved plan contains the dispatch
    projection; a record without it is damaged and is never applied.
 
+   Each worker's Dispatch row names, before its schedule action, the
+   repositories factory.json places on it, which dispatch reconcile registers
+   through the worker's execution backend
+   ([dispatch §Repository registration](dispatch.md#repository-registration)):
+
+   ```text
+     Dispatch         after every readiness gate
+       ~ builder-1   register 3 placed repositories as Paseo projects; remove the factory dispatch schedule if it exists
+       ~ builder-2   register 1 placed repository as a Paseo project; install the dispatcher and skill, then reconcile …
+   ```
+
+   A worker placing none has the schedule action alone, as above: with nothing
+   placed the backend is asked nothing, so there is nothing to register. The
+   count is the Repositories row's, from factory.json, so a saved plan, bound to
+   factory.json's text, records nothing more for it. Apply performs only what
+   the reviewed plan described: dispatch reconcile registers the placed
+   checkouts present on disk and nothing else, and never deletes a project.
+
 ### An empty factory
 
 factory.json may declare no worker, `hosts: []`, as
@@ -444,6 +462,28 @@ stage sent it anything. A later stage skipped for the reason the workers stage
 already gave says only `skipped`. Summaries are shown as data, never read for
 inline code.
 
+A worker whose execution backend left placed checkouts unregistered has a
+`Registration` row after its Dispatch row, which still says how dispatch ended,
+naming each such checkout with fffactory's short reason, as data, in the words
+the verification records; its worker row is then `!`, never `✔`, and the Next
+block says ``Rerun `fffactory apply` `` for it once. When every checkout was
+registered or already present, or the worker reported no registration, there
+is no such row:
+
+```text
+  ! builder-1          installed and verified · every account enrolled
+    ✔ Control plane   applied
+    ✔ Repositories    synchronized
+    ✔ Dispatch        active
+    ! Registration    1 placed repository not registered
+      /workspace/repos/product is not registered: registering it as a Paseo project timed out
+  ! Verification       The factory is not ready: 1 of 1 workers need attention
+    Operation record   s3://fff-abcd1234-state/fff-abcd1234-operations/2026-09-30T12:00:00.000Z-aaaaaaaa.json
+
+── Next ─────────────────────────────────────────────
+  builder-1: Rerun `fffactory apply`
+```
+
 Each account's steps are apply's own, named for the hostname it resolved, never
 text from the worker ([readiness §Enrollment](readiness.md#enrollment)). An
 account whose API credential factory.json delivers to the worker, as the host
@@ -466,8 +506,9 @@ with no login: store a valid one, then apply again
 Failed and not-attempted workers' rows go to standard error. The exit status is 0 when every
 worker was installed and verified or is stopped, 2 when one was skipped and
 none failed, and 1 when one failed, including a new worker whose first boot did
-not finish in time. The dispatch stage never fails a skipped worker: it reports
-it `skipped` and sends it nothing. A deferred worker also bypasses the
+not finish in time. A checkout left unregistered also exits 2, never 1, and
+never changes a failure's 1. The dispatch stage never fails a skipped worker: it
+reports it `skipped` and sends it nothing. A deferred worker also bypasses the
 control-plane stage, but one skipped for another reason that the tailnet still
 locates goes through the control-plane stage, which may fail it (exit 1). Exit
 0 means every worker is ready or stopped, but for the accounts a human
@@ -1046,12 +1087,19 @@ After the checks above, and a saved plan's local freshness:
    skipped (its maintenance deferred, offline, ...) or the tailnet no longer
    locates is `skipped` before any gate: it is sent nothing, its schedule left
    as it is, with the skip's reason and next action
-   ([dispatch §Skipped workers](dispatch.md#skipped-workers)).
+   ([dispatch §Skipped workers](dispatch.md#skipped-workers)). Each reconciled
+   worker's outcome (`active`, `pending` or `not_requested`, unchanged by it)
+   carries the repository registration its dispatch reconcile reported; a
+   worker on a release that predates registration reports none, and a skipped
+   or stopped one is sent nothing, so neither has one to report.
 10. End-to-end verification joins the worker, repository, control-plane and
    observed dispatch outcomes. Pending, deferred or skipped is incomplete
    (exit 2); a failed reconciliation is a command failure (exit 1). A skipped
    worker's release is left as is, never reported absent. A stopped worker is
-   not incomplete.
+   not incomplete. A placed checkout the execution backend did not register is
+   incomplete too (exit 2, never 1): the worker is not ready, its details naming
+   each unregistered checkout with fffactory's reason, then ``Rerun `fffactory
+   apply` ``. Every checkout registered or already present changes nothing.
 11. The `Result` section, then the one closing Next block
    ([below](#what-apply-prints)), with the combined exit status of those
    stages. The lock is released.
@@ -1471,7 +1519,10 @@ array records each worker's safe outcome (`not_requested`, `active`, `pending`,
 or tool output. The verification stage goes `reconciling`, then `verified`,
 `pending` or `failed`, and records each composite worker verdict; a skipped
 worker's `release` is `skipped`, and a stopped worker's every verdict
-`stopped`.
+`stopped`. A worker with checkouts left unregistered keeps its `dispatch`
+outcome and verdict, is recorded not ready with each unregistered checkout and
+the rerun in its `details`, and leaves the operation `partial`; the dispatch
+record has no registration of its own.
 
 ### Interruption
 
@@ -1823,7 +1874,7 @@ unchanged by where the plan was made.
 
 | Layer | Module | Responsibility |
 | --- | --- | --- |
-| Domain | `src/domain/plan.ts` | Plan IDs, the CLI/pin match guard, reading a JSON plan's resource changes and comparing them with a record's (`sameChanges`), `ChangeKind` and `changeTally`, `PlanReview` (`factoryPlanReview`), `UnexpectedPlan`, the D11 refusals, the refusal to resize a stopped or stopping worker, or any while the EC2 inventory cannot be read (`resizeRefusal`), the saved plan record and its two kinds (`SavedFactoryPlan`, `SavedBootstrapPlan`), its freshness rule as `StaleReason`s (`planStaleness`, `stateStaleness`, `stoppedStaleness`, `archiveStaleness`, and `bootstrapStaleness`), `PlannedArchive` and the record's `creates_archive`, `FACTORY_STATE_KEY`, `PLAN_TTL_MS`. Pure; no text layout. |
+| Domain | `src/domain/plan.ts` | Plan IDs, the CLI/pin match guard, reading a JSON plan's resource changes and comparing them with a record's (`sameChanges`), `ChangeKind` and `changeTally`, `PlanReview` (`factoryPlanReview`, each worker's dispatch with the repositories it registers, `ReviewedDispatch`), `UnexpectedPlan`, the D11 refusals, the refusal to resize a stopped or stopping worker, or any while the EC2 inventory cannot be read (`resizeRefusal`), the saved plan record and its two kinds (`SavedFactoryPlan`, `SavedBootstrapPlan`), its freshness rule as `StaleReason`s (`planStaleness`, `stateStaleness`, `stoppedStaleness`, `archiveStaleness`, and `bootstrapStaleness`), `PlannedArchive` and the record's `creates_archive`, `FACTORY_STATE_KEY`, `PLAN_TTL_MS`. Pure; no text layout. |
 | Domain | `src/domain/backend-bootstrap.ts` | The create-only rule a bootstrap or log archive plan is read back by (`createOnlyRefusal`), and the log archive's readiness (`ArchiveReadiness`, `missingArchiveHardening`, `unreadyArchive`). Pure. |
 | Domain | `src/domain/release-compatibility.ts` | `RELEASE_COMPATIBILITY`, release precedence, upgrade's assessment of the pin, the schema version check, the base generation and schema D11 refusals, the `PinMove` an upgrade shows (`pinMove`: a pin that is not a plain release is never carried). Pure. |
 | Domain | `src/domain/operation.ts` | The operation record, its key, stage transitions (upgrade's `pin` stage too), workers, repositories and control-plane outcomes. Pure. |
@@ -1874,7 +1925,8 @@ target, changes and tally, every stage with stopped workers shown skipped, an
 empty factory, the pin move, backend bootstrap's plan, `plan`'s Next block and
 its quoted instance and profile, the saved bootstrap plan's Next block applying
 it and planning the factory, the instance and profile a plan row's command
-repeats, data such as the factory name and dispatch values shown verbatim, an
+repeats, data such as the factory name and dispatch values shown verbatim, the
+Dispatch row's registration of none, one and several placed repositories, an
 unready bucket's guidance, the log archive's row and an unready archive's
 guidance, both D11 refusals, the resize refusals, every
 `StaleReason`'s words and the stale (a bootstrap plan's bucket reason too),
@@ -1994,7 +2046,9 @@ question), `tests/cli/presentation/workers.test.ts` (each worker outcome's
 row and status across its later stages, an installed worker never ready while
 enrollment or a later stage is pending or failed, a stopped worker's start
 command with the instance and profile, the enrollment's login once and its
-accounts numbered, delivered accounts grouped apart), `tests/cli/presentation/apply.test.ts` (the 2026-10-05 run
+accounts numbered, delivered accounts grouped apart, the Registration row under
+Dispatch naming each unregistered checkout as data, plain and in color, and none
+when every checkout registered), `tests/cli/presentation/apply.test.ts` (the 2026-10-05 run
 as [What apply prints](#what-apply-prints) shows it, plain and in color; the
 Applying rows, Terraform's for a plan that only creates the log archive; the Result and Next block with nothing pending, one and several
 workers to enroll, a delivered credential to replace with no login, and once for
@@ -2010,13 +2064,18 @@ record that could not be finished, and its interrupts before and after the
 lock naming `fffactory plan`), `tests/cli/apply-stages.test.ts`
 (the exit code of each stage's outcomes, each line on its stream in the order
 written, a failed worker's next action on standard error and the Next block
-of a run with no failed worker on standard output),
+of a run with no failed worker on standard output, a checkout left unregistered
+exiting 2 even without verification and never lowering a failure's 1),
 `tests/cli/plan-apply.test.ts` (output, exit codes and every refusal
 in process, the log archive's row created or present, an unready archive's
 refusal, and a saved plan stale once the archive it creates exists, and an
 interactive apply's once it appears while the plan is shown, naming no plan ID
 and rerunning `fffactory apply`, the plan's every stage including a placed repository and requested
-dispatch, `plan`'s Next block repeating a quoted instance and profile, a
+dispatch, the Dispatch row's registration with dispatch requested or not, a
+registration that failed naming the unregistered checkout and a rerun, exiting
+2 and leaving the operation partial, and one registered, already present or
+not reported leaving the Result and exit 0 as they were,
+`plan`'s Next block repeating a quoted instance and profile, a
 refusal's Next block repeating them, and human output colored only on the
 stream that is, the complete pipeline's Result and enrollment Next block, the
 workers' rows and exit codes 0, 2 and 1, mixed outcomes written to both

@@ -157,7 +157,8 @@ const OCTET = String.raw`(25[0-5]|2[0-4]\d|1\d\d|0?\d?\d)`;
 /** Same rule as the schema's CIDR pattern: octets 0-255, prefix 0-32 without a leading zero. */
 const IPV4_CIDR = new RegExp(String.raw`^(${OCTET}\.){3}${OCTET}/(3[0-2]|[12]?\d)$`);
 
-function isCheckoutPath(value: string): boolean {
+/** A checkout path relative to the repository root: no empty, `.` or `..` segment, nothing to escape it. */
+export function isCheckoutPath(value: string): boolean {
   const segments = value.split("/");
   return segments.every(
     (segment) => /^[A-Za-z0-9._-]+$/.test(segment) && segment !== "." && segment !== "..",
@@ -282,6 +283,9 @@ function checkRepositories(document: Record<string, unknown>, issues: Issue[]): 
   return new Set(byKey.map((entry) => entry.key));
 }
 
+// TODO(re-evaluate when factory.json's schema_version next changes): refuse a repository key a
+// host places twice (`duplicateKeys` here, `uniqueItems` in the schema). Valid today, it is
+// counted twice in the plan's Repositories and Dispatch rows and registered twice.
 function checkPlacement(host: KeyedEntry, declared: Set<string>, issues: Issue[]): void {
   const placed = host.value.repositories;
   if (!Array.isArray(placed)) return;

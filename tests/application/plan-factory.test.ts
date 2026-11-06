@@ -67,7 +67,8 @@ describe("fffactory plan (plan-apply §Plan)", () => {
             changes: ["paseo-package", "service-definition", "listen-address", "password"],
           },
         ],
-        dispatch: [{ ...BUILDER_1, requested: false, schedule: null }],
+        // The review counts the repositories registered; the saved record binds factory.json.
+        dispatch: [{ ...BUILDER_1, requested: false, schedule: null, registers: 0 }],
         stopped: [],
       },
       saved: {

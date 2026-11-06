@@ -1,0 +1,25 @@
+{
+  "protocol_version": 1,
+  "state": "active",
+  "blockers": [],
+  "changed": true,
+  "repository_registration": {
+    "backend": "paseo",
+    "changed": true,
+    "checkouts": [
+      {
+        "path": "/workspace/repos/alpha",
+        "state": "present"
+      },
+      {
+        "path": "/workspace/repos/team/beta",
+        "state": "registered"
+      },
+      {
+        "path": "/workspace/repos/delta",
+        "state": "failed",
+        "reason": "registering it as a Paseo project exited with status 1"
+      }
+    ]
+  }
+}
