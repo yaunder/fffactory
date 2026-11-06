@@ -251,6 +251,9 @@ projection on standard input. The worker installs the release assets, drops to
 `factory` for Paseo and repository operations, persists the projection and
 observed result, and reports `active` only after the real schedule matches.
 Pending and not-requested projections actively remove a previous schedule.
+Every reconcile then registers the placed checkouts through the worker's
+execution backend ([Repository registration](#repository-registration)) and
+returns its result in the inspection, which the adapter passes on unchanged.
 A [skipped worker](#skipped-workers) is sent no projection, so its schedule is
 left as it is.
 The adapter never invokes a removed v1 command or an arbitrary sudo command.
@@ -261,6 +264,73 @@ Every repository factory.json places on a worker is made available for
 supervision through the worker's
 [execution backend](../../CONTEXT.md#execution-backend), so the operator can
 work on it from the backend's own client without adding it by hand.
+
+### When it runs
+
+On every `dispatch reconcile`, once the schedule is reconciled, the worker's
+endpoint (`reconcileDispatch`, `src/host/dispatch.ts`) reads the host's
+repository manifest at `REPOSITORY_MANIFEST_PATH` and keeps every checkout it
+places that is present on disk as a directory, whatever its sync result: an
+unresolved checkout is still one the operator wants to open. A placed checkout
+not yet cloned is left out, and so is one reached through a symbolic link (the
+repository root, the checkout, or any directory between), as the sync program
+refuses it ([repositories](repositories.md)). It hands those to the selected
+[execution backend](#the-execution-backend), never to Paseo directly, the
+backend's Paseo command being `factoryPaseo` (`src/host/control-plane.ts`), the
+one activity takes, all its calls within one two-minute budget. The result is
+the inspection's `repository_registration`
+([host protocol §The dispatch inspection document](host-protocol.md#the-dispatch-inspection-document)),
+in the result the endpoint persists and in the one it returns.
+
+- It runs whatever the projection: requested and active, pending, or not
+  requested, and also when the schedule did not reconcile (`failed`). Only a
+  projection refused before anything changes (invalid, or for another worker)
+  registers nothing. Teardown's dispatch stop sends the same not-requested
+  projection ([Stopping dispatch](#stopping-dispatch)), so it registers too,
+  harmlessly, before the machine is destroyed.
+- Its outcome never changes the dispatch state, the blockers, the schedule or
+  the inspection's `changed`, which stay the schedule's. A registration failure
+  is reported in `repository_registration` alone.
+- It only adds. A project removed in Paseo is registered again on the next
+  reconcile: placement means shown. To stop showing one, unplace it; its project
+  stays, as an unmanaged checkout does
+  ([repositories §Unmanaged checkouts](repositories.md#unmanaged-checkouts)).
+- Without a manifest (the repository stage has never reached the worker),
+  nothing placed is present: the backend is asked nothing and the result has no
+  checkouts. A manifest that cannot be read or is invalid places nothing known,
+  so nothing is registered and the inspection carries no
+  `repository_registration`, rather than a result claiming nothing is placed.
+  That is never silent: every apply's repository stage writes the canonical
+  manifest before dispatch, so during an apply it can be invalid or unreadable
+  only where that delivery did not complete, which the stage reports `skipped`
+  ([repositories](repositories.md)), leaving the apply partial (exit 2) with a
+  rerun as its next action.
+- Anything unexpected the registration throws records none, and the schedule's
+  result is persisted as it is. That gap is unreported: apply cannot tell it
+  from a result written by an earlier release. Only a defect throws there,
+  since the backend's commands return outcomes rather than throwing.
+- `dispatch inspect` returns the stored registration unchanged, also when it
+  reports the schedule drifted. A stored result without it, written by an
+  earlier release, still parses, with no registration.
+
+It runs here because the activator already allows `dispatch reconcile`: the
+change ships as release code and reaches existing workers through `fffactory
+upgrade` and apply. A new activator action would not, the activator being
+first-boot user data, never updated.
+
+Tested in `tests/host/dispatch.test.ts`: the placed checkouts present on disk
+are registered for active, pending and not-requested projections, through the
+auth wrapper as `factory`, and stored; one not cloned, not a directory, or
+reached through a symbolic link (the repository root's too) is left out; a
+registration failure leaves the state, the schedule's commands and `changed` as
+they are, on a first run and a rerun; one that throws records none and the
+schedule's result is still stored; the backend's calls share one budget;
+without a manifest the backend is asked nothing; an invalid or unreadable one
+records no registration; inspection returns the stored one, also when the
+schedule drifted; an older stored result parses, with none.
+`tests/domain/dispatch-projection.test.ts` covers the field's place, its
+document and its reader, and `tests/host/protocol-contract.test.ts` the shared
+fixtures.
 
 ### The execution backend
 
@@ -378,7 +448,7 @@ configuration flag alone.
 | The end-to-end verification stage | application | `src/application/verify-factory.ts` |
 | The FFFlow/GitHub adapter over `HostTransport` | infrastructure | `src/infrastructure/ffflow-github-workflow-queue.ts` |
 | The versioned desired and observed dispatch documents, the not-requested projection that stops dispatch and how stopping ended (`DispatchStop`) | domain (pure) | `src/domain/dispatch-projection.ts` |
-| The root endpoint, asset installation, privilege drop and persisted observation | host | `src/host/dispatch.ts` |
+| The root endpoint, asset installation, privilege drop, persisted observation, and registering the placed checkouts present on disk after the schedule | host | `src/host/dispatch.ts` |
 | The dispatch program, schedule reconciler and skill | release assets | `assets/steps/dispatch/` |
 | The agents the capacity check counts (`host agents`), translated by the one Paseo adapter | host | `src/host/control-plane.ts`, `src/cli/commands/host.ts` |
 | The placed checkouts' absolute paths, the registration result, its document and reader | domain (pure) | `src/domain/repository-registration.ts` |
@@ -390,4 +460,5 @@ workers: [#134](https://github.com/yaunder/factory/issues/134). A delivered
 GitHub token's next action: [#70](https://github.com/yaunder/fffactory/issues/70).
 Stopping dispatch: [#84](https://github.com/yaunder/fffactory/issues/84).
 Capacity from `host agents`: [#100](https://github.com/yaunder/fffactory/issues/100).
-The execution backend's repository registration: [#133](https://github.com/yaunder/fffactory/issues/133).
+The execution backend's repository registration: [#133](https://github.com/yaunder/fffactory/issues/133);
+registered on every dispatch reconcile: [#134](https://github.com/yaunder/fffactory/issues/134).

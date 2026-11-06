@@ -1,7 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import {
   dispatchAdoptionExitCode,
+  type DispatchInspection,
   dispatchInspectionExitCode,
+  dispatchInspectionJson,
   dispatchProjection,
   dispatchProjectionJson,
   notRequestedDispatchProjection,
@@ -122,5 +124,68 @@ describe("the versioned dispatch host protocol", () => {
         reason: "drift",
       }),
     ).toBe(1);
+  });
+});
+
+describe("the inspection's repository registration (host protocol, dispatch §Repository registration)", () => {
+  const registration = {
+    backend: "paseo",
+    changed: true,
+    checkouts: [
+      { path: "/workspace/repos/alpha", state: "registered" },
+      {
+        path: "/workspace/repos/beta",
+        state: "failed",
+        reason: "listing Paseo's projects timed out",
+      },
+    ],
+  } as const;
+
+  test("is the last key, the registration's own document, on every reconciled or failed state", () => {
+    const inspections: DispatchInspection[] = [
+      { protocol_version: 1, state: "active", blockers: [], changed: false },
+      { protocol_version: 1, state: "pending", blockers: ["worker_release"], changed: true },
+      { protocol_version: 1, state: "not_requested", blockers: [], changed: true },
+      { protocol_version: 1, state: "failed", blockers: [], reason: "drift" },
+    ];
+    for (const inspection of inspections) {
+      // Built out of order: the serializer, not the object, fixes the order.
+      const built = {
+        repository_registration: {
+          checkouts: registration.checkouts,
+          changed: true,
+          backend: "paseo",
+        },
+        ...inspection,
+      } as DispatchInspection;
+      const text = dispatchInspectionJson(built);
+      expect(Object.keys(JSON.parse(text))).toEqual([
+        ...Object.keys(inspection),
+        "repository_registration",
+      ]);
+      expect(text).toBe(
+        JSON.stringify({ ...inspection, repository_registration: registration }, null, 2),
+      );
+      expect(parseDispatchInspection(text)).toEqual({
+        ...inspection,
+        repository_registration: registration,
+      } as DispatchInspection);
+    }
+  });
+
+  test("absent, as an older worker's, the inspection parses with none", () => {
+    const older = { protocol_version: 1, state: "active", blockers: [], changed: true };
+    const parsed = parseDispatchInspection(JSON.stringify(older));
+    expect(parsed).toEqual(older as DispatchInspection);
+    expect(parsed !== undefined && "repository_registration" in parsed).toBe(false);
+  });
+
+  test("malformed, it is dropped and never invalidates the inspection", () => {
+    const inspection = { protocol_version: 1, state: "active", blockers: [], changed: true };
+    const parsed = parseDispatchInspection(
+      JSON.stringify({ ...inspection, repository_registration: { backend: "herdr" } }),
+    );
+    expect(parsed).toEqual(inspection as DispatchInspection);
+    expect(parsed !== undefined && "repository_registration" in parsed).toBe(false);
   });
 });

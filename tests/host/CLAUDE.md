@@ -15,6 +15,10 @@ temporary directories by `worker-scenarios.ts`, never the real `/`.
   `projection-log-archive.json`, a host projection carrying the log archive, goes the same way:
   the CLI side projects it byte for byte, the worker side parses it unchanged, and `host
   inspect` reports its control-plane part's digest apart.
+  `dispatch-registered.json` is a reconcile's inspection with its repository registration:
+  `dispatch reconcile` produces it from a scripted schedule and Paseo, and the CLI reads it,
+  also through the `WorkflowQueue`; `dispatch-before-registration.json`, an older worker's
+  without it, is read by the CLI side only.
   `activity-agents.json` is also what `host agents` prints, and the dispatcher's Python test
   (`assets/steps/dispatch/tests/test_factory_dispatch.py`) reads it as its capacity check's
   answer. Change a document, its fixture and the CLI-side parser together.
@@ -41,6 +45,9 @@ temporary directories by `worker-scenarios.ts`, never the real `/`.
   Secrets Manager answering the Paseo password: it checks the hash setup is sent with
   `bcryptjs`'s `compareSync`, and searches every argument, environment value and setup input
   for the password.
+- `dispatch.test.ts` runs the dispatch endpoint over a scripted runner telling the schedule's
+  commands from Paseo's (after the auth wrapper), with a repository manifest and checkouts laid
+  out under the temporary root (`placeRepositories`).
 - `paseo-backend.test.ts` runs the Paseo adapter over a fake `PaseoCommand` answering `project
   ls` and `project create` as Paseo 0.15.0 prints them, and searches every argument and result
   for the auth wrapper's password.

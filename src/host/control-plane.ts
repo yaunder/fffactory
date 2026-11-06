@@ -166,17 +166,14 @@ export interface HostControlPlane {
   restart(): Promise<ControlPlaneAction>;
 }
 
-export function workerControlPlane(system: ApplySystem): HostControlPlane {
-  const release = join(system.root, WORKER_PATHS.activeRelease);
-  const auth = join(release, "steps/control-plane/paseo-auth.sh");
-  const setup = join(release, "steps/control-plane/setup-host.sh");
-  const run = (argv: readonly string[], stdin?: string) =>
-    system.run(argv, TIMEOUT_MS, {
-      env: ENV,
-      ...(stdin === undefined ? {} : { stdin: new TextEncoder().encode(stdin) }),
-    });
-  // The Paseo CLI as factory, in a clean environment, through the active release's auth wrapper.
-  const asFactory = [
+/** The active release's Paseo auth wrapper, the only way fffactory runs the Paseo CLI. */
+function authWrapper(system: ApplySystem): string {
+  return join(system.root, WORKER_PATHS.activeRelease, "steps/control-plane/paseo-auth.sh");
+}
+
+/** The Paseo CLI as factory, from root, in a clean environment, through the auth wrapper. */
+function asFactory(system: ApplySystem): readonly string[] {
+  return [
     "/usr/sbin/runuser",
     "-u",
     "factory",
@@ -184,26 +181,52 @@ export function workerControlPlane(system: ApplySystem): HostControlPlane {
     "/usr/bin/env",
     "-i",
     ...Object.entries(FACTORY_ENV).map(([name, value]) => `${name}=${value}`),
-    auth,
+    authWrapper(system),
   ];
-  // The adapter over `command`, every call of one answer within one budget.
-  const agents = (command: readonly string[], env: Readonly<Record<string, string>>) => {
-    const deadline = system.now().getTime() + ACTIVITY_BUDGET_MS;
-    return paseoAgents(async (args) => {
-      const left = deadline - system.now().getTime();
-      if (left <= 0) return { kind: "timed_out" };
-      return system.run([...command, ...args], left, { env });
-    });
+}
+
+/** `command` as a `PaseoCommand`, every call of it within one budget from now. */
+function budgeted(
+  system: ApplySystem,
+  command: readonly string[],
+  env: Readonly<Record<string, string>>,
+  budgetMs: number,
+): PaseoCommand {
+  const deadline = system.now().getTime() + budgetMs;
+  return async (args) => {
+    const left = deadline - system.now().getTime();
+    if (left <= 0) return { kind: "timed_out" };
+    return system.run([...command, ...args], left, { env });
   };
+}
+
+/**
+ * The Paseo CLI as `factory`, run from root (the activator's endpoints): in `factory`'s clean
+ * environment, authenticated by the active release's auth wrapper, every call within `budgetMs`
+ * from now. The one `PaseoCommand` root runs: activity's, and dispatch reconcile's execution
+ * backend's.
+ */
+export function factoryPaseo(system: ApplySystem, budgetMs: number): PaseoCommand {
+  return budgeted(system, asFactory(system), ENV, budgetMs);
+}
+
+export function workerControlPlane(system: ApplySystem): HostControlPlane {
+  const release = join(system.root, WORKER_PATHS.activeRelease);
+  const setup = join(release, "steps/control-plane/setup-host.sh");
+  const run = (argv: readonly string[], stdin?: string) =>
+    system.run(argv, TIMEOUT_MS, {
+      env: ENV,
+      ...(stdin === undefined ? {} : { stdin: new TextEncoder().encode(stdin) }),
+    });
   return {
     async activity() {
       if (!system.isRoot()) return { kind: "unknown", reason: "not root" };
-      return agents(asFactory, ENV);
+      return paseoAgents(factoryPaseo(system, ACTIVITY_BUDGET_MS));
     },
     async agents() {
       // Paseo's state is factory's: as root its CLI would leave root-owned files there.
       if (system.isRoot()) return { kind: "unknown", reason: "run as root" };
-      return agents([auth], FACTORY_ENV);
+      return paseoAgents(budgeted(system, [authWrapper(system)], FACTORY_ENV, ACTIVITY_BUDGET_MS));
     },
     async install() {
       if (!system.isRoot()) return { kind: "failed", reason: "not root" };
@@ -221,7 +244,7 @@ export function workerControlPlane(system: ApplySystem): HostControlPlane {
     },
     async reload() {
       if (!system.isRoot()) return { kind: "failed", reason: "not root" };
-      return failure(await run([...asFactory, "daemon", "reload"]), "Paseo reload");
+      return failure(await run([...asFactory(system), "daemon", "reload"]), "Paseo reload");
     },
     async restart() {
       if (!system.isRoot()) return { kind: "failed", reason: "not root" };

@@ -1,6 +1,7 @@
 /**
  * The host protocol's contract: one set of fixtures, produced by the worker side and read by
- * the CLI side (but `work-before-archive.json`, an older worker's, read only), and two, `dispatch-not-requested.json` and `projection-log-archive.json`,
+ * the CLI side (but `work-before-archive.json` and `dispatch-before-registration.json`, older
+ * workers', read only), and two, `dispatch-not-requested.json` and `projection-log-archive.json`,
  * produced by the CLI side and read by the worker side. A change that breaks either side against the fixtures breaks the protocol.
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
@@ -15,8 +16,11 @@ import {
   workerActivity,
 } from "../../src/domain/control-plane";
 import {
+  dispatchInspectionJson,
+  dispatchProjection,
   dispatchProjectionJson,
   notRequestedDispatchProjection,
+  parseDispatchInspection,
   parseDispatchProjection,
 } from "../../src/domain/dispatch-projection";
 import {
@@ -32,8 +36,19 @@ import {
   WORKER_PATHS,
 } from "../../src/domain/host-protocol";
 import { hostApplyJson, parseHostApply, readActivation } from "../../src/domain/installation";
-import type { FactoryId, FactoryInstance, HostKey, Release } from "../../src/domain/instance";
+import type {
+  FactoryId,
+  FactoryInstance,
+  HostKey,
+  Release,
+  Repository,
+} from "../../src/domain/instance";
 import { enrollmentReport, parseVerification, verificationJson } from "../../src/domain/readiness";
+import {
+  REPOSITORY_MANIFEST_PATH,
+  repositoryManifest,
+  repositoryManifestJson,
+} from "../../src/domain/repository-placement";
 import { activationOutcome } from "../../src/domain/rollout";
 import { inspectionVerdict } from "../../src/domain/status";
 import { resolveWorker } from "../../src/domain/tailnet";
@@ -45,12 +60,14 @@ import {
 } from "../../src/domain/work-inspection";
 import { workerApplier } from "../../src/host/apply";
 import { workerControlPlane } from "../../src/host/control-plane";
+import { workerDispatch } from "../../src/host/dispatch";
 import { workerInspector } from "../../src/host/inspect";
 import { flockExclusive } from "../../src/host/install-lock";
 import { workerVerifier } from "../../src/host/verify";
 import { workerWork } from "../../src/host/work";
 import type { ProcessRunner } from "../../src/infrastructure/local-tool-probe";
 import { sha256Text } from "../../src/infrastructure/release-tarball";
+import { ffflowGithubWorkflowQueue } from "../../src/infrastructure/ffflow-github-workflow-queue";
 import { paseoControlPlane } from "../../src/infrastructure/paseo-control-plane";
 import { fakeTransport, peer, TAG } from "../support/fake-workers";
 import {
@@ -505,6 +522,110 @@ describe("the not-requested dispatch projection, both sides", () => {
     const parsed = parseDispatchProjection(text);
     if (!parsed.ok) throw new Error(`rejected: ${parsed.reason}`);
     expect(dispatchProjectionJson(parsed.projection)).toBe(text);
+  });
+});
+
+describe("dispatch reconcile with its repository registration, both sides", () => {
+  const settings = {
+    enabled: true,
+    cron: "*/17 * * * *",
+    timezone: "America/Chicago",
+    provider: "codex",
+    model: "configured-model",
+    mode: "default",
+    cwd: "/home/factory",
+  } as const;
+  const projection = dispatchProjection(WORKER_HOSTNAME, settings, true, []);
+
+  /**
+   * A worker placing alpha, team/beta, gamma and delta, gamma not yet cloned, whose schedule
+   * reconciles and whose Paseo, as 0.15.0 answers, already has alpha and refuses delta.
+   */
+  async function registeringWorker(): Promise<ProcessRunner> {
+    const repositories: Repository[] = ["alpha", "team/beta", "gamma", "delta"].map((path) => ({
+      key: path.replace("/", "-"),
+      remote: `https://github.com/yaunder/${path.replace("/", "-")}`,
+      path,
+      branch: "main",
+    }));
+    const files: [string, string][] = [
+      [`${WORKER_PATHS.activeRelease}/steps/dispatch/factory-dispatch`, "#!/usr/bin/env python3\n"],
+      [`${WORKER_PATHS.activeRelease}/steps/dispatch/skill/SKILL.md`, "---\nname: dispatch\n---\n"],
+      [
+        REPOSITORY_MANIFEST_PATH,
+        repositoryManifestJson(
+          repositoryManifest(
+            "fff-aaaa1111" as FactoryId,
+            { key: "builder-1" as HostKey, repositories: repositories.map((item) => item.key) },
+            repositories,
+          ),
+        ),
+      ],
+    ];
+    for (const [path, text] of files) {
+      await mkdir(join(root, path, ".."), { recursive: true });
+      await writeFile(join(root, path), text);
+    }
+    for (const path of ["alpha", "team/beta", "delta"])
+      await mkdir(join(root, "/workspace/repos", path), { recursive: true });
+    const exited = (exitCode: number, stdout = "") => ({
+      kind: "exited" as const,
+      exitCode,
+      stdout,
+      stderr: "",
+    });
+    return async (argv) => {
+      const project = argv.indexOf("project");
+      if (project === -1) return exited(0, "{}");
+      if (argv[project + 1] === "ls")
+        return exited(
+          0,
+          JSON.stringify([
+            { projectId: "p1", name: "alpha", kind: "git", path: "/workspace/repos/alpha" },
+          ]),
+        );
+      return argv[project + 2] === "/workspace/repos/delta"
+        ? exited(1)
+        : exited(0, JSON.stringify({ projectId: "p2", path: argv[project + 2] }));
+    };
+  }
+
+  test("the worker produces dispatch-registered.json byte for byte", async () => {
+    const run = await registeringWorker();
+    const result = await workerDispatch({
+      ...applyingSystem(root, run),
+      readInput: async () => dispatchProjectionJson(projection),
+    }).reconcileDispatch();
+    expect(`${dispatchInspectionJson(result)}\n`).toBe(await fixture("dispatch-registered.json"));
+  });
+
+  test("the CLI reads it back without loss, and over the transport into the reconcile", async () => {
+    const text = await fixture("dispatch-registered.json");
+    const parsed = parseDispatchInspection(text);
+    if (parsed === undefined) throw new Error("rejected");
+    expect(`${dispatchInspectionJson(parsed)}\n`).toBe(text);
+    const resolution = resolveWorker([peer(WORKER_HOSTNAME)], WORKER_HOSTNAME, TAG);
+    if (resolution.kind !== "found") throw new Error("not found");
+    const { transport } = fakeTransport({
+      [WORKER_HOSTNAME]: { kind: "completed", exitCode: 0, stdout: text },
+    });
+    expect(
+      await ffflowGithubWorkflowQueue(transport).reconcileDispatch(resolution.worker, projection),
+    ).toEqual({ kind: "reconciled", changed: true, inspection: parsed });
+  });
+
+  test("dispatch-before-registration.json, an older worker's, reads as no registration", async () => {
+    const text = await fixture("dispatch-before-registration.json");
+    const parsed = parseDispatchInspection(text);
+    if (parsed === undefined) throw new Error("rejected");
+    expect(`${dispatchInspectionJson(parsed)}\n`).toBe(text);
+    const current = parseDispatchInspection(await fixture("dispatch-registered.json"));
+    if (current === undefined) throw new Error("rejected");
+    const { repository_registration: _, ...withoutRegistration } = current as Record<
+      string,
+      unknown
+    >;
+    expect(parsed).toEqual(withoutRegistration as never);
   });
 });
 
