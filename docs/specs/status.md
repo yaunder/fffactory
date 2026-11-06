@@ -14,8 +14,13 @@ record, writes no file and stores no result, so a worker it cannot reach has an
 unknown release: there is no last-known value to show. Its only calls are STS
 `GetCallerIdentity`, EC2 `DescribeInstances`, `tailscale status --json`, and
 `fffactory host inspect --json` plus, for an active release, `fffactory host
-repositories --json` on each reachable worker over SSH
-([host protocol](host-protocol.md)).
+repositories --json`, the activator's `dispatch inspect` and then its
+`control-plane activity` on each reachable worker over SSH
+([host protocol](host-protocol.md)). Dispatch and activity go through the
+worker's activator, which runs one operation at a time, so activity is read
+once dispatch has been. Status never runs the work inspection, which can hold
+the activator for minutes ([worker lifecycle §Inspect](worker-lifecycle.md#inspect)
+reports it).
 
 ## Order
 
@@ -98,6 +103,7 @@ Each worker reports its facts whatever stopped it:
 | `repositories` | The last completed repository result: `synchronized`, `unresolved`, `none`, `unreadable`, or `unknown`; plus the unmanaged checkout paths when observed. |
 | `dispatch` | The persisted and schedule-checked dispatch result: `active`, `pending`, `not_requested`, `failed`, `none`, `unreadable` or `unknown`; plus gate blockers when observed. |
 | `enrollment` | Each account's enrollment as the last install's verification found it, with the next action status names for it ([readiness §Enrollment](readiness.md#enrollment)), or null. |
+| `activity` | The worker's agents in fffactory's states, read through the activity call alone ([control plane §Agent states](control-plane.md#agent-states)): `busy` while any agent is `working` or `needs_input`, `idle` when none is, `unknown` when they could not be read (with why) or were not read: a worker not reached, or without an active release. Every agent with its ID, its state and whether dispatch launched it. Reported, never judged: a busy worker is still ready. |
 
 ## Readiness
 
@@ -115,7 +121,7 @@ summary and next action, the rest its details, in this order:
 | A host configuration whose SHA-256 is not that of the [host projection](host-protocol.md#the-host-projection) apply would send it | Repair the worker with `fffactory apply`. |
 | No host configuration, or one `fffactory-admin` cannot read | Repair the worker with `fffactory apply`. |
 | A service not `active` | Repair the worker with `fffactory apply`. |
-| With a release active: an install recorded as running: "An install of release R started at T has not finished; it may still be running" | If it started more than 72 min ago (apply's activation timeout), repair the worker with `fffactory apply`; otherwise wait for it to finish. |
+| With a release active: an install recorded as running: "An install of release R started at T has not finished; it may still be running" | If it started more than 84 min ago (apply's activation timeout), repair the worker with `fffactory apply`; otherwise wait for it to finish. |
 | With a release active: no install record, one that cannot be read, one that failed at a step, outside its steps (naming why) or in verification (naming the failed checks), or one of another release than the active one | Repair the worker with `fffactory apply`. |
 | Base software ready, but repositories are unresolved or have never synchronized | Resolve the reported checkouts or run `fffactory apply`. |
 | The repository result is unreadable or cannot be observed | Repair the worker with `fffactory apply`. |
@@ -124,7 +130,11 @@ summary and next action, the rest its details, in this order:
 
 The expected digest is that of the projection apply sends the host, built from
 factory.json's host for the pinned release by the same `projectHost`
-(`src/domain/host-projection.ts`), Paseo secret reference included.
+(`src/domain/host-projection.ts`), Paseo secret reference, delivered
+credential references and the log archive included. Status compares the whole
+file, so a changed credential reference, or the log archive turned on or off,
+reads as a configuration to repair with `fffactory apply`, which is how either
+is delivered.
 
 A running record may belong to an install that is still going, since an
 interrupted or timed-out `fffactory apply` stops waiting but `host apply`
@@ -141,12 +151,25 @@ only mentioned, and never keep a worker from being ready:
 ```text
   not ready  builder-1 (example-builder-1): Software ready on release 0.1.0; enrollment pending: GitHub, OpenAI Codex, Claude Code
              Machine: running (i-0000000000000000a); Tailscale: online; Release: 0.1.0
-               GitHub: Authenticate GitHub as factory on example-builder-1 (tailnet SSH policy must let you log in as `factory`): run `tailscale ssh factory@example-builder-1`, then `gh auth login --hostname github.com --git-protocol https --web`, then `gh auth status`
+               GitHub: Authenticate GitHub as factory on example-builder-1: run `tailscale ssh factory@example-builder-1`, then `gh auth login --hostname github.com --git-protocol https --web`, then `gh auth status --hostname github.com --active`
                ...
                Paseo clients: enrollment is checked from each client, not the worker
                Enrollment as `fffactory apply` last verified it, at 2026-09-30T12:09:00.000Z
              Next: Enroll each pending account on example-builder-1 as listed (tailnet SSH policy must let you log in there as `factory`), then verify the enrollment with `fffactory apply` and rerun `fffactory status`.
 ```
+
+An account factory.json delivers to the host (`deliveredAccounts`, read from
+factory.json, never the worker) names storing a valid credential instead,
+with no login ([readiness §Enrollment](readiness.md#enrollment)):
+
+```text
+               GitHub: Replace the GitHub token, which example-builder-1 did not accept: run `fffactory secret set github-token`, then `fffactory apply`
+```
+
+The worker's next action carries the tailnet-policy caveat only while an
+account is left to log in to: with only delivered accounts pending it is
+"Enroll each pending account on HOST as listed, then verify the enrollment
+with `fffactory apply` and rerun `fffactory status`."
 
 Status reads the verification the last install recorded: it runs
 unprivileged, and only root can check the runtime account's credentials. With
@@ -184,13 +207,21 @@ Inventories:
 
 Workers:
   not ready  builder-1 (example-builder-1): Offline in the tailnet
-             Machine: running (i-0000000000000000a); Tailscale: offline; Release: unknown; Repositories: unknown
+             Machine: running (i-0000000000000000a); Tailscale: offline; Release: unknown; Repositories: unknown; Dispatch: unknown
+             Agents: unknown
              Next: Check that the instance is running and that Tailscale is up on it, then rerun `fffactory status`.
   ready      builder-2 (example-builder-2): Ready on release 0.1.0
-             Machine: running (i-0000000000000000b); Tailscale: online; Release: 0.1.0; Repositories: synchronized
+             Machine: running (i-0000000000000000b); Tailscale: online; Release: 0.1.0; Repositories: synchronized; Dispatch: not_requested
+             Agents: 1 working, 2 finished (busy)
 
 Not ready: 1 of 4 entries needs attention.
 ```
+
+Each worker has one `Agents:` line: its agents counted by state, in
+fffactory's order (`working`, `needing input`, `finished`, `failed`,
+`stopped`), then its activity: `1 working, 2 finished (busy)`, `none (idle)`;
+`unknown` when they were not read, `unknown (REASON)` when they could not be,
+such as `unknown (its release predates fffactory's agent states)`.
 
 A stopped worker is labelled `stopped` and needs no attention; with every other
 entry ready, the last line counts it:
@@ -198,6 +229,7 @@ entry ready, the last line counts it:
 ```text
   stopped    builder-1 (example-builder-1): Stopped
              Machine: stopped (i-0000000000000000a); Tailscale: not_checked; Release: unknown; Repositories: unknown; Dispatch: unknown
+             Agents: unknown
              Next: Start it with `fffactory worker start builder-1`, then rerun `fffactory status`.
   ready      builder-2 (example-builder-2): Ready on release 0.1.0
              ...
@@ -218,7 +250,7 @@ Ready: no workers are declared.
 
 Its JSON report has `workers: []`.
 
-### JSON, schema version 1
+### JSON, schema version 2
 
 `--json` prints one document, indented by two spaces, on standard output and
 nothing else. Its structure is published as
@@ -232,17 +264,26 @@ nothing else. Its structure is published as
 - `workers`: `key`, `hostname`, `status` (a check's, or `stopped`), `summary`,
   `details`, `next_action`, `machine` (`state`, `instance_id`), `tailnet`,
   `release`, `configuration`, `installation`, `repositories` (`state`,
-  `unmanaged`), `dispatch` (`state`, `blockers`) and `enrollment`: null, or
+  `unmanaged`), `dispatch` (`state`, `blockers`), `activity` (`state`:
+  `busy`, `idle` or `unknown`; `reason`: why the agents could not be read, else
+  null; `agents`: each agent's `id`, `state` and `dispatched`, null unless
+  listed, the same object [worker inspect](worker-lifecycle.md#inspect)
+  reports) and `enrollment`: null, or
   each account's `id`, `title`, `state` and structured `next_action`
   (`summary`, `login`, `commands`), null exactly when enrolled, for GitHub,
   OpenAI Codex and Claude Code (Paseo clients are not listed until Paseo runs
-  on workers).
+  on workers). `login` is null for an account factory.json delivers: its
+  `commands` run where fffactory does.
 
 `next_action` is `null` exactly when `status` is `ready`. Adding a field, a
-check or a worker state keeps `schema_version` 1; consumers ignore what they do
+check or a worker state keeps `schema_version`; consumers ignore what they do
 not know. Removing, renaming or redefining a field needs a new version. The
 worker status `stopped` is such an addition
-([#7](https://github.com/yaunder/fffactory/issues/7)). This deliberately
+([#7](https://github.com/yaunder/fffactory/issues/7)), and so is `activity`
+([#101](https://github.com/yaunder/fffactory/issues/101)). Version 2 redefined an
+enrollment `next_action`'s `login` as nullable, for delivered accounts, and
+dropped the tailnet-policy caveat from its `summary`
+([#70](https://github.com/yaunder/fffactory/issues/70)). This deliberately
 differs from [doctor's rule](doctor.md#json-schema-version-1), under which
 changing the set of statuses needs a new version: it holds for every check and
 the report's top-level `status`, whose enum stays `ready`, `not_ready` and
@@ -262,11 +303,12 @@ versions and digests the worker reported after validation.
 | Layer | Module | Responsibility |
 | --- | --- | --- |
 | Domain | `src/domain/status.ts` | Machines and the EC2 inventory, worker inspections, facts and verdicts (`WorkerState`, with `stopped`); the inventory checks; `machineVerdict`, `stoppedWorkers`, `poweredDownWorkers` (the resize guard's stopped or stopping workers), `locateWorker`, `readinessVerdict`, `inspectionVerdict`; `SUPPORTED_BASE`, `MIN_AVAILABLE_BYTES`; the report, a stopped worker counted ready. Pure. |
-| Application | `src/application/status.ts` | `factoryStatus`: completeness, the account check, the inventories, each worker. |
+| Domain | `src/domain/control-plane.ts` | `agentActivity`: a worker's agents as status reports them. Pure. |
+| Application | `src/application/status.ts` | `factoryStatus`: completeness, the account check, the inventories, each worker, its agents read through `readAgents` (`src/application/control-plane.ts`) once dispatch has been. |
 | Application | `src/application/inspect-dispatch.ts` | Reads dispatch through the fixed activator operation. |
 | Application | `src/application/machine-inventory.ts` | The `MachineInventorySource` port. |
-| Infrastructure | `src/infrastructure/ec2-inventory.ts` | `ec2MachineInventory` over `DescribeInstances` (AWS SDK for JavaScript v3), paged, within one deadline. |
-| CLI adapter | `src/cli/commands/status.ts` | Arguments, the refusals, the human and JSON reports, the exit code. |
+| Infrastructure | `src/infrastructure/ec2-inventory.ts` | `ec2MachineInventory` over `DescribeInstances` (AWS SDK for JavaScript v3), paged, within one deadline; also teardown's tagged VPC listing over `DescribeVpcs` ([provisioning §Tagged VPCs](provisioning.md#tagged-vpcs)). |
+| CLI adapter | `src/cli/commands/status.ts` | Arguments, the refusals, the human and JSON reports, the exit code; the `Agents:` line laid out by `src/cli/presentation/agents.ts`. |
 
 Tests: `tests/domain/status.test.ts` (every finding and its order, a drifted
 configuration, every install record state, a running one that may still be
@@ -279,26 +321,38 @@ checks, the report's status and a stopped worker keeping it ready),
 hostname, and a device without the factory's tag, refused with the next action
 and never connected to; the tag read from factory.json; each worker's
 configuration compared with the projection apply would send it; enrollment
-pending reported with each account's state; an offline worker and one SSH
+pending reported with each account's state, and a delivered account's steps
+from factory.json; an offline worker and one SSH
 cannot reach with an unknown release; no release; unprovisioned and stopped
 machines not connected to, a stopped one with its own verdict; an unreadable
 EC2 inventory; Tailscale logged out; another account refused before any
-inventory; an incomplete factory.json refused before AWS),
+inventory; an incomplete factory.json refused before AWS; each reached
+worker's agents read after dispatch and never the work inspection, a busy
+worker still ready; a worker not reached with unknown activity and its control
+plane never asked; an outdated worker's and a missing control plane's reason),
+`tests/application/inspect-dispatch.test.ts` (the fixed dispatch inspection
+command, exit-status agreement, and fail-closed handling of untrusted answers),
 `tests/infrastructure/ec2-inventory.test.ts` (stubbed calls, and the real SDK
 against `tests/support/stub-ec2-instances.ts`), `tests/cli/status.test.ts`
 (exit codes 0, 2 and 1, no lock taken, no report once interrupted, the human
 report, a factory declaring no worker exiting 0 with how to add one and an empty
-`workers` in JSON, the JSON report against the fixture and the schema, enrollment pending
-in both, and a stopped worker exiting 0 with the start command, its JSON
-verdict `stopped` under schema version 1, and beside a worker that needs
+`workers` in JSON, the JSON report against the fixture and the schema, each worker's
+`Agents:` line and its `activity` in JSON, enrollment pending
+in both, a delivered credential not accepted in both, with no login, and a stopped worker
+exiting 0 with the start command, its JSON
+verdict `stopped`, and beside a worker that needs
 attention still exiting 2), and `tests/cli/status-executable.test.ts` (the
 spawned executable with stand-in `tailscale` and `ssh` on a private PATH, STS
 and EC2 stubs: an offline worker exits 2 with an unknown release and is never
 connected to; a device with the worker's name but not the factory's tag exits
 2, is never connected to and has neither tag printed; an unreachable one exits
-2; a ready one exits 0; one without a release reports `none`).
+2; a ready one exits 0, its activity read through the activator; one without a
+release reports `none`), and `tests/cli/presentation/agents.test.ts` (the
+`Agents:` line).
 
 Introduced by [#100](https://github.com/yaunder/factory/issues/100); the
 configuration comparison, install record and enrollment by
 [#101](https://github.com/yaunder/factory/issues/101); the `stopped` verdict by
-[#7](https://github.com/yaunder/fffactory/issues/7).
+[#7](https://github.com/yaunder/fffactory/issues/7); delivered accounts' next actions and
+schema version 2 by [#70](https://github.com/yaunder/fffactory/issues/70); each worker's
+agents by [#101](https://github.com/yaunder/fffactory/issues/101).

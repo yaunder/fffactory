@@ -53,16 +53,19 @@ Schema is [`schemas/factory.schema.json`](../../schemas/factory.schema.json), an
 | `aws.account_id` | Expected AWS account, 12 digits. |
 | `aws.region` | Expected AWS Region, such as `us-east-1`. |
 | `state_backend.bucket` | State bucket name (S3 bucket name rules: 3-63 of `a-z`, `0-9`, `.`, `-`), starting with the factory ID and a hyphen. See below. |
+| `log_archive.enabled` | Optional; whether the factory has a worker log archive (required inside `log_archive`). Its bucket name is derived. See [Log archive](#log-archive). |
 | `network.vpc_cidr`, `network.public_subnet_cidr` | IPv4 CIDR blocks. |
 | `network.availability_zone` | Availability zone, such as `us-east-1a`. |
 | `tailscale.tag` | Tailscale tag, such as `tag:software-factory`. |
 | `tailscale.auth_key_secret` | Secret reference to the factory's Tailscale enrollment key. |
 | `tailscale.admin_client_secret` | Secret reference to the client secret of the operator's Tailscale OAuth client with the `devices:core` scope, the factory's admin client ([secrets](secrets.md#the-tailscale-admin-client)). Workers never receive it. |
+| `credentials.github_token_secret`, `credentials.anthropic_api_key_secret`, `credentials.openai_api_key_secret` | Optional secret references to the factory's GitHub token, Anthropic API key and OpenAI API key, for the `github`, `anthropic` and `openai` accounts. See [API credentials](#api-credentials). |
 | `repositories[]` | Repository inventory. Each entry requires `key`, `remote` (`https://github.com/OWNER/NAME`), `path` (relative checkout path; no empty, `.` or `..` segments) and `branch`. |
 | `hosts[]` | Stable hosts, possibly none. Each entry requires `key`. |
 | `hosts[].instance_type`, `hosts[].root_volume_gib` | Machine declaration: EC2 instance type; root volume of 8-16384 GiB. |
-| `hosts[].paseo_password_secret` | Secret reference to the host's Paseo password. |
+| `hosts[].paseo_password_secret` | Secret reference to the host's Paseo password, which every host needs ([control plane §The daemon password](control-plane.md#the-daemon-password)). |
 | `hosts[].repositories[]` | Repository placement: keys of declared repositories. |
+| `hosts[].interactive_logins[]` | Accounts kept on a human's login on this host, each at most once: `github`, `openai`, `anthropic`. See [API credentials](#api-credentials). |
 | `hosts[].dispatch` | Desired dispatch settings: `enabled` (boolean), `cron`, `timezone`, `provider`, `model`, `mode` (non-blank strings), and `cwd` (absolute path). When enabled, every schedule field is required; no runtime default is applied. |
 
 ### Factory ID
@@ -94,10 +97,73 @@ requires it to start with the factory ID and a hyphen, such as
 applies once both `factory_id` and `state_backend.bucket` are set and well
 formed; the JSON Schema cannot express it.
 
+The state bucket is never the log archive's bucket: validation refuses
+`state_backend.bucket` equal to the archive's derived name
+([Log archive](#log-archive)), once `factory_id`, `aws.account_id` and
+`aws.region` are well formed, whether `log_archive.enabled` is true, false or
+absent, with a message naming the rule, never a configured value. An archive
+kept after teardown already passes as a ready state bucket, so `apply` would
+adopt it as one, and teardown, which deletes the state bucket, would then
+delete the archive it says it keeps. Reserving the name while the archive is
+disabled keeps evidence archived before it was disabled safe the same way.
+The JSON Schema cannot express this rule.
+
+### Log archive
+
+`log_archive.enabled: true` gives the factory a worker log archive, an S3
+bucket meant to keep workers' logs after the workers, and the factory, are
+gone. Absent or `false`, the factory has none. `log_archive` holds only
+`enabled`, and requires it. The field is optional, so schema version 1 is
+kept, and `fffactory init` never writes it: init fills only what fffactory
+generates, never an operator's choice. Enabling it makes `fffactory plan` and
+`apply` create the archive when it is missing, in the factory's reviewed plan
+([plan and apply §The infrastructure stage](plan-apply.md#the-infrastructure-stage)),
+and lets each host's role write new objects under its own prefix of the bucket
+([provisioning §Log archive access](provisioning.md#log-archive-access)).
+Each host's projection then carries the archive's bucket and Region
+([host protocol §The host projection](host-protocol.md#the-host-projection)),
+and its `credentials` step keeps Claude Code's session history
+(`cleanupPeriodDays: 3650`,
+[credential delivery §Managed settings](credential-delivery.md#managed-settings))
+so nothing is cleaned up before it is collected. Enabling or disabling the
+archive therefore changes every worker's projection digest: `status` reads it
+as a configuration `fffactory apply` has not delivered yet, and the next
+apply's workers stage installs it, with no Paseo change
+([control plane §Planned state](control-plane.md#planned-state)).
+fffactory itself writes nothing in the archive yet, and never removes it:
+[teardown](teardown.md) keeps it and says so. What workers collect into it,
+and the archive's format, are in [collector](collector.md).
+
+The archive's bucket name is derived, never configured:
+`<factory_id>-logs-<aws.account_id>-<aws.region>-an`, such as
+`fff-k3x9q2ab-logs-123456789012-us-east-1-an`. The `-an` suffix puts it in S3's
+account-regional namespace, where no other account can ever take the name, and
+it carries the factory ID as every factory resource name does
+([provisioning §Names](provisioning.md#names)). Deriving it does not keep the
+factory's own configurable state bucket from that name; validation does
+([State bucket](#state-bucket)). `archiveBucketName` in
+`src/domain/resource-naming.ts` is the one statement of this rule; it gives no
+name while the archive is not enabled or `factory_id`, `aws.account_id` or
+`aws.region` is absent.
+
+The name must fit S3's 63 characters. A factory ID has at most 20, which leaves
+21 for the Region; every AWS Region name today is shorter, but the Region
+format has no length bound. Validation therefore refuses
+`log_archive.enabled: true` whose derived name would exceed 63 characters,
+once `factory_id`, `aws.account_id` and `aws.region` are well formed, with a
+message naming the rule and the name's length, never a configured value.
+
+The account-regional namespace is unavailable in `me-south-1` and
+`me-central-1`, so validation refuses `log_archive.enabled: true` in either,
+once `aws.region` names it, with a message naming the Region; `false` is
+accepted anywhere. The JSON Schema cannot express this rule.
+
 ### Secret references
 
 A secret field (`tailscale.auth_key_secret`, `tailscale.admin_client_secret`,
-`hosts[].paseo_password_secret`) holds only a Secrets Manager secret ARN,
+`credentials.github_token_secret`, `credentials.anthropic_api_key_secret`,
+`credentials.openai_api_key_secret`, `hosts[].paseo_password_secret`) holds
+only a Secrets Manager secret ARN,
 `arn:aws:secretsmanager:REGION:ACCOUNT:secret:NAME`. Any other string, such as
 a pasted key or password, is rejected as a raw secret value. `fffactory secret
 set` stores a secret in Secrets Manager and sets its field to the ARN
@@ -111,6 +177,43 @@ so every secret is the factory's own. Validation requires each secret ARN's
 Region to be `aws.region` and its account `aws.account_id`, each check once
 that field is set and well formed; the JSON Schema cannot express it.
 
+### API credentials
+
+A worker's three accounts, the readiness enrollments `github`, `openai` and
+`anthropic` ([readiness](readiness.md)), are satisfied either by a human's
+login on the worker or by an API credential the factory delivers. The
+`credentials` object holds the factory-wide references, one per account:
+
+| Account | Reference |
+| --- | --- |
+| `github` | `credentials.github_token_secret` |
+| `openai` | `credentials.openai_api_key_secret` |
+| `anthropic` | `credentials.anthropic_api_key_secret` |
+
+A host's `interactive_logins` lists the accounts it keeps on a human's login.
+
+An account is *delivered* to a host when its reference is set and the host does
+not list it in `interactive_logins`. Listing an account without a reference
+changes nothing: it is on a human's login either way. A host factory.json does
+not declare is delivered nothing. `deliveredAccounts` in
+`src/domain/instance.ts` is the one statement of this rule, and gives each
+delivered account with its reference in `ENROLLMENTS`' order (`github`,
+`openai`, `anthropic`).
+
+All of these fields are optional. A document without them is valid, complete
+and means what it did before: every account stays on a human's login.
+The host projection carries each host's delivered references
+([host protocol §The host projection](host-protocol.md#the-host-projection)),
+and the hosts' role may read every reference set
+([provisioning §Terraform inputs](provisioning.md#terraform-inputs)). Each
+host's `credentials` install step delivers them
+([credential delivery](credential-delivery.md)).
+
+Validation rejects an unknown field under `credentials`, a raw secret value in
+any of them, an `interactive_logins` entry that is not one of the three account
+IDs, and an account listed twice on one host. Messages name the field, never
+the value; a duplicate names the account, which has passed its format check.
+
 ## Validation
 
 Validation reports every issue, each with a field path such as `factory_id`,
@@ -122,14 +225,20 @@ Validation reports every issue, each with a field path such as `factory_id`,
 - an invalid factory ID or host key;
 - a raw secret value in a secret field;
 - duplicate host keys, repository keys or repository checkout paths;
-- a state bucket whose name does not start with the factory ID and a hyphen;
+- a state bucket whose name does not start with the factory ID and a hyphen,
+  or is the log archive's derived bucket name, whether or not the archive is
+  enabled;
+- `log_archive` without `enabled`, and `log_archive.enabled: true` in
+  `me-south-1` or `me-central-1`, or with a derived bucket name over 63
+  characters;
 - a secret reference in another Region than `aws.region` or another account
   than `aws.account_id`;
-- placement of a repository that is not declared in `repositories`.
+- placement of a repository that is not declared in `repositories`;
+- an `interactive_logins` entry that is not an account ID, or that repeats one.
 
-Messages never echo field values, except keys that already passed their format
-check, so a secret pasted into any field cannot leak through validation
-output.
+Messages never echo field values, except keys and `aws.region` that already
+passed their format check, so a secret pasted into any field cannot leak
+through validation output.
 
 ## Completeness
 
@@ -138,16 +247,23 @@ Completeness is reported separately from validity. A valid document is complete
 when it has `release`, `factory_id`, `name`, `aws.account_id`, `aws.region`,
 `state_backend.bucket`, `network.vpc_cidr`, `network.public_subnet_cidr`,
 `network.availability_zone`, `tailscale.tag`, `tailscale.auth_key_secret`,
-`hosts`, and `instance_type` and `root_volume_gib` for every host. The report
-lists missing fields by path in that order. `hosts` may be an empty list: a
-factory may declare no worker, as
-[`fffactory worker terminate KEY`](worker-lifecycle.md#terminate-remove) leaves
-it after removing the last host, and its plan is then its shared
+`hosts`, and `instance_type`, `root_volume_gib` and `paseo_password_secret` for
+every host. The report lists missing fields by path in that order. A worker is
+ready only once its Paseo daemon runs, and the daemon never starts without a
+password ([control plane §The daemon password](control-plane.md#the-daemon-password)),
+so a host without one could be created but never made ready; the report names
+the command that stores it, `fffactory secret set paseo-password --host KEY`
+for that host's key. `hosts` may be an empty list: a factory may declare no
+worker, as [`fffactory worker terminate KEY`](worker-lifecycle.md#terminate-remove)
+leaves it after removing the last host, and its plan is then its shared
 infrastructure alone
 ([plan-apply §An empty factory](plan-apply.md#an-empty-factory)). An absent
 `hosts` is still reported missing, so a new document is not taken for a factory
-deliberately without workers. Repositories, dispatch settings, Paseo password
-references and `tailscale.admin_client_secret` are optional for completeness.
+deliberately without workers. Repositories, dispatch settings,
+`tailscale.admin_client_secret`, `credentials`, `interactive_logins` and
+`log_archive` are optional for completeness. `plan`, `apply`, `upgrade`,
+`status`, `teardown` and the `worker` commands refuse an incomplete document;
+`secret set` does not, as it is how a secret reference is filled in.
 
 ## `fffactory validate`
 
@@ -155,7 +271,9 @@ references and `tailscale.admin_client_secret` are optional for completeness.
 resolved path and its discovery source.
 
 - Valid: prints the schema version and either `Complete` or the list of fields
-  still needed, and exits 0. An incomplete document still exits 0.
+  still needed, and exits 0. An incomplete document still exits 0. A field
+  that a command fills is listed with it, as
+  ``hosts[0].paseo_password_secret: store it with `fffactory secret set paseo-password --host builder-1` ``.
 - Invalid: prints `path: message` for every issue to standard error and exits 1.
 - No instance found, or the selected file cannot be read: prints the reason to
   standard error and exits 1.
@@ -205,7 +323,10 @@ Output, on standard output, exit 0:
 - `Created PATH.`, `Updated PATH.` or `Unchanged PATH: nothing to fill.`;
 - `New factory ID: …` and `Release pin: …` for whichever of those `init` just
   wrote. Values that were already in the file are never echoed;
-- the completeness report, as `fffactory validate` prints it.
+- the completeness report, as `fffactory validate` prints it;
+- while `hosts` is still missing, ``Every host needs a Paseo password before
+  apply: `fffactory secret set paseo-password --host KEY`.``: a declared host
+  without one is already listed with that command.
 
 ## Credentials
 
@@ -245,7 +366,7 @@ pass the same selection and the factory Region.
 
 | Layer | Module | Responsibility |
 | --- | --- | --- |
-| Domain | `src/domain/instance.ts`, `src/domain/validation.ts`, `src/domain/initialization.ts` | `FactoryInstance`, `FactoryId`, `HostKey`, `Release`, secret references, validation rules, completeness report, factory ID generation from injected random bytes, and the gap-filling merge. Pure. |
+| Domain | `src/domain/instance.ts`, `src/domain/validation.ts`, `src/domain/initialization.ts`, `src/domain/resource-naming.ts` | `FactoryInstance`, `FactoryId`, `HostKey`, `Release`, secret references, validation rules, the delivered-account rule (`deliveredAccounts`), completeness report, factory ID generation from injected random bytes, the gap-filling merge, and the log archive's derived bucket name (`archiveBucketName`). Pure. |
 | Application | `src/application/resolve-instance.ts`, `src/application/validate-instance.ts`, `src/application/init-instance.ts`, `src/application/instance-store.ts` | Discovery precedence, reading and validating a document, initialization, the `InstanceStore` port. `describeSource`, each discovery source's words, is published wording: doctor's JSON `summary` embeds it, so it stays here. |
 | CLI adapter | `src/cli/presentation/instance-source.ts` | `instanceLine`, the `Instance: PATH (SOURCE)` line commands print, and `instanceHeader`, the restyled commands' header (`fffactory COMMAND · release R`, then `Instance  PATH (SOURCE)`, a path under home shown from `~`; [plan and apply §Before anything reaches AWS](plan-apply.md#before-anything-reaches-aws)), both in `describeSource`'s words. |
 | Infrastructure | `src/infrastructure/filesystem-instance-store.ts` | Filesystem `InstanceStore`, including the atomic write. |
@@ -253,6 +374,9 @@ pass the same selection and the factory Region.
 
 Tests: `tests/domain/instance.test.ts`, `tests/domain/instance-schema.test.ts`
 (JSON Schema agrees with the domain), `tests/domain/initialization.test.ts`,
+`tests/domain/resource-naming.test.ts` (the log archive's bucket name),
+`tests/cli/teardown.test.ts` (a state bucket named as the log archive refused
+before teardown reads anything of AWS, the archive left in place),
 `tests/application/resolve-instance.test.ts`,
 `tests/application/doctor.test.ts` (each source's words in doctor's summary),
 `tests/cli/presentation/instance-source.test.ts` (the instance line for each
@@ -276,4 +400,8 @@ in [provisioning §Resources and namespacing](provisioning.md#resources-and-name
 Introduced by [#89](https://github.com/yaunder/factory/issues/89);
 initialization by [#90](https://github.com/yaunder/factory/issues/90);
 credentials by [#92](https://github.com/yaunder/factory/issues/92); the state
-bucket rule by [#96](https://github.com/yaunder/factory/issues/96).
+bucket rule by [#96](https://github.com/yaunder/factory/issues/96); API
+credential references and interactive logins by
+[#66](https://github.com/yaunder/fffactory/issues/66); the log archive, and the
+state bucket's refusal of its name, by
+[#110](https://github.com/yaunder/fffactory/issues/110).

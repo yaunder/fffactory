@@ -10,11 +10,7 @@
  * still missing and the file is the one saved; then the newly created lock is acquired.
  */
 import type { CredentialSelection } from "../domain/aws-account";
-import {
-  bootstrapPlanVerdict,
-  type UnreadyBucket,
-  unreadyBucket,
-} from "../domain/backend-bootstrap";
+import { createOnlyRefusal, type UnreadyBucket, unreadyBucket } from "../domain/backend-bootstrap";
 import {
   bootstrapStaleness,
   type BootstrapPlanReview,
@@ -179,14 +175,10 @@ async function readBackBootstrapPlan(
   request: Pick<BootstrapPlanRequest, "instancePath" | "instance" | "bucket" | "release">,
 ): Promise<ReadBack> {
   const { bucket } = request;
-  const changes = resourceChanges(await provisioner.showPlan(saved));
-  if (changes === undefined) return unexpected({ kind: "unreadable_plan" });
-  const verdict = bootstrapPlanVerdict(changes);
-  if (!verdict.ok)
-    return unexpected(
-      ...verdict.unexpected.map((change) => ({ kind: "not_create", change }) as const),
-    );
-  if (verdict.creates.length === 0) return unexpected({ kind: "creates_nothing" });
+  const shown = resourceChanges(await provisioner.showPlan(saved));
+  const refusal = createOnlyRefusal(shown);
+  if (refusal !== undefined) return unexpected(...refusal);
+  const changes = (shown ?? []).filter(changesSomething);
   const review: BootstrapPlanReview = {
     kind: "backend_bootstrap",
     target: {
@@ -198,9 +190,9 @@ async function readBackBootstrapPlan(
       release: request.release,
       bucket: bucket.bucket,
     },
-    creates: verdict.creates,
+    creates: changes.map(({ address }) => address),
   };
-  return { kind: "read", changes: changes.filter(changesSomething), review };
+  return { kind: "read", changes, review };
 }
 
 /**

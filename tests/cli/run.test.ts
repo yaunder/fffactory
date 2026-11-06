@@ -26,6 +26,18 @@ describe("fffactory validate", () => {
     expect(out).toContain("Complete: nothing further is needed.");
   });
 
+  test("a host without a Paseo password is incomplete, naming the command that stores it", async () => {
+    const example = await Bun.file("examples/factory.json").json();
+    const [{ paseo_password_secret: _password, ...host }] = example.hosts;
+    const document = JSON.stringify({ ...example, hosts: [host] });
+    const { context, out } = harness(new MemoryInstanceStore({ "/x/factory.json": document }));
+    expect(await run(["validate", "--instance", "/x/factory.json"], context)).toBe(0);
+    expect(out.slice(-2)).toEqual([
+      "Incomplete: 1 field still needed:",
+      "  hosts[0].paseo_password_secret: store it with `fffactory secret set paseo-password --host builder-1`",
+    ]);
+  });
+
   test("honours FFFACTORY_INSTANCE", async () => {
     const store = new MemoryInstanceStore({ "/env/factory.json": '{"schema_version": 1}' });
     const { context, out } = harness(store, { FFFACTORY_INSTANCE: "/env/factory.json" });
@@ -42,6 +54,25 @@ describe("fffactory validate", () => {
     expect(err).toContain("Invalid factory.json:");
     expect(err.some((line) => line.startsWith("  factory_id: must be"))).toBe(true);
   });
+
+  test.each(["me-south-1", "me-central-1"])(
+    "refuses log_archive.enabled in %s, naming the Region (instance-configuration §Log archive)",
+    async (region) => {
+      const document = JSON.stringify({
+        schema_version: 1,
+        factory_id: "fff-abcd1234",
+        aws: { account_id: "123456789012", region },
+        log_archive: { enabled: true },
+      });
+      const { context, err } = harness(new MemoryInstanceStore({ [NEAREST]: document }));
+      expect(await run(["validate"], context)).toBe(1);
+      expect(err).toEqual([
+        `Instance: ${NEAREST} (nearest .fffactory/factory.json)`,
+        "Invalid factory.json:",
+        `  log_archive.enabled: must not be true in ${region}: S3's account-regional namespace, which names the log archive, is not available there`,
+      ]);
+    },
+  );
 
   test("fails with an initialization instruction when no instance exists", async () => {
     const { context, err } = harness(new MemoryInstanceStore());
@@ -113,8 +144,8 @@ describe("fffactory", () => {
 });
 
 describe("which commands wait on an interrupt (plan-apply §Interruption)", () => {
-  test("apply, upgrade, doctor, status and worker report what an interrupt left, so they wait", () => {
-    for (const name of ["apply", "upgrade", "doctor", "status", "worker"])
+  test("apply, upgrade, doctor, status, worker and teardown report what an interrupt left, so they wait", () => {
+    for (const name of ["apply", "upgrade", "doctor", "status", "worker", "teardown"])
       expect(waitsOnInterrupt([name, "--instance", "/x/factory.json"])).toBe(true);
   });
 

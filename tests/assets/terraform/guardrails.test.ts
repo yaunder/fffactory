@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import example from "../../../examples/factory.json";
 import {
+  projectArchiveVariables,
   projectBackendVariables,
   projectFactoryVariables,
 } from "../../../src/application/project-terraform-inputs";
@@ -15,6 +16,7 @@ import { checkTerraformGuardrails } from "../../support/terraform-guardrails";
 
 const MODULES = join(import.meta.dir, "../../../assets/terraform");
 const FIXTURES = join(import.meta.dir, "fixtures");
+const ROOT_MODULES = ["factory", "backend", "archive"];
 
 async function violations(fixture: string) {
   return (await checkTerraformGuardrails(join(FIXTURES, fixture))).violations;
@@ -35,6 +37,8 @@ describe("guardrails over the shipped Terraform modules (provisioning §Guardrai
     expect(report.resources).toContain("aws_iam_role.host");
     expect(report.resources).toContain("aws_instance.host");
     expect(report.resources).toContain("aws_s3_bucket.state");
+    expect(report.resources).toContain("aws_s3_bucket.archive");
+    expect(report.resources).toContain("aws_s3_bucket_abac.archive");
     expect(report.resources.length).toBeGreaterThanOrEqual(17);
   });
 
@@ -86,7 +90,7 @@ describe("guardrails over the shipped Terraform modules (provisioning §Guardrai
     ]);
   });
 
-  test("tag-conditioned, read-only, trust and deny statements pass", async () => {
+  test("tag-conditioned, read-only, trust and deny statements pass, a conditional document's among them", async () => {
     expect(await violations("tagged-iam")).toEqual([]);
   });
 
@@ -131,6 +135,11 @@ describe("guardrails over the shipped Terraform modules (provisioning §Guardrai
         at: "main.tf:36",
         message:
           "aws_iam_role_policy_attachment.admin: policy_arn is a policy the guardrail cannot read",
+      },
+      {
+        at: "main.tf:43",
+        message:
+          "aws_iam_role_policy.indexed: policy is not an aws_iam_policy_document the guardrail can read",
       },
     ]);
   });
@@ -294,7 +303,7 @@ describe("guardrails over the shipped Terraform modules (provisioning §Guardrai
   });
 
   test("each root module's lockfile pins the provider version its configuration requires", async () => {
-    for (const root of ["factory", "backend"]) {
+    for (const root of ROOT_MODULES) {
       const versions = await readFile(join(MODULES, root, "versions.tf"), "utf8");
       const lockfile = await readFile(join(MODULES, root, ".terraform.lock.hcl"), "utf8");
       const required = /version\s*=\s*"([0-9.]+)"/.exec(versions)?.[1];
@@ -328,6 +337,23 @@ describe("guardrails over the shipped Terraform modules (provisioning §Guardrai
     ).toBe(true);
   });
 
+  test("the archive root keeps its bucket: prevent_destroy, and no expiry, Object Lock or KMS", async () => {
+    const path = join(MODULES, "modules", "log-archive", "main.tf");
+    const source = await readFile(path, "utf8");
+    const resources = parseHcl(source, path).blocks.filter((block) => block.type === "resource");
+    const bucket = resources.find((block) => block.labels.join(".") === "aws_s3_bucket.archive");
+    const lifecycle = bucket?.body.blocks.find((block) => block.type === "lifecycle");
+    const prevent = lifecycle?.body.attributes.find(({ name }) => name === "prevent_destroy");
+    expect(prevent?.expression).toBe("true");
+    for (const forbidden of [
+      "aws_s3_bucket_lifecycle_configuration",
+      "aws_s3_bucket_object_lock_configuration",
+      "aws_kms_key",
+    ])
+      expect(resources.map((block) => block.labels[0])).not.toContain(forbidden);
+    expect(source).not.toMatch(/object_lock_enabled\s*=\s*true|aws:kms|force_destroy\s*=\s*true/);
+  });
+
   test("an empty factory's projection passes the hosts variable: no validation requires a host", async () => {
     const parsed = parseFactoryInstance({ ...example, hosts: [] });
     if (!parsed.valid) throw new Error("the empty example instance is invalid");
@@ -349,11 +375,15 @@ describe("guardrails over the shipped Terraform modules (provisioning §Guardrai
     if (!parsed.valid) throw new Error("the example instance is invalid");
     const factory = projectFactoryVariables(parsed.instance, []);
     const backend = projectBackendVariables(parsed.instance);
+    const archive = projectArchiveVariables(parsed.instance);
     expect(factory.ok && Object.keys(factory.variables).sort()).toEqual(
       await variablesOf("factory"),
     );
     expect(backend.ok && Object.keys(backend.variables).sort()).toEqual(
       await variablesOf("backend"),
+    );
+    expect(archive.ok && Object.keys(archive.variables).sort()).toEqual(
+      await variablesOf("archive"),
     );
   });
 });

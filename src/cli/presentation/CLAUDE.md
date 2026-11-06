@@ -21,7 +21,8 @@ The text a person reads, laid out from the data use cases return
 - A render takes at most one Next block and prints it last; a command that leaves work for the
   operator ends with one. An `fffactory` command it names, or a row names as inline code (a
   `code` span), is built with `fffactoryCommand` (`command-line.ts`), repeating the
-  `--instance` and `--profile` the running command was given, never by hand.
+  `--instance` and `--profile` the running command was given, never by hand; one fffactory's
+  own words name in backticks, with `withCommands` there.
 - A report whose lines go to both streams (apply's Result and Next block) is laid out here as
   lines, each for its stream (`StreamLine`, `apply.ts`), and the command writes them in order:
   routing which line goes where is layout, never the command's (`docs/specs/cli-output.md` §Two

@@ -7,7 +7,10 @@ the first that fails. Spec: [docs/specs/host-protocol.md](../../docs/specs/host-
 changed for another reason.
 
 - One `<step>.sh` per shell install step; the plugin step is native TypeScript in
-  `src/host/plugins.ts`, with manifest validation in `src/host/plugin-manifest.ts`.
+  `src/host/plugins.ts`, with manifest validation in `src/host/plugin-manifest.ts`, and so is
+  the `credentials` step, in `src/host/credentials.ts` (`docs/specs/credential-delivery.md`), and
+  the `collector` step, in `src/host/collector-step.ts`, whose systemd units are text in
+  `src/domain/collector-installation.ts`, not files here.
   `versions.env` and `plugins.json` are the pins. `tests/assets/steps/steps.test.ts` checks the list.
 - Bash on Amazon Linux 2023, `set -Eeuo pipefail`, shellcheck-clean (CI checks), executable.
   `host apply` runs each with `/bin/bash`, as root, from `/`, with only `PATH`, `HOME=/root`,
@@ -21,7 +24,12 @@ changed for another reason.
 - Never mention SSM here; a test fails on it.
 - A step that still needs `jq` carries a `TODO(re-evaluate when …)` naming when to drop it.
 - `versions.env` and `plugins.json` are the only pins of the agent CLIs and Claude Code
-  plugins: v1's originals in `agent-harness/` were deleted in #102.
+  plugins: v1's originals in `agent-harness/` were deleted in #102. `packages.sh` holds the
+  pins of the upstream build tools (ripgrep, just, pnpm): a version and the sha256 of its
+  archive each, installed only through its `install_verified_binary`, which checks the
+  sha256 before installing and skips a tool already at its pin.
+- `harness.sh` also writes Codex's root-owned `/etc/codex/requirements.toml` on every worker
+  (host-protocol.md §Agent pins); `tests/bootstrap/harness.test.sh` runs the real step.
 - `repositories/` holds the repository-sync program the repository stage runs over SSH, not an
   install step; its own CLAUDE.md has the rules.
 - `control-plane/` holds the Paseo control-plane step (install, verify, the config merge, the

@@ -14,7 +14,8 @@ import {
   ROOT,
   text,
 } from "./validation";
-import { carriesFactoryId } from "./resource-naming";
+import { ENROLLMENTS, type EnrollmentId } from "./readiness";
+import { archiveBucketName, carriesFactoryId } from "./resource-naming";
 
 export type { Issue } from "./validation";
 export { ROOT as DOCUMENT_ROOT } from "./validation";
@@ -49,6 +50,12 @@ const RELEASE_MESSAGE = "must be a release version like 1.2.3";
 const ACCOUNT_ID = /^\d{12}$/;
 const REGION = /^[a-z]{2}(-[a-z]+)+-\d+$/;
 const BUCKET = /^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/;
+/** The formats factory.json's validation gives an AWS Region and an S3 bucket name. */
+export { BUCKET as S3_BUCKET_NAME, REGION as AWS_REGION };
+/** S3's longest bucket name. */
+const S3_BUCKET_NAME_MAX = 63;
+/** Regions without S3's account-regional namespace, which names the log archive. */
+const NO_ACCOUNT_REGIONAL_NAMESPACE: readonly string[] = ["me-south-1", "me-central-1"];
 const REPOSITORY_KEY = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const isRepositoryKey = (value: string) => REPOSITORY_KEY.test(value);
 const isHostKey = (value: string) => HOST_KEY.test(value);
@@ -80,6 +87,8 @@ export interface Host {
   readonly paseo_password_secret?: SecretReference;
   readonly repositories?: readonly string[];
   readonly dispatch?: DispatchSettings;
+  /** Accounts kept on a human's login on this host: their references are not delivered to it. */
+  readonly interactive_logins?: readonly EnrollmentId[];
 }
 
 export interface Repository {
@@ -98,6 +107,11 @@ export interface FactoryInstance {
   readonly name?: string;
   readonly aws?: { readonly account_id?: string; readonly region?: string };
   readonly state_backend?: { readonly bucket?: string };
+  // TODO(re-evaluate when the reader ships): make the archive default-on, absent meaning
+  // enabled and shown in the reviewed plan; `init` never fills it, as it never makes an
+  // operator's choice.
+  /** The worker log archive; absent or disabled, there is none. Its name is `archiveBucketName`. */
+  readonly log_archive?: { readonly enabled: boolean };
   readonly network?: {
     readonly vpc_cidr?: string;
     readonly public_subnet_cidr?: string;
@@ -110,6 +124,12 @@ export interface FactoryInstance {
     /** The operator-only OAuth client (`devices:core`) that deletes devices; never a worker's. */
     readonly admin_client_secret?: SecretReference;
   };
+  /** Factory-wide API credentials, delivered to every host that does not keep a human login. */
+  readonly credentials?: {
+    readonly github_token_secret?: SecretReference;
+    readonly anthropic_api_key_secret?: SecretReference;
+    readonly openai_api_key_secret?: SecretReference;
+  };
   readonly repositories?: readonly Repository[];
   readonly hosts?: readonly Host[];
 }
@@ -121,11 +141,24 @@ export const TAILSCALE_SECRET_FIELDS = [
 ] as const satisfies readonly (keyof NonNullable<FactoryInstance["tailscale"]>)[];
 export type TailscaleSecretField = (typeof TAILSCALE_SECRET_FIELDS)[number];
 
+/** Each account's credential reference field under factory.json's `credentials`. */
+export const CREDENTIAL_SECRET_FIELDS = {
+  github: "github_token_secret",
+  anthropic: "anthropic_api_key_secret",
+  openai: "openai_api_key_secret",
+} as const satisfies Record<EnrollmentId, keyof NonNullable<FactoryInstance["credentials"]>>;
+export type CredentialSecretField =
+  (typeof CREDENTIAL_SECRET_FIELDS)[keyof typeof CREDENTIAL_SECRET_FIELDS];
+
+const ACCOUNT_IDS: readonly string[] = ENROLLMENTS.map(({ id }) => id);
+const isAccountId = (value: string) => ACCOUNT_IDS.includes(value);
+
 const OCTET = String.raw`(25[0-5]|2[0-4]\d|1\d\d|0?\d?\d)`;
 /** Same rule as the schema's CIDR pattern: octets 0-255, prefix 0-32 without a leading zero. */
 const IPV4_CIDR = new RegExp(String.raw`^(${OCTET}\.){3}${OCTET}/(3[0-2]|[12]?\d)$`);
 
-function isCheckoutPath(value: string): boolean {
+/** A checkout path relative to the repository root: no empty, `.` or `..` segment, nothing to escape it. */
+export function isCheckoutPath(value: string): boolean {
   const segments = value.split("/");
   return segments.every(
     (segment) => /^[A-Za-z0-9._-]+$/.test(segment) && segment !== "." && segment !== "..",
@@ -145,6 +178,7 @@ const hostRule = object(
     root_volume_gib: integer(8, 16384),
     paseo_password_secret: secretReference,
     repositories: arrayOf(repositoryKey),
+    interactive_logins: arrayOf(text(isAccountId, `must be one of ${ACCOUNT_IDS.join(", ")}`)),
     dispatch: object({
       enabled: boolean,
       cron: nonEmptyText,
@@ -192,6 +226,7 @@ const documentRule = object(
     state_backend: object({
       bucket: pattern(BUCKET, "must be an S3 bucket name"),
     }),
+    log_archive: object({ enabled: boolean }, ["enabled"]),
     network: object({
       vpc_cidr: pattern(IPV4_CIDR, "must be an IPv4 CIDR block"),
       public_subnet_cidr: pattern(IPV4_CIDR, "must be an IPv4 CIDR block"),
@@ -205,6 +240,11 @@ const documentRule = object(
       auth_key_secret: secretReference,
       admin_client_secret: secretReference,
     }),
+    credentials: object(
+      Object.fromEntries(
+        Object.values(CREDENTIAL_SECRET_FIELDS).map((field) => [field, secretReference]),
+      ),
+    ),
     repositories: arrayOf(repositoryRule),
     hosts: arrayOf(hostRule),
   },
@@ -243,6 +283,9 @@ function checkRepositories(document: Record<string, unknown>, issues: Issue[]): 
   return new Set(byKey.map((entry) => entry.key));
 }
 
+// TODO(re-evaluate when factory.json's schema_version next changes): refuse a repository key a
+// host places twice (`duplicateKeys` here, `uniqueItems` in the schema). Valid today, it is
+// counted twice in the plan's Repositories and Dispatch rows and registered twice.
 function checkPlacement(host: KeyedEntry, declared: Set<string>, issues: Issue[]): void {
   const placed = host.value.repositories;
   if (!Array.isArray(placed)) return;
@@ -257,10 +300,27 @@ function checkPlacement(host: KeyedEntry, declared: Set<string>, issues: Issue[]
   });
 }
 
+/** A host lists each account it keeps on interactive login at most once. */
+function checkInteractiveLogins(host: Record<string, unknown>, hostPath: string, issues: Issue[]) {
+  const logins = host.interactive_logins;
+  if (!Array.isArray(logins)) return;
+  const listPath = fieldPath(hostPath, "interactive_logins");
+  const accounts = logins.flatMap((account, index) =>
+    typeof account === "string" && isAccountId(account)
+      ? [{ key: account, path: itemPath(listPath, index) }]
+      : [],
+  );
+  duplicateKeys(accounts, (account) => `duplicates account "${account}"`, issues);
+}
+
 function checkHosts(document: Record<string, unknown>, declared: Set<string>, issues: Issue[]) {
   const hosts = wellFormedEntries(document.hosts, "hosts", "key", isHostKey);
   duplicateKeys(hosts, (key) => `duplicates host key "${key}"`, issues);
   for (const host of hosts) checkPlacement(host, declared, issues);
+  if (Array.isArray(document.hosts))
+    document.hosts.forEach((host, index) => {
+      if (isRecord(host)) checkInteractiveLogins(host, itemPath("hosts", index), issues);
+    });
 }
 
 /** The state bucket's name carries the factory ID, as every factory resource name does. */
@@ -277,6 +337,71 @@ function checkStateBucket(document: Record<string, unknown>, issues: Issue[]): v
     });
 }
 
+/**
+ * The log archive's bucket is named in S3's account-regional namespace, which some Regions
+ * lack. The message names the Region, a fixed one that has passed its format check.
+ */
+function checkLogArchiveRegion(document: Record<string, unknown>, issues: Issue[]): void {
+  if (nested(document, "log_archive", "enabled") !== true) return;
+  const region = nested(document, "aws", "region");
+  if (typeof region !== "string" || !NO_ACCOUNT_REGIONAL_NAMESPACE.includes(region)) return;
+  issues.push({
+    path: "log_archive.enabled",
+    message: `must not be true in ${region}: S3's account-regional namespace, which names the log archive, is not available there`,
+  });
+}
+
+/**
+ * The log archive's bucket name (`archiveBucketName`) as if enabled, whether or not it is:
+ * undefined until the factory ID, account and Region it derives from are well formed.
+ */
+function derivedArchiveName(document: Record<string, unknown>): string | undefined {
+  const factoryId = document.factory_id;
+  const account = nested(document, "aws", "account_id");
+  const region = nested(document, "aws", "region");
+  if (typeof factoryId !== "string" || !FACTORY_ID.test(factoryId)) return undefined;
+  if (typeof account !== "string" || !ACCOUNT_ID.test(account)) return undefined;
+  if (typeof region !== "string" || !REGION.test(region)) return undefined;
+  return archiveBucketName({
+    schema_version: SCHEMA_VERSION,
+    factory_id: factoryId as FactoryId,
+    aws: { account_id: account, region },
+    log_archive: { enabled: true },
+  });
+}
+
+/**
+ * The state bucket never takes the log archive's derived name, enabled or not: a retained
+ * archive would pass as a ready state bucket, and teardown, which deletes the state bucket,
+ * would then delete the archive it promises to keep. Reserved while the archive is disabled
+ * too, so evidence kept from when it was enabled stays protected. The message names the rule,
+ * never a configured value.
+ */
+function checkStateBucketNotArchive(document: Record<string, unknown>, issues: Issue[]): void {
+  const bucket = nested(document, "state_backend", "bucket");
+  if (typeof bucket !== "string" || bucket !== derivedArchiveName(document)) return;
+  issues.push({
+    path: "state_backend.bucket",
+    message:
+      "must not be <factory_id>-logs-<aws.account_id>-<aws.region>-an, the log archive's bucket name, reserved for it even while it is not enabled: teardown deletes the state bucket and keeps the archive",
+  });
+}
+
+/**
+ * The log archive's derived bucket name must fit S3's 63 characters, which a long Region name
+ * could exceed. Judged once the factory ID, account and Region it derives from are well formed;
+ * the message names only the rule and the length, never a configured value.
+ */
+function checkLogArchiveName(document: Record<string, unknown>, issues: Issue[]): void {
+  if (nested(document, "log_archive", "enabled") !== true) return;
+  const name = derivedArchiveName(document);
+  if (name === undefined || name.length <= S3_BUCKET_NAME_MAX) return;
+  issues.push({
+    path: "log_archive.enabled",
+    message: `must not be true while the log archive's bucket name, <factory_id>-logs-<aws.account_id>-<aws.region>-an, would be ${name.length} characters, beyond S3's ${S3_BUCKET_NAME_MAX}`,
+  });
+}
+
 /** A field of one of the document's objects, or undefined. */
 function nested(document: Record<string, unknown>, parent: string, field: string): unknown {
   const value = document[parent];
@@ -285,10 +410,16 @@ function nested(document: Record<string, unknown>, parent: string, field: string
 
 /** Every secret field that holds a well-formed ARN, by field path. */
 function secretFields(document: Record<string, unknown>): { path: string; arn: string }[] {
-  const fields = TAILSCALE_SECRET_FIELDS.map((field) => ({
-    path: fieldPath("tailscale", field),
-    arn: nested(document, "tailscale", field),
-  }));
+  const fields = [
+    ...TAILSCALE_SECRET_FIELDS.map((field) => ({
+      path: fieldPath("tailscale", field),
+      arn: nested(document, "tailscale", field),
+    })),
+    ...Object.values(CREDENTIAL_SECRET_FIELDS).map((field) => ({
+      path: fieldPath("credentials", field),
+      arn: nested(document, "credentials", field),
+    })),
+  ];
   if (Array.isArray(document.hosts))
     document.hosts.forEach((host, index) => {
       if (!isRecord(host)) return;
@@ -318,6 +449,29 @@ function checkSecretPlacement(document: Record<string, unknown>, issues: Issue[]
   }
 }
 
+/** An account whose credential factory.json's reference delivers to one host. */
+export interface DeliveredAccount {
+  readonly id: EnrollmentId;
+  readonly secret: SecretReference;
+}
+
+/**
+ * The accounts delivered to host `hostKey`, in `ENROLLMENTS`' order: each one `credentials`
+ * references and the host does not keep on interactive login. A host factory.json does not
+ * declare is delivered nothing.
+ */
+export function deliveredAccounts(
+  instance: FactoryInstance,
+  hostKey: HostKey,
+): readonly DeliveredAccount[] {
+  const host = instance.hosts?.find((candidate) => candidate.key === hostKey);
+  if (host === undefined) return [];
+  return ENROLLMENTS.flatMap(({ id }) => {
+    const secret = instance.credentials?.[CREDENTIAL_SECRET_FIELDS[id]];
+    return secret === undefined || host.interactive_logins?.includes(id) ? [] : [{ id, secret }];
+  });
+}
+
 /** factory.json's text: two-space indented JSON and a final newline. */
 export function serializeInstance(instance: FactoryInstance): string {
   return `${JSON.stringify(instance, null, 2)}\n`;
@@ -335,7 +489,10 @@ export function parseFactoryInstance(document: unknown): InstanceParse {
     const declared = checkRepositories(document, issues);
     checkHosts(document, declared, issues);
     checkStateBucket(document, issues);
+    checkStateBucketNotArchive(document, issues);
     checkSecretPlacement(document, issues);
+    checkLogArchiveRegion(document, issues);
+    checkLogArchiveName(document, issues);
   }
   return issues.length === 0
     ? { valid: true, instance: document as unknown as FactoryInstance }
@@ -345,6 +502,8 @@ export function parseFactoryInstance(document: unknown): InstanceParse {
 export interface CompletenessReport {
   readonly complete: boolean;
   readonly missing: readonly string[];
+  /** The command that fills a missing field, by its path, for the fields one fills. */
+  readonly commands: Readonly<Record<string, string>>;
 }
 
 const REQUIRED_FOR_COMPLETENESS: readonly (readonly [string, (i: FactoryInstance) => unknown])[] = [
@@ -361,35 +520,56 @@ const REQUIRED_FOR_COMPLETENESS: readonly (readonly [string, (i: FactoryInstance
   ["tailscale.auth_key_secret", (i) => i.tailscale?.auth_key_secret],
 ];
 
-const REQUIRED_HOST_FIELDS = ["instance_type", "root_volume_gib"] as const;
+/**
+ * A worker is ready only once its Paseo daemon runs, and the daemon never starts without a
+ * password, so every host needs one (`docs/specs/control-plane.md` §The daemon password).
+ */
+const REQUIRED_HOST_FIELDS = ["instance_type", "root_volume_gib", "paseo_password_secret"] as const;
+
+/** A missing field, and the command that fills it when one does. */
+interface MissingField {
+  readonly path: string;
+  readonly command?: string;
+}
 
 /**
  * The host fields still needed: `hosts` itself while it is absent, then each declared host's
- * machine and enabled dispatch fields. An empty list is complete: a factory may declare no
- * worker, as when `fffactory worker terminate` removed its last one.
+ * machine fields, Paseo password and enabled dispatch fields. An empty list is complete: a
+ * factory may declare no worker, as when `fffactory worker terminate` removed its last one.
  */
-function missingHostFields(hosts: readonly Host[] | undefined): string[] {
-  if (!hosts) return ["hosts"];
+function missingHostFields(hosts: readonly Host[] | undefined): MissingField[] {
+  if (!hosts) return [{ path: "hosts" }];
   const dispatchFields = ["cron", "timezone", "provider", "model", "mode", "cwd"] as const;
   return hosts.flatMap((host, index) => [
-    ...REQUIRED_HOST_FIELDS.filter((field) => host[field] === undefined).map((field) =>
-      fieldPath(itemPath("hosts", index), field),
-    ),
+    ...REQUIRED_HOST_FIELDS.filter((field) => host[field] === undefined).map((field) => ({
+      path: fieldPath(itemPath("hosts", index), field),
+      ...(field === "paseo_password_secret"
+        ? { command: `fffactory secret set paseo-password --host ${host.key}` }
+        : {}),
+    })),
     ...(host.dispatch?.enabled === true
       ? dispatchFields
           .filter((field) => host.dispatch?.[field] === undefined)
-          .map((field) => fieldPath(fieldPath(itemPath("hosts", index), "dispatch"), field))
+          .map((field) => ({
+            path: fieldPath(fieldPath(itemPath("hosts", index), "dispatch"), field),
+          }))
       : []),
   ]);
 }
 
 /** Lists the fields a valid, possibly partial, instance still needs before it can be planned. */
 export function assessCompleteness(instance: FactoryInstance): CompletenessReport {
-  const missing = [
+  const fields: MissingField[] = [
     ...REQUIRED_FOR_COMPLETENESS.filter(([, read]) => read(instance) === undefined).map(
-      ([path]) => path,
+      ([path]) => ({ path }),
     ),
     ...missingHostFields(instance.hosts),
   ];
-  return { complete: missing.length === 0, missing };
+  return {
+    complete: fields.length === 0,
+    missing: fields.map(({ path }) => path),
+    commands: Object.fromEntries(
+      fields.flatMap(({ path, command }) => (command === undefined ? [] : [[path, command]])),
+    ),
+  };
 }

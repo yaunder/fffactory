@@ -14,7 +14,10 @@ import {
 } from "../../src/domain/instance";
 import type { MachineInventory, WorkerStatus } from "../../src/domain/status";
 import type { PeerView } from "../../src/domain/tailnet";
+import type { AgentsObservation } from "../../src/domain/control-plane";
+import { INSPECT_WORK_COMMAND } from "../../src/domain/work-inspection";
 import { fakeCallerIdentity } from "../support/doctor-fakes";
+import { agentsIn, fakeControlPlane } from "../support/fake-control-plane";
 import {
   type Answer,
   statusAnswers,
@@ -34,14 +37,18 @@ import {
 const EXAMPLE = JSON.parse(await Bun.file("examples/factory.json").text());
 const B1 = "example-builder-1";
 const B2 = "example-builder-2";
+const BUILDER_2 = {
+  key: "builder-2",
+  instance_type: "m7i.large",
+  root_volume_gib: 100,
+  paseo_password_secret:
+    "arn:aws:secretsmanager:us-east-1:123456789012:secret:example/builder-2/paseo-password-AbCdEf",
+};
 
 function instance(overrides: Record<string, unknown> = {}): FactoryInstance {
   const document = {
     ...EXAMPLE,
-    hosts: [
-      EXAMPLE.hosts[0],
-      { key: "builder-2", instance_type: "m7i.large", root_volume_gib: 100 },
-    ],
+    hosts: [EXAMPLE.hosts[0], BUILDER_2],
     ...overrides,
   };
   const parsed = parseFactoryInstance(document);
@@ -66,25 +73,29 @@ function world({
   },
   caller,
   sha256 = FAKE_SHA256,
+  agents = agentsIn("finished"),
 }: {
   inventory?: MachineInventory;
   view?: PeerView;
   script?: Record<string, Answer>;
   caller?: CallerObservation;
   sha256?: (text: string) => string;
+  agents?: AgentsObservation;
 } = {}) {
   const identity = fakeCallerIdentity(caller);
   const machines = fakeMachineInventory(inventory);
   const tailnet = fakeTailnet(view);
   const transport = fakeTransport(script);
+  const controlPlane = fakeControlPlane("healthy", agents);
   const deps: StatusDependencies = {
     identity: identity.identity,
     machines: machines.machines,
     peers: tailnet.tailnet,
     transport: transport.transport,
+    controlPlane: controlPlane.controlPlane,
     sha256,
   };
-  return { deps, identity, machines, tailnet, transport };
+  return { deps, identity, machines, tailnet, transport, controlPlane };
 }
 
 async function report(deps: StatusDependencies, of: FactoryInstance = instance()) {
@@ -128,6 +139,79 @@ describe("factory status", () => {
     ]);
   });
 
+  test("reports each reached worker's agents in their states, read after dispatch, never the work", async () => {
+    const order: string[] = [];
+    const { deps, transport } = world({ agents: agentsIn("working", "finished", "finished") });
+    const traced: StatusDependencies = {
+      ...deps,
+      transport: {
+        run: (worker, command, options) => {
+          if (command.includes("dispatch")) order.push(`dispatch ${worker.hostname}`);
+          return deps.transport.run(worker, command, options);
+        },
+      },
+      controlPlane: {
+        ...(deps.controlPlane as NonNullable<StatusDependencies["controlPlane"]>),
+        agents: (worker) => {
+          order.push(`agents ${worker.hostname}`);
+          return (deps.controlPlane as NonNullable<StatusDependencies["controlPlane"]>).agents(
+            worker,
+          );
+        },
+      },
+    };
+    const outcome = await report(traced);
+    const [builder1] = outcome.report.workers;
+    expect(builder1?.activity).toEqual({
+      state: "busy",
+      reason: null,
+      agents: [
+        { id: "agent-1", state: "working", dispatched: true },
+        { id: "agent-2", state: "finished", dispatched: false },
+        { id: "agent-3", state: "finished", dispatched: false },
+      ],
+    });
+    // Dispatch and activity both go through the worker's activator, which runs one at a time.
+    for (const hostname of [B1, B2])
+      expect(order.filter((step) => step.endsWith(hostname))).toEqual([
+        `dispatch ${hostname}`,
+        `agents ${hostname}`,
+      ]);
+    expect(
+      transport.calls.some(({ command }) =>
+        INSPECT_WORK_COMMAND.every((word, index) => command[index] === word),
+      ),
+    ).toBe(false);
+    // Activity is reported, never judged: a busy worker is still ready.
+    expect(builder1?.status).toBe("ready");
+  });
+
+  test("a worker not reached has unknown activity, and its control plane is never asked", async () => {
+    const { deps, controlPlane } = world({ view: peers(peer(B1, { online: false })) });
+    const outcome = await report(deps);
+    expect(outcome.report.workers.map((worker) => worker.activity)).toEqual([
+      { state: "unknown", reason: null, agents: null },
+      { state: "unknown", reason: null, agents: null },
+    ]);
+    expect(controlPlane.calls).toEqual([]);
+  });
+
+  test("activity that could not be read is unknown, saying why; without a control plane too", async () => {
+    const outdated = await report(world({ agents: { kind: "outdated" } }).deps);
+    expect(outdated.report.workers[0]?.activity).toEqual({
+      state: "unknown",
+      reason: "its release predates fffactory's agent states",
+      agents: null,
+    });
+    const { deps } = world();
+    const unwired = await report({ ...deps, controlPlane: undefined });
+    expect(unwired.report.workers[0]?.activity).toEqual({
+      state: "unknown",
+      reason: "this fffactory cannot reach the worker's control plane",
+      agents: null,
+    });
+  });
+
   test("compares each worker's configuration with the projection apply would send it", async () => {
     const digested: string[] = [];
     const { deps } = world({
@@ -145,6 +229,7 @@ describe("factory status", () => {
       release: "0.1.0",
       paseo_password_secret:
         "arn:aws:secretsmanager:us-east-1:123456789012:secret:example/builder-1/paseo-password-AbCdEf",
+      log_archive: { bucket: "example-logs-123456789012-us-east-1-an", region: "us-east-1" },
     });
     const { "builder-1": one, "builder-2": two } = byKey(outcome.report.workers);
     expect(one?.status).toBe("ready");
@@ -174,10 +259,7 @@ describe("factory status", () => {
       },
     });
     const configured = instance({
-      hosts: [
-        { ...EXAMPLE.hosts[0], dispatch },
-        { key: "builder-2", instance_type: "m7i.large", root_volume_gib: 100 },
-      ],
+      hosts: [{ ...EXAMPLE.hosts[0], dispatch }, BUILDER_2],
     });
     const { report: result } = await report(deps, configured);
     expect(byKey(result.workers)["builder-1"]).toMatchObject({
@@ -213,7 +295,7 @@ describe("factory status", () => {
             cwd: "/home/factory",
           },
         },
-        { key: "builder-2", instance_type: "m7i.large", root_volume_gib: 100 },
+        BUILDER_2,
       ],
     });
     const { report: result } = await report(deps, configured);
@@ -245,6 +327,42 @@ describe("factory status", () => {
     expect(one).toMatchObject({ status: "not_ready", installation: "succeeded" });
     expect(one?.summary).toStartWith("Software ready on release 0.1.0; enrollment pending");
     expect(one?.enrollment?.map((entry) => entry.state)).toEqual(["pending", "pending", "pending"]);
+  });
+
+  test("an account factory.json delivers names its credential, from factory.json alone", async () => {
+    const pending = installed("0.1.0", verification(B1, "pending"));
+    const { deps } = world({
+      script: {
+        [B1]: statusAnswers(inspection(B1, { installation: pending }, "0.1.0")),
+        [B2]: statusAnswers(inspection(B2, { installation: pending }, "0.1.0")),
+      },
+    });
+    const github =
+      "arn:aws:secretsmanager:us-east-1:123456789012:secret:example/github-token-AbCdEf";
+    const outcome = await report(
+      deps,
+      instance({
+        credentials: { github_token_secret: github },
+        hosts: [EXAMPLE.hosts[0], { ...BUILDER_2, interactive_logins: ["github"] }],
+      }),
+    );
+    const workers = byKey(outcome.report.workers);
+    const logins = (key: string) =>
+      workers[key]?.enrollment?.map(({ next_action }) => next_action?.login ?? null);
+    expect(logins("builder-1")).toEqual([
+      null,
+      `tailscale ssh factory@${B1}`,
+      `tailscale ssh factory@${B1}`,
+    ]);
+    expect(workers["builder-1"]?.enrollment?.[0]?.next_action?.commands).toEqual([
+      "fffactory secret set github-token",
+      "fffactory apply",
+    ]);
+    expect(logins("builder-2")).toEqual([
+      `tailscale ssh factory@${B2}`,
+      `tailscale ssh factory@${B2}`,
+      `tailscale ssh factory@${B2}`,
+    ]);
   });
 
   test("reports unresolved and unmanaged checkouts from the worker's persisted observation", async () => {

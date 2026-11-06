@@ -24,8 +24,9 @@ import {
 } from "../support/doctor-fakes";
 import type { ControlPlane } from "../../src/application/control-plane";
 import type { WorkflowQueue } from "../../src/application/workflow-queue";
-import { fakeControlPlane, fakeWorkflowQueue } from "../support/fake-control-plane";
+import { agentsIn, fakeControlPlane, fakeWorkflowQueue } from "../support/fake-control-plane";
 import {
+  ARCHIVE,
   BUCKET,
   declaring,
   FACTORY,
@@ -41,10 +42,14 @@ import {
   STATE_BUCKET_ADDRESS,
 } from "../support/fake-provisioner";
 import { newSavedBootstrapPlan } from "../../src/domain/plan";
+import {
+  type RepositoryRegistration,
+  repositoryRegistration,
+} from "../../src/domain/repository-registration";
 import { fakePrompt } from "../support/fake-secrets";
 import { type Behavior, fakeTerraform } from "../support/fake-terraform";
 import { MemoryInstanceStore } from "../support/memory-instance-store";
-import { MemoryLockStore, READY_BUCKET } from "../support/memory-lock-store";
+import { MemoryLockStore, READY_ARCHIVE, READY_BUCKET } from "../support/memory-lock-store";
 import { MemoryPlanStore } from "../support/memory-plan-store";
 import {
   appliedRecord,
@@ -87,7 +92,7 @@ const STAGES = [
   "  Workers          one at a time",
   "    ~ builder-1   install release 0.3.0 and host configuration, then verify",
   "  Control plane    before worker activation",
-  "    ~ builder-1   paseo-package, service-definition, listen-address",
+  "    ~ builder-1   paseo-package, service-definition, listen-address, password",
   "  Repositories     one worker at a time",
   "    ~ builder-1   reconcile 0 placed repositories as factory; preserve and report unmanaged checkouts",
   "  Dispatch         after every readiness gate",
@@ -137,7 +142,7 @@ const ENROLL = [
   "",
   "  1. GitHub",
   "     $ gh auth login --hostname github.com --git-protocol https --web",
-  "     $ gh auth status",
+  "     $ gh auth status --hostname github.com --active",
   "  2. OpenAI Codex",
   "     $ codex login --device-auth",
   "     $ codex login status",
@@ -173,6 +178,16 @@ const CONVERGE = [
 /** The plan's row for a factory that declares no worker. */
 const NO_WORKERS =
   "  Workers          none declared. Declare a host in factory.json's hosts, then create it with `fffactory apply`.";
+
+/** factory.json placing one repository, `product`, on builder-1, its dispatch not requested. */
+const PLACING = `${JSON.stringify(
+  {
+    ...requestingDispatch(),
+    hosts: (requestingDispatch().hosts ?? []).map(({ dispatch: _, ...host }) => host),
+  },
+  null,
+  2,
+)}\n`;
 
 function text(hosts: string[], overrides: object = {}): string {
   return `${JSON.stringify({ ...declaring(...hosts), ...overrides }, null, 2)}\n`;
@@ -305,13 +320,23 @@ describe("fffactory plan (plan-apply §Plan)", () => {
     const stages = out.indexOf("  Control plane    before worker activation");
     expect(out.slice(stages, -SAVED.length)).toEqual([
       "  Control plane    before worker activation",
-      "    ~ builder-1   paseo-package, service-definition, listen-address",
+      "    ~ builder-1   paseo-package, service-definition, listen-address, password",
       "  Repositories     one worker at a time",
       "    ~ builder-1   reconcile 1 placed repository as factory; preserve and report unmanaged checkouts",
       "  Dispatch         after every readiness gate",
-      "    ~ builder-1   install the dispatcher and skill, then reconcile */15 * * * * UTC with claude/configured-model, mode default, cwd /home/factory",
+      "    ~ builder-1   register 1 placed repository as a Paseo project; install the dispatcher and skill, then reconcile */15 * * * * UTC with claude/configured-model, mode default, cwd /home/factory",
       "  Verification     end to end: observe each worker's release, repositories, Paseo and actual dispatch schedule",
     ]);
+  });
+
+  test("the Dispatch row names the registration of the placed repositories, dispatch requested or not (#135)", async () => {
+    const { context, out } = cli({ hosts: ["builder-1"], document: PLACING });
+    expect(await run(["plan"], context)).toBe(0);
+    const dispatch = out.indexOf("  Dispatch         after every readiness gate");
+    expect(out[dispatch + 1]).toBe(
+      "    ~ builder-1   register 1 placed repository as a Paseo project; remove the factory " +
+        "dispatch schedule if it exists",
+    );
   });
 
   test("its human output is colored only on a stream that is (cli-output §Color)", async () => {
@@ -455,6 +480,23 @@ describe("fffactory plan (plan-apply §Plan)", () => {
       "  network.public_subnet_cidr: is required to plan",
       "  network.availability_zone: is required to plan",
     ]);
+  });
+
+  test("log_archive.enabled in a Region without the account-regional namespace is refused before AWS (instance-configuration §Log archive)", async () => {
+    const document = text(["builder-1"], { log_archive: { enabled: true } }).replaceAll(
+      "eu-west-2",
+      "me-south-1",
+    );
+    const { context, err, identity, terraform, lockStore, assets } = cli({ document });
+    expect(await run(["plan"], context)).toBe(1);
+    expect(err).toEqual([
+      "Invalid factory.json:",
+      "  log_archive.enabled: must not be true in me-south-1: S3's account-regional namespace, which names the log archive, is not available there",
+    ]);
+    expect(identity.requests).toEqual([]);
+    expect(terraform.calls).toEqual([]);
+    expect(lockStore.calls).toEqual([]);
+    expect(assets.materialized).toEqual([]);
   });
 
   test("D11: removing a provisioned host key by hand is refused, naming `fffactory worker terminate`", async () => {
@@ -608,6 +650,43 @@ describe("fffactory plan (plan-apply §Plan)", () => {
     ]);
   });
 
+  test("with the log archive enabled, shows it created, or present once it exists (plan-apply §The infrastructure stage)", async () => {
+    const document = text(["builder-1"], { log_archive: { enabled: true } });
+    const missing = cli({ document });
+    expect(await run(["plan"], missing.context)).toBe(0);
+    expect(missing.out).toEqual([
+      ...header("plan"),
+      ...PLAN,
+      `  Archive          ${ARCHIVE}, created`,
+      ...CREATES,
+      ...STAGES,
+      ...SAVED,
+    ]);
+    const present = cli({ document });
+    present.lockStore.buckets.add(ARCHIVE);
+    expect(await run(["plan"], present.context)).toBe(0);
+    expect(present.out).toContain(`  Archive          ${ARCHIVE}, present`);
+  });
+
+  test("a log archive without all its settings is refused with how to complete it", async () => {
+    const { context, err, lockStore, planStore } = cli({
+      document: text(["builder-1"], { log_archive: { enabled: true } }),
+    });
+    lockStore.buckets.add(ARCHIVE);
+    lockStore.archives.set(ARCHIVE, { ...READY_ARCHIVE, abac: "Disabled" });
+    expect(await run(["plan"], context)).toBe(1);
+    expect(err.slice(0, 7)).toEqual([
+      "",
+      `✖ The log archive ${ARCHIVE} exists, but without every setting fffactory gives it. It lacks:`,
+      "  attribute-based access control",
+      "",
+      NEXT,
+      "  If another apply is still creating it, wait for that to finish, then retry.",
+      "",
+    ]);
+    expect(planStore.saved.size).toBe(0);
+  });
+
   test("a Terraform plan fffactory cannot read is refused", async () => {
     const { context, err, terraform } = cli();
     terraform.world.shown = { resource_changes: "garbled" };
@@ -657,7 +736,7 @@ describe("fffactory apply (plan-apply §Apply)", () => {
     const { context, out, err, prompt, lockStore, terraform } = cli({
       interactive: true,
       answers: ["yes"],
-      controlPlane: fakeControlPlane("healthy", { kind: "idle" }).controlPlane,
+      controlPlane: fakeControlPlane("healthy", agentsIn()).controlPlane,
       workflowQueue: fakeWorkflowQueue().queue,
     });
     lockStore.buckets.add(BUCKET);
@@ -743,6 +822,61 @@ describe("fffactory apply (plan-apply §Apply)", () => {
     ]);
     expect(prompt.asked).toEqual([]);
     expect(terraform.calls.map(({ call }) => call)).toEqual(["showPlan", "applyPlan"]);
+  });
+
+  test("a saved plan creating the log archive is stale once the archive exists", async () => {
+    const { context, err, lockStore, terraform } = cli({
+      document: text(["builder-1"], { log_archive: { enabled: true } }),
+    });
+    expect(await run(["plan"], context)).toBe(0);
+    lockStore.buckets.add(ARCHIVE);
+    terraform.calls.length = 0;
+    expect(await run(["apply", "--plan-id", "aaaaaaaa"], context)).toBe(1);
+    expect(err).toEqual([
+      "",
+      "✖ Refusing to apply plan aaaaaaaa: it is no longer the plan to apply:",
+      "  the log archive was created after it was planned",
+      "",
+      "Nothing was applied.",
+      "",
+      NEXT,
+      "  Review a new plan:",
+      "    $ fffactory plan",
+    ]);
+    expect(terraform.calls).toEqual([]);
+  });
+
+  test("a log archive created while an interactive apply's plan was shown: stale, with no plan ID, and apply is rerun", async () => {
+    const { context, err, lockStore, terraform } = cli({
+      document: text(["builder-1"], { log_archive: { enabled: true } }),
+      hosts: ["builder-1"],
+      interactive: true,
+      answers: ["yes"],
+    });
+    const prompt = context.prompt;
+    const racing = {
+      ...context,
+      prompt: {
+        ...prompt,
+        ask: async (question: string) => {
+          lockStore.buckets.add(ARCHIVE);
+          return prompt.ask(question);
+        },
+      },
+    };
+    expect(await run(["apply"], racing)).toBe(1);
+    expect(err).toEqual([
+      "",
+      "✖ Refusing to apply: the plan approved is no longer the plan to apply:",
+      "  the log archive was created after it was planned",
+      "",
+      "Nothing was applied.",
+      "",
+      NEXT,
+      "  Review a new plan:",
+      "    $ fffactory apply",
+    ]);
+    expect(terraform.calls.some(({ call }) => call === "applyPlan")).toBe(false);
   });
 
   test("applying a plan after factory.json changes is refused", async () => {
@@ -852,7 +986,7 @@ describe("fffactory apply (plan-apply §Apply)", () => {
       declared: [],
       interactive: true,
       answers: ["yes"],
-      controlPlane: fakeControlPlane("healthy", { kind: "idle" }).controlPlane,
+      controlPlane: fakeControlPlane("healthy", agentsIn()).controlPlane,
       workflowQueue: queue.queue,
     });
     expect(await run(["apply"], context)).toBe(0);
@@ -952,7 +1086,7 @@ describe("fffactory apply (plan-apply §Apply)", () => {
         answers: ["yes"],
         document: REQUESTING,
         fleet: workerFleet(["builder-1"], { [B1]: stale }),
-        controlPlane: fakeControlPlane("healthy", { kind: "active", count: 1 }).controlPlane,
+        controlPlane: fakeControlPlane("healthy", agentsIn("working")).controlPlane,
         workflowQueue: fakeWorkflowQueue().queue,
       });
       expect(await run(["apply"], context)).toBe(2);
@@ -962,9 +1096,9 @@ describe("fffactory apply (plan-apply §Apply)", () => {
       expect(out.slice(out.indexOf(RESULT))).toEqual([
         RESULT,
         UNCHANGED,
-        "  ! builder-1          skipped · Paseo maintenance is deferred while agents may be active",
+        "  ! builder-1          skipped · Paseo maintenance is deferred while agents may be busy",
         "    ! Control plane   deferred · Maintenance (paseo-package, service-definition, " +
-          `listen-address) was deferred while agents may be active on ${B1}; it stays on its ` +
+          `listen-address, password) was deferred while 1 agent is working on ${B1}; it stays on its ` +
           "complete current release",
         "    ✔ Repositories    synchronized",
         "    ↷ Dispatch        skipped",
@@ -972,7 +1106,7 @@ describe("fffactory apply (plan-apply §Apply)", () => {
         expect.stringMatching(RECORD_LINE),
         "",
         NEXT,
-        `  builder-1: Close the active agents on ${B1}, then rerun \`fffactory apply\``,
+        `  builder-1: Wait until no agent on ${B1} is working or needs input, then rerun \`fffactory apply\``,
       ]);
       expect(out.some((line) => line.includes("failed") || line.includes("absent"))).toBe(false);
     });
@@ -986,7 +1120,7 @@ describe("fffactory apply (plan-apply §Apply)", () => {
         fleet: workerFleet(["builder-1"], {}, () =>
           peers(peer(B1, { tags: [WORKER_TAG], online: false })),
         ),
-        controlPlane: fakeControlPlane("healthy", { kind: "idle" }).controlPlane,
+        controlPlane: fakeControlPlane("healthy", agentsIn()).controlPlane,
         workflowQueue: fakeWorkflowQueue().queue,
       });
       expect(await run(["apply"], context)).toBe(2);
@@ -1005,6 +1139,71 @@ describe("fffactory apply (plan-apply §Apply)", () => {
           "rerun `fffactory apply`.",
       ]);
       expect(out.some((line) => line.includes("failed") || line.includes("absent"))).toBe(false);
+    });
+  });
+
+  describe("a worker's repository registration (#135)", () => {
+    const PRODUCT = "/workspace/repos/product";
+
+    /** Applies PLACING to builder-1, its dispatch reconcile reporting `registration`. */
+    function applying(registration?: RepositoryRegistration) {
+      return cli({
+        hosts: ["builder-1"],
+        interactive: true,
+        answers: ["yes"],
+        document: PLACING,
+        controlPlane: fakeControlPlane("healthy", agentsIn()).controlPlane,
+        workflowQueue: fakeWorkflowQueue(registration === undefined ? {} : { registration }).queue,
+      });
+    }
+
+    /** builder-1's Result, from its row to the operation record. */
+    const workerResult = (out: readonly string[]) =>
+      out.slice(
+        out.indexOf(ENROLLMENT_PENDING),
+        out.findIndex((line) => RECORD_LINE.test(line)),
+      );
+
+    test.each([
+      ["registered", repositoryRegistration("paseo", [{ path: PRODUCT, state: "registered" }])],
+      ["already present", repositoryRegistration("paseo", [{ path: PRODUCT, state: "present" }])],
+      ["not reported, as by an older worker", undefined],
+    ])("%s leaves the Result and exit 0 as they were", async (_, registration) => {
+      const { context, out, err, lockStore } = applying(registration);
+      expect(await run(["apply"], context)).toBe(0);
+      expect(err).toEqual([]);
+      expect(workerResult(out)).toEqual([
+        ENROLLMENT_PENDING,
+        "    ✔ Control plane   applied",
+        "    ✔ Repositories    synchronized",
+        "      Dispatch        not requested",
+        "  ! Verification       The factory is ready: every worker is verified end to end · " +
+          "enrollment pending on 1 worker",
+      ]);
+      expect([...lockStore.operations.values()].at(-1)?.status).toBe("succeeded");
+    });
+
+    test("a failed one names each unregistered checkout and a rerun, and exits 2, never 1", async () => {
+      const { context, out, err, lockStore } = applying(
+        repositoryRegistration("paseo", [
+          { path: PRODUCT, state: "failed", reason: "registering it as a Paseo project timed out" },
+        ]),
+      );
+      expect(await run(["apply"], context)).toBe(2);
+      expect(err).toEqual([]);
+      expect(workerResult(out)).toEqual([
+        ENROLLMENT_PENDING,
+        "    ✔ Control plane   applied",
+        "    ✔ Repositories    synchronized",
+        "      Dispatch        not requested",
+        "    ! Registration    1 placed repository not registered",
+        `      ${PRODUCT} is not registered: registering it as a Paseo project timed out`,
+        "  ! Verification       The factory is not ready: 1 of 1 workers need attention · " +
+          "enrollment pending on 1 worker",
+      ]);
+      const next = out.slice(out.indexOf(NEXT));
+      expect(next.slice(0, 2)).toEqual([NEXT, "  builder-1: Rerun `fffactory apply`"]);
+      expect([...lockStore.operations.values()].at(-1)?.status).toBe("partial");
     });
   });
 

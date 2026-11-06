@@ -1,13 +1,17 @@
 import { describe, expect, test } from "bun:test";
 import { inspect } from "node:util";
-import type { FactoryInstance, SecretReference } from "../../src/domain/instance";
+import type { FactoryId, FactoryInstance, SecretReference } from "../../src/domain/instance";
 import { parseFactoryInstance } from "../../src/domain/instance";
 import {
+  classifySecrets,
   MAX_SECRET_BYTES,
+  ownsSecret,
   readSecretMaterial,
   resolveSecretTarget,
   SecretMaterial,
   secretReference,
+  secretReferences,
+  secretRegion,
   secretTags,
   withSecretReference,
 } from "../../src/domain/secrets";
@@ -105,6 +109,23 @@ describe("resolveSecretTarget", () => {
     });
   });
 
+  test.each([
+    ["github-token", "credentials.github_token_secret", "GitHub token"],
+    ["anthropic-api-key", "credentials.anthropic_api_key_secret", "Anthropic API key"],
+    ["openai-api-key", "credentials.openai_api_key_secret", "OpenAI API key"],
+  ])("the API credential %s goes to %s, named under the factory ID", (name, field, what) => {
+    expect(resolveSecretTarget(FACTORY, name, undefined) as unknown).toEqual({
+      ok: true,
+      target: {
+        name,
+        field,
+        secretName: `fff-abcd1234/${name}`,
+        description: `${what} of factory fff-abcd1234`,
+        factoryId: "fff-abcd1234",
+      },
+    });
+  });
+
   test("a Paseo password goes to its host's paseo_password_secret", () => {
     expect(resolveSecretTarget(FACTORY, "paseo-password", "builder-2") as unknown).toEqual({
       ok: true,
@@ -125,7 +146,8 @@ describe("resolveSecretTarget", () => {
       FACTORY,
       VALUE,
       undefined,
-      "unknown secret name; expected tailscale-auth-key, tailscale-admin-client or paseo-password",
+      "unknown secret name; expected tailscale-auth-key, tailscale-admin-client, paseo-password, " +
+        "github-token, anthropic-api-key or openai-api-key",
     ],
     [
       "a factory without an ID",
@@ -148,6 +170,16 @@ describe("resolveSecretTarget", () => {
       "builder-1",
       "tailscale-admin-client belongs to the whole factory and takes no --host",
     ],
+    ...["github-token", "anthropic-api-key", "openai-api-key"].map(
+      (name) =>
+        [
+          `a host for the factory-wide ${name}`,
+          FACTORY,
+          name,
+          "builder-1",
+          `${name} belongs to the whole factory and takes no --host`,
+        ] as const,
+    ),
     [
       "a Paseo password without a host",
       FACTORY,
@@ -206,6 +238,30 @@ describe("secret references in factory.json", () => {
     expect(parseFactoryInstance(updated).valid).toBe(true);
   });
 
+  test("each API credential's reference lands under credentials, leaving the rest alone", () => {
+    let updated = FACTORY;
+    const arns: Record<string, SecretReference> = {};
+    for (const name of ["github-token", "anthropic-api-key", "openai-api-key"]) {
+      const target = resolveSecretTarget(updated, name, undefined);
+      if (!target.ok) throw new Error(target.message);
+      expect(secretReference(updated, target.target)).toBeUndefined();
+      const arn =
+        `arn:aws:secretsmanager:eu-west-2:123456789012:secret:fff-abcd1234/${name}-AbCdEf` as SecretReference;
+      arns[name] = arn;
+      updated = withSecretReference(updated, target.target, arn);
+      expect(secretReference(updated, target.target)).toBe(arn);
+    }
+    expect(updated.credentials as unknown).toEqual({
+      github_token_secret: arns["github-token"],
+      anthropic_api_key_secret: arns["anthropic-api-key"],
+      openai_api_key_secret: arns["openai-api-key"],
+    });
+    expect(updated.tailscale).toEqual(FACTORY.tailscale);
+    expect(updated.hosts).toEqual(FACTORY.hosts);
+    expect(Object.keys(updated)).toEqual([...Object.keys(FACTORY), "credentials"]);
+    expect(parseFactoryInstance(updated).valid).toBe(true);
+  });
+
   test("a factory without a tailscale block gets one", () => {
     const bare = instance({ factory_id: "fff-abcd1234" });
     const target = resolveSecretTarget(bare, "tailscale-auth-key", undefined);
@@ -234,5 +290,119 @@ describe("secret references in factory.json", () => {
       "fffactory:factory-id": "fff-abcd1234",
       "fffactory:managed-by": "fffactory",
     });
+  });
+});
+
+describe("secret ownership (secrets §Deleting a factory's secrets)", () => {
+  const ID = "acme" as FactoryId;
+  const TAGS = { "fffactory:factory-id": "acme", "fffactory:managed-by": "fffactory" };
+
+  function listed(name: string, tags: Record<string, string> = TAGS, pendingDeletion = false) {
+    return {
+      name,
+      arn: `arn:aws:secretsmanager:eu-west-2:123456789012:secret:${name}-AbCdEf` as SecretReference,
+      tags,
+      pendingDeletion,
+    };
+  }
+
+  test.each([
+    ["its own name with both tags", listed("acme/tailscale-auth-key"), true],
+    ["a host's secret with both tags", listed("acme/builder-1/paseo-password"), true],
+    [
+      "its own name without the managed-by tag",
+      listed("acme/github-token", { "fffactory:factory-id": "acme" }),
+      false,
+    ],
+    [
+      "its own name managed by something else",
+      listed("acme/github-token", { ...TAGS, "fffactory:managed-by": "terraform" }),
+      false,
+    ],
+    ["its own name without the factory-id tag", listed("acme/github-token", {}), false],
+    ["another factory's name with this factory's tags", listed("other/github-token"), false],
+    ["a harness fffv source with this factory's tags", listed("fffv/anthropic-api-key"), false],
+    ["a longer factory ID's name: acme-lab/ is not acme/", listed("acme-lab/github-token"), false],
+    [
+      "this name tagged for a longer factory ID",
+      listed("acme/github-token", { ...TAGS, "fffactory:factory-id": "acme-lab" }),
+      false,
+    ],
+    ["the bare prefix", listed("acme/"), false],
+    ["the factory ID without a slash", listed("acme"), false],
+  ])("%s: owned is %p", (_, secret, owned) => {
+    expect(ownsSecret(ID, secret)).toBe(owned);
+  });
+
+  test("a longer factory ID owns its own secrets and not the shorter one's", () => {
+    const lab = "acme-lab" as FactoryId;
+    const tags = { ...TAGS, "fffactory:factory-id": "acme-lab" };
+    expect(ownsSecret(lab, listed("acme-lab/github-token", tags))).toBe(true);
+    expect(ownsSecret(lab, listed("acme/github-token", tags))).toBe(false);
+    expect(ownsSecret(lab, listed("acme-lab/github-token"))).toBe(false);
+  });
+
+  test("every reference factory.json holds, each once", () => {
+    const github = listed("acme/github-token").arn;
+    const source = listed("fffv/anthropic-api-key").arn;
+    const paseo = listed("acme/builder-1/paseo-password").arn;
+    const references = secretReferences(
+      instance({
+        factory_id: "acme",
+        tailscale: { tag: "tag:factory", auth_key_secret: ARN, admin_client_secret: ADMIN_ARN },
+        credentials: { github_token_secret: github, anthropic_api_key_secret: source },
+        hosts: [
+          { key: "builder-1", paseo_password_secret: paseo },
+          { key: "builder-2", paseo_password_secret: paseo },
+          { key: "builder-3" },
+        ],
+      }),
+    );
+    expect(references).toEqual([ARN, ADMIN_ARN, github, source, paseo]);
+    expect(secretReferences(instance({ factory_id: "acme" }))).toEqual([]);
+  });
+
+  test("classifies listed secrets and references: owned, tagged not owned, referenced not owned", () => {
+    const owned = listed("acme/tailscale-auth-key");
+    const pending = listed("acme/github-token", TAGS, true);
+    const untagged = listed("acme/openai-api-key", { "fffactory:factory-id": "acme" });
+    const borrowed = listed("fffv/anthropic-api-key");
+    const longer = listed("acme-lab/github-token", {
+      ...TAGS,
+      "fffactory:factory-id": "acme-lab",
+    });
+    const handMade =
+      "arn:aws:secretsmanager:eu-west-2:123456789012:secret:hand/made-XyZ123" as SecretReference;
+    const inventory = classifySecrets(
+      ID,
+      [owned, pending, untagged, borrowed, longer],
+      [owned.arn, borrowed.arn, handMade],
+    );
+    expect(inventory.owned).toEqual([owned, pending] as never);
+    expect(inventory.taggedNotOwned).toEqual([untagged, borrowed]);
+    expect(inventory.referencedNotOwned).toEqual([borrowed.arn, handMade]);
+  });
+
+  test("a partial ARN in factory.json refers to the owned secret it names", () => {
+    const owned = listed("acme/github-token");
+    const partial = owned.arn.replace(/-AbCdEf$/, "") as SecretReference;
+    const other = `${partial}-x` as SecretReference;
+    const inventory = classifySecrets(ID, [owned], [partial, other]);
+    expect(inventory.owned).toEqual([owned] as never);
+    expect(inventory.referencedNotOwned).toEqual([other]);
+  });
+
+  test("nothing listed: every reference is referenced, not owned", () => {
+    const inventory = classifySecrets(ID, [], [ARN]);
+    expect(inventory).toEqual({ owned: [], taggedNotOwned: [], referencedNotOwned: [ARN] });
+  });
+
+  test("a secret's Region is the one its ARN names", () => {
+    expect(secretRegion(ARN)).toBe("eu-west-2");
+    expect(
+      secretRegion(
+        "arn:aws-us-gov:secretsmanager:us-gov-west-1:123456789012:secret:acme/github-token-AbCdEf" as SecretReference,
+      ),
+    ).toBe("us-gov-west-1");
   });
 });

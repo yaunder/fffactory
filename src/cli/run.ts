@@ -8,6 +8,7 @@ import { lockCommand } from "./commands/lock";
 import { planCommand } from "./commands/plan";
 import { secretCommand } from "./commands/secret";
 import { statusCommand } from "./commands/status";
+import { teardownCommand } from "./commands/teardown";
 import { upgradeCommand } from "./commands/upgrade";
 import { validateCommand } from "./commands/validate";
 import { workerCommand } from "./commands/worker";
@@ -25,6 +26,7 @@ const COMMANDS: Readonly<Record<string, Command>> = {
   status: statusCommand,
   upgrade: upgradeCommand,
   worker: workerCommand,
+  teardown: teardownCommand,
   assets: assetsCommand,
   secret: secretCommand,
   lock: lockCommand,

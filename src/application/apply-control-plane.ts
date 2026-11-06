@@ -2,11 +2,11 @@
  * Apply's control-plane stage (`docs/specs/control-plane.md`): for one worker, decide what its
  * planned control-plane changes do and drive the `ControlPlane` port accordingly. Live changes
  * take effect without touching the daemon. A reload-safe change reloads it. A maintenance change
- * restarts it only when no agents are active; while agents are active it is left pending and the
- * worker stays on its complete current release, so apply never interrupts an active agent. A
- * later apply completes the deferred change once the agents are closed. The stage reaches the
- * worker only through the port; the classification rules it follows are pure
- * (`domain/change-classification.ts`).
+ * restarts it only when the worker is idle by the busy rule; while agents are busy, or may be, it
+ * is left pending and the worker stays on its complete current release, so apply never
+ * interrupts a busy agent. A later apply completes the deferred change once none is. The stage
+ * reaches the worker only through the port; the rules it follows are pure
+ * (`domain/change-classification.ts`, `domain/control-plane.ts`).
  */
 import {
   type ChangeType,
@@ -18,7 +18,11 @@ import type { WorkerIdentity } from "../domain/rollout";
 import type { WorkerAddress } from "../domain/tailnet";
 import type { HostProjection } from "../domain/host-projection";
 import type { ControlPlane } from "./control-plane";
-import type { AgentActivity } from "../domain/control-plane";
+import {
+  type BlockingActivity,
+  type WorkerActivity,
+  workerActivity,
+} from "../domain/control-plane";
 
 export interface ControlPlaneStageDependencies {
   readonly controlPlane: ControlPlane;
@@ -33,7 +37,7 @@ export interface ControlPlaneStageRequest {
   readonly changes: readonly ChangeType[];
   readonly projection: HostProjection;
   /** A pre-activation observation; a new worker has no daemon and is therefore idle. */
-  readonly activity?: AgentActivity;
+  readonly activity?: WorkerActivity;
 }
 
 /** One worker's control-plane reconciliation outcome. */
@@ -46,7 +50,7 @@ export type ControlPlaneOutcome =
       /** Whether the daemon was restarted for a maintenance change. */
       readonly restarted: boolean;
     })
-  /** A maintenance change was left pending because agents may be active; the daemon was not restarted. */
+  /** A maintenance change was left pending because agents may be busy; the daemon was not restarted. */
   | (WorkerIdentity & {
       readonly kind: "deferred";
       readonly pending: readonly ChangeType[];
@@ -69,6 +73,7 @@ export type ControlPlaneOutcome =
 function deferred(
   worker: WorkerIdentity,
   pending: readonly ChangeType[],
+  activity: BlockingActivity,
   reloaded: boolean,
 ): ControlPlaneOutcome {
   return {
@@ -76,7 +81,7 @@ function deferred(
     kind: "deferred",
     pending,
     reloaded,
-    ...maintenanceDeferral(worker.hostname, pending),
+    ...maintenanceDeferral(worker, pending, activity),
   };
 }
 
@@ -90,9 +95,9 @@ function failed(worker: WorkerIdentity, summary: string): ControlPlaneOutcome {
 }
 
 /**
- * Reconciles one worker's control plane. Reads agent activity first — activity it cannot read is
- * treated as active, so maintenance is deferred, never risking an interruption — then reloads
- * for a reload-safe change and restarts for a maintenance change only when no agents are active.
+ * Reconciles one worker's control plane. Reads its agents first — agents it cannot read may be
+ * busy, so maintenance is deferred, never risking an interruption — then reloads for a
+ * reload-safe change and restarts for a maintenance change only when no agent is busy.
  */
 // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: the safety order is intentionally linear and auditable
 export async function applyControlPlane(
@@ -102,17 +107,17 @@ export async function applyControlPlane(
   const { worker, address, changes } = request;
   if (changes.length === 0)
     return { ...worker, kind: "applied", live: [], reloaded: false, restarted: false };
-  const activity = request.activity ?? (await deps.controlPlane.activeAgents(address));
-  const agentsActive = activity.kind !== "idle";
-  const actions = controlPlaneActions(changes, agentsActive);
+  const activity = request.activity ?? workerActivity(await deps.controlPlane.agents(address));
+  const actions = controlPlaneActions(changes, activity);
 
   if (actions.maintenance.kind === "deferred") {
+    const { pending, activity: deferring } = actions.maintenance;
     if (actions.reload) {
       const result = await deps.controlPlane.reload(address);
       if (result.kind === "failed") return failed(worker, `Paseo reload failed: ${result.reason}`);
-      return deferred(worker, actions.maintenance.pending, true);
+      return deferred(worker, pending, deferring, true);
     }
-    return deferred(worker, actions.maintenance.pending, false);
+    return deferred(worker, pending, deferring, false);
   }
 
   if (changes.length > 0) {

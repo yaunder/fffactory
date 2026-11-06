@@ -14,7 +14,7 @@ import {
   pendingSteps,
   withStep,
 } from "../../src/domain/installation";
-import type { FactoryId, HostKey, Release } from "../../src/domain/instance";
+import type { FactoryId, HostKey, Release, SecretReference } from "../../src/domain/instance";
 import { ENROLLMENTS } from "../../src/domain/readiness";
 import { MATERIALIZED_MARKER } from "../../src/domain/release-assets";
 import type { ApplySystem } from "../../src/host/apply";
@@ -32,6 +32,19 @@ export const HOST_CONFIGURATION = hostProjectionJson(
 /** Its SHA-256. */
 export const HOST_CONFIGURATION_SHA256 =
   "ccdb230958f50d92a2a4e6d78269d2ad19f497226569f8fba095890825c7d857";
+/** The same host's configuration once factory.json delivers it a GitHub token reference. */
+export const HOST_CONFIGURATION_WITH_CREDENTIALS = hostProjectionJson(
+  hostProjection(
+    "fff-aaaa1111" as FactoryId,
+    "builder-1" as HostKey,
+    "0.3.0" as Release,
+    undefined,
+    {
+      github_token_secret:
+        "arn:aws:secretsmanager:eu-west-2:123456789012:secret:fff-aaaa1111/github-token-AbCdEf" as SecretReference,
+    },
+  ),
+);
 
 /** The record `host apply` keeps after installing 0.3.0: verified, every account pending. */
 export function lastApply(overrides: Partial<HostApplyRecord> = {}): HostApplyRecord {
@@ -136,6 +149,18 @@ export const SCENARIOS: readonly Scenario[] = [
     },
   },
   {
+    fixture: "inspect-credentials.json",
+    description:
+      "an installed worker on release 0.3.0 whose configuration carries a credential reference",
+    build: async (root) => {
+      await bootstrapped(root);
+      await activate(root, "0.3.0");
+      await file(root, WORKER_PATHS.configuration, HOST_CONFIGURATION_WITH_CREDENTIALS);
+      await file(root, WORKER_PATHS.lastApply, hostApplyJson(lastApply()));
+      return system(root);
+    },
+  },
+  {
     fixture: "inspect-failed-install.json",
     description: "a worker whose install of release 0.3.0 failed at its harness step",
     build: async (root) => {
@@ -213,7 +238,7 @@ export function installedTools(failing: readonly string[] = []): ProcessRunner {
     "codex --version": exited(0, "codex-cli 0.156.1\n"),
     "claude --version": exited(0, "2.1.280 (Claude Code)\n"),
     "systemctl is-active tailscaled.service": exited(0, "active\n"),
-    "gh auth status --hostname github.com": exited(0, "Logged in to github.com\n"),
+    "gh auth status --hostname github.com --active": exited(0, "Logged in to github.com\n"),
     "codex login status": exited(1, "Not logged in\n"),
     "claude auth status": exited(1, "Not logged in\n"),
   };

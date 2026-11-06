@@ -29,7 +29,7 @@ Three pieces work together:
 
 | Piece | What it does |
 | --- | --- |
-| **fffactory** | Creates AWS infrastructure, installs pinned tools on workers, synchronizes repositories and enables the dispatch schedule. |
+| **fffactory** | Creates AWS infrastructure, installs pinned tools on workers, synchronizes repositories and enables the dispatch schedule; removes it all again with `fffactory teardown`. |
 | **Paseo** | Runs agent sessions in isolated Git worktrees and lets you supervise them from desktop or mobile. |
 | **FFFlow** | Provides the planning and development workflow: captured issues, implementation, tests and pull requests. |
 
@@ -134,8 +134,10 @@ fffactory doctor
 
 If you use the standard AWS credential chain, omit the profile export. The
 CLI checks the caller's account against your configuration before operating.
-At this point, `validate` should report only `tailscale.auth_key_secret`
-missing; `doctor` exits 2 until that is supplied. Resolve any other findings.
+At this point, `validate` should report only `tailscale.auth_key_secret` and
+`hosts[0].paseo_password_secret` missing, the second with the `fffactory
+secret set paseo-password --host builder-1` that stores it; `doctor` exits 2
+until both are supplied. Resolve any other findings.
 
 ### 2. Prepare access and store secrets
 
@@ -178,13 +180,17 @@ pending. Follow the login instructions it prints next.
 
 ### 4. Enroll accounts and connect Paseo
 
+To skip these logins, deliver API keys instead
+([MACHINE_ONBOARDING.md §Deliver API credentials](MACHINE_ONBOARDING.md#deliver-api-credentials-optional));
+a delivered account needs no login on the worker.
+
 Replace `HOSTNAME` with the worker name printed by apply, such as
 `fff-k3x9q2ab-builder-1`. Log in as the worker's **`factory`** user:
 
 ```bash
 tailscale ssh factory@HOSTNAME
 gh auth login --hostname github.com --git-protocol https --web
-gh auth status
+gh auth status --hostname github.com --active
 codex login --device-auth
 codex login status
 claude auth login
@@ -295,10 +301,12 @@ is skipped, see [Mark an epic ready](MACHINE_ONBOARDING.md#12-mark-an-epic-ready
 | `fffactory doctor` | Check workstation prerequisites and configuration. |
 | `fffactory plan` | Review proposed changes without applying them. |
 | `fffactory apply` | Review and apply a plan under the factory-wide lock. |
-| `fffactory status` | Read worker readiness and dispatch state. |
+| `fffactory status` | Read worker readiness, dispatch state and each worker's agents (working, needing input, finished, failed, stopped). |
+| `fffactory worker inspect [KEY]` | See, changing nothing, whether `fffactory worker terminate` would remove each worker without `--force`: its verdict, what terminate would refuse it for, and every agent a removal would end. `--json` prints a versioned document; exits 2 when any worker would be refused. |
 | `fffactory worker stop\|start KEY` | Stop an idle worker's instance to save compute, or start it again. |
-| `fffactory worker terminate KEY` | Remove a worker: a reviewed Terraform plan destroys its instance, factory.json no longer declares it, and its Tailscale devices are deleted. The last worker too: the factory keeps its network and state, and a replacement of another size is declared and created with `fffactory apply`. With `--keep`, destroy only the instance and devices, keeping the host so the next `fffactory apply` creates it afresh. Needs the Tailscale admin client (`fffactory secret set tailscale-admin-client`). |
+| `fffactory worker terminate KEY` | Remove a worker: a reviewed Terraform plan destroys its instance, factory.json no longer declares it, and its Tailscale devices are deleted. The last worker too: the factory keeps its network and state until `fffactory teardown`, and a replacement of another size is declared and created with `fffactory apply`. With `--keep`, destroy only the instance and devices, keeping the host so the next `fffactory apply` creates it afresh. Needs the Tailscale admin client (`fffactory secret set tailscale-admin-client`). |
 | `fffactory upgrade` | Use a newer release to review and apply a release-pin change. |
+| `fffactory teardown` | Remove the whole factory: once you have reviewed what it removes and keeps and typed the factory ID (or passed `--confirm ID`), it stops dispatch, destroys every worker, the network and IAM, and deletes the factory's Tailscale devices, the secrets it owns and the state bucket. It refuses while an agent is working or needs input, or work is unpushed, and never breaks a held lock. factory.json, the log archive when enabled, and every credential source it only refers to are kept: revoke those sources yourself. Rerunning it finishes a teardown that stopped part way. Admin-tier; needs the Tailscale admin client. |
 
 Operate with the release factory.json pins; change that pin only through
 `fffactory upgrade`. A saved plan can also be applied with `--plan-id ID`

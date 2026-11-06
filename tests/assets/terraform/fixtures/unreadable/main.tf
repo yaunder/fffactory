@@ -35,3 +35,10 @@ resource "aws_iam_role_policy_attachment" "admin" {
   role       = aws_iam_role.host.name
   policy_arn = "arn:aws:iam::aws:policy/AdministratorAccess"
 }
+
+# Only a counted document's single instance, `[0]`, is read: another index is not.
+resource "aws_iam_role_policy" "indexed" {
+  name   = "${var.factory_id}-indexed"
+  role   = aws_iam_role.host.id
+  policy = data.aws_iam_policy_document.merged[var.index].json
+}

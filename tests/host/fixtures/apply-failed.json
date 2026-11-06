@@ -31,6 +31,16 @@
       "name": "plugins",
       "status": "not_run",
       "reason": null
+    },
+    {
+      "name": "credentials",
+      "status": "not_run",
+      "reason": null
+    },
+    {
+      "name": "collector",
+      "status": "not_run",
+      "reason": null
     }
   ],
   "verification": null,

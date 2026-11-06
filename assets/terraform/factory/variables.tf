@@ -88,7 +88,7 @@ variable "tailscale_tag" {
 }
 
 variable "paseo_password_secret_arns" {
-  description = "factory.json's hosts[].paseo_password_secret, by host key, for hosts that declare one."
+  description = "factory.json's hosts[].paseo_password_secret, by host key: every host declares one."
   type        = map(string)
 
   validation {
@@ -108,6 +108,35 @@ variable "paseo_password_secret_arns" {
   }
 }
 
+variable "credential_secret_arns" {
+  description = "factory.json's credentials.*_secret, by field name: the factory-wide API credentials every host may read. Empty when none is configured."
+  type        = map(string)
+
+  validation {
+    condition = alltrue([
+      for field in keys(var.credential_secret_arns) :
+      contains(["github_token_secret", "anthropic_api_key_secret", "openai_api_key_secret"], field)
+    ])
+    error_message = "credential_secret_arns keys must be github_token_secret, anthropic_api_key_secret or openai_api_key_secret."
+  }
+
+  validation {
+    condition = alltrue([
+      for arn in values(var.credential_secret_arns) :
+      can(regex("^arn:aws[a-z-]*:secretsmanager:[a-z0-9-]+:[0-9]{12}:secret:[A-Za-z0-9/_+=.@-]+$", arn))
+    ])
+    error_message = "credential_secret_arns values must be Secrets Manager secret ARNs."
+  }
+
+  validation {
+    condition = alltrue([
+      for arn in values(var.credential_secret_arns) :
+      can(regex("^arn:[a-z-]+:secretsmanager:${var.region}:${var.account_id}:secret:", arn))
+    ])
+    error_message = "credential_secret_arns values must be secrets in the factory Region and account."
+  }
+}
+
 variable "hosts" {
   description = "Stable hosts from factory.json, keyed by host key. Empty for a factory with no worker: its shared infrastructure stays."
   type = map(object({
@@ -118,5 +147,15 @@ variable "hosts" {
   validation {
     condition     = alltrue([for key in keys(var.hosts) : can(regex("^[a-z][a-z0-9]*(-[a-z0-9]+)*$", key)) && length(key) <= 32])
     error_message = "Host keys must be 1-32 lowercase letters, digits and single hyphens, starting with a letter."
+  }
+}
+
+variable "archive_bucket" {
+  description = "The log archive's bucket, <factory_id>-logs-<account_id>-<region>-an, derived when factory.json enables log_archive; every host may write its own prefix of it. Null when the archive is not enabled: hosts may write nothing."
+  type        = string
+
+  validation {
+    condition     = var.archive_bucket == null || var.archive_bucket == "${var.factory_id}-logs-${var.account_id}-${var.region}-an"
+    error_message = "archive_bucket must be null or the derived <factory_id>-logs-<account_id>-<region>-an."
   }
 }

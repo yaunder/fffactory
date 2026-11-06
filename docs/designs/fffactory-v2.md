@@ -618,10 +618,11 @@ command. `--keep` destroys only the machine and its devices, keeping the host,
 so the next apply creates it afresh.
 
 The last host is removed the same way, leaving an empty factory: `hosts: []` is
-complete, the state bucket, network and host identity stay, and plan, apply and
-status report no worker declared. Resizing a single-worker factory is
-terminate, then a replacement declared with the size wanted and created by
-`fffactory apply`; the removed key is no longer recorded, so it may be reused.
+complete, the state bucket, network and host identity stay until `fffactory
+teardown`, and plan, apply and status report no worker declared. Resizing a
+single-worker factory is terminate, then a replacement declared with the size
+wanted and created by `fffactory apply`; the removed key is no longer recorded,
+so it may be reused.
 
 Deleting a host entry by hand is invalid, and `plan` refuses it (D11), naming
 the command. Renaming a stable host key is also invalid; create a new host and
@@ -633,6 +634,17 @@ the removal ends with the machine), and no EBS snapshot is taken: treat Git as
 the durability boundary. Host replacement in place is not built either: until
 it arrives in M3, `plan` refuses any other plan that destroys or replaces a
 host machine (D11).
+
+The whole factory is removed with one command, `fffactory teardown`
+(admin-tier; [teardown](../specs/teardown.md), epic
+[#56](https://github.com/yaunder/fffactory/issues/56)), under the same lock and
+gates without `--force`: the operator reviews what it removes and keeps and
+types the factory ID; it stops dispatch, destroys the `factory` root with a
+guarded destroy plan, proves nothing tagged remains, then deletes the tailnet
+devices, the owned secrets (permanently, their absence confirmed), the local
+saved plans and, last, the state bucket. It keeps factory.json and every
+source the factory only refers to, reports what remains when a deletion fails,
+and a rerun finishes from what actually remains.
 
 ## Companion skill
 
@@ -748,6 +760,9 @@ M3, operate and expand, planned as need dictates:
 - base migrations with reboot and reconnect;
 - host retirement: `fffactory worker terminate KEY` removes a host with a
   reviewed, scoped destroy; snapshots and a `retiring` step remain deferred;
+- factory teardown: `fffactory teardown` removes a whole factory and
+  everything it owns, after the factory ID is typed; exporting evidence
+  before it remains deferred;
 - inventory and orphan reporting across AWS, Tailscale, and `factory.json`;
 - the companion `fffactory` skill and `skill install`;
 - the full acceptance exercise.

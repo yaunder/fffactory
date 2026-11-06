@@ -3,7 +3,9 @@ import type { MachineInventorySource } from "../application/machine-inventory";
 import type { FactoryId } from "../domain/instance";
 import { FACTORY_ID_TAG, HOST_KEY_TAG } from "../domain/resource-naming";
 import type { Machine, MachineState } from "../domain/status";
+import type { VpcInventory } from "../domain/teardown";
 import {
+  AdapterRefusal,
   type AwsCalls,
   AwsFailure,
   clientSettings,
@@ -14,7 +16,7 @@ import {
 /** One deadline for every page of the listing. */
 export const EC2_INVENTORY_TIMEOUT_MS = 15_000;
 
-/** DescribeInstances' largest page. */
+/** DescribeInstances' and DescribeVpcs' largest page. */
 const PAGE_SIZE = 1000;
 
 /** Every state but `terminated`: a terminated instance is gone. */
@@ -50,8 +52,22 @@ export interface InstancePage {
   readonly NextToken?: string | undefined;
 }
 
+export type DescribeVpcsInput = DescribeInstancesInput;
+
+/** The fields of one DescribeVpcs page the adapter reads. */
+export interface VpcListPage {
+  readonly Vpcs?: readonly { readonly VpcId?: string | undefined }[] | undefined;
+  readonly NextToken?: string | undefined;
+}
+
 export interface Ec2InventoryCalls extends AwsCalls {
   describeInstances(input: DescribeInstancesInput): Promise<InstancePage>;
+  describeVpcs(input: DescribeVpcsInput): Promise<VpcListPage>;
+}
+
+/** Filters as the SDK's commands take them: mutable copies. */
+function sdkFilters(filters: DescribeInstancesInput["Filters"]) {
+  return filters.map(({ Name, Values }) => ({ Name, Values: [...Values] }));
 }
 
 /**
@@ -68,10 +84,12 @@ export function sdkEc2InventoryCalls(
     return {
       describeInstances: (input) =>
         client.send(
-          new ec2.DescribeInstancesCommand({
-            ...input,
-            Filters: input.Filters.map(({ Name, Values }) => ({ Name, Values: [...Values] })),
-          }),
+          new ec2.DescribeInstancesCommand({ ...input, Filters: sdkFilters(input.Filters) }),
+          options,
+        ),
+      describeVpcs: (input) =>
+        client.send(
+          new ec2.DescribeVpcsCommand({ ...input, Filters: sdkFilters(input.Filters) }),
           options,
         ),
       close: () => client.destroy(),
@@ -112,9 +130,32 @@ async function listMachines(calls: Ec2InventoryCalls, factoryId: FactoryId): Pro
   return machines;
 }
 
+const VPC_ID = /^vpc-[0-9a-f]{8,32}$/;
+
 /**
- * The factory's instances from EC2 DescribeInstances, read-only, by the factory ID tag.
- * A failure is `unavailable`, described by error name or network code only.
+ * The VPCs carrying the factory ID tag, whatever their state. One without a well-formed ID is
+ * never skipped: the listing proves a factory's VPCs absent, so it fails rather than miss one.
+ */
+async function listVpcs(calls: Ec2InventoryCalls, factoryId: FactoryId): Promise<string[]> {
+  const Filters = [{ Name: `tag:${FACTORY_ID_TAG}`, Values: [factoryId] }];
+  const vpcIds: string[] = [];
+  let NextToken: string | undefined;
+  do {
+    const page = await calls.describeVpcs({ Filters, MaxResults: PAGE_SIZE, NextToken });
+    for (const { VpcId } of page.Vpcs ?? []) {
+      if (VpcId === undefined || !VPC_ID.test(VpcId))
+        throw new AdapterRefusal("EC2 DescribeVpcs listed a VPC without a well-formed ID");
+      vpcIds.push(VpcId);
+    }
+    NextToken = page.NextToken || undefined;
+  } while (NextToken !== undefined);
+  return vpcIds;
+}
+
+/**
+ * The factory's instances from EC2 DescribeInstances, and its VPCs from DescribeVpcs, read-only,
+ * by the factory ID tag. A failure is `unavailable`, described by error name or network code
+ * only.
  */
 export function ec2MachineInventory(
   open: OpenCalls<Ec2InventoryCalls> = sdkEc2InventoryCalls(),
@@ -133,6 +174,23 @@ export function ec2MachineInventory(
         return { kind: "machines", machines };
       } catch (error) {
         if (error instanceof AwsFailure) return { kind: "unavailable", reason: error.message };
+        throw error;
+      }
+    },
+
+    async listVpcs(credentials, region, factoryId): Promise<VpcInventory> {
+      try {
+        const vpcIds = await withAwsSession(
+          open,
+          { credentials, region },
+          timeoutMs,
+          "EC2 DescribeVpcs",
+          (calls) => listVpcs(calls, factoryId),
+        );
+        return { kind: "vpcs", vpcIds };
+      } catch (error) {
+        if (error instanceof AwsFailure || error instanceof AdapterRefusal)
+          return { kind: "unavailable", reason: error.message };
         throw error;
       }
     },

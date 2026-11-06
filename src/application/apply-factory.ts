@@ -1,7 +1,8 @@
 /**
  * `fffactory apply`: one plan, one approval tied to exactly that plan, then the change, all
- * under the one factory-wide lock. Apply is staged: the infrastructure stage (the factory
- * root's Terraform), the workers stage (`applyWorkers`), then repository reconciliation.
+ * under the one factory-wide lock. Apply is staged: the infrastructure stage (the log
+ * archive's root when the plan creates the archive, then the factory root's Terraform), the
+ * workers stage (`applyWorkers`), then repository reconciliation.
  * Every stage is in the approved plan and the same lock and operation record. Workers first wait
  * for any worker whose machine the infrastructure stage created to finish its first boot. On
  * a first apply, backend bootstrap comes first with its own approval. A worker whose machine
@@ -52,6 +53,7 @@ import {
   withVerification,
 } from "../domain/operation";
 import {
+  archiveStaleness,
   changesSomething,
   createdWorkers,
   declaredWorkers,
@@ -59,6 +61,7 @@ import {
   factoryPlanReview,
   hostMachineRefusal,
   newPlanId,
+  type PlannedArchive,
   type PlannedControlPlane,
   resizeRefusal,
   type PlannedDispatch,
@@ -79,13 +82,15 @@ import { rolloutResult, skipped, type WorkerIdentity, type WorkerOutcome } from 
 import {
   type ChangeType,
   classifyChange,
+  type Deferral,
   maintenanceDeferral,
   preActivationDeferral,
 } from "../domain/change-classification";
+import { workerActivity } from "../domain/control-plane";
 import { githubCredential, type PaseoHealth } from "../domain/dispatch-readiness";
 import { locateWorker, type TailnetLocation, thenRerunApply } from "../domain/status";
 import type { PeerView } from "../domain/tailnet";
-import { projectHost, projectHosts } from "../domain/host-projection";
+import { type HostProjection, projectHost, projectHosts } from "../domain/host-projection";
 import { applyWorkers, type WorkersStageDependencies } from "./apply-workers";
 import { applyRepositories, type RepositoryOutcome } from "./apply-repositories";
 import { applyControlPlane, type ControlPlaneOutcome } from "./apply-control-plane";
@@ -95,7 +100,9 @@ import type { ControlPlane, ControlPlaneHealth } from "./control-plane";
 import type { WorkflowQueue } from "./workflow-queue";
 import type { Approval } from "./approval";
 import { applySavedBootstrap, beginFactoryOperation } from "./bootstrap-backend";
+import { archiveOf, archivePlanFile, archiveState, readBackArchivePlan } from "./log-archive";
 import { type FactoryLock, type Interrupted, settleFactoryLock } from "./factory-lock";
+import type { ArchiveBucket } from "./lock-store";
 import {
   checkPlannable,
   circumstances,
@@ -109,7 +116,7 @@ import {
   planInfrastructure,
 } from "./plan-factory";
 import type { PlanFiles, StoredPlan } from "./plan-store";
-import { diagnosticsFileOf } from "./provisioner";
+import { diagnosticsFileOf, type SavedPlanRequest } from "./provisioner";
 import { planControlPlane } from "./plan-control-plane";
 
 export interface FactoryApplyDependencies
@@ -366,7 +373,107 @@ interface LockedApply {
 type InfrastructureChanges =
   | Exclude<InfrastructurePlan, { readonly kind: "planned" }>
   | Extract<FactoryApply, { readonly kind: "stale" | "damaged_plan" }>
-  | { readonly kind: "ready"; readonly changes: readonly ResourceChange[] };
+  | {
+      readonly kind: "ready";
+      /** The factory root's changes. */
+      readonly changes: readonly ResourceChange[];
+      /** The log archive as planned; undefined when factory.json does not enable it. */
+      readonly archive: PlannedArchive | undefined;
+    };
+
+/**
+ * The saved plan's log archive, while it is as planned: still missing when the plan creates it,
+ * still present and ready when it found it so. Its `archive.tfplan` is checked with the plan's
+ * other file (`swappedPlanFile`) and read back before the factory's.
+ */
+async function savedArchive(
+  deps: FactoryApplyDependencies,
+  saved: SavedFactoryPlan,
+  instance: FactoryInstance,
+  { lock }: LockedApply,
+): Promise<
+  | Exclude<InfrastructureChanges, { readonly kind: "ready" }>
+  | { readonly kind: "as_planned"; readonly archive: PlannedArchive | undefined }
+> {
+  const archive = archiveOf(instance, lock.bucket);
+  // factory.json's text is bound, so a record disagreeing with it about the archive is damaged.
+  if ((archive === undefined) !== (saved.creates_archive === undefined))
+    return { kind: "damaged_plan", planId: saved.plan_id };
+  if (archive === undefined || saved.creates_archive === undefined)
+    return { kind: "as_planned", archive: undefined };
+  const changed = await archiveChanged(deps, saved.plan_id, archive, saved.creates_archive);
+  if (changed !== undefined) return changed;
+  return {
+    kind: "as_planned",
+    archive: { bucket: archive.bucket, creates: saved.creates_archive },
+  };
+}
+
+/**
+ * The log archive, read now, against what its plan found: the plan's staleness once it exists
+ * though the plan creates it (`archive_created`, ready or not), or is gone though the plan found
+ * it present (`archive_missing`); refused as unready once the one the plan found ready lacks a
+ * setting the archive root applies; undefined while it is as planned.
+ */
+async function archiveChanged(
+  deps: FactoryApplyDependencies,
+  planId: string,
+  archive: ArchiveBucket,
+  creates: boolean,
+): Promise<Extract<FactoryApply, { readonly kind: "stale" | "unready_archive" }> | undefined> {
+  const state = await archiveState(deps.lockStore, archive);
+  const stale = archiveStaleness({ creates_archive: creates }, state.kind !== "missing");
+  if (stale !== undefined) return { kind: "stale", planId, reasons: [stale] };
+  if (state.kind === "unready") return { kind: "unready_archive", bucket: state.bucket };
+  return undefined;
+}
+
+/** This apply's archive root plan file, for a plan creating the log archive. */
+function archiveFileOf(
+  { instance, terraformDirectory }: Pick<FactoryApplyRequest, "instance" | "terraformDirectory">,
+  locked: LockedApply,
+): SavedPlanRequest {
+  const archive = archiveOf(instance, locked.lock.bucket);
+  if (archive === undefined) throw new Error("a plan creating the log archive has none");
+  return archivePlanFile(archive, terraformDirectory, locked.files.archive);
+}
+
+/**
+ * A saved plan creating the log archive is refused when its `archive.tfplan`, read back, does
+ * more than create, creates nothing or cannot be read. Undefined when it may be applied, or
+ * when the plan creates no archive.
+ */
+async function archiveReadBack(
+  deps: FactoryApplyDependencies,
+  archive: PlannedArchive | undefined,
+  request: Pick<FactoryApplyRequest, "instance" | "terraformDirectory">,
+  locked: LockedApply,
+): Promise<Extract<InfrastructureChanges, { readonly kind: "unexpected_plan" }> | undefined> {
+  if (archive?.creates !== true) return undefined;
+  const unexpected = await readBackArchivePlan(deps.provisioner, archiveFileOf(request, locked));
+  return unexpected === undefined ? undefined : { kind: "unexpected_plan", unexpected };
+}
+
+/**
+ * Whether the saved plan is still fresh under the lock: the state the revision it was planned
+ * against, the same workers stopped, and the log archive as planned.
+ */
+async function savedFreshness(
+  deps: FactoryApplyDependencies,
+  saved: SavedFactoryPlan,
+  instance: FactoryInstance,
+  locked: LockedApply,
+  machines: DeclaredMachines,
+): ReturnType<typeof savedArchive> {
+  const stale = stateStaleness(saved, await deps.lockStore.stateRevision(locked.lock.bucket));
+  if (stale !== undefined) return { kind: "stale", planId: saved.plan_id, reasons: [stale] };
+  const restarted = stoppedStaleness(
+    saved,
+    machines.stopped?.map(({ key }) => key),
+  );
+  if (restarted.length > 0) return { kind: "stale", planId: saved.plan_id, reasons: restarted };
+  return savedArchive(deps, saved, instance, locked);
+}
 
 /**
  * A saved plan is damaged once its Terraform plan file is not the one loaded before the lock,
@@ -383,27 +490,25 @@ async function swappedPlanFile(
 
 /**
  * The saved plan's changes, read from the Terraform plan file that will be applied, only
- * while the state is the revision it was planned against, the same workers are stopped, and
- * the file is still the one loaded before the lock, making the changes its record shows.
+ * while the state is the revision it was planned against, the same workers are stopped, the
+ * log archive is as planned, and the files are still the ones loaded before the lock, its
+ * `archive.tfplan` only creating and its `factory.tfplan` making the changes its record shows.
  * The resize refusal goes by `machines`, read now: a worker may have stopped since.
  */
 async function savedChanges(
   deps: FactoryApplyDependencies,
   saved: SavedFactoryPlan,
-  terraformDirectory: string,
+  { instance, terraformDirectory }: Pick<FactoryApplyRequest, "instance" | "terraformDirectory">,
   locked: LockedApply,
   machines: DeclaredMachines,
 ): Promise<InfrastructureChanges> {
   const { lock } = locked;
-  const stale = stateStaleness(saved, await deps.lockStore.stateRevision(lock.bucket));
-  if (stale !== undefined) return { kind: "stale", planId: saved.plan_id, reasons: [stale] };
-  const restarted = stoppedStaleness(
-    saved,
-    machines.stopped?.map(({ key }) => key),
-  );
-  if (restarted.length > 0) return { kind: "stale", planId: saved.plan_id, reasons: restarted };
-  const swapped = await swappedPlanFile(deps, locked);
-  if (swapped !== undefined) return swapped;
+  const archive = await savedFreshness(deps, saved, instance, locked, machines);
+  if (archive.kind !== "as_planned") return archive;
+  const unusable =
+    (await swappedPlanFile(deps, locked)) ??
+    (await archiveReadBack(deps, archive.archive, { instance, terraformDirectory }, locked));
+  if (unusable !== undefined) return unusable;
   const plan = await deps.provisioner.showPlan({
     ...factoryTarget(lock.bucket, terraformDirectory),
     planFile: locked.files.factory,
@@ -417,7 +522,7 @@ async function savedChanges(
   if (lost !== undefined) return { kind: "d11", refusal: lost };
   const resized = resizeRefusal(plan, machines.resizeGuard);
   if (resized !== undefined) return { kind: "stopped_resize", ...resized };
-  return { kind: "ready", changes };
+  return { kind: "ready", changes, archive: archive.archive };
 }
 
 /**
@@ -433,17 +538,19 @@ async function infrastructureChanges(
   machines: DeclaredMachines,
 ): Promise<InfrastructureChanges> {
   const { saved, lock } = locked;
-  if (saved !== undefined) return savedChanges(deps, saved, terraformDirectory, locked, machines);
+  if (saved !== undefined)
+    return savedChanges(deps, saved, { instance, terraformDirectory }, locked, machines);
   const planned = await planInfrastructure(deps, {
     instance,
     bucket: lock.bucket,
     terraformDirectory,
     planFile: locked.files.factory,
+    archivePlanFile: locked.files.archive,
     underFactoryLock: true,
     resizeGuard: machines.resizeGuard,
   });
   if (planned.kind !== "planned") return planned;
-  return { kind: "ready", changes: planned.changes };
+  return { kind: "ready", changes: planned.changes, archive: planned.archive };
 }
 
 function reasonOf(error: unknown): string {
@@ -584,9 +691,58 @@ async function movePin(
 }
 
 /**
- * From the approval question on: asks, moves an upgrade's pin, checks a saved plan's file is
- * still the one loaded, applies exactly the plan file when it changes anything, then runs the
- * workers stage.
+ * Right after the plan is approved, before anything is changed: the log archive as the plan
+ * found it, still missing when it creates it, still present and ready when it found it so.
+ * Another apply racing this one, or anything outside fffactory, may have made, deleted or
+ * changed it while the approval was asked. Undefined without one.
+ */
+async function approvedArchiveChanged(
+  deps: FactoryApplyDependencies,
+  request: FactoryApplyRequest,
+  locked: LockedApply,
+  planned: PlannedArchive | undefined,
+): ReturnType<typeof archiveChanged> {
+  if (planned === undefined) return undefined;
+  const archive = archiveOf(request.instance, locked.lock.bucket);
+  if (archive === undefined) throw new Error("a plan with a log archive has none");
+  return archiveChanged(deps, locked.planId, archive, planned.creates);
+}
+
+/**
+ * Applies exactly the approved plan's Terraform plan files: the archive root's first when it
+ * creates the log archive, then the factory root's when it changes anything. Whether Terraform
+ * applied anything, or that an interrupt stopped it.
+ */
+async function applyInfrastructure(
+  deps: FactoryApplyDependencies,
+  request: FactoryApplyRequest,
+  locked: LockedApply,
+  { log, progress }: Tracking,
+  { changes, archive }: Pick<FactoryPlanReview, "changes" | "archive">,
+): Promise<"applied" | "unchanged" | "interrupted"> {
+  const createsArchive = archive?.creates === true;
+  if (!createsArchive && changes.length === 0) return "unchanged";
+  await log.stage("applying");
+  progress.step = "applying";
+  if (createsArchive) {
+    await deps.provisioner.applyPlan(archiveFileOf(request, locked));
+    if (deps.interrupted()) return "interrupted";
+  }
+  if (changes.length > 0) {
+    await deps.provisioner.applyPlan({
+      ...factoryTarget(locked.lock.bucket, request.terraformDirectory),
+      planFile: locked.files.factory,
+    });
+    if (deps.interrupted()) return "interrupted";
+  }
+  return "applied";
+}
+
+/**
+ * From the approval question on: asks, checks a saved plan's files are still the ones loaded
+ * and the log archive still as planned (`approvedArchiveChanged`), moves an upgrade's pin,
+ * applies exactly the archive's plan file when it creates the archive, then the factory's when
+ * it changes anything, then runs the workers stage.
  */
 async function approveAndApply(
   deps: FactoryApplyDependencies,
@@ -595,8 +751,8 @@ async function approveAndApply(
   tracking: Tracking,
   review: FactoryPlanReview,
 ): Promise<FactoryApply> {
-  const { changes, workers, controlPlane, dispatch, stopped } = review;
-  const { log, progress } = tracking;
+  const { changes, workers, controlPlane, dispatch, stopped, archive } = review;
+  const { log } = tracking;
   await log.stage("awaiting_approval");
   const approved = await deps.approval.approve(review);
   if (deps.interrupted()) return interruptedUnder(log);
@@ -604,25 +760,21 @@ async function approveAndApply(
     await log.finish("declined", "declined");
     return { kind: "declined", stage: "infrastructure" };
   }
+  // Refused before an upgrade's pin is written, so a refusal leaves the pin where it was.
+  const refusal =
+    (await swappedPlanFile(deps, locked)) ??
+    (await approvedArchiveChanged(deps, request, locked, archive));
+  if (refusal !== undefined) {
+    await log.finish("refused", "refused");
+    return refusal;
+  }
+  if (deps.interrupted()) return interruptedUnder(log);
   if (request.pinUpdate !== undefined) {
     const stopped = await movePin(deps, request.pinUpdate, tracking);
     if (stopped !== undefined) return stopped;
   }
-  const swapped = await swappedPlanFile(deps, locked);
-  if (swapped !== undefined) {
-    await log.finish("refused", "refused");
-    return swapped;
-  }
-  if (changes.length > 0) {
-    await log.stage("applying");
-    progress.step = "applying";
-    await deps.provisioner.applyPlan({
-      ...factoryTarget(locked.lock.bucket, request.terraformDirectory),
-      planFile: locked.files.factory,
-    });
-    if (deps.interrupted()) return interruptedUnder(log);
-  }
-  const infrastructure = changes.length > 0 ? "applied" : "unchanged";
+  const infrastructure = await applyInfrastructure(deps, request, locked, tracking, review);
+  if (infrastructure === "interrupted") return interruptedUnder(log);
   // Only the machines this apply just created are still booting; their first boot is waited for.
   const created = createdWorkers(changes, workers);
   return workersStage(deps, request, locked, tracking, {
@@ -676,7 +828,7 @@ async function workersStage(
     deps,
     locked.target,
     tag,
-    request.instance.hosts ?? [],
+    request.instance,
     request.assetsSha256,
     new Set(created),
     new Set(applied.stopped),
@@ -694,7 +846,7 @@ async function workersStage(
     }
   }
   let activityView: PeerView | undefined;
-  const deferred = new Set<HostKey>();
+  const deferred = new Map<HostKey, Deferral>();
   const deferredControl: ControlPlaneOutcome[] = [];
   for (const plan of controlPlane) {
     if (
@@ -705,20 +857,22 @@ async function workersStage(
       continue;
     activityView ??= await deps.peers.view();
     const location = locateWorker(activityView, plan, tag);
-    const activity =
+    const activity = workerActivity(
       location.kind === "found" && deps.controlPlane !== undefined
-        ? await deps.controlPlane.activeAgents(location.worker)
-        : { kind: "unknown" as const, reason: "worker activity could not be read" };
+        ? await deps.controlPlane.agents(location.worker)
+        : { kind: "unknown", reason: "worker activity could not be read" },
+    );
     if (activity.kind !== "idle") {
-      deferred.add(plan.key);
       const pending = plan.changes.filter((change) => classifyChange(change) === "maintenance");
+      const deferral = maintenanceDeferral(plan, pending, activity);
+      deferred.set(plan.key, deferral);
       deferredControl.push({
         key: plan.key,
         hostname: plan.hostname,
         kind: "deferred",
         pending,
         reloaded: false,
-        ...maintenanceDeferral(plan.hostname, pending),
+        ...deferral,
       });
     }
   }
@@ -1043,9 +1197,7 @@ async function reconcileWorkerControlPlane(
   view: PeerView,
   tag: string,
   worker: WorkerOutcome,
-  factoryId: FactoryId,
-  release: FactoryApplyRequest["release"],
-  host: Host,
+  projection: HostProjection,
   changes: readonly ChangeType[],
   observation: string | undefined,
 ): Promise<WorkerControlPlane> {
@@ -1058,7 +1210,7 @@ async function reconcileWorkerControlPlane(
       worker: identity,
       address: location.worker,
       changes,
-      projection: projectHost(factoryId, release, host),
+      projection,
       ...(observation === "no-release" ? { activity: { kind: "idle" as const } } : {}),
     },
   );
@@ -1106,6 +1258,7 @@ function dispatchInputFor(
     settings: host.dispatch,
     releaseHealthy: true,
     githubCredential: githubCredential(worker.verification),
+    githubDelivered: worker.delivered.includes("github"),
     repositorySync: repo?.kind === "synchronized" ? "ready" : "pending",
     paseoHealth: cp.paseoHealth,
   };
@@ -1168,11 +1321,12 @@ async function postWorkersStages(
     // TODO(re-evaluate when a worker the workers stage skipped for a reason other than deferral
     // fails an apply in the control-plane stage): skip the control-plane stage for every
     // workers-stage skip, as dispatch does, not only a deferral.
-    if (deferredControl.some((item) => item.key === worker.key)) {
+    const deferral = deferredControl.find((item) => item.key === worker.key);
+    if (deferral?.kind === "deferred") {
       if (workflowQueue !== undefined)
         dispatchWorkers.push({
           worker: { key: worker.key, hostname: worker.hostname },
-          skip: { reason: "deferred", ...preActivationDeferral(worker.hostname) },
+          skip: { reason: "deferred", ...preActivationDeferral(deferral) },
         });
       continue;
     }
@@ -1181,9 +1335,7 @@ async function postWorkersStages(
       view,
       tag,
       worker,
-      about.factoryId,
-      request.release,
-      host,
+      projectHost(request.instance, about.factoryId, request.release, host),
       controlPlanePlan.find((item) => item.key === worker.key)?.changes ?? [],
       controlPlanePlan.find((item) => item.key === worker.key)?.observation,
     );
@@ -1247,7 +1399,7 @@ async function infrastructureStage(
       deps,
       locked.target,
       requireTag(request.instance),
-      request.instance.hosts ?? [],
+      request.instance,
       request.assetsSha256,
       new Set(
         createdWorkers(ready.changes, declaredWorkers(request.instance, locked.target.factoryId)),
@@ -1264,6 +1416,7 @@ async function infrastructureStage(
     dispatch,
     stopped,
     pinMove: request.pinUpdate?.move,
+    archive: ready.archive,
   });
   return approveAndApply(deps, request, locked, tracking, review);
 }

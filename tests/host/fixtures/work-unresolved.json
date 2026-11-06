@@ -32,5 +32,8 @@
         }
       ]
     }
-  ]
+  ],
+  "archive": {
+    "state": "not_collected"
+  }
 }

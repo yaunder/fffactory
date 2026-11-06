@@ -1,13 +1,20 @@
 import { describe, expect, test } from "bun:test";
 import example from "../../examples/factory.json";
 import {
+  projectArchiveVariables,
   projectBackendVariables,
   projectFactoryVariables,
 } from "../../src/application/project-terraform-inputs";
 import { type FactoryInstance, parseFactoryInstance } from "../../src/domain/instance";
 
 const TAILSCALE = example.tailscale.auth_key_secret;
-const PASEO = "arn:aws:secretsmanager:us-east-1:123456789012:secret:example/b-2/paseo-AbCdEf";
+const paseo = (key: string) =>
+  `arn:aws:secretsmanager:us-east-1:123456789012:secret:example/${key}/paseo-AbCdEf`;
+
+/** A host with its machine declaration and Paseo password, as completeness requires. */
+function host(key: string, instance_type = "m7i.xlarge", root_volume_gib = 200) {
+  return { key, instance_type, root_volume_gib, paseo_password_secret: paseo(key) };
+}
 
 function instance(document: unknown = example): FactoryInstance {
   const parsed = parseFactoryInstance(document);
@@ -35,7 +42,9 @@ describe("factory.json projected into the factory root module's variables", () =
         paseo_password_secret_arns: {
           "builder-1": example.hosts[0]?.paseo_password_secret as string,
         },
+        credential_secret_arns: {},
         hosts: { "builder-1": { instance_type: "m7i.xlarge", root_volume_gib: 200 } },
+        archive_bucket: "example-logs-123456789012-us-east-1-an",
       },
     });
   });
@@ -59,6 +68,43 @@ describe("factory.json projected into the factory root module's variables", () =
     expect(JSON.stringify(projection)).not.toContain("ts-admin");
   });
 
+  test("hosts may write only to the log archive factory.json enables: no bucket when it does not", () => {
+    const disabled = { ...example, log_archive: { enabled: false } };
+    const { log_archive: _, ...absent } = example;
+    for (const document of [disabled, absent]) {
+      const projection = projectFactoryVariables(instance(document), []);
+      expect(projection.ok && projection.variables.archive_bucket).toBeNull();
+    }
+  });
+
+  test("every credential reference reaches the hosts' role, whatever a host keeps on login (D2)", () => {
+    const arn = (name: string) =>
+      `arn:aws:secretsmanager:us-east-1:123456789012:secret:example/${name}-AbCdEf`;
+    const admin = arn("ts-admin");
+    const projection = projectFactoryVariables(
+      instance({
+        ...example,
+        tailscale: { ...example.tailscale, admin_client_secret: admin },
+        credentials: {
+          openai_api_key_secret: arn("openai-api-key"),
+          github_token_secret: arn("github-token"),
+          anthropic_api_key_secret: arn("anthropic-api-key"),
+        },
+        hosts: example.hosts.map((host) => ({
+          ...host,
+          interactive_logins: ["github", "openai", "anthropic"],
+        })),
+      }),
+      [],
+    );
+    expect(projection.ok && projection.variables.credential_secret_arns).toEqual({
+      github_token_secret: arn("github-token"),
+      anthropic_api_key_secret: arn("anthropic-api-key"),
+      openai_api_key_secret: arn("openai-api-key"),
+    });
+    expect(JSON.stringify(projection)).not.toContain("ts-admin");
+  });
+
   test("the Tailscale tag every host advertises is factory.json's tailscale.tag", () => {
     const projection = projectFactoryVariables(
       instance({ ...example, tailscale: { ...example.tailscale, tag: "tag:lab-workers" } }),
@@ -67,17 +113,9 @@ describe("factory.json projected into the factory root module's variables", () =
     expect(projection.ok && projection.variables.tailscale_tag).toBe("tag:lab-workers");
   });
 
-  test("hosts are keyed by host key; only hosts with a Paseo password reference list one", () => {
+  test("hosts are keyed by host key, each with its Paseo password reference", () => {
     const projection = projectFactoryVariables(
-      withHosts([
-        { key: "a-1", instance_type: "t3.large", root_volume_gib: 50 },
-        {
-          key: "b-2",
-          instance_type: "m7i.xlarge",
-          root_volume_gib: 200,
-          paseo_password_secret: PASEO,
-        },
-      ]),
+      withHosts([host("a-1", "t3.large", 50), host("b-2")]),
       [],
     );
     expect(projection.ok && projection.variables.hosts).toEqual({
@@ -85,7 +123,8 @@ describe("factory.json projected into the factory root module's variables", () =
       "b-2": { instance_type: "m7i.xlarge", root_volume_gib: 200 },
     });
     expect(projection.ok && projection.variables.paseo_password_secret_arns).toEqual({
-      "b-2": PASEO,
+      "a-1": paseo("a-1"),
+      "b-2": paseo("b-2"),
     });
   });
 
@@ -96,6 +135,7 @@ describe("factory.json projected into the factory root module's variables", () =
       variables: expect.objectContaining({
         tailscale_auth_key_secret_arn: TAILSCALE,
         paseo_password_secret_arns: {},
+        credential_secret_arns: {},
         hosts: {},
       }),
     });
@@ -129,20 +169,19 @@ describe("factory.json projected into the factory root module's variables", () =
     });
   });
 
-  test("a host without its machine declaration is refused by field path", () => {
+  test("a host without its machine declaration or Paseo password is refused by field path", () => {
     expect(projectFactoryVariables(withHosts([{ key: "a" }]), [])).toEqual({
       ok: false,
       issues: [
         { path: "hosts[0].instance_type", message: "is required to plan" },
         { path: "hosts[0].root_volume_gib", message: "is required to plan" },
+        { path: "hosts[0].paseo_password_secret", message: "is required to plan" },
       ],
     });
   });
 
   test("renaming a host key is refused before any variable exists", () => {
-    const renamed = withHosts([
-      { key: "builder-one", instance_type: "m7i.xlarge", root_volume_gib: 200 },
-    ]);
+    const renamed = withHosts([host("builder-one")]);
     expect(projectFactoryVariables(renamed, ["builder-1"])).toEqual({
       ok: false,
       issues: [{ path: "hosts", message: expect.stringContaining('host key "builder-1"') }],
@@ -150,10 +189,7 @@ describe("factory.json projected into the factory root module's variables", () =
   });
 
   test("keeping every recorded host key and adding another is projected", () => {
-    const grown = withHosts([
-      { key: "builder-1", instance_type: "m7i.xlarge", root_volume_gib: 200 },
-      { key: "builder-2", instance_type: "m7i.xlarge", root_volume_gib: 200 },
-    ]);
+    const grown = withHosts([host("builder-1"), host("builder-2")]);
     const projection = projectFactoryVariables(grown, ["builder-1"]);
     expect(projection.ok && Object.keys(projection.variables.hosts)).toEqual([
       "builder-1",
@@ -210,6 +246,42 @@ describe("factory.json projected into the backend root module's variables", () =
             "must start with the factory ID and a hyphen, so its name carries the factory ID",
         },
       ],
+    });
+  });
+});
+
+describe("factory.json projected into the archive root module's variables", () => {
+  test("the log archive's derived bucket is projected as its suffix after the factory ID", () => {
+    expect(projectArchiveVariables(instance())).toEqual({
+      ok: true,
+      variables: {
+        factory_id: "example",
+        account_id: "123456789012",
+        region: "us-east-1",
+        archive_bucket_suffix: "logs-123456789012-us-east-1-an",
+      },
+    });
+  });
+
+  test("an instance that does not enable the log archive is refused", () => {
+    const disabled = { ...example, log_archive: { enabled: false } };
+    const { log_archive: _, ...absent } = example;
+    for (const document of [disabled, absent])
+      expect(projectArchiveVariables(instance(document))).toEqual({
+        ok: false,
+        issues: [{ path: "log_archive.enabled", message: "must be true to plan the log archive" }],
+      });
+  });
+
+  test("an instance without its factory ID, account or Region is refused", () => {
+    expect(
+      projectArchiveVariables(instance({ schema_version: 1, log_archive: { enabled: true } })),
+    ).toEqual({
+      ok: false,
+      issues: ["factory_id", "aws.account_id", "aws.region"].map((path) => ({
+        path,
+        message: "is required to plan",
+      })),
     });
   });
 });

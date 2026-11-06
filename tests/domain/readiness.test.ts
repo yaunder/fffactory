@@ -29,33 +29,52 @@ function verification(overrides: Partial<Verification> = {}): Verification {
   };
 }
 
-const POLICY = "(tailnet SSH policy must let you log in as `factory`)";
+const GH_STATUS = "gh auth status --hostname github.com --active";
 
 describe("enrollment next actions (readiness §Enrollment)", () => {
   test("GitHub is authenticated as factory on the named host, over Tailscale SSH", () => {
-    expect(enrollmentNextAction("github", HOST)).toEqual({
-      summary: `Authenticate GitHub as factory on ${HOST} ${POLICY}`,
+    expect(enrollmentNextAction("github", HOST, false)).toEqual({
+      summary: `Authenticate GitHub as factory on ${HOST}`,
       login: `tailscale ssh factory@${HOST}`,
-      commands: [
-        "gh auth login --hostname github.com --git-protocol https --web",
-        "gh auth status",
-      ],
+      commands: ["gh auth login --hostname github.com --git-protocol https --web", GH_STATUS],
     });
-    expect(describeNextAction(enrollmentNextAction("github", HOST))).toBe(
-      `Authenticate GitHub as factory on ${HOST} ${POLICY}: run \`tailscale ssh factory@${HOST}\`, then ` +
-        "`gh auth login --hostname github.com --git-protocol https --web`, then `gh auth status`",
+    expect(describeNextAction(enrollmentNextAction("github", HOST, false))).toBe(
+      `Authenticate GitHub as factory on ${HOST}: run \`tailscale ssh factory@${HOST}\`, then ` +
+        `\`gh auth login --hostname github.com --git-protocol https --web\`, then \`${GH_STATUS}\``,
     );
   });
 
   test("the model providers are logged in as factory", () => {
-    expect(enrollmentNextAction("openai", HOST).commands).toEqual([
+    expect(enrollmentNextAction("openai", HOST, false).commands).toEqual([
       "codex login --device-auth",
       "codex login status",
     ]);
-    expect(enrollmentNextAction("anthropic", HOST).commands).toEqual([
+    expect(enrollmentNextAction("anthropic", HOST, false).commands).toEqual([
       "claude auth login",
       "claude auth status",
     ]);
+  });
+
+  test("a delivered account's credential is stored again and applied, with no login", () => {
+    expect(enrollmentNextAction("github", HOST, true)).toEqual({
+      summary: `Replace the GitHub token, which ${HOST} did not accept`,
+      login: null,
+      commands: ["fffactory secret set github-token", "fffactory apply"],
+    });
+    expect(describeNextAction(enrollmentNextAction("github", HOST, true))).toBe(
+      `Replace the GitHub token, which ${HOST} did not accept: run ` +
+        "`fffactory secret set github-token`, then `fffactory apply`",
+    );
+    expect(enrollmentNextAction("openai", HOST, true)).toEqual({
+      summary: `Replace the OpenAI API key, which ${HOST} did not accept`,
+      login: null,
+      commands: ["fffactory secret set openai-api-key", "fffactory apply"],
+    });
+    expect(enrollmentNextAction("anthropic", HOST, true)).toEqual({
+      summary: `Replace the Anthropic API key, which ${HOST} did not accept`,
+      login: null,
+      commands: ["fffactory secret set anthropic-api-key", "fffactory apply"],
+    });
   });
 
   test("Paseo clients are observed from each client, not as a worker enrollment", () => {
@@ -76,25 +95,61 @@ describe("the enrollment the CLI reports", () => {
         { id: "anthropic", state: "pending" },
       ],
     });
-    expect(enrollmentReport(reported, HOST)).toEqual([
-      { id: "github", title: "GitHub", state: "enrolled", next_action: null },
+    expect(enrollmentReport(reported, HOST, [])).toEqual([
+      { id: "github", title: "GitHub", state: "enrolled", delivered: false, next_action: null },
       {
         id: "openai",
         title: "OpenAI Codex",
         state: "unknown",
-        next_action: enrollmentNextAction("openai", HOST),
+        delivered: false,
+        next_action: enrollmentNextAction("openai", HOST, false),
       },
       {
         id: "anthropic",
         title: "Claude Code",
         state: "pending",
-        next_action: enrollmentNextAction("anthropic", HOST),
+        delivered: false,
+        next_action: enrollmentNextAction("anthropic", HOST, false),
+      },
+    ]);
+  });
+
+  test("a delivered account is named from the CLI's delivered set, never the worker's document", () => {
+    const reported = verification({
+      hostname: "attacker",
+      enrollment: [
+        { id: "github", state: "pending" },
+        { id: "openai", state: "unknown" },
+        { id: "anthropic", state: "enrolled" },
+      ],
+    });
+    expect(enrollmentReport(reported, HOST, ["github", "anthropic"])).toEqual([
+      {
+        id: "github",
+        title: "GitHub",
+        state: "pending",
+        delivered: true,
+        next_action: enrollmentNextAction("github", HOST, true),
+      },
+      {
+        id: "openai",
+        title: "OpenAI Codex",
+        state: "unknown",
+        delivered: false,
+        next_action: enrollmentNextAction("openai", HOST, false),
+      },
+      {
+        id: "anthropic",
+        title: "Claude Code",
+        state: "enrolled",
+        delivered: true,
+        next_action: null,
       },
     ]);
   });
 
   test("an account the worker did not report is unknown, and so still to enroll", () => {
-    const report = enrollmentReport(verification({ enrollment: [] }), HOST);
+    const report = enrollmentReport(verification({ enrollment: [] }), HOST, []);
     expect(report.map(({ state }) => state)).toEqual(["unknown", "unknown", "unknown"]);
     expect(workerReadiness(verification({ enrollment: [] }))).toBe("enrollment_pending");
   });
@@ -103,15 +158,17 @@ describe("the enrollment the CLI reports", () => {
     const report = enrollmentReport(
       verification({
         enrollment: [
-          { id: "github", state: "enrolled" },
+          { id: "github", state: "pending" },
           { id: "openai", state: "enrolled" },
           { id: "anthropic", state: "pending" },
         ],
       }),
       HOST,
+      ["github"],
     );
     expect(pendingEnrollmentLines(report)).toEqual([
-      `Claude Code: ${describeNextAction(enrollmentNextAction("anthropic", HOST))}`,
+      `GitHub: ${describeNextAction(enrollmentNextAction("github", HOST, true))}`,
+      `Claude Code: ${describeNextAction(enrollmentNextAction("anthropic", HOST, false))}`,
       PASEO_CLIENTS,
     ]);
   });
@@ -129,6 +186,7 @@ describe("a worker's enrollment, grouped (readiness §Where it is reported)", ()
         ],
       }),
       HOST,
+      [],
     );
     expect(workerEnrollment(report, HOST)).toEqual({
       hostname: HOST,
@@ -138,10 +196,7 @@ describe("a worker's enrollment, grouped (readiness §Where it is reported)", ()
         {
           id: "github",
           title: "GitHub",
-          commands: [
-            "gh auth login --hostname github.com --git-protocol https --web",
-            "gh auth status",
-          ],
+          commands: ["gh auth login --hostname github.com --git-protocol https --web", GH_STATUS],
         },
         {
           id: "anthropic",
@@ -149,17 +204,54 @@ describe("a worker's enrollment, grouped (readiness §Where it is reported)", ()
           commands: ["claude auth login", "claude auth status"],
         },
       ],
+      delivered: [],
+    });
+  });
+
+  test("a delivered account still to enroll names its credential, apart from the login", () => {
+    const report = enrollmentReport(
+      verification({
+        enrollment: [
+          { id: "github", state: "pending" },
+          { id: "openai", state: "pending" },
+          { id: "anthropic", state: "unknown" },
+        ],
+      }),
+      HOST,
+      ["github", "anthropic"],
+    );
+    expect(workerEnrollment(report, HOST)).toEqual({
+      hostname: HOST,
+      login: `tailscale ssh factory@${HOST}`,
+      requirement: "tailnet_ssh_as_runtime",
+      accounts: [
+        {
+          id: "openai",
+          title: "OpenAI Codex",
+          commands: ["codex login --device-auth", "codex login status"],
+        },
+      ],
+      delivered: [
+        { id: "github", title: "GitHub", credential: "GitHub token", secret: "github-token" },
+        {
+          id: "anthropic",
+          title: "Claude Code",
+          credential: "Anthropic API key",
+          secret: "anthropic-api-key",
+        },
+      ],
     });
   });
 
   test("a fully enrolled worker has no account to enroll", () => {
     const enrollment = ENROLLMENTS.map(({ id }) => ({ id, state: "enrolled" as const }));
-    const report = enrollmentReport(verification({ enrollment }), HOST);
+    const report = enrollmentReport(verification({ enrollment }), HOST, ["github"]);
     expect(workerEnrollment(report, HOST)).toEqual({
       hostname: HOST,
       login: `tailscale ssh factory@${HOST}`,
       requirement: "tailnet_ssh_as_runtime",
       accounts: [],
+      delivered: [],
     });
   });
 });

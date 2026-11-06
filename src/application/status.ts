@@ -5,9 +5,11 @@
  */
 import type { AccountExpectation, CredentialSelection } from "../domain/aws-account";
 import { accountExpectation } from "../domain/aws-account";
+import { agentActivity } from "../domain/control-plane";
 import { hostProjectionSha256, projectHost, type Sha256 } from "../domain/host-projection";
 import {
   assessCompleteness,
+  deliveredAccounts,
   type FactoryId,
   type FactoryInstance,
   type Host,
@@ -29,6 +31,7 @@ import {
 } from "../domain/status";
 import type { PeerView } from "../domain/tailnet";
 import type { CallerIdentity } from "./caller-identity";
+import { type ControlPlane, readAgents } from "./control-plane";
 import type { HostTransport } from "./host-transport";
 import { inspectWorker } from "./inspect-worker";
 import { inspectRepositories, type RepositoryObservation } from "./inspect-repositories";
@@ -43,6 +46,8 @@ export interface StatusDependencies {
   readonly machines: MachineInventorySource;
   readonly peers: TailnetPeers;
   readonly transport: HostTransport;
+  /** Reads each reached worker's agents; without one, their activity is unknown. */
+  readonly controlPlane: ControlPlane | undefined;
   /** Digests the host projection each worker should hold. */
   readonly sha256: Sha256;
 }
@@ -79,9 +84,14 @@ interface Observed {
 }
 
 async function workerStatus(
-  { transport, sha256 }: Pick<StatusDependencies, "transport" | "sha256">,
+  {
+    transport,
+    controlPlane,
+    sha256,
+  }: Pick<StatusDependencies, "transport" | "controlPlane" | "sha256">,
   target: StatusTarget,
   observed: Observed,
+  instance: FactoryInstance,
   host: Host,
 ): Promise<WorkerStatus> {
   const hostname = hostName(target.factoryId, host.key);
@@ -97,6 +107,7 @@ async function workerStatus(
     unmanagedRepositories: null,
     dispatch: "unknown" as const,
     dispatchBlockers: null,
+    activity: agentActivity(undefined),
   };
   const blocked = machineVerdict(machine, host.key);
   if (blocked) return { ...identity, ...facts, tailnet: "not_checked", ...unknown, ...blocked };
@@ -108,9 +119,10 @@ async function workerStatus(
     hostname,
     release: target.release,
     configurationSha256: hostProjectionSha256(
-      projectHost(target.factoryId, target.release, host),
+      projectHost(instance, target.factoryId, target.release, host),
       sha256,
     ),
+    delivered: deliveredAccounts(instance, host.key).map(({ id }) => id),
   });
   if (inspection.kind !== "inspected" || inspection.inspection.release.state !== "active")
     return {
@@ -122,12 +134,17 @@ async function workerStatus(
       unmanagedRepositories: null,
       dispatch: "unknown",
       dispatchBlockers: null,
+      activity: agentActivity(undefined),
       ...verdict,
     };
   const [repository, dispatch] = await Promise.all([
     inspectRepositories(transport, location.worker),
     inspectDispatch(transport, location.worker),
   ]);
+  // Only once dispatch has been read: both go through the worker's activator, which runs one
+  // operation at a time. The work inspection is never asked for: it can hold the activator for
+  // minutes (D12).
+  const agents = await readAgents(controlPlane, location.worker);
   const repositoryFacts = {
     repositories: repository.state,
     unmanagedRepositories:
@@ -149,6 +166,7 @@ async function workerStatus(
     ...repositoryFacts,
     dispatch: dispatch.state,
     dispatchBlockers: "blockers" in dispatch ? dispatch.blockers : null,
+    activity: agentActivity(agents),
     ...dispatchVerdict,
   };
 }
@@ -250,7 +268,7 @@ export async function factoryStatus(
   ]);
   const workers = await Promise.all(
     (instance.hosts ?? []).map((host) =>
-      workerStatus(deps, target, { inventory, view, tag }, host),
+      workerStatus(deps, target, { inventory, view, tag }, instance, host),
     ),
   );
   return {

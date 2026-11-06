@@ -12,3 +12,8 @@ variable "secret_arns" {
     error_message = "Hosts read at least the Tailscale enrollment key."
   }
 }
+
+variable "archive_bucket" {
+  description = "The log archive bucket every host may write its own prefix of, or null for none."
+  type        = string
+}

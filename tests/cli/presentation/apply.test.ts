@@ -80,6 +80,7 @@ function installed(key: string, pending: readonly string[] = [], hostname = host
         state: (pending.includes(id) ? "pending" : "enrolled") as EnrollmentState,
       })),
     },
+    delivered: [],
   } as const satisfies WorkerOutcome;
 }
 const ALL = ["github", "openai", "anthropic"];
@@ -136,7 +137,7 @@ function streams(lines: readonly StreamLine[]) {
 const GITHUB = [
   "  1. GitHub",
   "     $ gh auth login --hostname github.com --git-protocol https --web",
-  "     $ gh auth status",
+  "     $ gh auth status --hostname github.com --active",
 ];
 const THREE = [
   ...GITHUB,
@@ -181,7 +182,7 @@ describe("the motivating run (plan-apply §Apply)", () => {
       },
     ],
     repositories: [{ key: KEY, hostname: HOST, placed: [] }],
-    dispatch: [{ key: KEY, hostname: HOST, requested: false, schedule: null }],
+    dispatch: [{ key: KEY, hostname: HOST, requested: false, schedule: null, registers: 0 }],
     stopped: [],
   };
   const workers = [{ ...installed(KEY, ALL, HOST), release: "0.0.0" }];
@@ -364,6 +365,19 @@ describe("the Applying section (plan-apply §Apply, §Waiting for a new worker)"
     ]);
   });
 
+  test("creating the log archive alone is Terraform's apply: plan-apply §Apply", () => {
+    const archive = { bucket: "fff-abcd1234-logs-123456789012-eu-west-2-an", creates: true };
+    const creating = { ...review, changes: [], archive };
+    expect(rows(creating)).toEqual([
+      rule("Applying"),
+      "  Infrastructure   applying with Terraform (its output is not shown; can take several minutes)",
+    ]);
+    // An archive found present applies nothing for it.
+    expect(
+      infrastructureApplyingRow({ ...creating, archive: { ...archive, creates: false } }),
+    ).toBeUndefined();
+  });
+
   test("an upgrade's pin, written once approved, before the worker installs: plan-apply §Upgrade", () => {
     const upgrade: FactoryPlanReview = {
       ...review,
@@ -448,7 +462,7 @@ describe("the Result and its Next block (plan-apply §Apply)", () => {
       "",
       "  1. GitHub",
       "     $ gh auth login --hostname github.com --git-protocol https --web",
-      "     $ gh auth status",
+      "     $ gh auth status --hostname github.com --active",
       "  2. OpenAI Codex",
       "     $ codex login --device-auth",
       "     $ codex login status",
@@ -536,6 +550,86 @@ describe("the Result and its Next block (plan-apply §Apply)", () => {
       ...THREE,
       "",
       ...closing(` ${FLAGS}`),
+    ]);
+  });
+
+  test("a delivered credential not accepted: replace it from the workstation, no login", () => {
+    const github = { ...installed("builder-1", ["github"]), delivered: ["github" as const] };
+    const state = dispatchState(
+      true,
+      {
+        releaseHealthy: true,
+        githubCredential: "pending",
+        githubDelivered: true,
+        repositorySync: "ready",
+        ffflowAdoption: "passed",
+        paseoHealth: "healthy",
+      },
+      host("builder-1"),
+    );
+    if (state.kind !== "pending") throw new Error("not pending");
+    const result = applied({
+      workers: [github],
+      repositories: [synchronized("builder-1")],
+      dispatch: [
+        {
+          ...worker("builder-1"),
+          kind: "pending",
+          gates: state.gates,
+          blocking: state.blocking,
+          summary: describeDispatch(state),
+          nextActions: dispatchNextActions(state),
+        },
+      ],
+    });
+    const { out, err } = streams(appliedLines(result, SELECTED, PLAIN));
+    expect(err).toEqual([]);
+    expect(
+      out.slice(
+        out.indexOf("  ! builder-1          installed and verified · enrollment pending (1)"),
+      ),
+    ).toEqual([
+      "  ! builder-1          installed and verified · enrollment pending (1)",
+      "    ✔ Repositories    synchronized",
+      `    ! Dispatch        pending · GitHub is not authenticated for the runtime account on ${host("builder-1")}`,
+      `    Operation record   ${RECORD}`,
+      "",
+      rule("Next: enroll 1 account on builder-1"),
+      "  Replace the GitHub token, which builder-1 did not accept:",
+      `    $ fffactory secret set github-token ${FLAGS}`,
+      "  Refresh enrollment verification, reviewing the new plan:",
+      `    $ fffactory apply ${FLAGS}`,
+      "  Then confirm:",
+      `    $ fffactory status ${FLAGS}`,
+      PASEO,
+    ]);
+    expect(out.join("\n")).not.toContain("tailscale ssh");
+  });
+
+  test("delivered credentials said once for every worker, before the logins still to make", () => {
+    const delivered = ["github", "anthropic"] as const;
+    const result = applied({
+      workers: [
+        { ...installed("builder-1", ["github", "openai"]), delivered },
+        { ...installed("builder-2", ["github", "anthropic"]), delivered },
+      ],
+    });
+    const { out } = streams(appliedLines(result, APPLY, PLAIN));
+    expect(out.slice(out.indexOf(rule("Next: enroll accounts on 2 workers")))).toEqual([
+      rule("Next: enroll accounts on 2 workers"),
+      "  Replace the GitHub token, which builder-1, builder-2 did not accept:",
+      "    $ fffactory secret set github-token",
+      "  Replace the Anthropic API key, which builder-2 did not accept:",
+      "    $ fffactory secret set anthropic-api-key",
+      "",
+      "  On builder-1, log in as factory (tailnet SSH policy must allow it):",
+      `    $ tailscale ssh factory@${host("builder-1")}`,
+      "",
+      "  1. OpenAI Codex",
+      "     $ codex login --device-auth",
+      "     $ codex login status",
+      "",
+      ...closing(),
     ]);
   });
 
@@ -691,6 +785,7 @@ describe("the Result and its Next block (plan-apply §Apply)", () => {
         {
           releaseHealthy: true,
           githubCredential: github,
+          githubDelivered: false,
           repositorySync: "ready",
           ffflowAdoption: "failed",
           paseoHealth: "healthy",
@@ -771,6 +866,7 @@ describe("the Result and its Next block (plan-apply §Apply)", () => {
       {
         releaseHealthy: true,
         githubCredential: "enrolled",
+        githubDelivered: false,
         repositorySync: "pending",
         ffflowAdoption: "passed",
         paseoHealth: "healthy",
@@ -813,8 +909,8 @@ describe("the Result and its Next block (plan-apply §Apply)", () => {
   });
 
   test("deferred maintenance: one recovery instruction, though three stages name it", () => {
-    const close = `Close the active agents on ${host("builder-1")}, then rerun \`fffactory apply\``;
-    const deferral = "Paseo maintenance is deferred while agents may be active";
+    const close = `Wait until no agent on ${host("builder-1")} is working or needs input, then rerun \`fffactory apply\``;
+    const deferral = "Paseo maintenance is deferred while agents may be busy";
     const result = applied({
       workers: [{ ...worker("builder-1"), kind: "skipped", summary: deferral, nextAction: close }],
       repositories: [synchronized("builder-1")],
@@ -824,7 +920,7 @@ describe("the Result and its Next block (plan-apply §Apply)", () => {
           kind: "deferred",
           pending: ["password"],
           reloaded: false,
-          summary: "Maintenance (password) was deferred while agents may be active",
+          summary: "Maintenance (password) was deferred while agents may be busy",
           nextAction: close,
         },
       ],
@@ -842,7 +938,7 @@ describe("the Result and its Next block (plan-apply §Apply)", () => {
     expect(err).toEqual([]);
     expect(out.slice(3)).toEqual([
       `  ! builder-1          skipped · ${deferral}`,
-      "    ! Control plane   deferred · Maintenance (password) was deferred while agents may be active",
+      "    ! Control plane   deferred · Maintenance (password) was deferred while agents may be busy",
       "    ✔ Repositories    synchronized",
       "    ↷ Dispatch        skipped",
       "  ! Verification       The factory is not ready: 1 of 1 workers need attention",

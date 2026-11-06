@@ -17,6 +17,7 @@ import { verifyFactory } from "../../src/application/verify-factory";
 import type { HostKey } from "../../src/domain/instance";
 import { HOST_PROTOCOL_VERSION } from "../../src/domain/protocol-fields";
 import { ENROLLMENTS } from "../../src/domain/readiness";
+import { repositoryRegistration } from "../../src/domain/repository-registration";
 import type { WorkerOutcome } from "../../src/domain/rollout";
 import { harness } from "../support/cli-harness";
 import { MemoryInstanceStore } from "../support/memory-instance-store";
@@ -50,6 +51,7 @@ function installed(key: string, pending: readonly string[] = []): WorkerOutcome 
         state: pending.includes(id) ? ("pending" as const) : ("enrolled" as const),
       })),
     },
+    delivered: [],
   };
 }
 
@@ -102,7 +104,7 @@ describe("fffactory apply, worker report (plan-apply §Apply)", () => {
       "",
       "  1. GitHub",
       "     $ gh auth login --hostname github.com --git-protocol https --web",
-      "     $ gh auth status",
+      "     $ gh auth status --hostname github.com --active",
       "",
       "  Return to your workstation:",
       "    $ exit",
@@ -248,10 +250,47 @@ describe("fffactory apply, phase-3 report (plan-apply §Apply)", () => {
     expect(reportApply(skippedResult.result, skippedResult.context, APPLYING)).toBe(2);
   });
 
+  test("a checkout left unregistered exits 2 even without verification, and never outweighs a failure (#135)", () => {
+    const gap = {
+      registration: repositoryRegistration("paseo", [
+        {
+          path: "/workspace/repos/product",
+          state: "failed",
+          reason: "registering it as a Paseo project timed out",
+        },
+      ]),
+    };
+    const active: DispatchOutcome = {
+      key: "builder-1" as HostKey,
+      hostname: host("builder-1"),
+      kind: "active",
+      changed: false,
+      gates: [],
+      ...gap,
+    };
+    const unregistered = applied({ workers: [installed("builder-1")], dispatch: [active] });
+    expect(reportApply(unregistered.result, unregistered.context, APPLYING)).toBe(2);
+    expect(unregistered.err).toEqual([]);
+    expect(unregistered.out).toContain("  builder-1: Rerun `fffactory apply`");
+
+    const failed: DispatchOutcome = {
+      key: "builder-2" as HostKey,
+      hostname: host("builder-2"),
+      kind: "failed",
+      summary: "Schedule reconciliation failed",
+      nextAction: "Repair Paseo",
+    };
+    const both = applied({
+      workers: [installed("builder-1"), installed("builder-2")],
+      dispatch: [active, failed],
+    });
+    expect(reportApply(both.result, both.context, APPLYING)).toBe(1);
+  });
+
   test("every repository, control-plane, dispatch and verification branch, each action once", () => {
     // builder-5's Paseo maintenance was deferred: the workers stage skipped it (#134).
-    const close = `Close the active agents on ${host("builder-5")}, then rerun \`fffactory apply\``;
-    const deferral = "Paseo maintenance is deferred while agents may be active";
+    const close = `Wait until no agent on ${host("builder-5")} is working or needs input, then rerun \`fffactory apply\``;
+    const deferral = "Paseo maintenance is deferred while agents may be busy";
     const workers: WorkerOutcome[] = [
       ...["builder-1", "builder-2", "builder-3", "builder-4"].map((key) => installed(key)),
       {
@@ -293,7 +332,7 @@ describe("fffactory apply, phase-3 report (plan-apply §Apply)", () => {
         kind: "deferred",
         pending: ["password"],
         reloaded: false,
-        summary: "Maintenance (password) was deferred while agents may be active",
+        summary: "Maintenance (password) was deferred while agents may be busy",
         nextAction: close,
       },
     ];
@@ -360,7 +399,7 @@ describe("fffactory apply, phase-3 report (plan-apply §Apply)", () => {
       "  ✔ builder-4          installed and verified · every account enrolled",
       "      Dispatch        not requested",
       `  ! builder-5          skipped · ${deferral}`,
-      "    ! Control plane   deferred · Maintenance (password) was deferred while agents may be active",
+      "    ! Control plane   deferred · Maintenance (password) was deferred while agents may be busy",
       "    ↷ Dispatch        skipped",
       `  ! Verification       ${verification.summary}`,
       `    Operation record   ${RECORD}`,

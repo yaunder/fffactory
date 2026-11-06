@@ -50,3 +50,28 @@ data "aws_iam_policy_document" "hosts" {
     resources = ["*"]
   }
 }
+
+# A conditional document is read like any other: its one instance, `[0]`, is the block above.
+data "aws_iam_policy_document" "optional" {
+  count = var.enabled ? 1 : 0
+
+  statement {
+    sid       = "WriteOwnObjects"
+    actions   = ["s3:PutObject"]
+    resources = ["*"]
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:ResourceTag/fffactory:factory-id"
+      values   = [var.factory_id]
+    }
+  }
+}
+
+resource "aws_iam_role_policy" "optional" {
+  count = var.enabled ? 1 : 0
+
+  name   = "${var.factory_id}-optional"
+  role   = "${var.factory_id}-host"
+  policy = data.aws_iam_policy_document.optional[0].json
+}

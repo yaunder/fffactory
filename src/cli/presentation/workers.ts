@@ -5,10 +5,13 @@
  * outcome and what is still to enroll; this lays it out.
  */
 import type { ControlPlaneOutcome } from "../../application/apply-control-plane";
-import type { DispatchOutcome } from "../../application/apply-dispatch";
+import { type DispatchOutcome, registrationGap } from "../../application/apply-dispatch";
 import type { RepositoryOutcome } from "../../application/apply-repositories";
+import type { HostKey } from "../../domain/instance";
 import {
+  ENROLLMENTS,
   enrollmentReport,
+  pendingCount,
   RUNTIME_ACCOUNT,
   type WorkerEnrollment,
   workerEnrollment,
@@ -18,11 +21,12 @@ import { type Inline, type NextPart, type Row, step, verbatim } from "./blocks";
 import { fffactoryCommand, type Selection } from "./command-line";
 import type { Status } from "./style";
 
-/** Each later stage's label, in the plan's order. */
+/** Each later stage's label, in the plan's order, and dispatch's registration gap after it. */
 const STAGES = {
   controlPlane: "Control plane",
   repositories: "Repositories",
   dispatch: "Dispatch",
+  registration: "Registration",
 };
 /** Every worker's stages align, whichever ran for it. */
 const STAGE_WIDTH = Math.max(...Object.values(STAGES).map((label) => Bun.stringWidth(label)));
@@ -50,11 +54,14 @@ const worst = (statuses: readonly (Status | undefined)[]): Status | undefined =>
     undefined,
   );
 
-/** An installed worker's enrollment, named for the hostname the CLI resolved; none otherwise. */
+/**
+ * An installed worker's enrollment, named for the hostname the CLI resolved, with the accounts
+ * its projection delivered; none otherwise.
+ */
 export function workerEnrollmentOf(outcome: WorkerOutcome): WorkerEnrollment | undefined {
   if (outcome.kind !== "installed") return undefined;
   return workerEnrollment(
-    enrollmentReport(outcome.verification, outcome.hostname),
+    enrollmentReport(outcome.verification, outcome.hostname, outcome.delivered),
     outcome.hostname,
   );
 }
@@ -71,7 +78,8 @@ const said = (word: string, summary: string): Inline => [`${word} · `, verbatim
 function workersOutcome(outcome: WorkerOutcome, selection: Selection): Outcome {
   switch (outcome.kind) {
     case "installed": {
-      const pending = workerEnrollmentOf(outcome)?.accounts.length ?? 0;
+      const enrollment = workerEnrollmentOf(outcome);
+      const pending = enrollment === undefined ? 0 : pendingCount(enrollment);
       return pending === 0
         ? { status: "ready", value: "installed and verified · every account enrolled" }
         : {
@@ -160,6 +168,23 @@ function dispatchRow(outcome: DispatchOutcome, worker: WorkerOutcome): Row | und
 }
 
 /**
+ * The placed checkouts dispatch's registration left unregistered, each under the row with its
+ * reason, in the words verification records; no row when none was left, the Dispatch row alone
+ * saying how dispatch ended.
+ */
+function registrationRow(outcome: DispatchOutcome): Row | undefined {
+  const gap = registrationGap(outcome);
+  if (gap === undefined) return undefined;
+  const count = gap.unregistered.length;
+  return {
+    status: "attention",
+    label: STAGES.registration,
+    value: `${count} placed ${count === 1 ? "repository" : "repositories"} not registered`,
+    details: [{ kind: "text", lines: gap.unregistered.map((line) => [verbatim(line)]) }],
+  };
+}
+
+/**
  * A worker's row in the Result: its key, its workers-stage outcome, and under it each later
  * stage that ran for it, in the plan's order. Its status is its worst stage's, so a worker
  * whose enrollment is pending, or whose later stage is pending or failed, is never shown ready.
@@ -171,6 +196,7 @@ export function workerRow(outcome: WorkerOutcome, later: LaterStages, selection:
     later.controlPlane && controlPlaneRow(later.controlPlane),
     later.repositories && repositoriesRow(later.repositories, outcome),
     later.dispatch && dispatchRow(later.dispatch, outcome),
+    later.dispatch && registrationRow(later.dispatch),
   ].filter((row): row is Row => row !== undefined);
   const status = worst([own.status, ...stages.map((row) => row.status)]) ?? own.status;
   return {
@@ -181,6 +207,35 @@ export function workerRow(outcome: WorkerOutcome, later: LaterStages, selection:
       ? {}
       : { details: [{ kind: "rows", rows: stages, labelWidth: STAGE_WIDTH, statusColumn: true }] }),
   };
+}
+
+/** One worker's enrollment, by its key. */
+export interface KeyedEnrollment {
+  readonly key: HostKey;
+  readonly enrollment: WorkerEnrollment;
+}
+
+/**
+ * Each delivered credential some worker did not accept, once for every worker, in
+ * `ENROLLMENTS`' order: the workers, and the `fffactory secret set` that replaces it, with the
+ * instance and profile given. The credential is factory-wide, so one replacement serves them all.
+ */
+export function deliveredSteps(
+  enrollments: readonly KeyedEnrollment[],
+  selection: Selection,
+): NextPart[] {
+  return ENROLLMENTS.flatMap(({ id, credential, secret }) => {
+    const keys = enrollments
+      .filter(({ enrollment }) => enrollment.delivered.some((entry) => entry.id === id))
+      .map(({ key }) => key);
+    return keys.length === 0
+      ? []
+      : [
+          step(`Replace the ${credential}, which ${keys.join(", ")} did not accept:`, [
+            fffactoryCommand(["secret", "set", secret], selection),
+          ]),
+        ];
+  });
 }
 
 /** What logging in requires, said once with the login. */

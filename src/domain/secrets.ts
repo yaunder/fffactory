@@ -5,6 +5,8 @@
  * factory.json keeps only the secret's ARN.
  */
 import {
+  CREDENTIAL_SECRET_FIELDS,
+  type CredentialSecretField,
   type FactoryId,
   type FactoryInstance,
   type HostKey,
@@ -12,6 +14,7 @@ import {
   type SecretReference,
   type TailscaleSecretField,
 } from "./instance";
+import { enrollmentOf } from "./readiness";
 import { FACTORY_ID_TAG, MANAGED_BY_TAG } from "./resource-naming";
 import { fieldPath, itemPath } from "./validation";
 
@@ -69,27 +72,65 @@ export function readSecretMaterial(raw: string, source: MaterialSource): Materia
 }
 
 /** The secrets factory.json refers to, by the name `fffactory secret set` takes. */
-export type SecretName = "tailscale-auth-key" | "tailscale-admin-client" | "paseo-password";
+export type SecretName =
+  | "tailscale-auth-key"
+  | "tailscale-admin-client"
+  | "paseo-password"
+  | "github-token"
+  | "anthropic-api-key"
+  | "openai-api-key";
 
 const SECRET_NAMES: readonly SecretName[] = [
   "tailscale-auth-key",
   "tailscale-admin-client",
   "paseo-password",
+  "github-token",
+  "anthropic-api-key",
+  "openai-api-key",
 ];
 
-/** The secrets that belong to the whole factory, each under factory.json's `tailscale`. */
+/** The secrets that belong to the whole factory, under factory.json's `tailscale` or `credentials`. */
 type FactorySecretName = Exclude<SecretName, "paseo-password">;
 
+/** Where a factory-wide secret's reference lives: one field of one top-level section. */
+type FactorySecretField =
+  | { readonly section: "tailscale"; readonly field: TailscaleSecretField }
+  | { readonly section: "credentials"; readonly field: CredentialSecretField };
+
 /**
- * Each factory-wide secret's field under `tailscale` and what it is. The auth key is the
- * workers' join-only enrollment key; the admin client is the operator's own Tailscale OAuth
- * client, which no worker ever receives.
+ * Each factory-wide secret's field and what it is. The auth key is the workers' join-only
+ * enrollment key; the admin client is the operator's own Tailscale OAuth client, which no
+ * worker ever receives. The API credentials are delivered to the hosts that keep no human
+ * login for their account.
  */
 const FACTORY_SECRETS: Readonly<
-  Record<FactorySecretName, { readonly field: TailscaleSecretField; readonly what: string }>
+  Record<FactorySecretName, FactorySecretField & { readonly what: string }>
 > = {
-  "tailscale-auth-key": { field: "auth_key_secret", what: "Tailscale auth key" },
-  "tailscale-admin-client": { field: "admin_client_secret", what: "Tailscale admin client" },
+  "tailscale-auth-key": {
+    section: "tailscale",
+    field: "auth_key_secret",
+    what: "Tailscale auth key",
+  },
+  "tailscale-admin-client": {
+    section: "tailscale",
+    field: "admin_client_secret",
+    what: "Tailscale admin client",
+  },
+  "github-token": {
+    section: "credentials",
+    field: CREDENTIAL_SECRET_FIELDS.github,
+    what: enrollmentOf("github").credential,
+  },
+  "anthropic-api-key": {
+    section: "credentials",
+    field: CREDENTIAL_SECRET_FIELDS.anthropic,
+    what: enrollmentOf("anthropic").credential,
+  },
+  "openai-api-key": {
+    section: "credentials",
+    field: CREDENTIAL_SECRET_FIELDS.openai,
+    what: enrollmentOf("openai").credential,
+  },
 };
 
 /** Where one secret lives in Secrets Manager and in factory.json. */
@@ -157,12 +198,12 @@ export function resolveSecretTarget(
     return refuse("factory.json needs factory_id before a secret can be named");
   if (name === "paseo-password") return hostTarget(instance, factoryId, host);
   if (host !== undefined) return refuse(`${name} belongs to the whole factory and takes no --host`);
-  const { field, what } = FACTORY_SECRETS[name];
+  const { section, field, what } = FACTORY_SECRETS[name];
   return {
     ok: true,
     target: {
       name,
-      field: fieldPath("tailscale", field),
+      field: fieldPath(section, field),
       secretName: `${factoryId}/${name}`,
       description: `${what} of factory ${factoryId}`,
       factoryId,
@@ -170,9 +211,9 @@ export function resolveSecretTarget(
   };
 }
 
-/** The `tailscale` field of a factory-wide target; a host's target has none. */
-function tailscaleField(target: SecretTarget): TailscaleSecretField | undefined {
-  return target.name === "paseo-password" ? undefined : FACTORY_SECRETS[target.name].field;
+/** The section and field of a factory-wide target; a host's target has none. */
+function factoryField(target: SecretTarget): FactorySecretField | undefined {
+  return target.name === "paseo-password" ? undefined : FACTORY_SECRETS[target.name];
 }
 
 /** The reference factory.json currently holds for the target, if any. */
@@ -180,8 +221,9 @@ export function secretReference(
   instance: FactoryInstance,
   target: SecretTarget,
 ): SecretReference | undefined {
-  const field = tailscaleField(target);
-  if (field !== undefined) return instance.tailscale?.[field];
+  const factory = factoryField(target);
+  if (factory?.section === "tailscale") return instance.tailscale?.[factory.field];
+  if (factory?.section === "credentials") return instance.credentials?.[factory.field];
   return instance.hosts?.find((host) => host.key === target.hostKey)?.paseo_password_secret;
 }
 
@@ -197,9 +239,13 @@ export function withSecretReference(
   target: SecretTarget,
   arn: SecretReference,
 ): FactoryInstance {
-  const field = tailscaleField(target);
-  if (field !== undefined)
-    return withEntry(instance, "tailscale", withEntry(instance.tailscale, field, arn));
+  const factory = factoryField(target);
+  if (factory !== undefined)
+    return withEntry(
+      instance,
+      factory.section,
+      withEntry(instance[factory.section], factory.field, arn),
+    );
   const hosts = (instance.hosts ?? []).map((host) =>
     host.key === target.hostKey ? withEntry(host, "paseo_password_secret", arn) : host,
   );
@@ -210,3 +256,111 @@ export function withSecretReference(
 export function secretTags(factoryId: FactoryId): Readonly<Record<string, string>> {
   return { [FACTORY_ID_TAG]: factoryId, [MANAGED_BY_TAG]: "fffactory" };
 }
+
+/**
+ * The Region a secret's ARN names: the only one where Secrets Manager finds it, so the only
+ * one to ask about it. Any other answers `ResourceNotFoundException`, which is no proof of
+ * absence.
+ */
+export function secretRegion(arn: SecretReference): string {
+  const [, , , region = ""] = arn.split(":");
+  return region;
+}
+
+/** A secret as Secrets Manager lists or describes it: what its ownership is judged on. */
+export interface ListedSecret {
+  readonly name: string;
+  readonly arn: SecretReference;
+  readonly tags: Readonly<Record<string, string>>;
+  /** Scheduled for deletion: Secrets Manager reports a deleted date. */
+  readonly pendingDeletion: boolean;
+}
+
+declare const ownedBrand: unique symbol;
+
+/**
+ * A listed or described secret the factory owns. Only `classifySecrets` makes one, so nothing
+ * deletes a secret the ownership rule did not pass.
+ */
+export type OwnedSecret = ListedSecret & { readonly [ownedBrand]: "OwnedSecret" };
+
+/**
+ * Whether factory `factoryId` owns the secret (D7): its name starts with `<factory ID>/` and
+ * goes on, and it carries both `fffactory:factory-id = <factory ID>` and
+ * `fffactory:managed-by = fffactory`, exactly. A tag alone, or a name alone, is never enough.
+ */
+export function ownsSecret(
+  factoryId: FactoryId,
+  secret: Pick<ListedSecret, "name" | "tags">,
+): boolean {
+  const prefix = `${factoryId}/`;
+  const tags = secretTags(factoryId);
+  return (
+    secret.name.startsWith(prefix) &&
+    secret.name.length > prefix.length &&
+    Object.entries(tags).every(([key, value]) => secret.tags[key] === value)
+  );
+}
+
+/** Every secret reference factory.json holds, in field order, each once. */
+export function secretReferences(instance: FactoryInstance): readonly SecretReference[] {
+  const factoryWide = Object.values(FACTORY_SECRETS).map((target) =>
+    target.section === "tailscale"
+      ? instance.tailscale?.[target.field]
+      : instance.credentials?.[target.field],
+  );
+  const hosts = (instance.hosts ?? []).map((host) => host.paseo_password_secret);
+  const references = [...factoryWide, ...hosts].filter(
+    (reference): reference is SecretReference => reference !== undefined,
+  );
+  return [...new Set(references)];
+}
+
+/**
+ * Whether a factory.json reference names the listed secret: its full ARN, or the partial ARN
+ * without the six characters Secrets Manager adds after a hyphen.
+ */
+export function refersTo(reference: SecretReference, arn: SecretReference): boolean {
+  return (
+    reference === arn || (arn.startsWith(`${reference}-`) && arn.length === reference.length + 7)
+  );
+}
+
+/** A factory's secrets as teardown sees them (D7). */
+export interface SecretInventory {
+  /** Owned: deleted permanently. */
+  readonly owned: readonly OwnedSecret[];
+  /** Tagged with the factory ID but not owned, by name or managed-by tag: kept. */
+  readonly taggedNotOwned: readonly ListedSecret[];
+  /** factory.json references that are no owned secret, such as a `fffv/*` source: kept. */
+  readonly referencedNotOwned: readonly SecretReference[];
+}
+
+/**
+ * Sorts the secrets listed by the factory-ID tag, or described by a reference the listing left
+ * out, and factory.json's references, by ownership. A secret whose factory-ID tag is not exactly
+ * this factory's (the listing filters by prefix) is another factory's, and is in no group.
+ */
+export function classifySecrets(
+  factoryId: FactoryId,
+  listed: readonly ListedSecret[],
+  references: readonly SecretReference[],
+): SecretInventory {
+  const tagged = listed.filter((secret) => secret.tags[FACTORY_ID_TAG] === factoryId);
+  const owned = tagged.filter((secret) => ownsSecret(factoryId, secret)) as OwnedSecret[];
+  return {
+    owned,
+    taggedNotOwned: tagged.filter((secret) => !ownsSecret(factoryId, secret)),
+    referencedNotOwned: [...new Set(references)].filter(
+      (reference) => !owned.some((secret) => refersTo(reference, secret.arn)),
+    ),
+  };
+}
+
+/**
+ * How deleting one owned secret ended (D8): `absent` only once Secrets Manager no longer
+ * finds it. `reason` is fffactory's words or an AWS error name, never an AWS message.
+ */
+export type SecretDeletion =
+  | { readonly kind: "absent" }
+  | { readonly kind: "remains"; readonly reason: string };

@@ -5,9 +5,9 @@ import type {
 } from "../application/control-plane";
 import type { HostCommandOutcome, HostTransport } from "../application/host-transport";
 import {
+  type AgentsObservation,
   parseActivityDocument,
   parseControlPlaneActionDocument,
-  type AgentActivity,
 } from "../domain/control-plane";
 import { remoteCommand, WORKER_PATHS, type RemoteCommand } from "../domain/host-protocol";
 import { hostProjectionJson, type HostProjection } from "../domain/host-projection";
@@ -66,14 +66,14 @@ export function paseoControlPlane(transport: HostTransport): ControlPlane {
       if (outcome.kind !== "completed") return "unreachable";
       return outcome.exitCode === 0 ? "healthy" : "unhealthy";
     },
-    async activeAgents(worker): Promise<AgentActivity> {
+    async agents(worker): Promise<AgentsObservation> {
       const outcome = await run(worker, activator("activity"));
       if (outcome.kind !== "completed" || outcome.exitCode !== 0)
         return { kind: "unknown", reason: "Paseo activity could not be read" };
       const parsed = parseActivityDocument(outcome.stdout);
-      return parsed.ok
-        ? parsed.document.activity
-        : { kind: "unknown", reason: "Paseo activity returned invalid data" };
+      if (parsed.ok) return parsed.document;
+      if (parsed.kind === "outdated") return { kind: "outdated" };
+      return { kind: "unknown", reason: "Paseo activity returned invalid data" };
     },
     async install(worker, projection: HostProjection): Promise<ControlPlaneAction> {
       return readAction(

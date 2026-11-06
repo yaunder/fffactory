@@ -19,6 +19,20 @@ describe("fffactory init", () => {
     expect(out).toContain("Incomplete: 10 fields still needed:");
     expect(out).toContain("  name");
     expect(out).not.toContain("  factory_id");
+    expect(out.at(-1)).toBe(
+      "Every host needs a Paseo password before apply: `fffactory secret set paseo-password --host KEY`.",
+    );
+  });
+
+  test("once hosts are declared, says nothing more of the Paseo password than the fields do", async () => {
+    const example = await Bun.file("examples/factory.json").json();
+    const store = new MemoryInstanceStore({ [DEFAULT_PATH]: JSON.stringify(example) });
+    const { context, out } = harness(store);
+    expect(await run(["init"], context)).toBe(0);
+    expect(out).toEqual([
+      `Unchanged ${DEFAULT_PATH}: nothing to fill.`,
+      "Complete: nothing further is needed.",
+    ]);
   });
 
   test("a freshly initialized instance passes validate", async () => {

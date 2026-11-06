@@ -87,10 +87,23 @@ chain. Every such command first refuses unless the caller is in factory.json's
   (the VPC, subnet, internet gateway, route table, security group and
   instances, and `DescribeVpcs`, `DescribeInstances`), SSM `GetParameter` (only
   the public Amazon Linux image parameter), IAM (the hosts' role, instance
-  profile and inline policy, and passing the role to EC2), S3 (creating and
+  profile and inline policies, and passing the role to EC2), S3 (creating and
   configuring the state bucket, and reading and writing its state, lock and
-  operation objects), Secrets Manager (`CreateSecret`, `PutSecretValue`, with
-  tags) and Service Quotas (`GetServiceQuota`, `GetAWSDefaultServiceQuota`).
+  operation objects; with `log_archive.enabled`, also creating the log archive
+  bucket, `CreateBucket` in S3's account-regional namespace, setting its ABAC
+  (`PutBucketAbac`), versioning, public access block, ownership controls,
+  encryption and bucket policy, and reading them back, `HeadBucket`,
+  `GetBucketOwnershipControls` and `GetBucketAbac` among the reads
+  ([provisioning §Log archive readiness](docs/specs/provisioning.md#log-archive-readiness))),
+  Secrets Manager (`CreateSecret`, `PutSecretValue`, with
+  tags, and `GetSecretValue` for the admin client) and Service Quotas
+  (`GetServiceQuota`, `GetAWSDefaultServiceQuota`).
+  Removing workers and the factory also calls EC2 `TerminateInstances` and the
+  other deletes Terraform's destroy needs, IAM's deletes of the hosts' role,
+  policies and instance profile, Secrets Manager `ListSecrets`, `RestoreSecret`,
+  `DeleteSecret` and `DescribeSecret`, and S3 `ListBucketVersions`,
+  `DeleteObject`, `DeleteObjectVersion` and `DeleteBucket`
+  ([teardown §Permissions](docs/specs/teardown.md#permissions)).
   The Region needs room for one more VPC; `doctor` checks it. No
   least-privilege operator policy ships yet: use an identity whose policies
   allow those calls, such as an administrator of the account.
@@ -146,7 +159,8 @@ PATH`, such as `~/.fffactory/factory.json`) with a new permanent factory ID and
 this CLI's release as the pin, and contacts nothing.
 
 **Done when** it prints `Created PATH.`, `New factory ID: FACTORY_ID`, `Release
-pin: R` and the fields still needed.
+pin: R`, the fields still needed, and that every host needs a Paseo password
+before apply.
 
 **Otherwise:** rerunning on an existing document keeps every value and fills
 only what is missing (`Unchanged PATH: nothing to fill.`); an invalid document
@@ -184,7 +198,9 @@ fffactory validate
 ```
 
 **Done when** it prints `Valid factory.json (schema version 1).` and
-`Incomplete: 1 fields still needed:` naming only `tailscale.auth_key_secret`.
+`Incomplete: 2 fields still needed:` naming only `tailscale.auth_key_secret` and
+`hosts[0].paseo_password_secret`, the second with the `fffactory secret set
+paseo-password --host KEY` that step 6 runs.
 
 **Otherwise:** fix each `path: message` it prints to standard error (exit 1).
 Never put a key, password or token in factory.json: a secret field accepts
@@ -199,7 +215,8 @@ fffactory doctor --profile NAME
 ```
 
 **Done when** every check is ready except `factory.json`, which reports the
-document incomplete for `tailscale.auth_key_secret`; doctor exits 2.
+document missing 2 fields, `tailscale.auth_key_secret` and
+`hosts[0].paseo_password_secret`, as step 3 does; doctor exits 2.
 `fffactory doctor --json` gives the same report as a versioned document.
 
 **Otherwise:** follow each check's `Next:` line, then rerun doctor. The usual
@@ -264,8 +281,9 @@ never put it in a file in a repository or in factory.json.
 
 Optionally, create the factory's **admin client**, a Tailscale OAuth client
 that only the operator's `fffactory` uses, never a worker. `fffactory worker
-terminate` deletes a terminated worker's Tailscale devices with it, and refuses
-without it, so create it before you need to replace or remove a worker. On the
+terminate` deletes a terminated worker's Tailscale devices with it, and
+`fffactory teardown` the whole factory's; both refuse without it, so create it
+before you need to replace or remove a worker, or remove the factory. On the
 admin console's **Trust credentials** page, create an OAuth credential with
 the **`devices:core`** scope (read and write) and only that scope, and select
 factory.json's tag as its tag. Copy its client secret (`tskey-client-…`):
@@ -311,14 +329,16 @@ without a terminal it is read from standard input, such as `fffactory secret
 set tailscale-auth-key < key.txt`.
 
 The admin client's value is its client secret alone, and factory.json is
-complete without it; only `fffactory worker terminate` reads it, with your
-credentials. Workers' IAM role cannot read it: fffactory never gives it to a
-worker ([secrets §The Tailscale admin client](docs/specs/secrets.md#the-tailscale-admin-client)).
+complete without it; only `fffactory worker terminate` and `fffactory
+teardown` read it, with your credentials. Workers' IAM role cannot read it:
+fffactory never gives it to a worker ([secrets §The Tailscale admin
+client](docs/specs/secrets.md#the-tailscale-admin-client)).
 
 The Paseo password is the one every Paseo client of that worker types in
 [step 10](#10-enroll-paseo-clients): choose a strong, unique one and keep it in
-a password manager. factory.json does not require it, but the worker's Paseo
-daemon cannot start without it.
+a password manager. Every host needs one: its Paseo daemon cannot start
+without it, so `validate` reports factory.json incomplete until each host has
+one, naming the `secret set` command for it.
 
 **Done when** each `secret set` prints `Stored the … in Secrets Manager as NAME
 (a new secret).` and the field it set, `validate` prints `Complete: nothing
@@ -328,9 +348,66 @@ exits 0.
 **Otherwise:** a refusal names its cause and stores nothing (exit 1).
 Rerunning `secret set` stores a new value under the same secret, which workers
 that boot later read for the Tailscale key. Do not rotate a running worker's
-Paseo password: its daemon keeps the password it started with until Paseo
-restarts, while fffactory's own Paseo calls read the new value at once, and
-fffactory has no way yet to restart Paseo onto a rotated password.
+Paseo password: its daemon keeps the hash of the password it was installed
+with, while fffactory's own Paseo calls read the new value at once, and
+fffactory has no way yet to install a rotated password's hash and restart Paseo
+onto it.
+
+### Deliver API credentials (optional)
+
+**Actor:** human: the values are typed at hidden prompts. **Specs:**
+[secrets §The API credentials](docs/specs/secrets.md#the-api-credentials),
+[instance configuration §API credentials](docs/specs/instance-configuration.md#api-credentials).
+
+A worker's three accounts can be supplied as API credentials instead of a
+human's login in [step 8](#8-enroll-the-workers-accounts). Each is optional and
+factory-wide:
+
+| Account | `NAME` | What to create |
+| --- | --- | --- |
+| `github` | `github-token` | A GitHub token for `gh` and git (below). |
+| `anthropic` | `anthropic-api-key` | An Anthropic API key, for Claude Code. |
+| `openai` | `openai-api-key` | An OpenAI API key, for Codex. |
+
+```bash
+fffactory secret set github-token --profile NAME
+fffactory secret set anthropic-api-key --profile NAME
+fffactory secret set openai-api-key --profile NAME
+fffactory validate
+```
+
+Each is stored as `FACTORY_ID/NAME` and referenced from
+`credentials.github_token_secret`, `credentials.anthropic_api_key_secret` or
+`credentials.openai_api_key_secret`. fffactory does not check that a token or
+key works.
+
+For the GitHub token, create either:
+
+- a fine-grained personal access token owned by the organization, with
+  repository permissions Metadata read, Contents read and write (and Workflows
+  read and write to push workflow files), and Issues and Pull requests read and
+  write. The organization must allow fine-grained tokens. They expire: plan
+  their rotation; or
+- a classic personal access token with the `repo` and `read:org` scopes (and
+  `workflow` to push workflow files).
+
+Logging in by hand keeps working, for example to use a coding agent's
+subscription plan. An account with no credential stored stays on a human's
+login on every worker. To keep one worker on a human's login for an account
+whose credential is stored, list the account in that host's
+`interactive_logins`, such as `"interactive_logins": ["anthropic"]`.
+
+Every `fffactory apply` delivers each stored credential to the workers that do
+not keep its account on a human's login: the worker reads it with its own role
+and logs `gh` and Codex in as `factory`, and gives Claude Code a key file and a
+root-owned API key helper, with no prompt
+([credential delivery](docs/specs/credential-delivery.md)). Those accounts need
+no login in step 8. A credential that cannot be read, is empty, or that gh
+refuses fails the worker's install, naming the account: fix it with `secret set
+NAME` and apply again. One delivered but not accepted by the worker's check
+leaves the account pending, and apply's and status's next action says so with
+no login: `Replace the GitHub token, which KEY did not accept`, then `fffactory
+secret set github-token` and `fffactory apply`.
 
 ## 7. Bootstrap and provision
 
@@ -390,7 +467,10 @@ bucket's absence changed: plan again and review the new plan.
 `Next: enroll 3 accounts on KEY`: the login, each account's commands, then
 `exit`, `fffactory apply` and `fffactory status`, and `Paseo clients:
 enrollment is checked from each client, not the worker`. Pending enrollment is
-expected here: fffactory never enrolls an account.
+expected here for each account left to a human login: fffactory never logs in.
+An account delivered as an API credential ([step 6](#deliver-api-credentials-optional))
+is not pending; with all three delivered the worker shows `✔ KEY   installed
+and verified · every account enrolled`, and step 8 has nothing to do.
 
 **Otherwise:**
 
@@ -418,13 +498,16 @@ expected here: fffactory never enrolls an account.
 **Actor:** human: each login opens a browser or device-code flow. **Spec:**
 [readiness §Enrollment](docs/specs/readiness.md#enrollment).
 
-Run the steps apply's Next block printed for each pending account. They are, as
-`factory` on the worker:
+Run the steps apply's Next block printed for each pending account. An account
+delivered as an API credential ([step 6](#deliver-api-credentials-optional)) was
+enrolled by apply and needs none of them; if the worker did not accept it, the
+Next block names `fffactory secret set NAME` instead, run on your workstation.
+The logins are, as `factory` on the worker:
 
 ```bash
 tailscale ssh factory@HOSTNAME
 gh auth login --hostname github.com --git-protocol https --web
-gh auth status
+gh auth status --hostname github.com --active
 codex login --device-auth
 codex login status
 claude auth login
@@ -436,8 +519,8 @@ Log in as `factory` and nowhere else: agents run as `factory`, and
 `fffactory-admin` cannot switch to it. Credentials stay on the worker; never
 copy them into factory.json, a prompt or a repository.
 
-**Done when** `gh auth status`, `codex login status` and `claude auth status`
-each succeed.
+**Done when** `gh auth status --hostname github.com --active`, `codex login
+status` and `claude auth status` each succeed.
 
 **Otherwise:** `tailscale ssh` refused means the tailnet SSH rule does not let
 you log in as `factory`: fix [step 5](#5-prepare-the-tailnet).
@@ -472,7 +555,8 @@ ready.`
 
 **Otherwise:** status exit 2 lists each not-ready finding with its next action;
 an account still pending names its steps again (back to
-[step 8](#8-enroll-the-workers-accounts)).
+[step 8](#8-enroll-the-workers-accounts)), or, for a delivered one, `fffactory
+secret set NAME` and `fffactory apply`.
 
 ## 10. Enroll Paseo clients
 
@@ -587,8 +671,8 @@ dispatch agent's timeline names the exact reason
 - one of its tasks is not open, or an open pull request mentions it;
 - a task depends on an open issue outside the epic;
 - an `epic/<id>` branch already exists on the remote;
-- the host is at its cap of running agents: wait for the running agent to
-  finish, or answer its permission request;
+- the host is at its cap: an agent dispatch started is working or needs
+  input. Wait for it to finish its turn, or answer its permission request;
 - a Paseo agent already dispatched for the epic still exists: the epic stays
   skipped while it does;
 - the repository fails the FFFlow adoption check, or its checkout is not
@@ -602,6 +686,10 @@ dispatch agent's timeline names the exact reason
   the cause remains. A checkout that is only behind is fast-forwarded, not
   skipped.
 
+A run whose worker cannot read its own agents (`fffactory host agents`, run
+by the dispatcher) fails before it starts anything, its error naming why
+([dispatch §Capacity](docs/specs/dispatch.md#capacity)).
+
 Resolve the cause; the next scheduled run considers the epic again. Never
 start an agent by hand to work around a skip.
 
@@ -612,12 +700,42 @@ start an agent by hand to work around a skip.
 Rerunning `fffactory apply` is safe: every stage converges what remains, and
 an up-to-date worker gets no Paseo lifecycle action. Paseo maintenance
 (`paseo-package`, `service-definition`, `listen-address`, `password`) restarts
-the daemon, which would end running agents, so when agents may be active apply
-defers it: the worker is `skipped` with `Paseo maintenance is deferred while
-agents may be active`, stays on its complete current release, and apply exits
-2. Close the active agents on HOSTNAME, then rerun `fffactory apply`. Live
+the daemon, which would end agents' turns, so while any agent is working or
+needs input, or fffactory cannot tell, apply defers it: the worker is `skipped`
+with `Paseo maintenance is deferred while agents may be busy`, stays on its
+complete current release, and apply exits 2 naming what to do, such as waiting
+until no agent on HOSTNAME is working or needs input, then rerunning `fffactory
+apply`. Finished agents never defer it. A worker on a release from before
+fffactory's agent states is deferred for good: apply names how to replace it
+(check its work by hand, `fffactory worker terminate KEY --keep --force`, then
+`fffactory apply`). Live
 changes such as the dispatch schedule or repositories never restart Paseo
 ([control plane §Pre-activation deferral](docs/specs/control-plane.md#pre-activation-deferral)).
+
+### Renew or remove an API credential
+
+To rotate a delivered GitHub token or API key, store the new value, then apply:
+
+```bash
+fffactory secret set github-token --profile NAME   # or anthropic-api-key, openai-api-key
+fffactory plan --profile NAME
+fffactory apply --plan-id ID --profile NAME
+```
+
+No Paseo restart is needed. GitHub uses the new token at once; Codex and Claude
+Code agents started after the apply use the new key, and running Claude Code
+agents pick it up on a 401 or within 5 minutes. Keep the old value valid until
+the agents running at the apply have finished, then revoke it
+([credential delivery §Renewal](docs/specs/credential-delivery.md#renewal)).
+
+To stop delivering one, remove its `credentials.*_secret` from factory.json (or,
+for one worker, list the account in that host's `interactive_logins`) and
+apply. Claude Code's key file, and its managed settings while they name
+fffactory's key helper, are removed, so the worker returns to a human's Claude
+Code login; managed settings of anyone else's are kept. The gh and Codex logins stay until you log out
+on the worker as `factory` (`gh auth logout --hostname github.com`, `codex
+logout`) and log in by hand as in [step 8](#8-enroll-the-workers-accounts)
+([credential delivery §Removal](docs/specs/credential-delivery.md#removal)).
 
 ### Upgrade the factory
 
@@ -641,6 +759,58 @@ interrupted operation is dead, run `fffactory lock break` and confirm its lock
 ID; then rerun `fffactory apply`. Never break a lock to make progress past an
 operation that may still be running
 ([provisioning §`fffactory lock break`](docs/specs/provisioning.md#fffactory-lock-break)).
+
+### Remove the factory
+
+**Actor:** human (types the factory ID at a terminal), or an agent with
+`--confirm FACTORY_ID` once the operator approved removing that factory.
+Admin-tier: it needs the AWS permissions of
+[teardown §Permissions](docs/specs/teardown.md#permissions) and the Tailscale
+admin client ([step 5](#5-prepare-the-tailnet), stored in [step 6](#6-store-the-secrets)).
+
+```bash
+fffactory teardown --profile NAME                         # at a terminal: review, then type the ID
+fffactory teardown --confirm FACTORY_ID --profile NAME    # without one
+```
+
+It shows what it removes and keeps, then stops dispatch, destroys every
+worker, the network and IAM, and deletes the factory's Tailscale devices, the
+secrets it owns (permanently, their absence confirmed), the local saved plans
+and the state bucket. Push or finish work on the workers first: busy agents,
+unpushed work or unresolved checkouts refuse it, naming the worker, and it has
+no `--force` (remove such a worker first with `fffactory worker terminate KEY
+--force`). `fffactory worker inspect` shows beforehand, changing nothing,
+which workers terminate's gates would refuse and why, and the agents a removal
+would end ([worker lifecycle
+§Inspect](docs/specs/worker-lifecycle.md#inspect)). A stopped worker is not
+inspected, and anything unpushed on its disk is destroyed.
+
+**Done when** it prints `✔ Removed factory ID: only what it kept remains`,
+exiting 0. An interrupt during the state bucket's last deletion can print that
+and still exit 128 plus the signal's number: nothing it removes remains
+([teardown §Interruption](docs/specs/teardown.md#interruption)).
+
+**Otherwise:**
+
+- Exit 1: refused or declined, nothing removed; do what its Next block says.
+  A refusal after dispatch was stopped leaves it stopped: `fffactory apply`
+  restarts it if you keep the factory.
+- Exit 2: it stopped part way and lists what remains; do its next action and
+  rerun `fffactory teardown`, which resumes from what actually remains.
+- Interrupted: it says what it left and what to do next. Under the lock the
+  factory usually stays locked, as after an interrupted apply ([An interrupted
+  operation](#an-interrupted-operation)); before the lock, without a state
+  bucket, or once the bucket's deletion reached the lock, it may not be
+  ([teardown §Interruption](docs/specs/teardown.md#interruption)).
+
+Afterwards factory.json is unchanged and still describes the factory (`fffactory
+apply` would create it again): delete it once you no longer need it. With
+`log_archive.enabled` the log archive is kept too: fffactory never removes it,
+and applying the same factory.json again adopts it. Teardown
+revokes nothing it only refers to: revoke the Tailscale auth key and admin
+OAuth client, remove the factory's tag, grant and SSH rule from the tailnet
+policy, and revoke the API credentials it was given, once nothing else uses
+them ([teardown](docs/specs/teardown.md)).
 
 ### Not available yet
 

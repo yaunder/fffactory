@@ -1,16 +1,23 @@
 import { describe, expect, test } from "bun:test";
 import {
   applyDispatch,
+  type DispatchOutcome,
   type DispatchSkip,
   type DispatchStageRequest,
   type DispatchWorker,
   type GatedDispatchWorker,
+  REGISTRATION_NEXT_ACTION,
+  registrationGap,
 } from "../../src/application/apply-dispatch";
 import type { WorkflowAdoption, WorkflowQueue } from "../../src/application/workflow-queue";
 import { DISPATCH_GATES, type DispatchGate } from "../../src/domain/dispatch-readiness";
 import type { DispatchInspection } from "../../src/domain/dispatch-projection";
 import type { HostKey } from "../../src/domain/instance";
-import { enrollmentNextAction } from "../../src/domain/readiness";
+import { describeNextAction, enrollmentNextAction } from "../../src/domain/readiness";
+import {
+  type RepositoryRegistration,
+  repositoryRegistration,
+} from "../../src/domain/repository-registration";
 import type { WorkerIdentity } from "../../src/domain/rollout";
 import { resolveWorker, type WorkerAddress } from "../../src/domain/tailnet";
 import { peer, TAG } from "../support/fake-workers";
@@ -41,6 +48,7 @@ function worker(overrides: Partial<GatedDispatchWorker> = {}): GatedDispatchWork
     settings: SETTINGS,
     releaseHealthy: true,
     githubCredential: "enrolled",
+    githubDelivered: false,
     repositorySync: "ready",
     paseoHealth: "healthy",
     ...overrides,
@@ -72,9 +80,17 @@ function inspectionFor(
       };
 }
 
-/** A workflow queue reporting a fixed adoption and reconcile result, recording its calls. */
+/**
+ * A workflow queue reporting a fixed adoption and reconcile result, recording its calls; its
+ * inspection carries `registration` when given, as a worker on a release that registers does.
+ */
 function fakeQueue(
-  options: { adoption?: WorkflowAdoption; changed?: boolean; reconcileFails?: boolean } = {},
+  options: {
+    adoption?: WorkflowAdoption;
+    changed?: boolean;
+    reconcileFails?: boolean;
+    registration?: RepositoryRegistration;
+  } = {},
 ) {
   const calls: { adoption: number; reconcile: { active: boolean }[] } = {
     adoption: 0,
@@ -92,7 +108,12 @@ function fakeQueue(
         : {
             kind: "reconciled",
             changed: options.changed ?? true,
-            inspection: inspectionFor(projection, options.changed ?? true),
+            inspection: {
+              ...inspectionFor(projection, options.changed ?? true),
+              ...(options.registration === undefined
+                ? {}
+                : { repository_registration: options.registration }),
+            },
           };
     },
     inspectDispatch: async () => ({ protocol_version: 1, state: "none" }),
@@ -147,10 +168,24 @@ describe("the dispatch stage (dispatch §Requested versus active)", () => {
     const outcome = outcomes[0];
     expect(outcome?.kind).toBe("pending");
     if (outcome?.kind !== "pending") throw new Error("expected pending");
-    const next = enrollmentNextAction("github", HOSTNAME);
-    const line = outcome.nextActions.find((entry) => entry.includes("GitHub"));
-    expect(line).toContain(next.login);
-    for (const command of next.commands) expect(line).toContain(command);
+    expect(outcome.nextActions).toEqual([
+      `GitHub is not authenticated for the runtime account on ${HOSTNAME}: ` +
+        describeNextAction(enrollmentNextAction("github", HOSTNAME, false)),
+    ]);
+  });
+
+  test("a delivered GitHub token not accepted names storing a valid one", async () => {
+    const { queue } = fakeQueue();
+    const { outcomes } = await run(
+      [worker({ githubCredential: "pending", githubDelivered: true })],
+      queue,
+    );
+    const outcome = outcomes[0];
+    if (outcome?.kind !== "pending") throw new Error("expected pending");
+    expect(outcome.nextActions).toEqual([
+      `GitHub is not authenticated for the runtime account on ${HOSTNAME}: ` +
+        describeNextAction(enrollmentNextAction("github", HOSTNAME, true)),
+    ]);
   });
 
   test("rerunning with an active agent is a no-op: dispatch stays active and nothing restarts", async () => {
@@ -232,8 +267,8 @@ describe("the dispatch stage (dispatch §Requested versus active)", () => {
   test.each<DispatchSkip>([
     {
       reason: "deferred",
-      summary: "Paseo maintenance is deferred while agents may be active",
-      nextAction: `Close the active agents on ${HOSTNAME}, then rerun \`fffactory apply\``,
+      summary: "Paseo maintenance is deferred while agents may be busy",
+      nextAction: `Wait until no agent on ${HOSTNAME} is working or needs input, then rerun \`fffactory apply\``,
     },
     {
       reason: "worker_skipped",
@@ -260,4 +295,78 @@ describe("the dispatch stage (dispatch §Requested versus active)", () => {
       expect(outcomes[1]?.kind).toBe("active");
     },
   );
+});
+
+const PRODUCT = "/workspace/repos/product";
+const TOOLS = "/workspace/repos/tools";
+const DOCS = "/workspace/repos/docs";
+const REGISTERED = repositoryRegistration("paseo", [
+  { path: PRODUCT, state: "registered" },
+  { path: TOOLS, state: "present" },
+]);
+const UNREGISTERED = repositoryRegistration("paseo", [
+  { path: PRODUCT, state: "failed", reason: "registering it as a Paseo project timed out" },
+  { path: TOOLS, state: "present" },
+  { path: DOCS, state: "failed", reason: "listing Paseo's projects exited with status 1" },
+]);
+
+describe("the dispatch stage's repository registration (dispatch §Repository registration)", () => {
+  test.each([
+    ["active", worker()],
+    ["pending", worker({ repositorySync: "pending" })],
+    ["not_requested", worker({ settings: undefined })],
+  ] as const)(
+    "a %s outcome carries the registration dispatch reconcile reported, its kind unchanged",
+    async (kind, entry) => {
+      const { queue } = fakeQueue({ registration: UNREGISTERED });
+      const { outcomes } = await run([entry], queue);
+      expect(outcomes[0]?.kind).toBe(kind);
+      expect(outcomes[0]).toMatchObject({ registration: UNREGISTERED });
+    },
+  );
+
+  test("an older worker's inspection without one carries none", async () => {
+    const { queue } = fakeQueue();
+    const { outcomes } = await run([worker({ settings: undefined })], queue);
+    expect(outcomes[0]).toEqual({ ...WORKER, kind: "not_requested" });
+  });
+
+  test("a schedule that did not reconcile carries none: it fails the worker as before", async () => {
+    const { queue } = fakeQueue({ registration: UNREGISTERED, reconcileFails: true });
+    const { outcomes } = await run([worker()], queue);
+    expect(outcomes[0]?.kind).toBe("failed");
+    expect(outcomes[0]).not.toHaveProperty("registration");
+  });
+
+  test("a failed checkout is a gap: each unregistered checkout with its reason, then a rerun", async () => {
+    const { queue } = fakeQueue({ registration: UNREGISTERED });
+    const { outcomes } = await run([worker()], queue);
+    expect(registrationGap(outcomes[0] as DispatchOutcome)).toEqual({
+      unregistered: [
+        `${PRODUCT} is not registered: registering it as a Paseo project timed out`,
+        `${DOCS} is not registered: listing Paseo's projects exited with status 1`,
+      ],
+      nextAction: "Rerun `fffactory apply`",
+    });
+    expect(REGISTRATION_NEXT_ACTION).toBe("Rerun `fffactory apply`");
+  });
+
+  test.each<[string, DispatchOutcome]>([
+    [
+      "every checkout registered or present",
+      { ...WORKER, kind: "not_requested", registration: REGISTERED },
+    ],
+    [
+      "no checkout placed",
+      { ...WORKER, kind: "not_requested", registration: repositoryRegistration("paseo", []) },
+    ],
+    ["no registration reported", { ...WORKER, kind: "not_requested" }],
+    [
+      "a skipped worker",
+      { ...WORKER, kind: "skipped", reason: "worker_skipped", summary: "s", nextAction: "n" },
+    ],
+    ["a stopped worker", { ...WORKER, kind: "stopped" }],
+  ])("%s is no gap", (_, outcome) => {
+    expect(registrationGap(outcome)).toBeUndefined();
+  });
 });

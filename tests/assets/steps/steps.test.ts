@@ -41,10 +41,12 @@ const WORKER_PATH = [
   "src/infrastructure/paseo-control-plane.ts",
   "src/domain/change-classification.ts",
   "src/application/apply-dispatch.ts",
+  "src/application/stop-dispatch.ts",
   "src/application/verify-factory.ts",
   "src/application/workflow-queue.ts",
   "src/infrastructure/ffflow-github-workflow-queue.ts",
   "src/domain/dispatch-readiness.ts",
+  "src/domain/dispatch-projection.ts",
   ...code(await readdir(join(ROOT, "src/host"))).map((name) => `src/host/${name}`),
   // The steps directory, including the wrapped repository scripts in `repositories/`.
   ...(await readdir(STEPS, { recursive: true }))
@@ -55,7 +57,7 @@ const WORKER_PATH = [
 describe("the install steps", () => {
   test("are one script per shell install step, in the release's steps directory", () => {
     expect(SCRIPTS).toEqual(
-      INSTALL_STEPS.filter(({ name }) => name !== "plugins")
+      INSTALL_STEPS.filter((step) => !("implementation" in step))
         .map(({ name }) => `${name}.sh`)
         .sort(),
     );
@@ -101,6 +103,77 @@ describe("the install steps", () => {
   });
 });
 
+/**
+ * `packages.sh`'s upstream build tools (host protocol §apply, the `packages` row): each is
+ * downloaded only from its pinned URL, checked against its pinned sha256 before anything is
+ * extracted or installed, installed into /usr/local/bin, and skipped when it already reports
+ * its pin. The real download needs network and root, so it is checked statically.
+ */
+describe("packages.sh's pinned tools", async () => {
+  const text = await readFile(join(STEPS, "packages.sh"), "utf8");
+  const joined = text.replace(/ *\\\n\s*/g, " ");
+  const pin = (name: string) => text.match(new RegExp(`^readonly ${name}="([^"]*)"$`, "m"))?.[1];
+  const installer = joined.match(/^install_verified_binary\(\) \{\n[\s\S]*?\n\}\n/m)?.[0] ?? "";
+  const calls = joined
+    .split("\n")
+    .filter((line) => line.startsWith("install_verified_binary "))
+    .map((line) => line.trim());
+  const position = (pattern: RegExp) => installer.search(pattern);
+
+  test("pins just and pnpm, as ripgrep, to an exact version and a sha256", () => {
+    for (const tool of ["RIPGREP", "JUST", "PNPM"]) {
+      expect({ tool, version: pin(`${tool}_VERSION`) }).toEqual({
+        tool,
+        version: expect.stringMatching(/^\d+\.\d+\.\d+$/),
+      });
+      expect({ tool, sha256: pin(`${tool}_SHA256`) }).toEqual({
+        tool,
+        sha256: expect.stringMatching(/^[0-9a-f]{64}$/),
+      });
+    }
+  });
+
+  test("installs ripgrep, just and pnpm into /usr/local/bin through the one checked installer, from their pinned upstream URLs", () => {
+    expect(calls).toEqual([
+      'install_verified_binary rg "ripgrep ${RIPGREP_VERSION}" "https://github.com/BurntSushi/ripgrep/releases/download/${RIPGREP_VERSION}/ripgrep-${RIPGREP_VERSION}-x86_64-unknown-linux-musl.tar.gz" "${RIPGREP_SHA256}" "ripgrep-${RIPGREP_VERSION}-x86_64-unknown-linux-musl/rg"',
+      'install_verified_binary just "just ${JUST_VERSION}" "https://github.com/casey/just/releases/download/${JUST_VERSION}/just-${JUST_VERSION}-x86_64-unknown-linux-musl.tar.gz" "${JUST_SHA256}" just',
+      'install_verified_binary pnpm "${PNPM_VERSION}" "https://registry.npmjs.org/@pnpm/exe.linux-x64/-/exe.linux-x64-${PNPM_VERSION}.tgz" "${PNPM_SHA256}" package/pnpm',
+    ]);
+    expect(installer).toContain('local destination="/usr/local/bin/${name}"');
+    expect(installer).toMatch(
+      /\n\s*install -o root -g root -m 0755 "\$\{work\}\/\$\{member\}" "\$\{destination\}"\n/,
+    );
+  });
+
+  test("downloads nothing else, and installs nothing it has not checked", () => {
+    expect(
+      text.match(/https:\/\/[^\s"]+/g)?.filter((url) => !calls.join("\n").includes(url)),
+    ).toEqual(["https://cli.github.com/packages/rpm/gh-cli.repo"]);
+    expect(text.match(/\bcurl\b/g)).toHaveLength(1);
+    expect(text.match(/\binstall -o\b/g)).toHaveLength(1);
+    expect(installer).toMatch(
+      /\bcurl --fail [^\n]*"\$\{url\}" --output "\$\{work\}\/\$\{archive\}"/,
+    );
+    const checked = position(
+      /\|\s*\(cd "\$\{work\}" && sha256sum --check --status\)\s*\|\|\s*fail /,
+    );
+    expect(installer).toMatch(/printf '%s {2}%s\\n' "\$\{sha256\}" "\$\{archive\}"/);
+    expect(position(/\bcurl\b/)).toBeGreaterThan(-1);
+    expect(checked).toBeGreaterThan(position(/\bcurl\b/));
+    expect(position(/\btar --extract\b/)).toBeGreaterThan(checked);
+    expect(position(/\binstall -o\b/)).toBeGreaterThan(checked);
+  });
+
+  test("skips a tool whose --version already reports its pin", () => {
+    const skip = position(
+      /current="\$\("\$\{destination\}" --version 2>\/dev\/null \| head -n 1\)"[^\n]*\n\s*if \[\[ \$\{current\} == "\$\{reported\}" \|\| \$\{current\} == "\$\{reported\} "\* \]\]; then/,
+    );
+    expect(skip).toBeGreaterThan(-1);
+    expect(position(/\n\s*return 0\n/)).toBeGreaterThan(skip);
+    expect(position(/\bcurl\b/)).toBeGreaterThan(position(/\n\s*return 0\n/));
+  });
+});
+
 describe("the release-owned Paseo programs", () => {
   test("are executable bash and carry no v1 deployment or marker assumptions", async () => {
     for (const script of CONTROL_PLANE_SCRIPTS) {
@@ -120,10 +193,39 @@ describe("the release-owned Paseo programs", () => {
     expect(setup).not.toContain("/usr/local/libexec/paseo-auth");
     expect(setup).not.toMatch(/systemctl (start|restart)/);
     expect(setup).not.toContain("factory-dispatch");
+  });
+
+  /**
+   * The daemon authenticates against the bcrypt hash setup merged into config.json, so it never
+   * holds `PASEO_PASSWORD`, which every agent, tool and hook it launches would inherit.
+   */
+  test("the unit starts the daemon directly, without the password, and only with a stored hash", async () => {
     const service = await readFile(join(CONTROL_PLANE, "paseo.service"), "utf8");
-    expect(service).toContain(
-      "ExecStart=/opt/fffactory/current/steps/control-plane/paseo-auth.sh daemon run",
+    const exec = service.split("\n").filter((line) => line.startsWith("ExecStart"));
+    expect(exec).toEqual([
+      'ExecStartPre=/usr/bin/jq --exit-status ".daemon.auth.password | strings | length > 0" /home/factory/.paseo/config.json',
+      "ExecStart=/home/factory/.local/bin/paseo daemon run --home /home/factory/.paseo",
+    ]);
+    const settings = service.split("\n").filter((line) => !line.startsWith("#"));
+    expect(settings.join("\n")).not.toMatch(
+      /paseo-auth|PASEO_PASSWORD|EnvironmentFile|PassEnvironment/,
     );
+  });
+
+  test("setup hands paseo-config.sh the hash it reads after the reference, never as an argument", async () => {
+    const setup = await readFile(join(CONTROL_PLANE, "setup-host.sh"), "utf8");
+    expect(setup).toMatch(
+      /IFS= read -r paseo_secret_arn \|\| true\nIFS= read -r paseo_password_hash \|\| true\n/,
+    );
+    const merge =
+      setup.match(/\n[^\n]*factory_command (?:[^\n]*\\\n)*[^\n]*paseo-config\.sh[^\n]*/)?.[0] ?? "";
+    expect(merge).toMatch(/^\nprintf '%s\\n' "\$\{paseo_password_hash\}" \| factory_command /);
+    expect(merge).toContain("IFS= read -r FACTORY_PASEO_PASSWORD_HASH");
+    expect(merge).not.toMatch(/FACTORY_PASEO_PASSWORD_HASH=/);
+    expect(setup.match(/password_hash/g)?.length).toBe(
+      setup.match(/\$\{paseo_password_hash\}|read -r paseo_password_hash/g)?.length,
+    );
+    expect(setup).not.toMatch(/PASEO_PASSWORD\b|get-secret-value/);
   });
 
   /**

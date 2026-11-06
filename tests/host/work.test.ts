@@ -24,11 +24,18 @@ import {
   workFindings,
 } from "../../src/domain/work-inspection";
 import type { ApplySystem } from "../../src/host/apply";
-import { WORK_BUDGET_MS, workerWork } from "../../src/host/work";
+import { INSPECT_WORK_TIMEOUT_MS } from "../../src/application/inspect-work";
+import {
+  ARCHIVE_BUDGET_MS,
+  WORK_BUDGET_MS,
+  WORK_GIT_TIMEOUT_MS,
+  workerWork,
+} from "../../src/host/work";
 import {
   AS_FACTORY,
   addSubmodule,
   CHECKOUT,
+  configureCollector,
   type GitWorld,
   gitWorld,
   PASEO,
@@ -93,6 +100,7 @@ describe("host work inspect (host-protocol §work inspect)", () => {
       hostname: WORKER_HOSTNAME,
       complete: true,
       repositories: [],
+      archive: { state: "not_collected" },
     });
   });
 
@@ -103,6 +111,7 @@ describe("host work inspect (host-protocol §work inspect)", () => {
       hostname: WORKER_HOSTNAME,
       complete: true,
       repositories: [repository()],
+      archive: { state: "not_collected" },
     });
   });
 
@@ -527,6 +536,31 @@ describe("host work inspect (host-protocol §work inspect)", () => {
     });
     expect(commands.length).toBe(1);
     expect(result.complete).toBe(false);
+  });
+
+  test("the archive's count comes out of the same budget: time it took leaves Git none", async () => {
+    await checkout();
+    await configureCollector(world);
+    // The inspection's first reading of the clock starts its budget; by the next, the count has
+    // used it all.
+    let readings = 0;
+    const result = await inspect({
+      now: () => new Date(readings++ === 0 ? 0 : WORK_BUDGET_MS),
+      run: asTestUser,
+    });
+    expect(commands.length).toBe(0);
+    expect(result.complete).toBe(false);
+    expect(result.archive).toMatchObject({ state: "collected", complete: true });
+  });
+
+  test("the whole inspection ends comfortably within the CLI's deadline", () => {
+    // Git starts only within WORK_BUDGET_MS of the start, the archive's count and its checkpoint's
+    // read within it, and the last command started may take WORK_GIT_TIMEOUT_MS: a 25 s margin
+    // left for SSH and the activator.
+    expect(WORK_BUDGET_MS + WORK_GIT_TIMEOUT_MS).toBeLessThanOrEqual(
+      INSPECT_WORK_TIMEOUT_MS - 25_000,
+    );
+    expect(ARCHIVE_BUDGET_MS).toBeLessThan(WORK_BUDGET_MS);
   });
 
   test("a file Git is told to assume unchanged makes its worktree unreadable: never read as clean", async () => {

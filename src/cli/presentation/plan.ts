@@ -22,8 +22,9 @@ import {
   type D11Refusal,
   type FactoryPlanReview,
   hostMachineAddress,
+  type PlannedArchive,
   type PlannedControlPlane,
-  type PlannedDispatch,
+  type ReviewedDispatch,
   type PlannedRepositories,
   type PlannedWorker,
   type PlanReview,
@@ -110,7 +111,7 @@ const factoryName = (target: PlanTarget): string =>
   target.name === undefined ? target.factoryId : `${target.name} (${target.factoryId})`;
 
 /** What every plan shows first: which factory, account and Region, and which release. */
-function targetRows(target: PlanTarget, more: readonly Row[] = []): Block {
+export function targetRows(target: PlanTarget, more: readonly Row[] = []): Block {
   return {
     kind: "rows",
     rows: [
@@ -123,7 +124,7 @@ function targetRows(target: PlanTarget, more: readonly Row[] = []): Block {
 }
 
 /** One change, after its glyph in its color; a change of no known kind is named by its actions. */
-function changeLine(change: ResourceChange): Inline {
+export function changeLine(change: ResourceChange): Inline {
   const symbol = changeSymbol(change);
   if (symbol === undefined) return [verbatim(`${change.address} (${change.actions.join(", ")})`)];
   const kind = changeKind(change);
@@ -141,6 +142,12 @@ function infrastructureRow(changes: readonly ResourceChange[]): Row {
     details: [{ kind: "text", lines: changes.filter(changesSomething).map(changeLine) }],
   };
 }
+
+/** The log archive: its bucket, which the plan creates, or which is present already. */
+const archiveRow = ({ bucket, creates }: PlannedArchive): Row => ({
+  label: "Archive",
+  value: `${bucket}, ${creates ? "created" : "present"}`,
+});
 
 /** A stage's row, then each worker's change under it. */
 const stageRow = (label: string, value: string, workers: readonly Row[]): Row => ({
@@ -227,10 +234,26 @@ function repositoryRows(plans: readonly PlannedRepositories[], stopped: readonly
   ];
 }
 
-function dispatchChange({ requested, schedule }: PlannedDispatch): Inline {
-  if (!requested || schedule === null) return "remove the factory dispatch schedule if it exists";
+/**
+ * The placed repositories the dispatch stage registers, before its schedule action; nothing for
+ * a worker placing none, whose registration asks the backend nothing. Worded for Paseo, the one
+ * execution backend a worker selects.
+ */
+// TODO(re-evaluate when a second execution backend adapter is built): word the registration in
+// the terms of the backend factory.json selects for the worker, not Paseo's alone.
+function registration(registers: number): string {
+  if (registers === 0) return "";
+  return registers === 1
+    ? "register 1 placed repository as a Paseo project; "
+    : `register ${registers} placed repositories as Paseo projects; `;
+}
+
+function dispatchChange({ requested, schedule, registers }: ReviewedDispatch): Inline {
+  const registering = registration(registers);
+  if (!requested || schedule === null)
+    return `${registering}remove the factory dispatch schedule if it exists`;
   return [
-    "install the dispatcher and skill, then reconcile ",
+    `${registering}install the dispatcher and skill, then reconcile `,
     verbatim(`${schedule.cron} ${schedule.timezone}`),
     " with ",
     verbatim(`${schedule.provider}/${schedule.model}`),
@@ -242,7 +265,7 @@ function dispatchChange({ requested, schedule }: PlannedDispatch): Inline {
 }
 
 /** The dispatch stage, then the end-to-end verification that follows it. */
-function dispatchRows(plans: readonly PlannedDispatch[], stopped: readonly HostKey[]) {
+function dispatchRows(plans: readonly ReviewedDispatch[], stopped: readonly HostKey[]) {
   if (plans.length === 0) return [];
   return [
     stageRow(
@@ -275,8 +298,8 @@ function pinRow(move: PinMove): Row {
 
 /**
  * The whole factory plan an operator approves, as the `Plan` section: its target (and an
- * upgrade's pin move), its infrastructure changes, then each worker's install and later stages,
- * those of the stopped workers skipped.
+ * upgrade's pin move), the log archive when factory.json enables it, its infrastructure
+ * changes, then each worker's install and later stages, those of the stopped workers skipped.
  */
 export function planSection(review: FactoryPlanReview, selection: Selection): Block {
   const { stopped } = review;
@@ -288,6 +311,7 @@ export function planSection(review: FactoryPlanReview, selection: Selection): Bl
       {
         kind: "rows",
         rows: [
+          ...(review.archive === undefined ? [] : [archiveRow(review.archive)]),
           infrastructureRow(review.changes),
           workersRow(review, selection),
           ...controlPlaneRows(review.controlPlane, stopped),
@@ -510,6 +534,10 @@ export function describeStaleReason(reason: StaleReason): string {
       return "the state bucket no longer exists";
     case "state_bucket_created":
       return "the state bucket was created after it was planned";
+    case "archive_created":
+      return "the log archive was created after it was planned";
+    case "archive_missing":
+      return "the log archive no longer exists";
     case "inventory_unreadable":
       return `the EC2 inventory could not be read to check that worker ${reason.key} is still stopped`;
     case "worker_started":
@@ -526,9 +554,18 @@ const reviewNewPlan = (selection: Selection): Next =>
   nextSteps(step("Review a new plan:", [fffactoryCommand(["plan"], selection)]));
 
 // TODO(re-evaluate when #12 lands): update the `paseo_changed` refusal's wording to #12's
-// corrected outcome. It comes after the infrastructure stage applied, so its `Nothing was
-// applied.` is known to be misleading: #12 moves the check before anything is applied, or
-// reports what was.
+// corrected outcome, in `staleReport` and `staleRunReport` alike. It comes after the
+// infrastructure stage applied, so its `Nothing was applied.` is known to be misleading: #12
+// moves the check before anything is applied, or reports what was.
+/** The refusal of a plan no longer the plan to apply: `heading`, every reason, then nothing applied. */
+const staleBlocks = (heading: string, reasons: readonly StaleReason[]): Block[] => [
+  refused(
+    heading,
+    reasons.map((reason) => [verbatim(describeStaleReason(reason))]),
+  ),
+  NOTHING_APPLIED,
+];
+
 /** Why a saved plan is no longer the plan to apply: every reason, then a new plan. */
 export function staleReport(
   planId: string,
@@ -536,14 +573,33 @@ export function staleReport(
   selection: Selection,
 ): Report {
   return {
-    blocks: [
-      refused(
-        `Refusing to apply plan ${planId}: it is no longer the plan to apply:`,
-        reasons.map((reason) => [verbatim(describeStaleReason(reason))]),
-      ),
-      NOTHING_APPLIED,
-    ],
+    blocks: staleBlocks(
+      `Refusing to apply plan ${planId}: it is no longer the plan to apply:`,
+      reasons,
+    ),
     next: reviewNewPlan(selection),
+  };
+}
+
+/**
+ * Why the plan approved in this run, never saved and its ID never shown, is no longer the plan
+ * to apply: every reason, then the command that plans it again, `rerun` (apply's, or an
+ * upgrade's while its pin has not moved).
+ */
+export function staleRunReport(
+  reasons: readonly StaleReason[],
+  {
+    action,
+    rerun,
+    selection,
+  }: { readonly action: string; readonly rerun: string; readonly selection: Selection },
+): Report {
+  return {
+    blocks: staleBlocks(
+      `Refusing to ${action}: the plan approved is no longer the plan to apply:`,
+      reasons,
+    ),
+    next: nextSteps(step("Review a new plan:", [fffactoryCommand([rerun], selection)])),
   };
 }
 
@@ -579,9 +635,16 @@ function hardeningLabel(setting: BucketHardening, readiness: StateBucketReadines
     public_access_block: "public access block",
     default_encryption: "default encryption",
     tls_only_policy: "TLS-only bucket policy",
+    bucket_owner_enforced: "bucket-owner-enforced object ownership",
+    sse_s3: "SSE-S3 default encryption",
+    abac: "attribute-based access control",
   };
   return labels[setting];
 }
+
+const SSE_S3_CONFIGURATION =
+  "--server-side-encryption-configuration " +
+  `'${JSON.stringify({ Rules: [{ ApplyServerSideEncryptionByDefault: { SSEAlgorithm: "AES256" } }] })}'`;
 
 function hardeningCommand(setting: BucketHardening, location: StateBucketLocation): string {
   const commands: Record<BucketHardening, readonly [string, string]> = {
@@ -591,18 +654,26 @@ function hardeningCommand(setting: BucketHardening, location: StateBucketLocatio
       "--public-access-block-configuration BlockPublicAcls=true,IgnorePublicAcls=true," +
         "BlockPublicPolicy=true,RestrictPublicBuckets=true",
     ],
-    default_encryption: [
-      "put-bucket-encryption",
-      "--server-side-encryption-configuration " +
-        `'${JSON.stringify({ Rules: [{ ApplyServerSideEncryptionByDefault: { SSEAlgorithm: "AES256" } }] })}'`,
-    ],
+    default_encryption: ["put-bucket-encryption", SSE_S3_CONFIGURATION],
     tls_only_policy: ["put-bucket-policy", `--policy '${tlsOnlyPolicy(location.bucket)}'`],
+    bucket_owner_enforced: [
+      "put-bucket-ownership-controls",
+      "--ownership-controls 'Rules=[{ObjectOwnership=BucketOwnerEnforced}]'",
+    ],
+    sse_s3: ["put-bucket-encryption", SSE_S3_CONFIGURATION],
+    abac: ["put-bucket-abac", "--abac-status Status=Enabled"],
   };
   const [command, settings] = commands[setting];
   return (
     `aws s3api ${command} --region ${location.region} --bucket ${location.bucket} ` +
     `--expected-bucket-owner ${location.accountId} ${settings}`
   );
+}
+
+/** What an unready bucket's refusal says first, and the wait it names before completing it. */
+interface UnreadyWords {
+  readonly heading: string;
+  readonly wait: string;
 }
 
 // TODO(re-evaluate when the state-bucket module's hardening changes, or when apply can import
@@ -612,7 +683,29 @@ function hardeningCommand(setting: BucketHardening, location: StateBucketLocatio
  * Why an operation refuses a state bucket that exists but lacks some of backend bootstrap's
  * settings, and how to complete it: fffactory itself cannot finish an interrupted bootstrap.
  */
-function unreadyBucketReport({ location, readiness, missing }: UnreadyBucket): Report {
+const unreadyBucketReport = (bucket: UnreadyBucket): Report =>
+  incompleteBucketReport(bucket, {
+    heading: `The state bucket ${bucket.location.bucket} exists, but backend bootstrap did not finish it.`,
+    wait: "If another first apply is still bootstrapping it, wait for that to finish, then retry.",
+  });
+
+// TODO(re-evaluate when retention or bucket settings must change): converge the log archive's
+// settings through a reviewed plan instead of printing AWS CLI commands.
+/**
+ * Why plan and apply refuse a log archive that exists but lacks some of the archive root's
+ * settings, and how to complete it: the archive root keeps no state, so it cannot finish one.
+ */
+const unreadyArchiveReport = (bucket: UnreadyBucket): Report =>
+  incompleteBucketReport(bucket, {
+    heading: `The log archive ${bucket.location.bucket} exists, but without every setting fffactory gives it.`,
+    wait: "If another apply is still creating it, wait for that to finish, then retry.",
+  });
+
+/** A bucket that lacks settings fffactory gives it: each one, then the commands that apply it. */
+function incompleteBucketReport(
+  { location, readiness, missing }: UnreadyBucket,
+  words: UnreadyWords,
+): Report {
   const warning: NextPart[] = missing.includes("tls_only_policy")
     ? [
         {
@@ -624,17 +717,13 @@ function unreadyBucketReport({ location, readiness, missing }: UnreadyBucket): R
   return {
     blocks: [
       refused(
-        `The state bucket ${location.bucket} exists, but backend bootstrap did not finish it. It lacks:`,
+        `${words.heading} It lacks:`,
         missing.map((setting) => hardeningLabel(setting, readiness)),
       ),
     ],
     next: {
       paragraphs: [
-        [
-          step(
-            "If another first apply is still bootstrapping it, wait for that to finish, then retry.",
-          ),
-        ],
+        [step(words.wait)],
         [
           step(
             "Otherwise complete the bucket with these AWS CLI commands, using credentials for " +
@@ -669,6 +758,8 @@ export function planRefusalReport(refusal: PlanRefusal, context: RefusalContext)
       return stoppedResizeReport(refusal, context);
     case "unready":
       return unreadyBucketReport(refusal.bucket);
+    case "unready_archive":
+      return unreadyArchiveReport(refusal.bucket);
     case "unexpected_plan":
       return {
         blocks: [

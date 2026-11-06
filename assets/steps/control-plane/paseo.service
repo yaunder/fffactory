@@ -11,7 +11,11 @@ WorkingDirectory=/home/factory
 Environment=HOME=/home/factory
 Environment=PASEO_HOME=/home/factory/.paseo
 Environment=PATH=/home/factory/.local/bin:/usr/local/bin:/usr/bin:/bin
-ExecStart=/opt/fffactory/current/steps/control-plane/paseo-auth.sh daemon run --home /home/factory/.paseo
+# The daemon checks clients against the bcrypt hash setup merged into config.json. It never holds
+# PASEO_PASSWORD, which every agent, tool and hook it launches would inherit, and never starts
+# without a stored password: a host without one keeps no daemon, as it had none before.
+ExecStartPre=/usr/bin/jq --exit-status ".daemon.auth.password | strings | length > 0" /home/factory/.paseo/config.json
+ExecStart=/home/factory/.local/bin/paseo daemon run --home /home/factory/.paseo
 Restart=always
 RestartSec=5
 KillMode=control-group

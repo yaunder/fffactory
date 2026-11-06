@@ -7,7 +7,13 @@ const NAMESPACE = "https://sts.amazonaws.com/doc/2011-06-15/";
 
 /** How the stub answers every request. */
 export type StubStsAnswer =
-  | { readonly kind: "caller"; readonly account: string; readonly arn: string }
+  | {
+      readonly kind: "caller";
+      readonly account: string;
+      readonly arn: string;
+      /** `UserId`: an IAM user's ID unless given, `<role ID>:<session>` for an assumed role. */
+      readonly userId?: string;
+    }
   | { readonly kind: "error"; readonly status: number; readonly code: string }
   /** Never answers, as an unreachable endpoint would not. */
   | { readonly kind: "hang" };
@@ -16,6 +22,8 @@ export interface StubSts {
   readonly endpoint: string;
   /** Form-encoded bodies of the requests received, in order. */
   readonly requests: readonly string[];
+  /** Each request's `x-amz-security-token`, or null: the session the caller signed with. */
+  readonly sessionTokens: readonly (string | null)[];
   stop(): void;
 }
 
@@ -25,7 +33,7 @@ function respond(answer: StubStsAnswer): Response | Promise<Response> {
     case "caller":
       return new Response(
         `<GetCallerIdentityResponse xmlns="${NAMESPACE}"><GetCallerIdentityResult>` +
-          `<Arn>${answer.arn}</Arn><UserId>AIDAEXAMPLEUSERID</UserId>` +
+          `<Arn>${answer.arn}</Arn><UserId>${answer.userId ?? "AIDAEXAMPLEUSERID"}</UserId>` +
           `<Account>${answer.account}</Account></GetCallerIdentityResult>` +
           "<ResponseMetadata><RequestId>stub</RequestId></ResponseMetadata>" +
           "</GetCallerIdentityResponse>",
@@ -46,17 +54,20 @@ function respond(answer: StubStsAnswer): Response | Promise<Response> {
 /** Starts a stub on a free local port answering every request with `answer`. */
 export function stubSts(answer: StubStsAnswer): StubSts {
   const requests: string[] = [];
+  const sessionTokens: (string | null)[] = [];
   const server = Bun.serve({
     hostname: "127.0.0.1",
     port: 0,
     fetch: async (request) => {
       requests.push(await request.text());
+      sessionTokens.push(request.headers.get("x-amz-security-token"));
       return respond(answer);
     },
   });
   return {
     endpoint: `http://127.0.0.1:${server.port}`,
     requests,
+    sessionTokens,
     stop: () => server.stop(true),
   };
 }

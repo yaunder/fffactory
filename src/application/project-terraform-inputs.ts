@@ -1,17 +1,19 @@
 /**
  * Projects factory.json into the input variables of the shipped Terraform root modules
- * (`assets/terraform/factory` and `assets/terraform/backend`). The projection exists only in
- * memory and in the operation's private inputs file: it is never written where anyone could
- * edit it, so factory.json stays the only editable desired state. Secrets appear only as the
- * references factory.json holds.
+ * (`assets/terraform/factory`, `assets/terraform/backend` and `assets/terraform/archive`). The
+ * projection exists only in memory and in the operation's private inputs file: it is never
+ * written where anyone could edit it, so factory.json stays the only editable desired state.
+ * Secrets appear only as the references factory.json holds.
  */
 import {
   assessCompleteness,
+  CREDENTIAL_SECRET_FIELDS,
+  type CredentialSecretField,
   type FactoryId,
   type FactoryInstance,
   type Issue,
 } from "../domain/instance";
-import { stateBucketSuffix } from "../domain/resource-naming";
+import { archiveBucketName, stateBucketSuffix } from "../domain/resource-naming";
 import { checkStableHostKeys } from "../domain/stable-host-keys";
 
 /** A host's machine declaration, as the `hosts` variable of the factory root module takes it. */
@@ -31,9 +33,19 @@ export interface FactoryVariables {
   readonly tailscale_auth_key_secret_arn: string;
   /** The tag every host advertises when it enrolls in Tailscale. */
   readonly tailscale_tag: string;
-  /** By host key, for hosts that declare a Paseo password reference. */
+  /** Each host's Paseo password reference, by host key: completeness requires one. */
   readonly paseo_password_secret_arns: Readonly<Record<string, string>>;
+  /**
+   * factory.json's `credentials` references, by field name: factory-wide, so every host's
+   * shared role may read each one, whichever hosts keep that account on a human's login.
+   */
+  readonly credential_secret_arns: Readonly<Partial<Record<CredentialSecretField, string>>>;
   readonly hosts: Readonly<Record<string, HostMachine>>;
+  /**
+   * The log archive's derived bucket name (`archiveBucketName`), which every host may write its
+   * own prefix of; null when factory.json does not enable the archive, so hosts may write none.
+   */
+  readonly archive_bucket: string | null;
 }
 
 /** The variables of the backend root module, `assets/terraform/backend/variables.tf`. */
@@ -43,6 +55,15 @@ export interface BackendVariables {
   readonly region: string;
   /** `state_backend.bucket` after the factory ID and a hyphen. */
   readonly state_bucket_suffix: string;
+}
+
+/** The variables of the archive root module, `assets/terraform/archive/variables.tf`. */
+export interface ArchiveVariables {
+  readonly factory_id: string;
+  readonly account_id: string;
+  readonly region: string;
+  /** The log archive's derived bucket name (`archiveBucketName`) after the factory ID and a hyphen. */
+  readonly archive_bucket_suffix: string;
 }
 
 export type Projection<T> =
@@ -87,9 +108,13 @@ export function projectFactoryVariables(
       tailscale_auth_key_secret_arn: complete.tailscale.auth_key_secret as string,
       tailscale_tag: complete.tailscale.tag as string,
       paseo_password_secret_arns: Object.fromEntries(
-        hosts.flatMap((host) =>
-          host.paseo_password_secret === undefined ? [] : [[host.key, host.paseo_password_secret]],
-        ),
+        hosts.map((host) => [host.key, host.paseo_password_secret as string]),
+      ),
+      credential_secret_arns: Object.fromEntries(
+        Object.values(CREDENTIAL_SECRET_FIELDS).flatMap((field) => {
+          const arn = complete.credentials?.[field];
+          return arn === undefined ? [] : [[field, arn]];
+        }),
       ),
       hosts: Object.fromEntries(
         hosts.map((host) => [
@@ -100,6 +125,7 @@ export function projectFactoryVariables(
           },
         ]),
       ),
+      archive_bucket: archiveBucketName(complete) ?? null,
     },
   };
 }
@@ -128,6 +154,35 @@ export function projectBackendVariables(instance: FactoryInstance): Projection<B
       account_id: instance.aws?.account_id as string,
       region: instance.aws?.region as string,
       state_bucket_suffix: suffix,
+    },
+  };
+}
+
+const ARCHIVE_FIELDS = BACKEND_FIELDS.filter(([path]) => path !== "state_backend.bucket");
+
+const ARCHIVE_DISABLED: Issue = {
+  path: "log_archive.enabled",
+  message: "must be true to plan the log archive",
+};
+
+/**
+ * The archive root module's variables: the log archive bucket's definition, named as
+ * `archiveBucketName` derives it. Refused unless the instance enables the log archive and
+ * declares its factory ID, account and Region.
+ */
+export function projectArchiveVariables(instance: FactoryInstance): Projection<ArchiveVariables> {
+  if (instance.log_archive?.enabled !== true) return { ok: false, issues: [ARCHIVE_DISABLED] };
+  const missing = ARCHIVE_FIELDS.filter(([, read]) => read(instance) === undefined);
+  if (missing.length > 0) return { ok: false, issues: required(missing.map(([path]) => path)) };
+  const factoryId = instance.factory_id as FactoryId;
+  const bucket = archiveBucketName(instance) as string;
+  return {
+    ok: true,
+    variables: {
+      factory_id: factoryId,
+      account_id: instance.aws?.account_id as string,
+      region: instance.aws?.region as string,
+      archive_bucket_suffix: bucket.slice(factoryId.length + 1),
     },
   };
 }

@@ -4,6 +4,7 @@
  * ready, and the report's status. Pure: `application/status.ts` makes the observations.
  */
 import { type CheckResult, type CheckStatus, failed, ready, worstStatus } from "./check-result";
+import type { AgentActivity } from "./control-plane";
 import {
   HOST_PROTOCOL_VERSION,
   type HostInspection,
@@ -16,6 +17,7 @@ import type { HostKey } from "./instance";
 import type { DispatchGate } from "./dispatch-readiness";
 import { tailscaleCheck } from "./local-tooling";
 import {
+  type EnrollmentId,
   type EnrollmentReport,
   enrollmentReport,
   pendingEnrollment,
@@ -122,6 +124,8 @@ export interface WorkerStatus extends WorkerFacts, Verdict {
     | "unreadable"
     | "unknown";
   readonly dispatchBlockers: readonly DispatchGate[] | null;
+  /** Its agents in their states, as the activity call alone read them; unknown when not read. */
+  readonly activity: AgentActivity;
 }
 
 export interface StatusReport {
@@ -391,6 +395,8 @@ export interface Expectation {
   readonly release: string;
   /** SHA-256 of the host projection apply would send it (`domain/host-projection.ts`). */
   readonly configurationSha256: string;
+  /** The accounts factory.json delivers to it (`deliveredAccounts`), never the worker's word. */
+  readonly delivered: readonly EnrollmentId[];
 }
 
 interface Finding {
@@ -515,11 +521,13 @@ function installationFindings(inspection: HostInspection): Finding[] {
 
 /**
  * The inspection's release, configuration, install and enrollment facts; enrollment steps name
- * `hostname`, the worker's name as the CLI resolved it, never one the worker reported.
+ * `hostname`, the worker's name as the CLI resolved it, never one the worker reported, and
+ * treat the accounts factory.json `delivered` to it as delivered.
  */
 export function inspectedFacts(
   inspection: HostInspection,
   hostname: string,
+  delivered: readonly EnrollmentId[],
 ): Omit<WorkerFacts, "machine" | "instanceId" | "tailnet"> {
   const { release, configuration, installation } = inspection;
   const verification = "verification" in installation ? installation.verification : null;
@@ -527,23 +535,27 @@ export function inspectedFacts(
     release: release.state === "active" ? release.version : release.state,
     configuration: configuration.state === "present" ? configuration.sha256 : configuration.state,
     installation: installation.state,
-    enrollment: verification === null ? null : enrollmentReport(verification, hostname),
+    enrollment: verification === null ? null : enrollmentReport(verification, hostname, delivered),
   };
 }
 
 /**
  * Software ready and every check passed, with accounts still to enroll: the exact steps for
  * each, which `fffactory apply` verifies again. Status itself cannot: only root can check the
- * runtime account's credentials, and only `host apply` runs as root.
+ * runtime account's credentials, and only `host apply` runs as root. Logging in on the worker
+ * needs tailnet SSH policy to allow it; replacing a delivered credential does not.
  */
 function enrollmentVerdict(verification: Verification, expected: Expectation): Verdict | undefined {
-  const report = enrollmentReport(verification, expected.hostname);
+  const report = enrollmentReport(verification, expected.hostname, expected.delivered);
   const pending = pendingEnrollment(report);
   if (pending.length === 0) return undefined;
   const titles = pending.map((entry) => entry.title).join(", ");
+  const login = pending.some((entry) => !entry.delivered)
+    ? ` (tailnet SSH policy must let you log in there as \`${RUNTIME_ACCOUNT}\`)`
+    : "";
   return notReadyVerdict(
     `Software ready on release ${expected.release}; enrollment pending: ${titles}`,
-    `Enroll each pending account on ${expected.hostname} as listed (tailnet SSH policy must let you log in there as \`factory\`)`,
+    `Enroll each pending account on ${expected.hostname} as listed${login}`,
     [
       ...pendingEnrollmentLines(report),
       `Enrollment as \`fffactory apply\` last verified it, at ${verification.verified_at}`,
@@ -660,7 +672,7 @@ export function inspectionVerdict(
 ): Omit<WorkerFacts, "machine" | "instanceId" | "tailnet"> & { readonly verdict: Verdict } {
   if (inspection.kind === "inspected")
     return {
-      ...inspectedFacts(inspection.inspection, expected.hostname),
+      ...inspectedFacts(inspection.inspection, expected.hostname, expected.delivered),
       verdict: readinessVerdict(inspection.inspection, expected),
     };
   return {

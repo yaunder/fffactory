@@ -7,25 +7,40 @@
   ([docs/specs/release.md](../docs/specs/release.md) §Worker executable).
 - `terraform-check.ts` (`just terraform-check`, CI's Terraform job) checks `assets/terraform`
   with the managed Terraform only: `fmt`, `validate` against the shipped lockfiles, and plans
-  of both root modules for two factory IDs whose JSON must keep every name in its own
-  namespace. Its plans reach no AWS: an override in its private copy gives the provider
+  of every root module (`factory`, `backend`, `archive`) for two factory IDs whose JSON must
+  keep every name in its own namespace. Its plans reach no AWS: an override in its private copy gives the provider
   example keys and points every endpoint at a local stand-in, and Terraform runs with
   `AWS_CONFIG_FILE` and `AWS_SHARED_CREDENTIALS_FILE` at `/dev/null` and
   `AWS_EC2_METADATA_DISABLED=true`, so no local AWS profile or credential can be read. It
   downloads Terraform and the provider, so `check-all` does not run it.
 - `terraform-check.ts` also compares each planned host's `user_data` with the rendering the
-  bootstrap tests use (`tests/support/user-data.ts`), and plans the factory root without
-  hosts, an empty factory: no instance, the shared infrastructure kept, the hosts' policy
-  allowing only the Tailscale enrollment key.
+  bootstrap tests use (`tests/support/user-data.ts`); requires each archive plan to only create
+  the derived log archive bucket with exactly its settings (`ARCHIVE_SETTINGS`) and the TLS-only
+  Deny; requires each factory plan's hosts' role to hold exactly the `read_secrets` and
+  `write_archive` inline policies, the latter named `<id>-write-archive` and exactly
+  `writeArchivePolicy` for the bucket that factory ID's archive plan creates; and plans the
+  factory root without hosts, an empty factory: no instance, the shared infrastructure kept, the
+  hosts' policy allowing only the Tailscale enrollment key; with every credential reference set,
+  the hosts' policy allowing exactly the enrollment key, the Paseo password and those
+  references; and without `log_archive`, the hosts' role holding only `read_secrets`.
 - `terraform-check.ts` last checks `worker terminate`'s scoped removal rule against real
-  Terraform removal plans (`terraform-removal-check.ts`): states for several hosts and for
-  one, synthesized offline by `terraform-state-fixture.ts` (each `-refresh=false` plan's
+  Terraform removal plans (`terraform-removal-check.ts`): states for several hosts (two with
+  their own Paseo passwords, one sharing another's) and for one, every host with a password
+  as completeness requires, synthesized offline by `terraform-state-fixture.ts` (each `-refresh=false` plan's
   resources written into a local state, unknown values filled with fake but well-formed IDs,
   until Terraform plans no resource change; that last plan, changing only outputs, applied
   with no API call), each removal planned as fffactory plans it but with `-refresh=false`,
   its JSON judged by `removalPlanRefusal`. Its provisioner calls (`showPlan`, `output`) run in the
   FFFactory cache, as fffactory's do. Add a case there whenever the rule or the modules
   change what a removal plans.
+- `terraform-check.ts` then checks teardown's guarded destroy plan rule against real
+  `plan -destroy` plans (`terraform-destroy-check.ts`), in the removal check's tree and state
+  file: states with one host and with two, synthesized the same way, an empty state, and the
+  one-host state stripped to its root outputs, each plan deleting every managed resource and
+  root output of its prior state and nothing else, its exit code agreeing (`destroyPlanMismatch`),
+  passed by `destroyPlanRefusal` with the state's instances listed and refused with none,
+  another, or any one resource or output change tampered into a non-delete
+  ([docs/specs/provisioning.md](../docs/specs/provisioning.md) §Destroy plan).
 - `repository-skills.sh` (`just repository-skills`, part of `check-all`, and CI's
   "Factory code validation" job in `.github/workflows/repository-checks.yml`) checks the
   absence of checkout-local repository skills, AGENTS.md's capability routing and the

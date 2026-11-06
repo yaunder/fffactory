@@ -10,9 +10,8 @@ import {
   pluginPins,
   records,
 } from "./plugin-manifest";
-import { AS_FACTORY } from "./runtime-account";
+import { AS_FACTORY, FACTORY_HOME } from "./runtime-account";
 
-const FACTORY_HOME = "/home/factory";
 const MARKETPLACES = `${FACTORY_HOME}/.local/share/software-factory/marketplaces`;
 const CACHE = `${FACTORY_HOME}/.claude/plugins/cache`;
 const ENV = {

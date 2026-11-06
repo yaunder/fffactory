@@ -2,7 +2,7 @@ import { parseArgs } from "node:util";
 import { applyFactory, type FactoryApply } from "../../application/apply-factory";
 import type { WorkerProgress } from "../../application/apply-workers";
 import type { ControlPlaneOutcome } from "../../application/apply-control-plane";
-import type { DispatchOutcome } from "../../application/apply-dispatch";
+import { type DispatchOutcome, registrationGap } from "../../application/apply-dispatch";
 import type { Approval } from "../../application/approval";
 import type { PlanRefusal } from "../../application/plan-factory";
 import { isPlanId, type PlanReview } from "../../domain/plan";
@@ -33,6 +33,7 @@ import {
   planRefusalReport,
   reviewBlocks,
   staleReport,
+  staleRunReport,
   unknownPlanReport,
 } from "../presentation/plan";
 import type { Writer } from "../presentation/style";
@@ -76,9 +77,10 @@ const USAGE = [
   "plan may be spent: run `fffactory plan` instead.",
   "",
   "Exits 0 once every worker is installed and verified or stopped, or once a saved",
-  "bootstrap plan has created the bucket, 2 when a worker was skipped, and 1 when",
-  "anything failed or was refused, including a new worker whose first boot did not",
-  "finish in time.",
+  "bootstrap plan has created the bucket, 2 when anything is pending, deferred or",
+  "skipped (a worker skipped, maintenance deferred, a repository gap, dispatch",
+  "pending or verification not ready), and 1 when anything failed or was refused,",
+  "including a new worker whose first boot did not finish in time.",
   "",
   "Refused, naming what is missing, when this fffactory is not the release",
   "factory.json pins, when factory.json no longer declares a provisioned host key",
@@ -186,10 +188,20 @@ function controlPlaneExit(outcomes: readonly ControlPlaneOutcome[] | undefined):
   return outcomes?.some((outcome) => outcome.kind === "deferred") ? 2 : 0;
 }
 
-/** A skipped worker, sent nothing because an earlier stage skipped it or the tailnet no longer locates it, is not a failure: 2. */
+/**
+ * A skipped worker, sent nothing because an earlier stage skipped it or the tailnet no longer
+ * locates it, is not a failure: 2. Nor is a placed checkout its execution backend left
+ * unregistered, a convenience that never fails an apply but is never silent: 2
+ * (`docs/specs/plan-apply.md` §Apply).
+ */
 function dispatchExit(outcomes: readonly DispatchOutcome[] | undefined): 0 | 1 | 2 {
   if (outcomes?.some((outcome) => outcome.kind === "failed")) return 1;
-  return outcomes?.some((outcome) => outcome.kind === "pending" || outcome.kind === "skipped")
+  return outcomes?.some(
+    (outcome) =>
+      outcome.kind === "pending" ||
+      outcome.kind === "skipped" ||
+      registrationGap(outcome) !== undefined,
+  )
     ? 2
     : 0;
 }
@@ -229,6 +241,7 @@ const REFUSED: Readonly<Record<Refused["kind"], true>> = {
   d11: true,
   stopped_resize: true,
   unready: true,
+  unready_archive: true,
   unexpected_plan: true,
   locked: true,
   stale: true,
@@ -242,7 +255,9 @@ function refusalReport(result: Refused, context: CliContext, reporting: ApplyRep
   const { selection } = reporting;
   switch (result.kind) {
     case "stale":
-      return staleReport(result.planId, result.reasons, selection);
+      return reporting.savedPlan === true
+        ? staleReport(result.planId, result.reasons, selection)
+        : staleRunReport(result.reasons, reporting);
     case "no_plan":
       return unknownPlanReport(result.planId, selection);
     case "damaged_plan":
@@ -357,7 +372,12 @@ async function apply(args: readonly string[], context: CliContext): Promise<numb
       randomBytes: context.randomBytes,
     },
   );
-  return reportApply(result, context, { action: "apply", rerun: "apply", selection: values });
+  return reportApply(result, context, {
+    action: "apply",
+    rerun: "apply",
+    selection: values,
+    savedPlan: planId !== undefined,
+  });
 }
 
 export const applyCommand: Command = {

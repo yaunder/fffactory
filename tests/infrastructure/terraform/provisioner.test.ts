@@ -192,6 +192,29 @@ describe("terraformProvisioner plan", () => {
     expect(locking?.args.some((arg) => arg.startsWith("-lock"))).toBe(false);
   });
 
+  test("a destroy plan plans in destroy mode, and only when asked", async () => {
+    const request = { ...planRequest(), destroy: true };
+    expect(await provisioner().plan(request)).toEqual({ changes: true });
+    const [init, plan] = await terraform.invocations();
+    const operation = operationOf(init);
+    expect(plan?.args).toEqual([
+      "plan",
+      "-input=false",
+      "-no-color",
+      "-detailed-exitcode",
+      "-destroy",
+      `-var-file=${join(operation, "inputs.tfvars.json")}`,
+      `-out=${request.planFile}`,
+    ]);
+    await provisioner().plan({ ...planRequest(), destroy: true, stateLock: false });
+    const [, , , unlocked] = await terraform.invocations();
+    expect(unlocked?.args.slice(4, 6)).toEqual(["-destroy", "-lock=false"]);
+    await provisioner().plan({ ...planRequest(), destroy: false });
+    const [, , , , , planned] = await terraform.invocations();
+    expect(planned?.args[0]).toBe("plan");
+    expect(planned?.args.includes("-destroy")).toBe(false);
+  });
+
   test("passes the credential selection, factory Region and operation settings to Terraform", async () => {
     await provisioner().plan(planRequest());
     const [init] = await terraform.invocations();

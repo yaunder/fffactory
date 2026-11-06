@@ -12,7 +12,11 @@ import {
   githubCredential,
   type PaseoHealth,
 } from "../../src/domain/dispatch-readiness";
-import { enrollmentNextAction, type Verification } from "../../src/domain/readiness";
+import {
+  describeNextAction,
+  enrollmentNextAction,
+  type Verification,
+} from "../../src/domain/readiness";
 import { HOST_PROTOCOL_VERSION } from "../../src/domain/protocol-fields";
 
 const HOSTNAME = "fff-abcd1234-builder-1";
@@ -21,6 +25,7 @@ const HOSTNAME = "fff-abcd1234-builder-1";
 const PASSING: DispatchGateInputs = {
   releaseHealthy: true,
   githubCredential: "enrolled",
+  githubDelivered: false,
   repositorySync: "ready",
   ffflowAdoption: "passed",
   paseoHealth: "healthy",
@@ -73,12 +78,28 @@ describe("dispatch readiness gates (dispatch §Gate matrix)", () => {
   test("a missing GitHub credential keeps dispatch inactive and surfaces the enrollment next action", () => {
     const state = dispatchState(true, { ...PASSING, githubCredential: "pending" }, HOSTNAME);
     expect(state.kind).toBe("pending");
-    const lines = dispatchNextActions(state);
-    const expected = enrollmentNextAction("github", HOSTNAME);
-    const line = lines.find((entry) => entry.includes("GitHub"));
-    expect(line).toBeDefined();
-    expect(line).toContain(expected.login);
-    for (const command of expected.commands) expect(line).toContain(command);
+    expect(dispatchNextActions(state)).toEqual([
+      `GitHub is not authenticated for the runtime account on ${HOSTNAME}: ` +
+        describeNextAction(enrollmentNextAction("github", HOSTNAME, false)),
+    ]);
+  });
+
+  test("a delivered GitHub token not accepted names storing a valid one, never a login", () => {
+    for (const githubCredential of ["pending", "unknown"] as const) {
+      const state = dispatchState(
+        true,
+        { ...PASSING, githubCredential, githubDelivered: true },
+        HOSTNAME,
+      );
+      if (state.kind !== "pending") throw new Error("expected pending");
+      expect(state.blocking.map(({ gate, nextAction }) => [gate, nextAction])).toEqual([
+        [
+          "github_credential",
+          `Replace the GitHub token, which ${HOSTNAME} did not accept: run ` +
+            "`fffactory secret set github-token`, then `fffactory apply`",
+        ],
+      ]);
+    }
   });
 
   test("an unknown GitHub credential also blocks dispatch", () => {

@@ -6,6 +6,7 @@ import { run } from "../../src/cli/run";
 import type { SecretReference } from "../../src/domain/instance";
 import { harness } from "../support/cli-harness";
 import { fakeCallerIdentity } from "../support/doctor-fakes";
+import { agentsIn, fakeControlPlane } from "../support/fake-control-plane";
 import {
   statusAnswers,
   fakeMachineInventory,
@@ -28,15 +29,22 @@ const EXAMPLE = JSON.parse(await Bun.file("examples/factory.json").text());
 const B1 = "example-builder-1";
 const B2 = "example-builder-2";
 const B1_PASEO_SECRET = EXAMPLE.hosts[0].paseo_password_secret as SecretReference;
+/** The log archive `examples/factory.json` enables, as each host's projection carries it. */
+const EXAMPLE_ARCHIVE = { bucket: "example-logs-123456789012-us-east-1-an", region: "us-east-1" };
+const B2_PASEO_SECRET =
+  "arn:aws:secretsmanager:us-east-1:123456789012:secret:example/builder-2/paseo-password-AbCdEf" as SecretReference;
+const BUILDER_2 = {
+  key: "builder-2",
+  instance_type: "m7i.large",
+  root_volume_gib: 100,
+  paseo_password_secret: B2_PASEO_SECRET,
+};
 const schemaAccepts = new Ajv2020({ allErrors: true, strict: true }).compile(schema);
 
 function store(overrides: Record<string, unknown> = {}) {
   const document = {
     ...EXAMPLE,
-    hosts: [
-      EXAMPLE.hosts[0],
-      { key: "builder-2", instance_type: "m7i.large", root_volume_gib: 100 },
-    ],
+    hosts: [EXAMPLE.hosts[0], BUILDER_2],
     ...overrides,
   };
   return new MemoryInstanceStore({ [NEAREST]: JSON.stringify(document) });
@@ -52,12 +60,19 @@ const RUNNING = fakeMachineInventory({
 
 function ready() {
   return fakeTransport({
-    [B1]: statusAnswers(readyWorker("example", "builder-1", "0.1.0", B1_PASEO_SECRET)),
-    [B2]: statusAnswers(readyWorker("example", "builder-2", "0.1.0")),
+    [B1]: statusAnswers(
+      readyWorker("example", "builder-1", "0.1.0", B1_PASEO_SECRET, undefined, EXAMPLE_ARCHIVE),
+    ),
+    [B2]: statusAnswers(
+      readyWorker("example", "builder-2", "0.1.0", B2_PASEO_SECRET, undefined, EXAMPLE_ARCHIVE),
+    ),
   });
 }
 
-/** builder-1 offline in the tailnet, builder-2 ready: the fixture's scenario. */
+/** A worker's control plane: one agent working, two finished. */
+const BUSY = fakeControlPlane("healthy", agentsIn("working", "finished", "finished")).controlPlane;
+
+/** builder-1 offline in the tailnet, builder-2 ready and busy: the fixture's scenario. */
 function offlineScenario() {
   return harness(
     store(),
@@ -66,6 +81,7 @@ function offlineScenario() {
       machines: RUNNING,
       tailnet: fakeTailnet(peers(peer(B1, { online: false }), peer(B2))).tailnet,
       transport: ready().transport,
+      controlPlane: BUSY,
     },
   );
 }
@@ -244,9 +260,11 @@ describe("fffactory status human output", () => {
         "Workers:",
         `  not ready  builder-1 (${B1}): Offline in the tailnet`,
         "             Machine: running (i-0000000000000000a); Tailscale: offline; Release: unknown; Repositories: unknown; Dispatch: unknown",
+        "             Agents: unknown",
         "             Next: Check that the instance is running and that Tailscale is up on it, then rerun `fffactory status`.",
         `  ready      builder-2 (${B2}): Ready on release 0.1.0`,
         "             Machine: running (i-0000000000000000b); Tailscale: online; Release: 0.1.0; Repositories: synchronized; Dispatch: not_requested",
+        "             Agents: 1 working, 2 finished (busy)",
         "",
         "Not ready: 1 of 4 entries needs attention.",
       ].join("\n"),
@@ -299,6 +317,7 @@ describe("fffactory status, a stopped worker (status §Workers)", () => {
         }).machines,
         tailnet: fakeTailnet(peers(peer(B1, { online: false }), peer(B2))).tailnet,
         transport: transport.transport,
+        controlPlane: fakeControlPlane("healthy", agentsIn("finished")).controlPlane,
       },
     );
     return { ...scenario, transport };
@@ -307,25 +326,27 @@ describe("fffactory status, a stopped worker (status §Workers)", () => {
   test("exits 0, shows it stopped with the start command and never connects to it", async () => {
     const { context, out, transport } = stoppedScenario();
     expect(await run(["status"], context)).toBe(0);
-    expect(out.slice(-8)).toEqual([
+    expect(out.slice(-10)).toEqual([
       "Workers:",
       `  stopped    builder-1 (${B1}): Stopped`,
       "             Machine: stopped (i-0000000000000000a); Tailscale: not_checked; Release: unknown; Repositories: unknown; Dispatch: unknown",
+      "             Agents: unknown",
       "             Next: Start it with `fffactory worker start builder-1`, then rerun `fffactory status`.",
       `  ready      builder-2 (${B2}): Ready on release 0.1.0`,
       "             Machine: running (i-0000000000000000b); Tailscale: online; Release: 0.1.0; Repositories: synchronized; Dispatch: not_requested",
+      "             Agents: 1 finished (idle)",
       "",
       "Ready: 1 of 2 workers is ready; 1 is stopped.",
     ]);
     expect(transport.calls.map((call) => call.worker.hostname)).not.toContain(B1);
   });
 
-  test("its JSON verdict is stopped, under the same schema version", async () => {
+  test("its JSON verdict is stopped, a worker state the schema lists", async () => {
     const { context, out } = stoppedScenario();
     expect(await run(["status", "--json"], context)).toBe(0);
     const document = JSON.parse(out[0] ?? "");
     expect(schemaAccepts(document)).toBe(true);
-    expect(document.schema_version).toBe(1);
+    expect(document.schema_version).toBe(2);
     expect(document.status).toBe("ready");
     expect(document.workers[0]).toMatchObject({
       key: "builder-1",
@@ -362,7 +383,14 @@ describe("fffactory status, a stopped worker (status §Workers)", () => {
 
 describe("fffactory status, enrollment pending (readiness §Enrollment)", () => {
   function pendingScenario() {
-    const pending = readyWorker("example", "builder-1", "0.1.0", B1_PASEO_SECRET);
+    const pending = readyWorker(
+      "example",
+      "builder-1",
+      "0.1.0",
+      B1_PASEO_SECRET,
+      undefined,
+      EXAMPLE_ARCHIVE,
+    );
     const installation = pending.installation.state === "succeeded" ? pending.installation : null;
     return harness(
       store(),
@@ -378,7 +406,16 @@ describe("fffactory status, enrollment pending (readiness §Enrollment)", () => 
               verification: verification(B1, "pending"),
             },
           }),
-          [B2]: statusAnswers(readyWorker("example", "builder-2", "0.1.0")),
+          [B2]: statusAnswers(
+            readyWorker(
+              "example",
+              "builder-2",
+              "0.1.0",
+              B2_PASEO_SECRET,
+              undefined,
+              EXAMPLE_ARCHIVE,
+            ),
+          ),
         }).transport,
       },
     );
@@ -392,7 +429,7 @@ describe("fffactory status, enrollment pending (readiness §Enrollment)", () => 
         "pending: GitHub, OpenAI Codex, Claude Code",
     );
     expect(out).toContain(
-      `               GitHub: Authenticate GitHub as factory on ${B1} (tailnet SSH policy must let you log in as \`factory\`): run \`tailscale ssh factory@${B1}\`, then \`gh auth login --hostname github.com --git-protocol https --web\`, then \`gh auth status\``,
+      `               GitHub: Authenticate GitHub as factory on ${B1}: run \`tailscale ssh factory@${B1}\`, then \`gh auth login --hostname github.com --git-protocol https --web\`, then \`gh auth status --hostname github.com --active\``,
     );
     expect(out).toContain(
       `             Next: Enroll each pending account on ${B1} as listed (tailnet SSH policy must let you log in there as \`factory\`), then verify the enrollment with \`fffactory apply\` and rerun \`fffactory status\`.`,
@@ -409,12 +446,96 @@ describe("fffactory status, enrollment pending (readiness §Enrollment)", () => 
       title: "GitHub",
       state: "pending",
       next_action: {
-        summary: `Authenticate GitHub as factory on ${B1} (tailnet SSH policy must let you log in as \`factory\`)`,
+        summary: `Authenticate GitHub as factory on ${B1}`,
         login: `tailscale ssh factory@${B1}`,
         commands: [
           "gh auth login --hostname github.com --git-protocol https --web",
-          "gh auth status",
+          "gh auth status --hostname github.com --active",
         ],
+      },
+    });
+  });
+});
+
+describe("fffactory status, a delivered credential not accepted (readiness §Enrollment)", () => {
+  const GITHUB_TOKEN =
+    "arn:aws:secretsmanager:us-east-1:123456789012:secret:example/github-token-AbCdEf" as SecretReference;
+
+  /** builder-1 is delivered the GitHub token, which it did not accept; builder-2 keeps its login. */
+  function deliveredScenario() {
+    const credentials = { github_token_secret: GITHUB_TOKEN };
+    const pending = readyWorker(
+      "example",
+      "builder-1",
+      "0.1.0",
+      B1_PASEO_SECRET,
+      credentials,
+      EXAMPLE_ARCHIVE,
+    );
+    const installation = pending.installation.state === "succeeded" ? pending.installation : null;
+    return harness(
+      store({
+        credentials,
+        hosts: [EXAMPLE.hosts[0], { ...BUILDER_2, interactive_logins: ["github"] }],
+      }),
+      {},
+      {
+        machines: RUNNING,
+        tailnet: fakeTailnet(peers(peer(B1), peer(B2))).tailnet,
+        transport: fakeTransport({
+          [B1]: statusAnswers({
+            ...pending,
+            installation: {
+              ...(installation ?? installed("0.1.0", null)),
+              verification: verification(B1, "enrolled", {
+                enrollment: [
+                  { id: "github", state: "pending" },
+                  { id: "openai", state: "enrolled" },
+                  { id: "anthropic", state: "enrolled" },
+                ],
+              }),
+            },
+          }),
+          [B2]: statusAnswers(
+            readyWorker(
+              "example",
+              "builder-2",
+              "0.1.0",
+              B2_PASEO_SECRET,
+              undefined,
+              EXAMPLE_ARCHIVE,
+            ),
+          ),
+        }).transport,
+      },
+    );
+  }
+
+  test("exits 2 and names storing a valid token, then apply, with no login", async () => {
+    const { context, out } = deliveredScenario();
+    expect(await run(["status"], context)).toBe(2);
+    expect(out).toContain(
+      `               GitHub: Replace the GitHub token, which ${B1} did not accept: run \`fffactory secret set github-token\`, then \`fffactory apply\``,
+    );
+    expect(out).toContain(
+      `             Next: Enroll each pending account on ${B1} as listed, then verify the enrollment with \`fffactory apply\` and rerun \`fffactory status\`.`,
+    );
+    expect(out.join("\n")).not.toContain(`tailscale ssh factory@${B1}`);
+  });
+
+  test("its JSON next action has no login", async () => {
+    const { context, out } = deliveredScenario();
+    expect(await run(["status", "--json"], context)).toBe(2);
+    const document = JSON.parse(out[0] ?? "");
+    expect(schemaAccepts(document)).toBe(true);
+    expect(document.workers[0].enrollment[0]).toEqual({
+      id: "github",
+      title: "GitHub",
+      state: "pending",
+      next_action: {
+        summary: `Replace the GitHub token, which ${B1} did not accept`,
+        login: null,
+        commands: ["fffactory secret set github-token", "fffactory apply"],
       },
     });
   });
@@ -442,6 +563,7 @@ describe("fffactory status --json", () => {
         machines: RUNNING,
         tailnet: fakeTailnet(peers(peer(B1, { online: false }), peer(B2))).tailnet,
         transport: ready().transport,
+        controlPlane: BUSY,
         styles: { out: ansiStyle, err: ansiStyle },
       },
     );

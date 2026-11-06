@@ -1,11 +1,14 @@
 import type { CredentialSelection } from "../domain/aws-account";
-import type { StateBucketReadiness } from "../domain/backend-bootstrap";
+import type { ArchiveReadiness, StateBucketReadiness } from "../domain/backend-bootstrap";
 import type { HeldLock, LockBreakEntry, LockRecord } from "../domain/factory-lock";
 import type { FactoryId } from "../domain/instance";
-import type { OperationRecord } from "../domain/operation";
+import type { OperationRecord, StoredOperation } from "../domain/operation";
+import type { BucketDeletion } from "../domain/state-bucket-deletion";
 
 /** The factory's state bucket, reached with the credentials the account check allowed. */
 export interface StateBucket {
+  /** Never set: `kind` tells it from an `ArchiveBucket` (`FactoryBucket`). */
+  readonly kind?: never;
   readonly factoryId: FactoryId;
   readonly bucket: string;
   /** The factory's account: every request requires the bucket to be owned by it. */
@@ -14,25 +17,67 @@ export interface StateBucket {
   readonly credentials: CredentialSelection;
 }
 
+/**
+ * The factory's log archive (`archiveBucketName`), in the state bucket's account and Region and
+ * reached with the same credentials. fffactory only asks whether it exists and how it is set:
+ * it writes nothing in it.
+ */
+export interface ArchiveBucket {
+  readonly kind: "archive";
+  readonly bucket: string;
+  /** The factory's account: every request requires the bucket to be owned by it. */
+  readonly accountId: string;
+  readonly region: string;
+  readonly credentials: CredentialSelection;
+}
+
+/** A bucket whose existence and settings the factory's operations check (D7). */
+export type FactoryBucket = StateBucket | ArchiveBucket;
+
+/**
+ * `bucketExists` was refused with S3's 403 for a request that requires the factory's account to
+ * own the bucket: another account owns the name, as it may once the factory's bucket was
+ * deleted, or these credentials may not reach it. S3 does not say which.
+ */
+export class StateBucketUnreachable extends Error {
+  override readonly name = "StateBucketUnreachable";
+
+  constructor(
+    readonly bucket: string,
+    readonly accountId: string,
+  ) {
+    super(
+      `The state bucket ${bucket} is not accessible in account ${accountId}: it belongs to ` +
+        "another account, or these credentials may not reach it (S3 answered 403)",
+    );
+  }
+}
+
 export type LockCreation =
   | { readonly created: true; readonly version: string }
   /** `held` is undefined when the lock that refused creation was gone before it could be read. */
   | { readonly created: false; readonly held: HeldLock | undefined };
 
 /**
- * Port: the state bucket, as the factory's operations use it: its readiness, the
- * factory-wide lock (one object, `lockKey`) and its break log, the records of operations
- * that held the lock, and the revision of the factory's Terraform state. Every call
- * rejects, naming the AWS error but never quoting it, when it cannot complete.
+ * Port: the state bucket, as the factory's operations use it: its readiness (and the log
+ * archive's, the one other bucket they check, `FactoryBucket`), the factory-wide
+ * lock (one object, `lockKey`) and its break log, the records of operations that held the lock,
+ * written and, for teardown, read back, the revision of the factory's Terraform state, and,
+ * last of all, its deletion. Every call but `deleteBucket` rejects, naming the AWS error but
+ * never quoting it, when it cannot complete; `deleteBucket` resolves every failure the same
+ * way, as `remains`.
  */
 export interface LockStore {
   /**
-   * Whether the state bucket exists in the factory's account. Rejects when it cannot tell,
-   * including when the name belongs to another account.
+   * Whether the state bucket, or the log archive, exists in the factory's account. Rejects
+   * when it cannot tell, for the state bucket with `StateBucketUnreachable` when S3 answers
+   * 403: the name belongs to another account, or these credentials may not reach it.
    */
-  bucketExists(bucket: StateBucket): Promise<boolean>;
+  bucketExists(bucket: FactoryBucket): Promise<boolean>;
   /** The settings backend bootstrap applies to an existing state bucket, as S3 reports them. */
   bucketReadiness(bucket: StateBucket): Promise<StateBucketReadiness>;
+  /** The settings the archive root applies to an existing log archive, as S3 reports them. */
+  archiveReadiness(bucket: ArchiveBucket): Promise<ArchiveReadiness>;
   /** Creates the lock object only if none exists: a conditional write that never replaces one. */
   create(bucket: StateBucket, record: LockRecord): Promise<LockCreation>;
   /** The lock object, or undefined when there is none. */
@@ -44,8 +89,29 @@ export interface LockStore {
   /** Writes an operation's record at `operationKey(record)`, replacing its earlier one. */
   writeOperation(bucket: StateBucket, record: OperationRecord): Promise<void>;
   /**
+   * Every object under the factory's operation records' prefix (`operationsPrefix`), by key with
+   * its text: what teardown reads back for the host keys earlier teardowns remembered
+   * (`rememberedHostKeys`).
+   */
+  readOperations(bucket: StateBucket): Promise<readonly StoredOperation[]>;
+  /**
    * An opaque revision of the factory's Terraform state object (`FACTORY_STATE_KEY`) that
    * changes whenever the state is written; undefined when there is no state yet.
    */
   stateRevision(bucket: StateBucket): Promise<string | undefined>;
+  /**
+   * Deletes every object version and delete marker in the bucket, page by page as it is listed,
+   * the lock's last, only once every other is gone, oldest first and the current one alone and
+   * last of all (`deletionBatches`, `lockBatches`), then the bucket itself
+   * (`docs/specs/provisioning.md` §Deleting the state bucket). A bucket already gone is
+   * `absent`. Nothing else in the factory may run meanwhile: its caller holds the lock, and
+   * this deletes it. On `absent` the lock is gone with the bucket: the caller must neither
+   * release it nor write an operation record into the bucket. On `remains`, `lock` says
+   * whether it is still held: once its versions are being deleted the factory may be
+   * unlocked. Releasing it by its version while the bucket exists is harmless either way.
+   * Once `interrupted` answers true it starts no further S3 call, neither a listing, a
+   * DeleteObjects nor DeleteBucket: the bucket `remains` (`DELETION_INTERRUPTED`), the lock
+   * `held` until the call for its current version was made, `deleted` once every one is gone.
+   */
+  deleteBucket(bucket: StateBucket, interrupted: () => boolean): Promise<BucketDeletion>;
 }

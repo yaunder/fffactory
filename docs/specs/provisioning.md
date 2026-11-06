@@ -122,7 +122,7 @@ the shipped lockfile, which init may not change. Then:
 
 | Port call | Terraform command | Deadline | Result |
 | --- | --- | --- | --- |
-| `plan` | `plan -input=false -no-color -detailed-exitcode [-lock=false] -var-file=<inputs.tfvars.json> -out=<plan file>` | 30 min | `changes`: exit 2 is true, exit 0 false. |
+| `plan` | `plan -input=false -no-color -detailed-exitcode [-destroy] [-lock=false] -var-file=<inputs.tfvars.json> -out=<plan file>` | 30 min | `changes`: exit 2 is true, exit 0 false. |
 | `showPlan` | `show -json -no-color <plan file>` | 5 min | The parsed JSON plan. |
 | `applyPlan` | `apply -input=false -no-color <plan file>` | 60 min | Applies exactly the saved plan. |
 | `output` | `output -json -no-color` | 5 min | Each output's value by name. |
@@ -130,7 +130,9 @@ the shipped lockfile, which init may not change. Then:
 `init` has a 10-minute deadline. `plan` adds `-lock=false` when its request
 says `stateLock: false`, which a plan made outside the factory-wide lock does
 ([plan-apply §Plan](plan-apply.md#plan)); otherwise Terraform takes its own
-state lock as usual. `show`, `apply` of a saved plan file and `output` take the
+state lock as usual. It adds `-destroy` when its request says `destroy: true`,
+which only teardown's guarded destroy plan does ([Destroy plan](#destroy-plan));
+otherwise it plans as usual. `show`, `apply` of a saved plan file and `output` take the
 state lock or not as Terraform does. The plan file is an absolute path the caller
 owns; a relative one is refused. Input variables and backend settings reach
 Terraform only through the operation's private files, never as command
@@ -244,11 +246,13 @@ account, Region and tailnet (D5), so every factory keeps to its own namespace.
 | --- | --- |
 | `factory/` (root) | The factory: `network`, `host-identity` and `hosts`, and the current Amazon Linux 2023 x86-64 image from the public SSM parameter `/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64`. Its state lives in the S3 backend: the bucket comes from the backend settings, the key is `factory/terraform.tfstate`, encrypted, with S3 native locking (`use_lockfile`). |
 | `backend/` (root) | The state bucket's definition, `state-bucket`, planned and applied only by [backend bootstrap](#backend-bootstrap). It has no backend of its own. |
+| `archive/` (root) | The log archive's definition, `log-archive`, for a factory.json enabling it ([instance configuration §Log archive](instance-configuration.md#log-archive)). Like `backend/`, it keeps no state: each plan starts empty, so it can only create the bucket, and no command destroys it. `plan` and `apply` plan and apply it, create-only, in the infrastructure stage when the archive is missing ([Log archive readiness](#log-archive-readiness), [plan and apply §The infrastructure stage](plan-apply.md#the-infrastructure-stage)). An existing archive's settings cannot be changed through it, marked `TODO(re-evaluate when retention or bucket settings must change)` in `archive/main.tf`. |
 | `modules/network` | The factory VPC (DNS support and hostnames on), its internet gateway, one public subnet in `network.availability_zone` that assigns no public IPs by default, a route table with a default route to the gateway, and the hosts' security group: no ingress, all egress (hosts are reached over Tailscale). |
-| `modules/host-identity` | The hosts' IAM role, assumable only by EC2, its instance profile, and one inline policy allowing `secretsmanager:GetSecretValue` on exactly the workers' secret references factory.json declares (`tailscale.auth_key_secret`, `hosts[].paseo_password_secret`), never the operator's Tailscale admin client. Hosts can mutate nothing. |
+| `modules/host-identity` | The hosts' IAM role, assumable only by EC2, its instance profile, and one inline policy allowing `secretsmanager:GetSecretValue` on exactly the workers' secret references factory.json declares (`tailscale.auth_key_secret`, `hosts[].paseo_password_secret`, `credentials.*_secret`), never the operator's Tailscale admin client. One role serves every host, so each may read every host's Paseo password and every credential reference, whichever hosts keep an account on a human's login; narrowing it is an open question ([#64](https://github.com/yaunder/fffactory/issues/64)). With the log archive enabled, a second inline policy lets each host write new objects under its own prefix of the archive bucket, and nothing else of it ([Log archive access](#log-archive-access)); without it there is no such policy. Hosts can mutate nothing else: they can neither read, overwrite nor delete the archive. |
 | `modules/hosts` | One EC2 instance per stable host key, none for a factory that declares no host: `hosts[].instance_type`, an encrypted gp3 root volume of `hosts[].root_volume_gib` deleted with the instance, a public IP, IMDSv2 only with a hop limit of 1 and instance tags in metadata, the security group and instance profile above. Its user data is the worker bootstrap, `bootstrap/user-data.sh.tftpl` rendered with the host's namespaced hostname, the Region, the Tailscale reference and tag, and the activator ([worker bootstrap](worker-bootstrap.md)). It changes neither `ami` nor `user_data` of a running host: a newer image or bootstrap template never replaces a host. |
 | `bootstrap/` | Not a module: the worker bootstrap's user data template and root activator, which `modules/hosts` reads ([worker bootstrap](worker-bootstrap.md)). |
 | `modules/state-bucket` | The state bucket: public access blocked, bucket-owner-enforced ownership, SSE-S3 encryption, versioning, a policy denying any request without TLS, and `prevent_destroy`. |
+| `modules/log-archive` | The log archive bucket, in S3's account-regional namespace (`bucket_namespace = "account-regional"`): versioning, public access blocked, bucket-owner-enforced ownership, SSE-S3 encryption, attribute-based access control on (`aws_s3_bucket_abac`, so S3 evaluates `aws:ResourceTag` conditions; without it a grant conditioned on the factory-ID tag matches nothing and fails closed), a bucket policy holding only the Deny of any request without TLS, and `prevent_destroy`. It never expires anything: no lifecycle rule, no Object Lock (which could never be turned off) and no KMS key (whose deletion would leave the archive unreadable). The policy names no role, so a host role a later apply recreates needs no change to it. |
 
 Each root module ships its `.terraform.lock.hcl`, generated with the managed
 Terraform for `linux_amd64` and `darwin_arm64` (the release targets); it also
@@ -270,12 +274,13 @@ resource's own name (`src/domain/resource-naming.ts`):
 | VPC, internet gateway, subnet, route table | `Name` tag `<id>-vpc`, `<id>-igw`, `<id>-public`, `<id>-public` |
 | Security group | name prefix `<id>-hosts-` (AWS appends a unique suffix), `Name` tag `<id>-hosts` |
 | IAM role, instance profile | `<id>-host` |
-| The role's inline policy | `<id>-read-secrets` |
+| The role's inline policies | `<id>-read-secrets`, and with the log archive enabled `<id>-write-archive` |
 | Host instance, and its Tailscale hostname | `Name` tag `<id>-<host key>` |
 | Host root volume | `Name` tag `<id>-<host key>-root` |
 | State bucket | `state_backend.bucket`, which must start with `<id>-` ([instance configuration](instance-configuration.md#state-bucket)) |
+| Log archive bucket | `<id>-logs-<account>-<region>-an`, derived by `archiveBucketName`, in S3's account-regional namespace ([instance configuration §Log archive](instance-configuration.md#log-archive)) |
 | Factory-wide lock, its break log | Objects `<id>-lock.json` and `<id>-lock-log/…` in the state bucket ([Lock](#lock)) |
-| Secrets `fffactory secret set` creates | `<id>/tailscale-auth-key`, `<id>/tailscale-admin-client`, `<id>/<host key>/paseo-password`: Secrets Manager names are paths, as in `examples/factory.json` ([secrets](secrets.md)) |
+| Secrets `fffactory secret set` creates | `<id>/tailscale-auth-key`, `<id>/tailscale-admin-client`, `<id>/<host key>/paseo-password`, `<id>/github-token`, `<id>/anthropic-api-key`, `<id>/openai-api-key`: Secrets Manager names are paths, as in `examples/factory.json` ([secrets](secrets.md)) |
 
 The AWS provider's default tags put `fffactory:factory-id = <id>` and
 `fffactory:managed-by = fffactory` on every taggable resource; a host's
@@ -288,6 +293,84 @@ digits) never are. Two factories whose IDs are, such as `acme` and
 `x` are both `acme-lab-x`); do not give factories sharing an account or tailnet such IDs. IAM tag
 conditions compare the whole factory ID, so they are unaffected.
 
+### Log archive access
+
+When factory.json enables the log archive, the hosts' role `<id>-host` carries
+the inline policy `<id>-write-archive`, for the bucket `archiveBucketName`
+derives (`<archive>` below). The bucket need not exist for the policy to
+apply; apply creates a missing archive before the factory root
+([Log archive readiness](#log-archive-readiness)). As AWS receives it:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "WriteOwnArchivePrefix",
+      "Effect": "Allow",
+      "Action": "s3:PutObject",
+      "Resource": "arn:aws:s3:::<archive>/archive/1/<id>/workers/${aws:userid}/*",
+      "Condition": { "StringEquals": { "aws:ResourceTag/fffactory:factory-id": "<id>" } }
+    },
+    {
+      "Sid": "DenyWritesWithoutIfNoneMatch",
+      "Effect": "Deny",
+      "Action": "s3:PutObject",
+      "Resource": "arn:aws:s3:::<archive>/*",
+      "Condition": { "Null": { "s3:if-none-match": "true" } }
+    }
+  ]
+}
+```
+
+- For an instance role `aws:userid` is `<role ID>:<instance ID>`, so each worker
+  incarnation writes only under its own prefix: a replaced host, or a role a
+  later apply recreates, starts a new one. HCL writes it `$${aws:userid}`.
+- The Allow carries the factory-ID tag condition every mutating Allow does
+  ([Guardrails](#guardrails)); S3 evaluates it because the archive enables
+  ABAC, and without ABAC it matches nothing.
+- The Deny refuses a write without `If-None-Match`, so no write replaces an
+  object. On a versioned bucket a delete marker would let a rewrite through,
+  so hosts hold no delete.
+- Writers must use single PutObject calls with `If-None-Match`: multipart
+  uploads are refused, since `CreateMultipartUpload` and `UploadPart` are
+  authorised as `s3:PutObject` without the header.
+- Nothing else: no read, list, delete, ACL or lifecycle action. Anything on a
+  host, its agents included, can reach the role's credentials through the
+  instance metadata service.
+
+Without the archive enabled the factory root's `archive_bucket` is null and the
+role has no such policy. Disabling it removes the policy and keeps the bucket.
+No live probe checks the grant: AWS's enforcement of these statements was
+checked once in a throwaway account, and `just terraform-check` asserts the
+planned policy is exactly them and the role holds no other but its
+secret-reading policy.
+
+Operators read the archive with their own credentials, which fffactory neither
+creates nor checks. The reader needs this statement on the operator's identity,
+for the factory's prefix only:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ListFactoryArchive",
+      "Effect": "Allow",
+      "Action": "s3:ListBucket",
+      "Resource": "arn:aws:s3:::<archive>",
+      "Condition": { "StringLike": { "s3:prefix": "archive/1/<id>/*" } }
+    },
+    {
+      "Sid": "ReadFactoryArchive",
+      "Effect": "Allow",
+      "Action": "s3:GetObject",
+      "Resource": "arn:aws:s3:::<archive>/archive/1/<id>/*"
+    }
+  ]
+}
+```
+
 ### Guardrails
 
 The modules are held to D5 by static checks that run in `bun test` without
@@ -297,10 +380,12 @@ Terraform, `tests/assets/terraform/guardrails.test.ts` over
 - every resource type is classified in `NAMED_RESOURCES`
   (`src/infrastructure/terraform/resource-names.ts`) by the attributes that
   name it, or as having no name of its own (routes, associations, a bucket's
-  settings); each of those names is a template beginning `${var.factory_id}-`.
+  settings, its ABAC status among them); each of those names is a template beginning `${var.factory_id}-`.
   An unclassified type fails;
-- every IAM policy is an `aws_iam_policy_document` with literal actions.
-  An allowed statement whose actions are not all reads (`Get`, `List`,
+- every IAM policy is an `aws_iam_policy_document` with literal actions,
+  referenced as `data.aws_iam_policy_document.<name>.json`, or `<name>[0]` for
+  the one instance of a document whose `count` makes it conditional; any other
+  index fails. An allowed statement whose actions are not all reads (`Get`, `List`,
   `Describe`, `BatchGet`) must carry a `StringEquals` condition on
   `aws:ResourceTag/fffactory:factory-id` or
   `ec2:ResourceTag/fffactory:factory-id` with the values `[var.factory_id]`;
@@ -347,7 +432,8 @@ Terraform, `tests/assets/terraform/guardrails.test.ts` over
 The same test runs the check over deliberately broken fixtures
 (`tests/assets/terraform/fixtures/`): unprefixed names, mutating statements
 without the tag condition, trust statements open to any principal, unreadable
-policies (an attached managed policy and a `.tf.json` file among them),
+policies (an attached managed policy, a `.tf.json` file and a document
+referenced by an index other than `[0]` among them),
 dynamic blocks in a resource and in a trust statement's principals, tag
 overrides in nested blocks and behind templated keys, remote or untagged
 module calls, blocks and data sources outside the allowlists, provisioners,
@@ -367,13 +453,15 @@ Known limits, each marked in the code with a `TODO(re-evaluate when …)`:
 - `ebs_block_device.tags.Name` has no naming rule; the modules attach no extra
   EBS volumes;
 - every `Get` action counts as a read, `sts:GetFederationToken` included; the
-  modules allow only `secretsmanager:GetSecretValue`.
+  only `Get` action the modules allow is `secretsmanager:GetSecretValue` (their
+  one other action, the archive's `s3:PutObject`, is a mutation and carries the
+  tag condition).
 
 `bun scripts/terraform-check.ts` (`just terraform-check`, and CI's
 `Terraform modules` job) runs the managed Terraform over a copy of the
 modules: `fmt -check`, then `init -backend=false -lockfile=readonly` and
-`validate` in each root module, then the namespacing plans. It plans both
-root modules, `factory` and `backend`, for two factory IDs, `fff-aaaa1111`
+`validate` in each root module, then the namespacing plans. It plans every
+root module, `factory`, `backend` and `archive`, for two factory IDs, `fff-aaaa1111`
 and `fff-bbbb2222`, with `examples/factory.json` projected for each, and reads
 each plan with `terraform show -json`. Every name `NAMED_RESOURCES` lists in
 each plan's planned values must be known when planning and carry that plan's
@@ -381,16 +469,36 @@ factory ID, and no name of one factory's plans may appear in the other's; a
 plan with no names fails too. Each planned host's `user_data`, rendered by
 Terraform, must equal the rendering the
 [worker bootstrap tests](worker-bootstrap.md#tests) run for the same inputs.
+Each `archive` plan must only create (its policy document only read), and
+hold exactly the bucket and its six settings, one of each, so a lifecycle
+rule, Object Lock configuration or KMS key fails: the bucket named
+`<id>-<archive_bucket_suffix>` as fffactory derives it, in the
+account-regional namespace, with the factory-ID tag and no `force_destroy`;
+versioning `Enabled`; every public access block flag on;
+`BucketOwnerEnforced`; `AES256`; ABAC `Enabled`; and a policy whose one
+statement is the TLS-only Deny. `prevent_destroy` is not in a plan's JSON:
+`guardrails.test.ts` checks the archive bucket carries it, and that the
+module holds no lifecycle configuration, Object Lock or KMS.
+Each `factory` plan, its factory.json enabling the log archive, must give the
+hosts' role exactly two inline policies, its secret-reading policy and one
+`<id>-write-archive` policy whose document is exactly the two statements of
+[Log archive access](#log-archive-access), for the bucket the same factory
+ID's `archive` plan creates; any other policy on the role fails.
 Last, it plans the factory root for `fff-aaaa1111` from the example without
 hosts, an empty factory ([plan-apply §An empty factory](plan-apply.md#an-empty-factory)):
 the plan must hold no instance, keep the VPC, the hosts' role and instance
 profile, and its secret-reading policy must allow exactly the Tailscale
-enrollment key. Then it checks terminate's scoped removal rule against
-Terraform's real removal plans
+enrollment key. It plans the factory root once more from the example with
+`log_archive.enabled: false`: the hosts' role must hold only its
+secret-reading policy, no `<id>-write-archive`. Then it checks terminate's
+scoped removal rule against Terraform's real removal plans
 ([worker lifecycle §Terminate (remove)](worker-lifecycle.md#terminate-remove)):
 from local states synthesized from its own plans of the example with several
 hosts and with one, it plans each removal with `-refresh=false` and judges
-the JSON plan with `removalPlanRefusal`. The plans reach no AWS account: an override file in the script's copy only keeps
+the JSON plan with `removalPlanRefusal`. Last, from such states with one host
+and with two, and from an empty state, it plans the `factory` root with
+`-destroy -refresh=false` and judges each plan with `destroyPlanRefusal`
+([Destroy plan](#destroy-plan)). The plans reach no AWS account: an override file in the script's copy only keeps
 state local, gives the provider AWS's documentation example keys, skips its
 account and credential checks, and points every endpoint at a local
 stand-in that answers only the image parameter lookup.
@@ -409,8 +517,10 @@ state. Secrets appear only as the references factory.json holds.
 | `availability_zone`, `vpc_cidr`, `public_subnet_cidr` | `network.*` |
 | `tailscale_auth_key_secret_arn` | `tailscale.auth_key_secret` |
 | `tailscale_tag` | `tailscale.tag` |
-| `paseo_password_secret_arns` | `hosts[].paseo_password_secret`, by host key, for hosts that declare one |
+| `paseo_password_secret_arns` | `hosts[].paseo_password_secret`, by host key: every host declares one |
+| `credential_secret_arns` | `credentials.github_token_secret`, `credentials.anthropic_api_key_secret`, `credentials.openai_api_key_secret`, by field name, for each one set; empty for none. Factory-wide: `interactive_logins` does not narrow it |
 | `hosts` | `hosts[]` by host key: `instance_type` and `root_volume_gib`; empty for a factory that declares no host |
+| `archive_bucket` | The derived log archive bucket name (`archiveBucketName`) when `log_archive.enabled` is true; null otherwise, so the hosts' role gets no `<id>-write-archive` policy. Its validation accepts only null or `<factory_id>-logs-<account_id>-<region>-an` |
 
 `tailscale.admin_client_secret` is projected into no variable: no worker may
 read the operator's Tailscale admin client ([secrets](secrets.md#the-tailscale-admin-client)).
@@ -420,15 +530,27 @@ read the operator's Tailscale admin client ([secrets](secrets.md#the-tailscale-a
 | `factory_id`, `account_id`, `region` | `factory_id`, `aws.account_id`, `aws.region` |
 | `state_bucket_suffix` | `state_backend.bucket` after the factory ID and a hyphen |
 
+| Variable (`archive`) | From |
+| --- | --- |
+| `factory_id`, `account_id`, `region` | `factory_id`, `aws.account_id`, `aws.region` |
+| `archive_bucket_suffix` | The derived log archive bucket name (`archiveBucketName`) after the factory ID and a hyphen: `logs-<account>-<region>-an`. Its validation accepts only `logs-<account_id>-<region>-an` |
+
 The factory projection is refused, listing each issue by field path with
 `is required to plan`, unless the instance is
 [complete](instance-configuration.md#completeness). The backend projection
 needs only `factory_id`, `aws.account_id`, `aws.region` and
 `state_backend.bucket`, and refuses a bucket that does not carry the factory
-ID. The root modules repeat factory.json's format rules as variable
+ID. The archive projection (`projectArchiveVariables`) is refused with
+`log_archive.enabled: must be true to plan the log archive` unless factory.json
+enables the archive, and then needs only `factory_id`, `aws.account_id` and
+`aws.region`. The root modules repeat factory.json's format rules as variable
 validations; none requires a host, so an empty factory's projection plans its
 shared infrastructure alone, and its hosts' policy allows only the Tailscale
-enrollment key. A test checks that each projection supplies exactly its root
+enrollment key and any credential references. The hosts' policy allows the
+`distinct` union of the enrollment key, `paseo_password_secret_arns`' values
+and `credential_secret_arns`' values; each ARN must be a Secrets Manager
+secret in the factory Region and account, and `credential_secret_arns`' keys
+only the three field names. A test checks that each projection supplies exactly its root
 module's variables.
 
 ### Stable host keys
@@ -489,7 +611,7 @@ account than `aws.account_id`. Then:
    | --- | --- |
    | 200 | The bucket exists: no bootstrap, if it is ready (below). |
    | 404 | It does not: bootstrap it. |
-   | 403 | Refused: `The state bucket B is not accessible in account A: it belongs to another account, or these credentials may not reach it (S3 answered 403)`. Bucket names are global, so the name may be taken. |
+   | 403 | Refused: `The state bucket B is not accessible in account A: it belongs to another account, or these credentials may not reach it (S3 answered 403)`. Bucket names are global, so the name may be taken. The refusal is typed (`StateBucketUnreachable`), so teardown can say what it may mean after an earlier teardown ([teardown §Rerun](teardown.md#rerun)). |
    | 301 | Refused: `The state bucket B exists outside the factory Region R (S3 answered 301)`. |
 
    An existing bucket must carry every setting backend bootstrap applies,
@@ -571,7 +693,8 @@ every later operation goes from the bucket and readiness checks straight to
 the lock. The backend root module keeps no state of its own (it has no
 backend block, and an operation's local state is removed with it): the
 bucket is created once and, with `prevent_destroy`, never destroyed by
-fffactory.
+Terraform. It is deleted only by removing the whole factory, with S3 calls
+([Deleting the state bucket](#deleting-the-state-bucket)).
 
 Bootstrap necessarily runs before the lock exists: the lock lives in the
 bucket, so nothing can be locked until the bucket is created. The lock is taken
@@ -607,6 +730,83 @@ the bootstrap and stops
 `fffactory plan` plans a missing bucket's bootstrap with
 `planBackendBootstrap`, applying nothing, and saves it as that bootstrap plan
 ([plan and apply §Plan](plan-apply.md#plan)).
+
+### Log archive readiness
+
+With `log_archive.enabled`, `plan` and `apply` (and `upgrade`, through apply's
+infrastructure stage) check the log archive the way backend bootstrap checks
+the state bucket, through the same `LockStore` port (`bucketExists` and
+`archiveReadiness`, `src/application/log-archive.ts`), with the state bucket's
+account, Region and credentials. fffactory asks only whether the archive exists
+and how it is set: it writes no object in it.
+
+1. S3 `HeadBucket`, with `ExpectedBucketOwner` set to the factory's account:
+
+   | S3 answers | Means |
+   | --- | --- |
+   | 200 | The archive exists: nothing is planned for it, if it is ready (below). |
+   | 404 | It does not: the `archive` root module plans it, create-only, into `archive.tfplan`. |
+   | 403 | Refused: `The log archive B is not accessible in account A: these credentials may not reach it (S3 answered 403)`. Its name is in S3's account-regional namespace, so no other account can hold it. |
+   | 301 | Refused: `The log archive B exists outside the factory Region R (S3 answered 301)`. |
+
+   Any other failure fails the command, naming the call: `S3 HeadBucket on the
+   log archive failed: CODE`.
+2. An existing archive must carry every setting the `log-archive` module
+   applies that S3 can report, read with `GetBucketVersioning`,
+   `GetPublicAccessBlock`, `GetBucketOwnershipControls`,
+   `GetBucketEncryption`, `GetBucketAbac` and `GetBucketPolicy` (each with
+   `ExpectedBucketOwner`): versioning `Enabled`, all four public access block
+   settings on, object ownership `BucketOwnerEnforced`, default encryption
+   rules that are all SSE-S3 (`AES256`; S3 encrypts every new bucket by
+   default, so any rule alone would prove nothing), ABAC `Enabled`, and the
+   TLS-only policy statement the state bucket's check reads
+   (`deniesInsecureTransport`). S3's answer that a setting was never made
+   (`NoSuchPublicAccessBlockConfiguration`,
+   `OwnershipControlsNotFoundError`,
+   `ServerSideEncryptionConfigurationNotFoundError`, `NoSuchBucketPolicy`, an
+   ABAC status that is not `Enabled`) counts as lacking it; any other failure
+   fails the command. Not checked: the account-regional namespace itself,
+   which the name proves, `prevent_destroy`, a Terraform setting S3 does not
+   know, and the bucket's tags. An archive lacking any setting is refused
+   before anything is planned or saved, as an unready state bucket is, on
+   standard error:
+
+   ```text
+   ✖ The log archive fff-abcd1234-logs-123456789012-eu-west-2-an exists, but without every setting fffactory gives it. It lacks:
+     attribute-based access control
+
+   ── Next ─────────────────────────────────────────────
+     If another apply is still creating it, wait for that to finish, then retry.
+
+     Otherwise complete the bucket with these AWS CLI commands, using credentials for account 123456789012, then retry:
+       $ aws s3api put-bucket-abac --region eu-west-2 --bucket fff-abcd1234-logs-123456789012-eu-west-2-an --expected-bucket-owner 123456789012 --abac-status Status=Enabled
+   ```
+
+   Each lacking setting is listed (versioning with its state; `public access
+   block`; `bucket-owner-enforced object ownership`; `SSE-S3 default
+   encryption`; `attribute-based access control`; `TLS-only bucket policy`),
+   in that order, with the one command that applies it as the module does, and
+   the state bucket's warning when the policy command is among them. fffactory
+   cannot finish the archive itself: the `archive` root keeps no state, and its
+   plan would create a bucket that exists. Marked `TODO(re-evaluate when
+   retention or bucket settings must change)` in
+   `src/cli/presentation/plan.ts`, as in `archive/main.tf`.
+
+A missing archive's plan is read back with `showPlan` and judged by the same
+create-only rule as backend bootstrap's (`createOnlyRefusal`,
+`src/domain/backend-bootstrap.ts`). Unlike the state bucket's, it is not
+approved on its own: the lock lives in the state bucket, not the archive, so
+the archive is created under the factory lock, in the factory's one reviewed
+plan, applied before the factory root once approved, and checked missing again
+once approved, before an upgrade's pin is written or anything is applied
+([plan and apply §Apply](plan-apply.md#apply)). Two
+applies cannot race to create it: the factory lock serialises them, and a
+saved plan creating an archive that exists by its apply is stale. A ready
+archive is left alone, so a factory applied again after teardown, which keeps
+the archive ([teardown](teardown.md)), adopts it; a plan that found it ready
+checks it again after approval, before anything is changed, and is stale once
+it is gone and refused as above once it lacks a setting
+([plan and apply §Freshness](plan-apply.md#freshness)).
 
 ## Lock
 
@@ -785,30 +985,309 @@ state bucket failed: REASON`, where the reason is the S3 error code, `the
 credential provider failed (NAME)`, `network error (CODE)` or `timed out after
 N s`, never an AWS or SDK message.
 
+## Destroy plan
+
+Removing a whole factory ([#56](https://github.com/yaunder/fffactory/issues/56))
+destroys its `factory` root first (D6), with a destroy plan guarded before it
+is shown or confirmed (D13). The teardown use case plans it under the factory
+lock, after its inventory and before its confirmation, and applies exactly that
+plan once its gates pass ([teardown §Order](teardown.md#order)), as
+`fffactory teardown` runs it ([teardown §Command](teardown.md#command)). `plan`
+and `apply` keep the D11 refusals of host destroys
+([plan and apply §Refusals](plan-apply.md#refusals-until-lifecycle-work-lands-d11)),
+and the state bucket, outside the `factory` root, is never Terraform's to
+destroy ([Deleting the state bucket](#deleting-the-state-bucket)).
+
+The destroy plan is `plan -destroy` of the `factory` root (`PlanRequest.destroy`,
+[Operations](#operations)) with today's projection: factory.json projected by
+`projectFactoryVariables` with the host keys the state records, read with
+`Provisioner.output` as a plan reads them
+([Stable host keys](#stable-host-keys)). Destroy mode destroys whatever the
+state holds, but Terraform still evaluates the configuration, so its variables
+must be supplied and valid. The saved plan is read back with `showPlan`
+(`show -json`) and judged by `destroyPlanRefusal` (`src/domain/teardown.ts`),
+over the factory's instances EC2 lists by the factory ID tag
+([status §Inventories](status.md#inventories)):
+
+- A plan that cannot be read is refused: not a JSON object, `resource_changes`
+  not a list, or a change without a printable address or a non-empty list of
+  printable actions ([plan and apply](plan-apply.md), `resourceChanges`); and
+  `output_changes`, when present, not an object, or a root output change
+  without a printable name or a non-empty list of printable actions
+  (`outputChanges` in `src/domain/plan.ts`), failing closed.
+- Every resource change's actions must be exactly `["delete"]`, `["no-op"]` or
+  `["read"]`. Anything else is refused, `create`, `update`, a replacement
+  (`["delete", "create"]` or `["create", "delete"]`), `forget` and any action
+  fffactory does not know among them, and so is a list mixing the allowed ones.
+- Every root output change's actions must be exactly `["delete"]` or
+  `["no-op"]`. An output has no side effect, but a destroy plan that creates
+  or updates one is not a destroy: anything else, `read` among it, is refused
+  like a resource change, listed as `output.NAME (ACTIONS)` after the
+  resource changes.
+- Each `delete` of a managed `aws_instance` (by type and mode, or by address
+  when the plan names neither, as [D11](plan-apply.md#refusals-until-lifecycle-work-lands-d11)
+  judges one) must destroy the instance EC2 lists for that host: the `id` its
+  change's `before` names must be an instance EC2 lists for the factory, whose
+  `fffactory:host-key` tag is a well-formed host key `KEY`, and the change's
+  address must be `module.hosts.aws_instance.host["KEY"]`. This is the check
+  `worker terminate` makes of the one host it removes
+  ([worker lifecycle §Terminate (remove)](worker-lifecycle.md#terminate-remove)),
+  made of every host. An empty inventory lists no instance, so every instance
+  delete is refused.
+- A plan with no change, an empty state's, passes: the `factory` root is
+  already absent, as on a rerun after it was destroyed. So does a plan that
+  deletes only root outputs, of a state that records root outputs but no
+  resource: it is applied, so the state records no output
+  ([teardown §Rerun](teardown.md#rerun)).
+
+Terraform's `-detailed-exitcode` and the JSON plan must agree, as defence in
+depth (`destroyPlanMismatch`, [teardown §Refusals](teardown.md#refusals)):
+exit 2 needs a resource change or a root output change that is not `no-op`
+or `read`, and exit 0 needs neither. Exit 2 is a "non-empty diff (changes
+present)", and root output changes are part of that diff: in the PR #89
+review, Terraform 1.16.4 exited 2 for a `-refresh=false` destroy plan of a
+state with no resource and only `host_keys = []`,
+`output_changes.host_keys.actions` `["delete"]` and no `resource_changes`.
+`just terraform-check` reproduces that behaviour with a state recording no
+resource and the root's three outputs (`host_keys = []`, `hosts = {}` and
+`network`), each deleted. Counting only resource changes would refuse that
+plan on every rerun.
+
+| Refused | Summary | Details | Next action |
+| --- | --- | --- | --- |
+| Unreadable | `Terraform's destroy plan could not be read` | None | ``Rerun `fffactory teardown`.`` |
+| A change other than a delete, no-op or read, or a root output change other than a delete or no-op | `Terraform's destroy plan does more than destroy the factory's resources` | Each offending resource change, in the plan's order, as `ADDRESS (ACTIONS)`, such as `module.network.aws_vpc.this (update)`, then each offending output change, in the plan's order, as `output.NAME (ACTIONS)`, such as `output.hosts (update)` | ``Check the factory's Terraform state with `fffactory plan`, then rerun `fffactory teardown`.`` |
+| An instance delete EC2 does not back | `Terraform's destroy plan destroys an instance EC2 does not list for the factory` | Each such delete as `ADDRESS (delete): ` and why: `the plan does not name the instance it destroys`; `instance ID, which EC2 does not list with the factory's tags`; `instance ID, which EC2 lists without a well-formed host key tag`; `instance ID, which EC2 lists for host KEY` | ``Check the factory's instances in the EC2 console, then rerun `fffactory teardown`.`` |
+
+The first refusal that applies is the one given, in the table's order. A host
+key tag that is not a well-formed host key is never echoed.
+
+The rule relies on Terraform's documented JSON plan format and plan modes
+(checked 2026-10-21 for the pinned 1.16):
+
+- `plan -destroy` "creates a plan whose goal is to destroy all remote objects
+  that currently exist, leaving an empty Terraform state";
+  `-detailed-exitcode` exits 0 for "empty diff (no changes)" and 2 for a
+  "non-empty diff (changes present)"
+  (<https://developer.hashicorp.com/terraform/cli/commands/plan>). Root output
+  changes count among them: observed, not documented (Terraform 1.16.4, in the
+  PR #89 review and by `just terraform-check`, above).
+- `resource_changes` describes "the individual change actions that Terraform
+  plans", each with `change.actions`, one of `["no-op"]`, `["create"]`,
+  `["read"]`, `["update"]`, `["delete", "create"]`, `["create", "delete"]` and
+  `["delete"]`; "for `["create"]` and `["delete"]` actions, either `before` or
+  `after` is unset (respectively)", so a delete's `before` holds the object as
+  the state knew it, an instance's `id` among it. `forget`, which a `removed`
+  block with `destroy = false` plans ("remove the resource from state without
+  destroying the actual resource"), is not in that list; it is refused like any
+  other action, and the modules hold no `removed` block ([Guardrails](#guardrails)).
+- `output_changes` "describes the planned changes to the output values of the
+  root module", each a change representation with the same `actions`
+  (<https://developer.hashicorp.com/terraform/internals/json-format>); a
+  destroy plan deletes every output the state records.
+- `resource_drift` reports what refreshing found, not what the plan does, and
+  is not read.
+
+`just terraform-check` checks the rule against Terraform's own destroy plans
+([Guardrails](#guardrails)): from local states synthesized from its plans of
+the example with one host and with two, from an empty state, and from a state
+holding only the root outputs (the one-host state stripped of its resources,
+`host_keys` `[]` and `hosts` `{}`, `network` kept), each planned with
+`-destroy`, as teardown plans it, and `-refresh=false`, since the offline
+check has no AWS to refresh against (teardown refreshes). Each plan must delete
+every managed resource and every root output its prior state holds and change
+nothing else (the empty state's changes nothing, the outputs-only state's
+deletes only its outputs and exits 2), and `destroyPlanMismatch` must agree
+with its exit code; `destroyPlanRefusal` must pass it with EC2 listing the
+instances the state records, and refuse it with EC2 listing none, with another
+instance listed in place of one, with any one resource change tampered into
+`update`, a replacement or `forget`, and with any one output change tampered
+into `update` or `create`.
+
+### Tagged VPCs
+
+Teardown also lists the VPCs carrying the factory ID tag: after the destroy,
+any left is a leftover outside Terraform state that stops the run before
+devices, secrets and the bucket (D12, [teardown §Order](teardown.md#order)),
+and without a state bucket, any found refuses the cleanup (D10,
+[teardown §No state bucket](teardown.md#no-state-bucket)). `MachineInventorySource.listVpcs`
+(`ec2MachineInventory`) calls EC2 `DescribeVpcs` in the factory Region with
+the filter `tag:fffactory:factory-id` = the factory ID, 1000 per page,
+following `NextToken`, every page within one 15 s deadline
+(`EC2_INVENTORY_TIMEOUT_MS`), and answers each VPC's ID (`VpcInventory`). The
+listing proves absence, so it never skips: a VPC without a well-formed ID
+(`vpc-` and 8 to 32 hexadecimal digits) makes it `unavailable`, `EC2
+DescribeVpcs listed a VPC without a well-formed ID`, as do a failure, by error
+name or network code (`EC2 DescribeVpcs failed: REASON`), and the deadline. It
+needs `ec2:DescribeVpcs`, which EC2 does not scope to resources.
+
+## Deleting the state bucket
+
+Removing a whole factory ([#56](https://github.com/yaunder/fffactory/issues/56))
+deletes its state bucket last (D6): the lock lives in it. The teardown use case
+runs this last, under the factory lock it deletes, and on `absent` neither
+releases the lock nor writes its record
+([teardown §Operation record](teardown.md#operation-record)). Terraform never destroys the bucket
+(`prevent_destroy`); `LockStore.deleteBucket` empties and deletes it with S3
+calls, every one with `ExpectedBucketOwner` set to the factory's account:
+
+1. `ListObjectVersions`, 1000 per page, following `NextKeyMarker` and
+   `NextVersionIdMarker` while a page is truncated: every object version and
+   every delete marker of every key, the Terraform state and its lock file,
+   the operation records, the break log and the factory lock among them, each
+   with whether it is its key's current one (`IsLatest`) and when it was
+   written (`LastModified`). A version without an ID is the `null` version. A
+   truncated page that names no next key, or a listed version without a key or
+   without `LastModified`, fails the listing; none is looped on, skipped or
+   guessed.
+2. Each page is deleted before the next is listed: `DeleteObjects` in quiet
+   mode, each object named by its key and version ID, at most 1000 per call
+   (`DELETE_OBJECTS_LIMIT`), in listing order, every key but the lock's
+   (`<factory ID>-lock.json` exactly; the break log's keys, under
+   `<factory ID>-lock-log/`, are not the lock's). The lock's versions are set
+   aside (`deletionBatches`). Deleting by version ID removes that version, or
+   that delete marker, permanently, and writes no delete marker. The next page
+   is asked for from the markers the last named, though the versions they name
+   are gone by then: S3 resumes after the place they name. Were S3 ever to
+   refuse such a marker, the listing fails and the bucket remains; a rerun
+   lists from the start, the pages before already deleted.
+3. Once the last page is done, the lock's versions and delete markers, in
+   calls of their own (`lockBatches`): first every one no longer current,
+   oldest first by `LastModified`, then the current one (`IsLatest`) alone, in
+   the last call. The SDK returns a page's versions and its delete markers in
+   two lists, each newest first, so listing order alone does not say whether a
+   delete marker is older than a version; those written in the same instant go
+   in reverse listing order. Deleting one no longer current never changes
+   which is current. Deleting the current one makes the newest left current,
+   so deleting it while an older one is left would revive an earlier holder's
+   lock; and S3 promises no order within one call, so the current one never
+   shares a call. The lock key seldom holds more than the lock in place: each
+   release deletes its own version.
+4. The lock's versions are deleted only once every other version is gone.
+   When `DeleteObjects` reports a version it did not delete, the rest of the
+   pages are still listed and their other keys deleted, but not the lock's
+   versions, nor the bucket. The lock's calls stop at the first that reports a
+   version it did not delete, or fails: the current one is deleted only once
+   every other one of the lock's is gone.
+5. `DeleteBucket`.
+
+| S3 answers | Result | The lock (`lock`) |
+| --- | --- | --- |
+| `DeleteBucket` succeeds | `absent` | Gone with the bucket |
+| 404 (`NoSuchBucket`) to any call | `absent`: the bucket is already gone, as on a rerun after it was deleted | Gone with the bucket |
+| `DeleteObjects` reports versions it did not delete | `remains`: the listed versions not deleted, the lock's among them (those of its calls never made too), and S3's error code for them, each code once (`Unknown` for one that is not a plain name) | `held` for another key's version; `unknown` for one of the lock's |
+| A call fails: an S3 error such as `AccessDenied`, the credential provider, the network, its deadline | `remains`: the failure, `S3 OPERATION on the state bucket failed: REASON` ([S3 failures](#s3-failures)), and the listed versions not yet deleted, unknown until the listing reached its last page. A call past its deadline may still have reached S3, so what is left is at most the count | `held` before the lock's calls; `unknown` in them |
+| `DeleteBucket` refuses with `BucketNotEmpty` | `remains`, with the count unknown: a version was written since the listing | `deleted` |
+| `DeleteBucket` fails otherwise | `remains`, empty: no version left | `deleted` |
+
+A bucket another account owns answers 403 to the listing: it `remains`,
+nothing is deleted, and it is never taken for absent. A failed call stops the
+deletion at once; the next run lists again and resumes from what is left.
+
+An interrupt (`interrupted`, [teardown §Interruption](teardown.md#interruption))
+starts no further call: no listing, no `DeleteObjects` and no `DeleteBucket`.
+A call already made finishes and is counted. The bucket `remains`, its failure
+`Interrupted: no further S3 call was started` (`DELETION_INTERRUPTED`), with
+the lock `held` until the call for its current version was made, since that
+version goes alone in the last call of all, and `deleted` once every one of its
+versions is gone.
+Each listing page, each `DeleteObjects` call and `DeleteBucket` has a 30 s
+deadline of its own (`S3_TIMEOUT_MS`), so a bucket too large to list within
+one still loses a page of versions to every run.
+
+The caller holds the factory lock, and deleting the bucket deletes it:
+
+- `absent`: the lock is gone with the bucket. The caller neither releases it
+  nor writes an operation record into the bucket.
+- `remains` with `lock` `held`: it stopped before the lock's versions, so the
+  lock stays held, and the factory locked, until the caller releases it.
+- `remains` with `lock` `unknown`: a call for the lock's versions failed or
+  refused one, so the lock may still be held, or be gone. Never an earlier
+  version of it current: the current one is deleted alone, last, and only once
+  every other one of the lock's is gone.
+- `remains` with `lock` `deleted`: every version of the lock is gone, so the
+  factory is unlocked, and another operation may lock it (`DeleteBucket` then
+  refuses with `BucketNotEmpty`).
+
+Releasing the lock by its version while the bucket still exists is harmless in
+every case: it deletes that version only, and a version already gone is
+deleted again without error.
+
+Why, per the Amazon S3 API Reference and User Guide (checked 2026-10-21):
+
+- `DeleteBucket`: "All objects (including all object versions and delete
+  markers) in the bucket must be deleted before the bucket itself can be
+  deleted." S3 refuses a bucket that is not empty with `BucketNotEmpty`.
+- `DeleteObjects` takes "up to 1,000 keys" and, optionally, a version ID for
+  each, and answers 200 with each key's result, "success or failure": a
+  per-key failure is an `Error` entry with its `Code`, never a failed call.
+  In quiet mode "the response includes only keys where the delete operation
+  encountered an error". Naming a delete marker's version ID deletes the
+  marker. "If the object specified in the request isn't found, Amazon S3
+  confirms the deletion by returning the result as deleted", so a rerun
+  deleting versions already gone succeeds.
+- `ListObjectVersions` returns at most 1,000 entries per answer, versions as
+  `Version` and delete markers as `DeleteMarker`, each with `IsLatest`
+  (whether it is its key's current one) and `LastModified`, a key's newest
+  first; a truncated answer (`IsTruncated`) names where the next starts
+  (`NextKeyMarker`, `NextVersionIdMarker`). The SDK gathers them into two
+  lists, `Versions` and `DeleteMarkers`.
+- Deleting a key's current version, or its current delete marker, by version
+  ID makes the newest left current: a delete marker deleted that way brings
+  the version under it back. Deleting one no longer current changes nothing
+  else.
+- `ExpectedBucketOwner`: "If the account ID that you provide does not match
+  the actual owner of the bucket, the request fails with the HTTP status code
+  `403 Forbidden`."
+- Consistency: object writes, deletes and listings are strongly consistent, so
+  a version deleted is never listed again. "Bucket configurations have an
+  eventual consistency model": "if you delete a bucket and immediately list
+  all buckets, the deleted bucket might still appear". `DeleteBucket`'s success
+  is therefore the proof of absence, never a later `HeadBucket`, which may
+  still find the bucket for a while. A run in that window lists an empty
+  bucket and deletes it again, or finds it gone: `absent` either way.
+
+Backend bootstrap enables neither Object Lock nor MFA delete, so neither is
+handled. Incomplete multipart uploads are neither listed nor aborted:
+fffactory starts none. If anything else kept the bucket, `DeleteBucket` would
+fail and the bucket `remains`, never `absent`.
+
+The operator's credentials need, beyond the lock's:
+
+| Permission | Resource | For |
+| --- | --- | --- |
+| `s3:ListBucketVersions` | `arn:aws:s3:::BUCKET` | The listing. |
+| `s3:DeleteObject`, `s3:DeleteObjectVersion` | `arn:aws:s3:::BUCKET/*` | `DeleteObjects` by version ID. |
+| `s3:DeleteBucket` | `arn:aws:s3:::BUCKET` | The bucket. |
+
 ## Layer mapping
 
 | Layer | Module | Responsibility |
 | --- | --- | --- |
 | Domain | `src/domain/managed-terraform.ts` | `SUPPORTED_TERRAFORM`, the one pin; `ManagedTerraformState` and the `terraform` doctor check. Pure. |
-| Application | `src/application/provisioner.ts` | The `Provisioner` port: `plan`, `showPlan`, `applyPlan`, `output`; `ProvisioningFailed` and `diagnosticsFileOf`. |
+| Application | `src/application/provisioner.ts` | The `Provisioner` port: `plan` (in destroy mode when asked), `showPlan`, `applyPlan`, `output`; `ProvisioningFailed` and `diagnosticsFileOf`. |
 | Application | `src/application/managed-terraform.ts` | The read-only `ManagedTerraformProbe` port and `managedTerraformPaths`, the cache layout. |
 | Infrastructure | `src/infrastructure/terraform/installer.ts` | `managedTerraform`: platform names, download, SHA256SUMS and archive verification, atomic install, `inspect`. |
 | Infrastructure | `src/infrastructure/terraform/zip.ts` | Extracting one entry from a zip archive. |
 | Infrastructure | `src/infrastructure/terraform/runner.ts` | `terraformEnvironment` and `terraformRunner` over an injected `ProcessRunner`, stopping Terraform with SIGINT and a grace period. |
 | Infrastructure | `src/infrastructure/local-tool-probe.ts` | `bunProcessRunner` with its graceful stop, `stopsGracefully`, `stopRunningTools` and `killRunningTools`. |
 | Infrastructure | `src/infrastructure/terraform/provisioner.ts` | `terraformProvisioner`: per-operation directories, the Terraform commands, and failed commands' diagnostics files. |
-| Domain | `src/domain/resource-naming.ts`, `src/domain/stable-host-keys.ts` | The namespacing rule, the factory-ID and host-key tags, the state bucket's suffix; the stable host key check. Pure. |
+| Domain | `src/domain/resource-naming.ts`, `src/domain/stable-host-keys.ts` | The namespacing rule, the factory-ID and host-key tags, the state bucket's suffix, the log archive's derived bucket name; the stable host key check. Pure. |
 | Application | `src/application/project-terraform-inputs.ts` | factory.json projected into each root module's variables. |
 | Infrastructure | `src/infrastructure/terraform/resource-names.ts` | `NAMED_RESOURCES`, and the namespacing check over a Terraform JSON plan. |
 | Infrastructure | `assets/terraform/` | The Terraform modules and their provider lockfiles. |
-| Domain | `src/domain/backend-bootstrap.ts` | The create-only rule (`bootstrapPlanVerdict`, each offending change as a `ResourceChange`) and `BootstrapContext`; the state bucket's readiness rule, its TLS-only policy and its check, and `UnreadyBucket` (where the bucket is, what S3 reports and each setting it lacks). Pure; no text layout. |
+| Domain | `src/domain/backend-bootstrap.ts` | The create-only rule (`bootstrapPlanVerdict`, each offending change as a `ResourceChange`, and `createOnlyRefusal`, the read-back's verdict as `UnexpectedPlan`s, for backend bootstrap's and the log archive's plans) and `BootstrapContext`; the state bucket's readiness rule, its TLS-only policy and its check, the log archive's readiness rule (`ArchiveReadiness`, `missingArchiveHardening`, `unreadyArchive`), and `UnreadyBucket` (where the bucket is, what S3 reports and each setting it lacks). Pure; no text layout. |
 | Domain | `src/domain/factory-lock.ts` | The lock record, its key and break-log key, parsing, staleness (`isStale`, `lockAge`, `formatDuration`), and the break confirmation rule (`confirmsBreak`). Pure; no text layout. |
+| Domain | `src/domain/teardown.ts` | The guarded destroy plan's rule (`destroyPlanRefusal`, each refusal a summary, details and next action) and `VpcInventory`; the rest of teardown's rules are [teardown](teardown.md)'s. Pure. |
+| Infrastructure | `src/infrastructure/ec2-inventory.ts` | `ec2MachineInventory`'s `listVpcs`: the factory's tagged VPCs from `DescribeVpcs`, paged, within one deadline, a VPC without a well-formed ID or a failure `unavailable`. |
+| Domain | `src/domain/state-bucket-deletion.ts` | `DELETE_OBJECTS_LIMIT`, the order the bucket is emptied in, page by page with the lock's versions set aside (`deletionBatches`), then the lock's, in batches of their own, those no longer current oldest first and the current one alone and last (`lockBatches`), and how deleting it ended (`BucketDeletion`, and what became of the lock, `LockAfterDeletion`). Pure. |
 | CLI adapter | `src/cli/presentation/lock.ts` | The holder lines (`describeHeldLock`) and the lock refusal: `lockRefusalReport` in blocks for plan, apply and upgrade, and the unstyled `lockRefusal` the worker commands still print. |
 | Application | `src/application/bootstrap-backend.ts` | `bootstrapBackend` and `beginFactoryOperation`: the bootstrap plan approved as a `PlanReview`, an unready bucket returned as its `UnreadyBucket`; and `applySavedBootstrap`, a saved bootstrap plan's exact apply, its review shown as the same `PlanReview`. |
-| CLI adapter | `src/cli/presentation/plan.ts` | The bootstrap plan as shown (`bootstrapSection`), and as `plan` saves it (`savedBootstrapPlanReport`), and the unready bucket's refusal (`planRefusalReport`): what it lacks, the AWS CLI commands that complete it, and the warning that `put-bucket-policy` replaces the whole policy. |
+| CLI adapter | `src/cli/presentation/plan.ts` | The bootstrap plan as shown (`bootstrapSection`), and as `plan` saves it (`savedBootstrapPlanReport`), and the unready state bucket's and log archive's refusals (`planRefusalReport`): what it lacks, the AWS CLI commands that complete it, and the warning that `put-bucket-policy` replaces the whole policy. |
+| Application | `src/application/log-archive.ts` | The log archive's readiness (`archiveOf`, `archiveState`) and its create-only plan (`planArchive`, `archivePlanFile`, `readBackArchivePlan`), for the infrastructure stage. |
 | Application | `src/application/factory-lock.ts` | `stateBucketOf`, `lockHolder`, `acquireFactoryLock`, `releaseFactoryLock`, `settleFactoryLock`, `withFactoryLock`, `breakFactoryLock`. |
-| Application | `src/application/lock-store.ts`, `src/application/approval.ts`, `src/application/operator-prompt.ts` | The `LockStore`, `Approval` and `OperatorPrompt` ports. |
-| Infrastructure | `src/infrastructure/aws-s3-lock-store.ts` | `s3LockStore`: HeadBucket, the bucket's versioning, public access block, encryption and policy, conditional PutObject, GetObject and DeleteObject by version, PutObject of [operation records](plan-apply.md#operation-records) and HeadObject of the Terraform state, always with `ExpectedBucketOwner`. |
+| Application | `src/application/lock-store.ts`, `src/application/approval.ts`, `src/application/operator-prompt.ts` | The `LockStore` (the state bucket, and the log archive's existence and readiness: `FactoryBucket`, `ArchiveBucket`), `Approval` and `OperatorPrompt` ports. |
+| Infrastructure | `src/infrastructure/aws-s3-lock-store.ts` | `s3LockStore`: HeadBucket, the bucket's versioning, public access block, encryption and policy (and for the log archive its ownership controls and ABAC status too), conditional PutObject, GetObject and DeleteObject by version, PutObject of [operation records](plan-apply.md#operation-records), their ListObjectsV2 and GetObject for teardown ([teardown §Devices](teardown.md#devices)), and HeadObject of the Terraform state; and the bucket's deletion, ListObjectVersions page by page, each page's DeleteObjects by version before the next, then the lock's, and DeleteBucket, each failure `remains` by name and a 404 `absent`; always with `ExpectedBucketOwner`. |
 | Infrastructure | `src/infrastructure/aws-session.ts` | One deadline per port call, and AWS failures described by name and code. |
 | Infrastructure | `src/infrastructure/terminal-prompt.ts` | `terminalPrompt`: echoed and hidden questions on standard error, standard input; at a terminal both are read in raw mode, so Ctrl-C cancels a question rather than interrupting `fffactory`, and an echoed answer is echoed by the prompt. |
 | CLI adapter | `src/cli/main.ts` | Wires `managedTerraform()` as doctor's probe and the provisioner's installer, `terraformProvisioner`, `s3LockStore()`, `terminalPrompt(process.stdin, process.stderr)`, the host name and the clock, and `interruptible` (`src/cli/interrupts.ts`): on interrupt, says so on standard error, marks the command interrupted and stops running tools, waits up to `RETURN_GRACE_MS` for a command that waits on an interrupt (`waitsOnInterrupt`) to return, and kills them on a second signal. |
@@ -838,7 +1317,7 @@ environment for a profile and for the chain, SIGINT at the deadline, the
 exact text and mode of the private inputs, CLI configuration and backend
 files, literal backend values and refused setting names, the lockfile
 refusal, operation cleanup, stale operation directories removed, `-lock=false`
-only when asked, a failed command's standard error kept in a private diagnostics
+and `-destroy` only when asked, a failed command's standard error kept in a private diagnostics
 file it names and never in its message, old diagnostics removed, diagnostics that
 cannot be kept blocking nothing, a decoy
 `terraform` on `PATH` that must never
@@ -855,26 +1334,59 @@ rejected, adding accepted, malformed keys never echoed),
 `tests/domain/instance.test.ts` (the state bucket rule),
 `tests/application/project-terraform-inputs.test.ts` (every variable
 projected, the factory's own Tailscale reference and tag, an empty factory
-projecting no hosts, incomplete instances and renamed host keys refused),
+projecting no hosts, incomplete instances and renamed host keys refused; the
+archive's derived suffix, and an archive not enabled or an instance without
+its factory ID, account or Region refused; the factory root's
+`archive_bucket`, the derived name, or null for an archive disabled or absent),
 `tests/infrastructure/terraform/resource-names.test.ts` (names collected from
 JSON plans, unprefixed and unknown names and unclassified types reported, two
 factory IDs sharing no name) and `tests/assets/terraform/guardrails.test.ts`
-(the modules pass, each fixture fails with its violations, the lockfiles pin
+(the modules pass, a conditional document referenced by `[0]` passes, each
+fixture fails with its violations, the lockfiles pin
 the required provider version, each projection matches its root module's
-variables, and no validation of the `hosts` variable requires a host).
+variables, the archive bucket carries `prevent_destroy` and its module no
+lifecycle rule, Object Lock or KMS, and no validation of the `hosts` variable
+requires a host).
 `scripts/terraform-check.ts` runs the modules' `fmt`, `validate`, namespacing
-plans, the empty factory's plan and the removal plans with the managed
-Terraform in CI.
+plans, the archive plans' settings, the hosts' archive-writing policy with the
+archive enabled and its absence with it disabled, the empty factory's plan, the
+removal plans and the destroy plans
+(`scripts/terraform-destroy-check.ts`) with the managed Terraform in CI.
+Destroy plan: `tests/domain/teardown.test.ts` (hand-written plans: deletes,
+reads and no-ops passed; an update, a create, a replacement either way,
+`forget`, an unknown action and a mixed list refused, each as `ADDRESS
+(ACTIONS)` in the plan's order; root outputs deleted or left passed, a plan
+deleting only outputs passed, an output created, updated, read, replaced or
+changed by an unknown action refused as `output.NAME (ACTIONS)` after the
+resource changes, unreadable `output_changes` refused; an instance delete EC2 does not list, one
+listed for another host or without a well-formed host key tag (never echoed),
+one that names no instance, and every one with an empty inventory refused; an
+unreadable plan refused; an empty plan passed), `tests/domain/plan.test.ts`
+(`outputChanges`: by name in the plan's order, none without `output_changes`,
+an unreadable shape undefined), and
+`tests/infrastructure/ec2-inventory.test.ts` (the tagged VPC listing over
+stubbed calls: its filter, pages and session, none listed, a VPC without a
+well-formed ID, a failure by name and the deadline; and over the real SDK
+against `tests/support/stub-ec2-instances.ts`, which applies `DescribeVpcs`'
+tag filters, another factory's and an untagged VPC left out).
 First apply and lock: `tests/domain/backend-bootstrap.test.ts` (resource
 changes read, unreadable plans, the create-only rule; the readiness rule, the
 TLS-only policy check and policy, the unready bucket's location, readiness and
-missing settings in bootstrap's order),
+missing settings in bootstrap's order; `createOnlyRefusal`; the log archive's
+readiness, SSE-S3 rather than any encryption, and an unready archive carrying
+only its location),
 `tests/cli/presentation/plan.test.ts` (the bootstrap plan as shown, refused
 plans with each reason; the unready bucket's guidance, its commands in
-bootstrap's order and the whole-policy warning),
+bootstrap's order and the whole-policy warning; an unready log archive's
+guidance and commands in their order),
 `tests/domain/factory-lock.test.ts` (keys, record round trip, unreadable
 records, holder and breaker recorded in printable ASCII, age and staleness,
-confirmation by token only, the break entry), `tests/cli/presentation/lock.test.ts`
+confirmation by token only, the break entry),
+`tests/domain/state-bucket-deletion.test.ts` (a page's lock versions and
+delete markers set aside; the break log and another factory's lock not the
+lock; batches of at most 1000; the lock's versions and delete markers, listed
+apart, no longer current oldest first by when written, those written in the
+same instant in reverse listing order, then the current one alone, last), `tests/cli/presentation/lock.test.ts`
 (holder lines, a stale and an unreadable lock, the refusal), `tests/application/bootstrap-backend.test.ts` (an
 existing bucket skipped, a half-bootstrapped one refused before any plan or
 lock, a missing one planned, shown, approved and applied, a
@@ -891,10 +1403,28 @@ version, a failed log write),
 `tests/infrastructure/aws-s3-lock-store.test.ts` (stubbed calls, and the real
 SDK against `tests/support/stub-s3.ts`, a local S3 stand-in with versioned,
 never-versioned and suspended buckets: HeadBucket by status, the readiness
-settings, conditional writes, reads, deletes by version, the break log, a
+settings, the log archive's HeadBucket answers named for the archive, its
+ownership controls, ABAC status and SSE-S3 read and lacking, conditional writes, reads, deletes by version, the break log, a
 never-versioned or suspended bucket refusing the lock and keeping nothing, a
 leftover `null`-version lock held and broken, error names, a missing profile, a deadline and a
-closed port), `tests/infrastructure/terminal-prompt.test.ts` and
+closed port; deleting the bucket: each page deleted before the next is listed, the lock's
+versions after every other's, oldest first and the current one alone and last, a current
+delete marker the SDK lists apart deleted after the version under it, then the bucket, a
+version S3 would not delete keeping the lock held and the bucket while every other page is
+still listed and deleted, the lock's own versions refused or their call failing (`unknown`),
+the lock's calls stopping at the first refusal, its current version and the bucket never sent,
+unprintable codes, a failed or timed-out call stopping at once, its count unknown before the
+last page, a failed listing on the first page or a later one, a markerless listing, a keyless
+version or one without `LastModified`, `BucketNotEmpty` and
+other `DeleteBucket` refusals (`deleted`), a 404 at each step, a deadline per page and per call;
+and against the stub a used bucket with records, a break log, state versions, delete markers
+and the lock emptied and deleted, `ExpectedBucketOwner` on every request, another account's
+bucket untouched, 1500 versions deleted page by page, the lock's versions oldest first and
+the current one alone and last, a lock released by a delete marker and taken again deleted
+in that order, a refused version leaving the lock held, a version written after the listing,
+and a bucket already gone; and the stub itself, as S3, resuming a listing after a deleted
+version, refusing a version marker it never gave, and making the version under a current
+delete marker current once that marker is deleted), `tests/infrastructure/terminal-prompt.test.ts` and
 `tests/cli/lock.test.ts` (confirmation by `--lock-id` or typed ID only, the
 log entry, a lock replaced while confirming, the account refusal before S3).
 
@@ -905,4 +1435,9 @@ and namespacing by [#96](https://github.com/yaunder/factory/issues/96); host
 user data by [#97](https://github.com/yaunder/factory/issues/97); first apply
 and the factory-wide lock by [#98](https://github.com/yaunder/factory/issues/98); the lock's
 interruption rule, operation records and the state revision by
-[#99](https://github.com/yaunder/factory/issues/99).
+[#99](https://github.com/yaunder/factory/issues/99); the hosts' read of the
+credential references by [#68](https://github.com/yaunder/fffactory/issues/68);
+deleting the state bucket by [#82](https://github.com/yaunder/fffactory/issues/82); the
+destroy plan and the tagged VPC listing by [#83](https://github.com/yaunder/fffactory/issues/83); the
+`archive/` root by [#111](https://github.com/yaunder/fffactory/issues/111); the hosts'
+archive-writing policy by [#112](https://github.com/yaunder/fffactory/issues/112).

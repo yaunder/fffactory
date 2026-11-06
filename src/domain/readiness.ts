@@ -1,9 +1,10 @@
 /**
  * Readiness after software: what `host verify` reports (`docs/specs/readiness.md`). The
  * software checks say whether the release installed on a worker works; the enrollments say
- * which human steps it still waits for (GitHub and the model providers). The CLI names each
- * one's exact next action itself. Enrollment is guided, never automated: fffactory only
- * checks it.
+ * which accounts it still waits for (GitHub and the model providers). The CLI names each
+ * one's exact next action itself: a human login on the worker, or, for an account whose API
+ * credential factory.json delivers to it, storing a valid one. fffactory never performs a
+ * human login: it only checks it.
  */
 import {
   array,
@@ -19,16 +20,29 @@ import {
   string,
   TOKEN,
 } from "./protocol-fields";
+import type { SecretName } from "./secrets";
 
 /**
- * The accounts a worker needs a human to enroll and `host verify` checks, in the order they
- * are reported. Paseo clients are not among them yet: see `PASEO_CLIENTS`.
+ * The accounts a worker needs enrolled and `host verify` checks, in the order they are
+ * reported, each with the API credential that can be delivered for it: what it is and the
+ * `fffactory secret set` name that stores it. Paseo clients are not among them yet: see
+ * `PASEO_CLIENTS`.
  */
 export const ENROLLMENTS = [
-  { id: "github", title: "GitHub" },
-  { id: "openai", title: "OpenAI Codex" },
-  { id: "anthropic", title: "Claude Code" },
-] as const;
+  { id: "github", title: "GitHub", credential: "GitHub token", secret: "github-token" },
+  { id: "openai", title: "OpenAI Codex", credential: "OpenAI API key", secret: "openai-api-key" },
+  {
+    id: "anthropic",
+    title: "Claude Code",
+    credential: "Anthropic API key",
+    secret: "anthropic-api-key",
+  },
+] as const satisfies readonly {
+  readonly id: string;
+  readonly title: string;
+  readonly credential: string;
+  readonly secret: SecretName;
+}[];
 export type EnrollmentId = (typeof ENROLLMENTS)[number]["id"];
 const ENROLLMENT_IDS: readonly EnrollmentId[] = ENROLLMENTS.map(({ id }) => id);
 
@@ -49,14 +63,19 @@ export type EnrollmentState = (typeof ENROLLMENT_STATES)[number];
 /** The runtime account every credential belongs to. */
 export const RUNTIME_ACCOUNT = "factory";
 
-/** What a human does to enroll one account on one worker. */
+/**
+ * What an operator does to enroll one account on one worker: log in there and run its
+ * commands, or, for a delivered account, run them on the workstation.
+ */
 export interface NextAction {
-  // TODO(re-evaluate when the status report schema next bumps its version): drop the tailnet-policy caveat from NextAction.summary; WorkerEnrollment.requirement carries it.
   /** Published wording: status's `next_action.summary` and `details` carry it. */
   readonly summary: string;
-  /** How to log in to the worker as the runtime account. */
-  readonly login: string;
-  /** The commands to run there, in order. */
+  /**
+   * How to log in to the worker as the runtime account; null for a delivered account, whose
+   * commands run where fffactory does.
+   */
+  readonly login: string | null;
+  /** The commands to run, in order. */
   readonly commands: readonly string[];
 }
 
@@ -94,32 +113,71 @@ export function runtimeLogin(hostname: string): string {
 
 /** Logging in as `factory` is tailnet SSH policy's to allow, an administrator's step. */
 export const RUNTIME_LOGIN_POLICY = `tailnet SSH policy must let you log in as \`${RUNTIME_ACCOUNT}\``;
-const POLICY = `(${RUNTIME_LOGIN_POLICY})`;
 
 /**
- * The exact steps that enroll `id` on the worker `hostname`. Only the CLI makes them, from the
- * hostname it resolved: a worker reports states, never text an operator is told to run.
+ * GitHub's check, as `host verify` runs it and the steps end with it: the active account only,
+ * so a stale stored account does not fail an active one that works.
  */
-export function enrollmentNextAction(id: EnrollmentId, hostname: string): NextAction {
+export const GITHUB_STATUS: readonly string[] = [
+  "gh",
+  "auth",
+  "status",
+  "--hostname",
+  "github.com",
+  "--active",
+];
+
+/** Each account's `ENROLLMENTS` entry, by its `id`. */
+const BY_ID = Object.fromEntries(ENROLLMENTS.map((entry) => [entry.id, entry])) as Readonly<
+  Record<EnrollmentId, (typeof ENROLLMENTS)[number]>
+>;
+
+/** `id`'s `ENROLLMENTS` entry. */
+export function enrollmentOf(id: EnrollmentId): (typeof ENROLLMENTS)[number] {
+  return BY_ID[id];
+}
+
+/** A delivered account's credential, refused by the worker: store a valid one and apply it. */
+function deliveredNextAction(id: EnrollmentId, hostname: string): NextAction {
+  const { credential, secret } = enrollmentOf(id);
+  return {
+    summary: `Replace the ${credential}, which ${hostname} did not accept`,
+    login: null,
+    commands: [`fffactory secret set ${secret}`, "fffactory apply"],
+  };
+}
+
+/**
+ * The exact steps that enroll `id` on the worker `hostname`: for an account factory.json
+ * `delivered` to it, storing a valid credential and applying it; otherwise a human login there.
+ * Only the CLI makes them, from the hostname it resolved and factory.json's delivered accounts:
+ * a worker reports states, never text an operator is told to run.
+ */
+export function enrollmentNextAction(
+  id: EnrollmentId,
+  hostname: string,
+  delivered: boolean,
+): NextAction {
+  if (delivered) return deliveredNextAction(id, hostname);
   switch (id) {
     case "github":
       return {
-        summary: `Authenticate GitHub as ${RUNTIME_ACCOUNT} on ${hostname} ${POLICY}`,
+        summary: `Authenticate GitHub as ${RUNTIME_ACCOUNT} on ${hostname}`,
         login: runtimeLogin(hostname),
         commands: [
           "gh auth login --hostname github.com --git-protocol https --web",
-          "gh auth status",
+          GITHUB_STATUS.join(" "),
         ],
       };
     case "openai":
       return {
-        summary: `Log in to OpenAI Codex as ${RUNTIME_ACCOUNT} on ${hostname} ${POLICY}`,
+        summary: `Log in to OpenAI Codex as ${RUNTIME_ACCOUNT} on ${hostname}`,
         login: runtimeLogin(hostname),
         commands: ["codex login --device-auth", "codex login status"],
       };
     case "anthropic":
       return {
-        summary: `Log in to Claude Code as ${RUNTIME_ACCOUNT} on ${hostname} ${POLICY}`,
+        summary: `Log in to Claude Code as ${RUNTIME_ACCOUNT} on ${hostname}`,
         login: runtimeLogin(hostname),
         commands: ["claude auth login", "claude auth status"],
       };
@@ -131,6 +189,8 @@ export interface EnrollmentReport {
   readonly id: EnrollmentId;
   readonly title: string;
   readonly state: EnrollmentState;
+  /** factory.json delivers the account's API credential to the worker. */
+  readonly delivered: boolean;
   /** Null exactly when enrolled. */
   readonly next_action: NextAction | null;
 }
@@ -142,16 +202,23 @@ function stateOf(verification: Verification, id: EnrollmentId): EnrollmentState 
 
 /**
  * Every account `ENROLLMENTS` names, in its order, as `verification` found it on the worker
- * `hostname` the CLI resolved; an account the worker did not report is `unknown`.
+ * `hostname` the CLI resolved; an account the worker did not report is `unknown`. `delivered`
+ * is factory.json's (`deliveredAccounts`), never the worker's.
  */
-export function enrollmentReport(verification: Verification, hostname: string): EnrollmentReport[] {
+export function enrollmentReport(
+  verification: Verification,
+  hostname: string,
+  delivered: readonly EnrollmentId[],
+): EnrollmentReport[] {
   return ENROLLMENTS.map(({ id, title }) => {
     const state = stateOf(verification, id);
+    const isDelivered = delivered.includes(id);
     return {
       id,
       title,
       state,
-      next_action: state === "enrolled" ? null : enrollmentNextAction(id, hostname),
+      delivered: isDelivered,
+      next_action: state === "enrolled" ? null : enrollmentNextAction(id, hostname, isDelivered),
     };
   });
 }
@@ -180,7 +247,8 @@ export function pendingEnrollmentLines(report: readonly EnrollmentReport[]): str
  * wording: the sentence in status's `details` and a dispatch gate's next action.
  */
 export function describeNextAction(action: NextAction): string {
-  const steps = [action.login, ...action.commands].map((command) => `\`${command}\``);
+  const login = action.login === null ? [] : [action.login];
+  const steps = [...login, ...action.commands].map((command) => `\`${command}\``);
   return `${action.summary}: run ${steps.join(", then ")}`;
 }
 
@@ -192,17 +260,31 @@ export interface EnrollmentAccount {
 }
 
 /**
+ * One delivered account still to enroll on a worker: the worker did not accept its credential,
+ * which `fffactory secret set SECRET` replaces and the next apply delivers.
+ */
+export interface DeliveredEnrollment {
+  readonly id: EnrollmentId;
+  readonly title: string;
+  /** What the credential is, such as `GitHub token`. */
+  readonly credential: string;
+  readonly secret: SecretName;
+}
+
+/**
  * A worker's enrollment grouped for an operator: one login to the runtime account, what that
  * login requires (`tailnet_ssh_as_runtime`: tailnet SSH policy must let the operator log in as
- * `factory`, `RUNTIME_LOGIN_POLICY`), then each account still to enroll, in `ENROLLMENTS`'
- * order. The structure human output renders from; status's published `details` and
- * `next_action` keep their own wording.
+ * `factory`, `RUNTIME_LOGIN_POLICY`), then each account still to enroll there, in
+ * `ENROLLMENTS`' order; and apart, each delivered account still to enroll, whose credential is
+ * replaced from the workstation. The structure human output renders from; status's published
+ * `details` and `next_action` keep their own wording.
  */
 export interface WorkerEnrollment {
   readonly hostname: string;
   readonly login: string;
   readonly requirement: "tailnet_ssh_as_runtime";
   readonly accounts: readonly EnrollmentAccount[];
+  readonly delivered: readonly DeliveredEnrollment[];
 }
 
 /** `report`'s accounts still to enroll on the worker `hostname` the CLI resolved, grouped. */
@@ -210,14 +292,25 @@ export function workerEnrollment(
   report: readonly EnrollmentReport[],
   hostname: string,
 ): WorkerEnrollment {
+  const pending = pendingEnrollment(report);
   return {
     hostname,
     login: runtimeLogin(hostname),
     requirement: "tailnet_ssh_as_runtime",
-    accounts: pendingEnrollment(report).flatMap(({ id, title, next_action }) =>
-      next_action === null ? [] : [{ id, title, commands: [...next_action.commands] }],
+    accounts: pending.flatMap(({ id, title, delivered, next_action }) =>
+      delivered || next_action === null ? [] : [{ id, title, commands: [...next_action.commands] }],
     ),
+    delivered: pending.flatMap(({ id, title, delivered }) => {
+      if (!delivered) return [];
+      const { credential, secret } = enrollmentOf(id);
+      return [{ id, title, credential, secret }];
+    }),
   };
+}
+
+/** How many accounts `enrollment` still has to enroll, by login or by a delivered credential. */
+export function pendingCount(enrollment: WorkerEnrollment): number {
+  return enrollment.accounts.length + enrollment.delivered.length;
 }
 
 /**

@@ -1,0 +1,30 @@
+{
+  "format": 1,
+  "epoch": "20261030T101500Z-0123456789abcdef",
+  "seq": 2,
+  "run_started_at": "2026-10-30T10:16:00.000Z",
+  "captures": [
+    {
+      "source": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "path": "/home/factory/.claude/projects/-home-factory--paseo-worktrees-1zu9oxdf-x/0b6e1c3a-session.jsonl",
+      "generation": 1,
+      "offset": 4096,
+      "length": 512,
+      "blob": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "base_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "prefix_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "mtime_ms": 1793355360000
+    },
+    {
+      "source": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "path": "/home/factory/.claude/projects/-home-factory--paseo-worktrees-1zu9oxdf-x/0b6e1c3a-session/subagents/agent-1.meta.json",
+      "generation": 3,
+      "offset": 0,
+      "length": 120,
+      "blob": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "base_sha256": null,
+      "prefix_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "mtime_ms": 1793355350000
+    }
+  ]
+}

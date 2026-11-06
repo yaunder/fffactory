@@ -142,6 +142,56 @@ describe("setSecret", () => {
     expect(secrets.writes).toEqual([]);
   });
 
+  test.each([
+    ["github-token", "github_token_secret", "GitHub token"],
+    ["anthropic-api-key", "anthropic_api_key_secret", "Anthropic API key"],
+    ["openai-api-key", "openai_api_key_secret", "OpenAI API key"],
+  ])(
+    "the API credential %s is stored factory-wide under credentials.%s, and rotates on rerun",
+    async (name, field, what) => {
+      const { deps, store, secrets } = setup();
+      const arn = `arn:aws:secretsmanager:eu-west-2:123456789012:secret:fff-abcd1234/${name}-AbCdEf`;
+      const first = await setSecret(deps, request({ name }));
+      expect(first).toMatchObject({ kind: "stored", arn, created: true, reference: "added" });
+      expect(secrets.writes).toEqual([
+        {
+          name: `fff-abcd1234/${name}`,
+          description: `${what} of factory fff-abcd1234`,
+          tags: { "fffactory:factory-id": "fff-abcd1234", "fffactory:managed-by": "fffactory" },
+          region: "eu-west-2",
+          credentials: { source: "chain" },
+          value: VALUE,
+        },
+      ]);
+      const written = store.files[PATH] ?? "";
+      expect(JSON.parse(written)).toEqual({ ...DOCUMENT, credentials: { [field]: arn } });
+      expect(written).not.toContain(VALUE);
+      expect(JSON.stringify(first)).not.toContain(VALUE);
+
+      const writes = store.writes.length;
+      const again = await setSecret(deps, request({ name }));
+      expect(again).toMatchObject({ kind: "stored", arn, created: false, reference: "unchanged" });
+      expect(secrets.writes.map((write) => write.name)).toEqual([
+        `fff-abcd1234/${name}`,
+        `fff-abcd1234/${name}`,
+      ]);
+      expect(store.writes).toHaveLength(writes);
+    },
+  );
+
+  test.each(["github-token", "anthropic-api-key", "openai-api-key"])(
+    "the API credential %s takes no --host, refused before reaching AWS",
+    async (name) => {
+      const { deps, identity, secrets } = setup();
+      expect(await setSecret(deps, request({ name, host: "builder-1" }))).toEqual({
+        kind: "refused",
+        message: `${name} belongs to the whole factory and takes no --host`,
+      });
+      expect(identity.requests).toEqual([]);
+      expect(secrets.writes).toEqual([]);
+    },
+  );
+
   test("setting it again stores a new value and leaves factory.json as it is", async () => {
     const { deps, store } = setup();
     await setSecret(deps, request());

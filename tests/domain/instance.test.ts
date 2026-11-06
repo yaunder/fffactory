@@ -1,7 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import {
   assessCompleteness,
+  deliveredAccounts,
   type FactoryInstance,
+  type HostKey,
   parseFactoryId,
   parseFactoryInstance,
   parseHostKey,
@@ -259,6 +261,123 @@ describe("parseFactoryInstance", () => {
     });
   });
 
+  describe("credential references", () => {
+    const GITHUB = "arn:aws:secretsmanager:us-east-1:123456789012:secret:f/github-token-AbCdEf";
+    const ANTHROPIC = "arn:aws:secretsmanager:us-east-1:123456789012:secret:f/anthropic-AbCdEf";
+    const OPENAI = "arn:aws:secretsmanager:us-east-1:123456789012:secret:f/openai-AbCdEf";
+
+    test("accepts all three references and every interactive login", () => {
+      const instance = parsed({
+        ...completeDocument(),
+        credentials: {
+          github_token_secret: GITHUB,
+          anthropic_api_key_secret: ANTHROPIC,
+          openai_api_key_secret: OPENAI,
+        },
+        hosts: [{ key: "a", interactive_logins: ["github", "anthropic", "openai"] }],
+      });
+      expect(String(instance.credentials?.github_token_secret)).toBe(GITHUB);
+      expect(instance.hosts?.[0]?.interactive_logins).toEqual(["github", "anthropic", "openai"]);
+    });
+
+    test("accepts an empty credentials object and an empty interactive login list", () => {
+      expect(
+        parseFactoryInstance({
+          schema_version: 1,
+          credentials: {},
+          hosts: [{ key: "a", interactive_logins: [] }],
+        }).valid,
+      ).toBe(true);
+    });
+
+    test.each([
+      "credentials.github_token_secret",
+      "credentials.anthropic_api_key_secret",
+      "credentials.openai_api_key_secret",
+    ])("rejects a raw secret value in %s without echoing it", (path) => {
+      const field = path.split(".")[1] as string;
+      const issues = issuesFor({
+        schema_version: 1,
+        credentials: { [field]: "sk-ant-api03-pasted-material" },
+      });
+      expect(issues).toEqual([{ path, message: expect.stringContaining("Secrets Manager") }]);
+      expect(JSON.stringify(issues)).not.toContain("pasted");
+    });
+
+    test("rejects an unknown credential", () => {
+      expect(
+        issuesFor({ schema_version: 1, credentials: { gitlab_token_secret: GITHUB } }),
+      ).toEqual([
+        { path: "credentials.gitlab_token_secret", message: "is not a recognized field" },
+      ]);
+    });
+
+    test("rejects credentials that are not an object", () => {
+      expect(issuesFor({ schema_version: 1, credentials: [GITHUB] })).toEqual([
+        { path: "credentials", message: "must be an object" },
+      ]);
+    });
+
+    test.each(["Region", "account"] as const)(
+      "rejects a credential in another %s, naming the field only",
+      (kind) => {
+        const arn =
+          kind === "Region"
+            ? "arn:aws:secretsmanager:eu-west-2:123456789012:secret:f/elsewhere-AbCdEf"
+            : "arn:aws:secretsmanager:us-east-1:210987654321:secret:f/elsewhere-AbCdEf";
+        const message =
+          kind === "Region"
+            ? "must be a secret in the factory Region, aws.region"
+            : "must be a secret in the factory account, aws.account_id";
+        const issues = issuesFor({
+          ...completeDocument(),
+          credentials: {
+            github_token_secret: arn,
+            anthropic_api_key_secret: arn,
+            openai_api_key_secret: arn,
+          },
+        });
+        expect(issues).toEqual([
+          { path: "credentials.github_token_secret", message },
+          { path: "credentials.anthropic_api_key_secret", message },
+          { path: "credentials.openai_api_key_secret", message },
+        ]);
+        expect(JSON.stringify(issues)).not.toContain("elsewhere");
+      },
+    );
+
+    test("rejects an unknown interactive login without echoing it", () => {
+      expect(
+        issuesFor({ schema_version: 1, hosts: [{ key: "a", interactive_logins: ["gitlab"] }] }),
+      ).toEqual([
+        {
+          path: "hosts[0].interactive_logins[0]",
+          message: "must be one of github, openai, anthropic",
+        },
+      ]);
+    });
+
+    test.each([
+      ["a string", "github", "hosts[0].interactive_logins", "must be an array"],
+      ["a number", [1], "hosts[0].interactive_logins[0]", "must be a string"],
+    ])("rejects interactive logins holding %s", (_kind, logins, path, message) => {
+      expect(
+        issuesFor({ schema_version: 1, hosts: [{ key: "a", interactive_logins: logins }] }),
+      ).toEqual([{ path, message }]);
+    });
+
+    test("rejects a duplicate interactive login", () => {
+      expect(
+        issuesFor({
+          schema_version: 1,
+          hosts: [{ key: "a", interactive_logins: ["openai", "github", "openai"] }],
+        }),
+      ).toEqual([
+        { path: "hosts[0].interactive_logins[2]", message: 'duplicates account "openai"' },
+      ]);
+    });
+  });
+
   describe("host keys", () => {
     test("rejects duplicate host keys", () => {
       const issues = issuesFor({
@@ -298,6 +417,118 @@ describe("parseFactoryInstance", () => {
         parseFactoryInstance({ schema_version: 1, state_backend: { bucket: "abc" } }).valid,
       ).toBe(true);
       expect(parseFactoryInstance({ schema_version: 1, factory_id: "abc" }).valid).toBe(true);
+    });
+
+    describe("never the log archive's bucket (instance configuration §State bucket)", () => {
+      // completeDocument's factory ID, account and Region derive this archive name.
+      const ARCHIVE = "yaunder-v2-logs-123456789012-us-east-1-an";
+      const reserved = {
+        path: "state_backend.bucket",
+        message:
+          "must not be <factory_id>-logs-<aws.account_id>-<aws.region>-an, the log archive's bucket name, reserved for it even while it is not enabled: teardown deletes the state bucket and keeps the archive",
+      };
+
+      test.each([
+        ["enabled", { log_archive: { enabled: true } }],
+        ["disabled", { log_archive: { enabled: false } }],
+        ["absent", {}],
+      ])("refuses the archive's derived name with the archive %s", (_, archive) => {
+        const document = { ...completeDocument(), ...archive, state_backend: { bucket: ARCHIVE } };
+        expect(issuesFor(document)).toEqual([reserved]);
+      });
+
+      test("is judged once the factory ID, account and Region are well formed", () => {
+        const { aws: _, ...withoutAws } = completeDocument();
+        expect(
+          parseFactoryInstance({ ...withoutAws, state_backend: { bucket: ARCHIVE } }).valid,
+        ).toBe(true);
+      });
+    });
+  });
+
+  describe("log archive", () => {
+    const inRegion = (region: string, enabled: unknown) => ({
+      schema_version: 1,
+      aws: { account_id: "123456789012", region },
+      log_archive: { enabled },
+    });
+
+    test.each([true, false])("accepts enabled %p", (enabled) => {
+      expect(parsed({ ...completeDocument(), log_archive: { enabled } }).log_archive).toEqual({
+        enabled,
+      });
+    });
+
+    test("rejects an enabled flag that is not a boolean", () => {
+      expect(issuesFor({ schema_version: 1, log_archive: { enabled: "true" } })).toEqual([
+        { path: "log_archive.enabled", message: "must be a boolean" },
+      ]);
+    });
+
+    test("requires the enabled flag of a declared archive", () => {
+      expect(issuesFor({ schema_version: 1, log_archive: {} })).toEqual([
+        { path: "log_archive.enabled", message: "is required" },
+      ]);
+    });
+
+    test("rejects a configured bucket: the archive's name is derived, never chosen", () => {
+      expect(
+        issuesFor({ schema_version: 1, log_archive: { enabled: true, bucket: "logs" } }),
+      ).toEqual([{ path: "log_archive.bucket", message: "is not a recognized field" }]);
+    });
+
+    test("rejects a log archive that is not an object", () => {
+      expect(issuesFor({ schema_version: 1, log_archive: true })).toEqual([
+        { path: "log_archive", message: "must be an object" },
+      ]);
+    });
+
+    test.each(["me-south-1", "me-central-1"])(
+      "refuses an enabled archive in %s, which lacks the account-regional namespace",
+      (region) => {
+        expect(issuesFor(inRegion(region, true))).toEqual([
+          {
+            path: "log_archive.enabled",
+            message: `must not be true in ${region}: S3's account-regional namespace, which names the log archive, is not available there`,
+          },
+        ]);
+      },
+    );
+
+    describe("its derived bucket name within S3's 63 characters", () => {
+      // A 20-character factory ID leaves 21 for the Region: 20 + "-logs-" + 12 + "-" + 21 + "-an".
+      const named = (region: string, enabled: unknown) => ({
+        ...inRegion(region, enabled),
+        factory_id: "a".repeat(20),
+      });
+      const longest = `us-${"a".repeat(16)}-1`;
+      const tooLong = `us-${"a".repeat(17)}-1`;
+
+      test("accepts an enabled archive whose name is exactly 63 characters", () => {
+        expect(longest).toHaveLength(21);
+        expect(parseFactoryInstance(named(longest, true)).valid).toBe(true);
+      });
+
+      test("refuses an enabled archive whose name would exceed them", () => {
+        expect(issuesFor(named(tooLong, true))).toEqual([
+          {
+            path: "log_archive.enabled",
+            message:
+              "must not be true while the log archive's bucket name, <factory_id>-logs-<aws.account_id>-<aws.region>-an, would be 64 characters, beyond S3's 63",
+          },
+        ]);
+      });
+
+      test("accepts a disabled archive however long the name would be", () => {
+        expect(parseFactoryInstance(named(tooLong, false)).valid).toBe(true);
+      });
+    });
+
+    test("accepts a disabled archive in a Region without the namespace, and one with no Region yet", () => {
+      expect(parseFactoryInstance(inRegion("me-south-1", false)).valid).toBe(true);
+      expect(
+        parseFactoryInstance({ schema_version: 1, log_archive: { enabled: true } }).valid,
+      ).toBe(true);
     });
   });
 
@@ -353,9 +584,75 @@ describe("parseFactoryInstance", () => {
   });
 });
 
+describe("deliveredAccounts", () => {
+  const GITHUB = "arn:aws:secretsmanager:us-east-1:123456789012:secret:f/github-token-AbCdEf";
+  const ANTHROPIC = "arn:aws:secretsmanager:us-east-1:123456789012:secret:f/anthropic-AbCdEf";
+  const OPENAI = "arn:aws:secretsmanager:us-east-1:123456789012:secret:f/openai-AbCdEf";
+  const ALL = {
+    github_token_secret: GITHUB,
+    anthropic_api_key_secret: ANTHROPIC,
+    openai_api_key_secret: OPENAI,
+  };
+  const key = (value: string) => value as HostKey;
+
+  function delivered(credentials: unknown, hosts: unknown[], host = "a") {
+    const document = { ...completeDocument(), hosts };
+    if (credentials !== undefined) Object.assign(document, { credentials });
+    return deliveredAccounts(parsed(document), key(host)).map(({ id, secret }) => [
+      id,
+      String(secret),
+    ]);
+  }
+
+  test("a factory without credentials delivers nothing", () => {
+    expect(delivered(undefined, [{ key: "a" }])).toEqual([]);
+    expect(delivered({}, [{ key: "a" }])).toEqual([]);
+  });
+
+  test("every referenced account is delivered to a host listing no interactive login, in enrollment order", () => {
+    expect(delivered(ALL, [{ key: "a" }])).toEqual([
+      ["github", GITHUB],
+      ["openai", OPENAI],
+      ["anthropic", ANTHROPIC],
+    ]);
+    expect(delivered(ALL, [{ key: "a", interactive_logins: [] }])).toHaveLength(3);
+  });
+
+  test("an account the host keeps on interactive login is not delivered to it", () => {
+    expect(delivered(ALL, [{ key: "a", interactive_logins: ["anthropic", "github"] }])).toEqual([
+      ["openai", OPENAI],
+    ]);
+    expect(
+      delivered(ALL, [{ key: "a", interactive_logins: ["github", "openai", "anthropic"] }]),
+    ).toEqual([]);
+  });
+
+  test("an account without a reference is never delivered, listed or not", () => {
+    const githubOnly = { github_token_secret: GITHUB };
+    expect(delivered(githubOnly, [{ key: "a" }])).toEqual([["github", GITHUB]]);
+    expect(delivered(githubOnly, [{ key: "a", interactive_logins: ["openai"] }])).toEqual([
+      ["github", GITHUB],
+    ]);
+  });
+
+  test("each host's interactive logins apply to that host alone", () => {
+    const hosts = [{ key: "a", interactive_logins: ["github"] }, { key: "b" }];
+    expect(delivered({ github_token_secret: GITHUB }, hosts, "a")).toEqual([]);
+    expect(delivered({ github_token_secret: GITHUB }, hosts, "b")).toEqual([["github", GITHUB]]);
+  });
+
+  test("a host factory.json does not declare is delivered nothing", () => {
+    expect(delivered(ALL, [{ key: "a" }], "gone")).toEqual([]);
+  });
+});
+
 describe("assessCompleteness", () => {
   test("a complete document has nothing missing", () => {
-    expect(assessCompleteness(parsed(completeDocument()))).toEqual({ complete: true, missing: [] });
+    expect(assessCompleteness(parsed(completeDocument()))).toEqual({
+      complete: true,
+      missing: [],
+      commands: {},
+    });
   });
 
   test("a minimal partial document lists every field still needed", () => {
@@ -375,6 +672,7 @@ describe("assessCompleteness", () => {
         "tailscale.auth_key_secret",
         "hosts",
       ],
+      commands: {},
     });
   });
 
@@ -382,27 +680,73 @@ describe("assessCompleteness", () => {
     const complete = completeDocument();
     const tailscale = complete.tailscale as Record<string, unknown>;
     const document = { ...complete, tailscale: { ...tailscale, admin_client_secret: SECRET_ARN } };
-    expect(assessCompleteness(parsed(document))).toEqual({ complete: true, missing: [] });
+    expect(assessCompleteness(parsed(document))).toEqual({
+      complete: true,
+      missing: [],
+      commands: {},
+    });
+  });
+
+  test("the log archive is optional, enabled or not", () => {
+    for (const enabled of [true, false]) {
+      const document = { ...completeDocument(), log_archive: { enabled } };
+      expect(assessCompleteness(parsed(document)).complete).toBe(true);
+    }
+  });
+
+  test("credential references and interactive logins are optional", () => {
+    const complete = completeDocument();
+    const [host] = complete.hosts as Record<string, unknown>[];
+    const document = {
+      ...complete,
+      credentials: { github_token_secret: SECRET_ARN },
+      hosts: [{ ...host, interactive_logins: ["openai"] }],
+    };
+    expect(assessCompleteness(parsed(document))).toEqual({
+      complete: true,
+      missing: [],
+      commands: {},
+    });
   });
 
   test("an empty host list is complete: a factory may declare no worker", () => {
     expect(assessCompleteness(parsed({ ...completeDocument(), hosts: [] }))).toEqual({
       complete: true,
       missing: [],
+      commands: {},
     });
   });
 
   test("an absent host list is still needed: an empty one declares no worker on purpose", () => {
     const { hosts: _hosts, ...document } = completeDocument();
-    expect(assessCompleteness(parsed(document))).toEqual({ complete: false, missing: ["hosts"] });
+    expect(assessCompleteness(parsed(document))).toEqual({
+      complete: false,
+      missing: ["hosts"],
+      commands: {},
+    });
   });
 
-  test("lists machine fields missing from a declared host", () => {
+  test("lists machine fields and the Paseo password missing from a declared host", () => {
     const document = { ...completeDocument(), hosts: [{ key: "a" }] };
     expect(assessCompleteness(parsed(document)).missing).toEqual([
       "hosts[0].instance_type",
       "hosts[0].root_volume_gib",
+      "hosts[0].paseo_password_secret",
     ]);
+  });
+
+  test("every host needs a Paseo password, named with the command that stores it", () => {
+    const complete = completeDocument();
+    const [host] = complete.hosts as Record<string, unknown>[];
+    const { paseo_password_secret: _password, ...passwordless } = host ?? {};
+    const document = { ...complete, hosts: [host, { ...passwordless, key: "builder-2" }] };
+    expect(assessCompleteness(parsed(document))).toEqual({
+      complete: false,
+      missing: ["hosts[1].paseo_password_secret"],
+      commands: {
+        "hosts[1].paseo_password_secret": "fffactory secret set paseo-password --host builder-2",
+      },
+    });
   });
 
   test("an enabled dispatch declaration requires every real schedule input", () => {

@@ -3,18 +3,32 @@
  * `docs/specs/dispatch.md`), as in-memory fakes that answer as given and record every call, so
  * a test can tell what apply asked a worker's Paseo and dispatch, and what it never asked.
  */
-import type { AgentActivity, ControlPlane } from "../../src/application/control-plane";
+import type { ControlPlane } from "../../src/application/control-plane";
+import type { AgentState, AgentsObservation, WorkerAgents } from "../../src/domain/control-plane";
 import type { WorkflowAdoption, WorkflowQueue } from "../../src/application/workflow-queue";
 import type { DispatchInspection } from "../../src/domain/dispatch-projection";
 import type { HostProjection } from "../../src/domain/host-projection";
+import type { RepositoryRegistration } from "../../src/domain/repository-registration";
+
+/** A worker listing one agent in each of `states`, the first dispatched. */
+export function agentsIn(...states: AgentState[]): WorkerAgents {
+  return {
+    kind: "listed",
+    agents: states.map((state, index) => ({
+      id: `agent-${index + 1}`,
+      state,
+      dispatched: index === 0,
+    })),
+  };
+}
 
 /**
- * A control plane answering `health` and `activeAgents` as given. It records every call in
- * `calls`, and in `installed` the projection each `install` received.
+ * A control plane answering `health` and `agents` as given. It records every call in `calls`,
+ * and in `installed` the projection each `install` received.
  */
 export function fakeControlPlane(
   health: "healthy" | "unhealthy" | "unreachable",
-  activity: AgentActivity,
+  agents: AgentsObservation,
 ) {
   const calls: string[] = [];
   const installed: HostProjection[] = [];
@@ -23,9 +37,9 @@ export function fakeControlPlane(
       calls.push("health");
       return health;
     },
-    activeAgents: async () => {
-      calls.push("activeAgents");
-      return activity;
+    agents: async () => {
+      calls.push("agents");
+      return agents;
     },
     install: async (_worker, projection) => {
       calls.push("install");
@@ -63,11 +77,18 @@ function dispatchInspection(
 
 /**
  * A workflow queue reporting `adoption` (passed by default) and reconciling every projection it
- * is sent, unless `failure` makes reconciling fail. It counts adoption checks in `adoptions` and
- * records each projection's `active` in `reconcile`: both stay empty for a worker sent nothing.
+ * is sent, unless `failure` makes reconciling fail; its inspection carries `registration` when
+ * given, as a worker whose release registers the placed checkouts reports it, and none otherwise,
+ * as an older worker's. It counts adoption checks in `adoptions` and records each projection's
+ * `active` in `reconcile`: both stay empty for a worker sent nothing.
  */
 export function fakeWorkflowQueue(
-  options: { adoption?: WorkflowAdoption; changed?: boolean; failure?: string } = {},
+  options: {
+    adoption?: WorkflowAdoption;
+    changed?: boolean;
+    failure?: string;
+    registration?: RepositoryRegistration;
+  } = {},
 ) {
   const reconcile: boolean[] = [];
   const adoptions = { count: 0 };
@@ -82,7 +103,12 @@ export function fakeWorkflowQueue(
       return {
         kind: "reconciled",
         changed: options.changed ?? true,
-        inspection: dispatchInspection(projection, options.changed ?? true),
+        inspection: {
+          ...dispatchInspection(projection, options.changed ?? true),
+          ...(options.registration === undefined
+            ? {}
+            : { repository_registration: options.registration }),
+        },
       };
     },
     inspectDispatch: async () => ({ protocol_version: 1, state: "none" }),

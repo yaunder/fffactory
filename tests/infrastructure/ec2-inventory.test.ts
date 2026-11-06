@@ -2,10 +2,12 @@ import { afterEach, describe, expect, test } from "bun:test";
 import type { AwsSession } from "../../src/infrastructure/aws-session";
 import {
   type DescribeInstancesInput,
+  type DescribeVpcsInput,
   type Ec2InventoryCalls,
   ec2MachineInventory,
   type InstancePage,
   sdkEc2InventoryCalls,
+  type VpcListPage,
 } from "../../src/infrastructure/ec2-inventory";
 import type { FactoryId } from "../../src/domain/instance";
 import { type StubEc2Instances, stubEc2Instances } from "../support/stub-ec2-instances";
@@ -14,9 +16,10 @@ import { EXAMPLE_CREDENTIALS } from "../support/stub-sts";
 const FACTORY = "fff-aaaa1111" as FactoryId;
 const TAGS = { "fffactory:factory-id": FACTORY, "fffactory:host-key": "builder-1" };
 
-function stubbed(pages: InstancePage[] | Error) {
+function stubbed(pages: InstancePage[] | Error, vpcPages: VpcListPage[] | Error = []) {
   const sessions: AwsSession[] = [];
   const inputs: DescribeInstancesInput[] = [];
+  const vpcInputs: DescribeVpcsInput[] = [];
   const events: string[] = [];
   const open = async (session: AwsSession): Promise<Ec2InventoryCalls> => {
     sessions.push(session);
@@ -26,10 +29,15 @@ function stubbed(pages: InstancePage[] | Error) {
         if (pages instanceof Error) throw pages;
         return pages[inputs.length - 1] ?? {};
       },
+      describeVpcs: async (input) => {
+        vpcInputs.push(input);
+        if (vpcPages instanceof Error) throw vpcPages;
+        return vpcPages[vpcInputs.length - 1] ?? {};
+      },
       close: () => events.push("close"),
     };
   };
-  return { open, sessions, inputs, events };
+  return { open, sessions, inputs, vpcInputs, events };
 }
 
 describe("the EC2 inventory over stubbed calls", () => {
@@ -124,6 +132,7 @@ describe("the EC2 inventory over stubbed calls", () => {
   test("a listing past its deadline is unavailable", async () => {
     const open = async (): Promise<Ec2InventoryCalls> => ({
       describeInstances: () => new Promise<InstancePage>(() => {}),
+      describeVpcs: () => new Promise<VpcListPage>(() => {}),
       close: () => {},
     });
     expect(
@@ -145,6 +154,80 @@ describe("the EC2 inventory over stubbed calls", () => {
         reason: "EC2 DescribeInstances failed: unexpected TypeError",
       },
     );
+  });
+});
+
+describe("the factory's tagged VPCs over stubbed calls (provisioning §Destroy plan)", () => {
+  test("lists the VPCs carrying the factory ID tag, page by page", async () => {
+    const stub = stubbed(
+      [],
+      [
+        { Vpcs: [{ VpcId: "vpc-0123456789abcdef0" }], NextToken: "next" },
+        { Vpcs: [{ VpcId: "vpc-0fedcba98" }] },
+        {},
+      ],
+    );
+    expect(
+      await ec2MachineInventory(stub.open).listVpcs(
+        { source: "--profile", profile: "factory" },
+        "eu-west-2",
+        FACTORY,
+      ),
+    ).toEqual({ kind: "vpcs", vpcIds: ["vpc-0123456789abcdef0", "vpc-0fedcba98"] });
+    expect(stub.sessions.map(({ region, profile }) => ({ region, profile }))).toEqual([
+      { region: "eu-west-2", profile: "factory" },
+    ]);
+    const Filters = [{ Name: "tag:fffactory:factory-id", Values: [FACTORY] }];
+    expect(stub.vpcInputs).toEqual([
+      { Filters, MaxResults: 1000, NextToken: undefined },
+      { Filters, MaxResults: 1000, NextToken: "next" },
+    ]);
+    expect(stub.inputs).toEqual([]);
+    expect(stub.events).toEqual(["close"]);
+  });
+
+  test("a factory with no tagged VPC lists none", async () => {
+    const stub = stubbed([], [{ Vpcs: [] }]);
+    expect(
+      await ec2MachineInventory(stub.open).listVpcs({ source: "chain" }, "us-east-1", FACTORY),
+    ).toEqual({ kind: "vpcs", vpcIds: [] });
+  });
+
+  test("a VPC without a well-formed ID is never skipped: the listing is unavailable", async () => {
+    for (const vpc of [{}, { VpcId: "" }, { VpcId: "subnet-0123456789abcdef0" }]) {
+      const stub = stubbed([], [{ Vpcs: [{ VpcId: "vpc-0123456789abcdef0" }, vpc] }]);
+      expect(
+        await ec2MachineInventory(stub.open).listVpcs({ source: "chain" }, "us-east-1", FACTORY),
+      ).toEqual({
+        kind: "unavailable",
+        reason: "EC2 DescribeVpcs listed a VPC without a well-formed ID",
+      });
+    }
+  });
+
+  test("a failure is unavailable, named without AWS's message", async () => {
+    const denied = Object.assign(new Error("AWS message about wJalrXUtnFEMI"), {
+      name: "UnauthorizedOperation",
+      $fault: "client",
+    });
+    expect(
+      await ec2MachineInventory(stubbed([], denied).open).listVpcs(
+        { source: "chain" },
+        "us-east-1",
+        FACTORY,
+      ),
+    ).toEqual({ kind: "unavailable", reason: "EC2 DescribeVpcs failed: UnauthorizedOperation" });
+  });
+
+  test("a listing past its deadline is unavailable", async () => {
+    const open = async (): Promise<Ec2InventoryCalls> => ({
+      describeInstances: () => new Promise<InstancePage>(() => {}),
+      describeVpcs: () => new Promise<VpcListPage>(() => {}),
+      close: () => {},
+    });
+    expect(
+      await ec2MachineInventory(open, 20).listVpcs({ source: "chain" }, "us-east-1", FACTORY),
+    ).toEqual({ kind: "unavailable", reason: "EC2 DescribeVpcs failed: timed out after 0.02 s" });
   });
 });
 
@@ -192,5 +275,32 @@ describe("the EC2 inventory over the real SDK", () => {
       kind: "unavailable",
       reason: "EC2 DescribeInstances failed: UnauthorizedOperation",
     });
+    expect(
+      await inventory(stub.endpoint).listVpcs({ source: "chain" }, "us-east-1", FACTORY),
+    ).toEqual({ kind: "unavailable", reason: "EC2 DescribeVpcs failed: UnauthorizedOperation" });
+  });
+
+  test("reads the factory's tagged VPCs, page by page, from a local stub", async () => {
+    stub = stubEc2Instances({
+      vpcPages: [
+        [
+          { id: "vpc-0123456789abcdef0", tags: { "fffactory:factory-id": FACTORY } },
+          { id: "vpc-0aaaaaaaaaaaaaaaa", tags: { "fffactory:factory-id": "fff-bbbb2222" } },
+        ],
+        [
+          { id: "vpc-0bbbbbbbbbbbbbbbb", tags: {} },
+          { id: "vpc-0fedcba9876543210", tags: { Name: "x", "fffactory:factory-id": FACTORY } },
+        ],
+      ],
+    });
+    expect(
+      await inventory(stub.endpoint).listVpcs({ source: "chain" }, "us-east-1", FACTORY),
+    ).toEqual({ kind: "vpcs", vpcIds: ["vpc-0123456789abcdef0", "vpc-0fedcba9876543210"] });
+    const first = new URLSearchParams(stub.requests[0]);
+    expect(first.get("Action")).toBe("DescribeVpcs");
+    expect(first.get("Filter.1.Name")).toBe("tag:fffactory:factory-id");
+    expect(first.get("Filter.1.Value.1")).toBe(FACTORY);
+    expect(first.get("MaxResults")).toBe("1000");
+    expect(stub.requests).toHaveLength(2);
   });
 });

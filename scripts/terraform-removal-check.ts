@@ -99,17 +99,10 @@ const CASES: readonly RemovalCase[] = [
     ],
   },
   {
-    title: "a host without a Paseo password",
+    title: "a host sharing another host's Paseo password",
     hosts: "several",
     key: "builder-3" as HostKey,
     changes: [deletes("builder-3" as HostKey)],
-    verdicts: ALLOWED,
-  },
-  {
-    title: "a host sharing another host's Paseo password",
-    hosts: "several",
-    key: "builder-4" as HostKey,
-    changes: [deletes("builder-4" as HostKey)],
     verdicts: ALLOWED,
   },
   {
@@ -143,7 +136,7 @@ const CASES: readonly RemovalCase[] = [
     verdicts: [{ listed: "the state's", refused: moreThan("builder-1" as HostKey) }],
   },
   {
-    title: "a host without a Paseo password, with another host's password changed too",
+    title: "a host sharing another host's Paseo password, with a third host's password changed too",
     hosts: "several",
     key: "builder-3" as HostKey,
     edit: (document) => ({
@@ -163,6 +156,23 @@ const CASES: readonly RemovalCase[] = [
     changes: [POLICY_UPDATE, deletes("builder-3" as HostKey)],
     verdicts: [{ listed: "the state's", refused: moreThan("builder-3" as HostKey) }],
   },
+  {
+    title: "a host with its own Paseo password, with a credential reference changed too",
+    hosts: "several",
+    key: "builder-1" as HostKey,
+    edit: (document) => ({
+      ...document,
+      credentials: {
+        ...(document.credentials as Json),
+        github_token_secret: String((document.credentials as Json).github_token_secret).replace(
+          "/github-token-",
+          "/github-token-rotated-",
+        ),
+      },
+    }),
+    changes: [POLICY_UPDATE, deletes("builder-1" as HostKey)],
+    verdicts: [{ listed: "the state's", refused: moreThan("builder-1" as HostKey) }],
+  },
 ];
 
 /** A Paseo password reference of the factory's own Region and account. */
@@ -171,39 +181,49 @@ function passwordSecret(example: Json, factoryId: FactoryId, name: string): stri
   return `arn:aws:secretsmanager:${region}:${account_id}:secret:${factoryId}/${name}/paseo-password-AbCdEf`;
 }
 
+/** The factory-wide credential references, of the factory's own Region and account. */
+function credentialSecrets(example: Json, factoryId: FactoryId): Json {
+  const { region, account_id } = example.aws as Json;
+  return Object.fromEntries(
+    ["github_token_secret", "anthropic_api_key_secret", "openai_api_key_secret"].map((field) => [
+      field,
+      `arn:aws:secretsmanager:${region}:${account_id}:secret:${factoryId}/${field.replace(/_secret$/, "").replaceAll("_", "-")}-AbCdEf`,
+    ]),
+  );
+}
+
 /**
  * The fixture's factory.json: the example's, for `factoryId`, with several hosts (two with
- * their own Paseo passwords, one without, one sharing another's) or one with its own.
+ * their own Paseo passwords, one sharing another's) or one with its own, and every
+ * factory-wide credential reference, which no removal may change. Every host has a password:
+ * factory.json is incomplete, and never projected, without one.
  */
-function fixtureDocument(context: RemovalCheckContext, hosts: RemovalCase["hosts"]): Json {
+export function fixtureDocument(context: RemovalCheckContext, hosts: RemovalCase["hosts"]): Json {
   const { example, factoryId } = context;
   const [template] = example.hosts as [Json];
-  const { paseo_password_secret: _, ...bare } = template;
-  const host = (key: string, secret?: string) => ({
-    ...bare,
+  const host = (key: string, secret: string) => ({
+    ...template,
     key,
-    ...(secret === undefined
-      ? {}
-      : { paseo_password_secret: passwordSecret(example, factoryId, secret) }),
+    paseo_password_secret: passwordSecret(example, factoryId, secret),
   });
   const bucket = `${factoryId}-${String((example.state_backend as Json).bucket).slice(String(example.factory_id).length + 1)}`;
   return {
     ...example,
     factory_id: factoryId,
     state_backend: { bucket },
+    credentials: credentialSecrets(example, factoryId),
     hosts:
       hosts === "one"
         ? [host("builder-1", "builder-1")]
         : [
             host("builder-1", "builder-1"),
             host("builder-2", "builder-2"),
-            host("builder-3"),
-            host("builder-4", "builder-2"),
+            host("builder-3", "builder-2"),
           ],
   };
 }
 
-function parsed(document: Json): FactoryInstance {
+export function parsed(document: Json): FactoryInstance {
   const result = parseFactoryInstance(document);
   if (!result.valid)
     throw new Error(
@@ -219,12 +239,18 @@ function allowed(policy: unknown): string[] {
   return statements.flatMap((statement) => [statement.Resource].flat().map(String)).sort();
 }
 
-/** The secrets the hosts' policy must allow for `instance`: the enrollment key and passwords. */
+/**
+ * The secrets the hosts' policy must allow for `instance`: the enrollment key, the passwords
+ * and the credential references.
+ */
 function neededSecrets(instance: FactoryInstance): string[] {
   const passwords = (instance.hosts ?? []).flatMap((host) =>
     host.paseo_password_secret === undefined ? [] : [host.paseo_password_secret],
   );
-  return [...new Set([instance.tailscale?.auth_key_secret ?? "", ...passwords])].sort();
+  const credentials = Object.values(instance.credentials ?? {});
+  return [
+    ...new Set([instance.tailscale?.auth_key_secret ?? "", ...passwords, ...credentials]),
+  ].sort();
 }
 
 /** What is wrong with the secret-reading policy's change in `plan`. */
@@ -247,7 +273,7 @@ function policyProblems(plan: unknown, remaining: FactoryInstance, secret: strin
 }
 
 /** The instance ID the state's `hosts` output records for `key`. */
-function recordedInstance(outputs: Readonly<Record<string, unknown>>, key: HostKey): string {
+export function recordedInstance(outputs: Readonly<Record<string, unknown>>, key: HostKey): string {
   const hosts = outputs.hosts;
   const host = isJson(hosts) ? hosts[key] : undefined;
   const id = isJson(host) ? host.instance_id : undefined;
@@ -297,7 +323,7 @@ async function removalPlan(
   return { shown, changes: exitCode === 2, remaining };
 }
 
-function target(context: RemovalCheckContext): ProvisioningTarget {
+export function target(context: RemovalCheckContext): ProvisioningTarget {
   return {
     configuration: { directory: context.tree, root: "factory" },
     credentials: { source: "chain" },

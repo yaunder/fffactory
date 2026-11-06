@@ -138,11 +138,44 @@ export function resourceChanges(plan: unknown): ResourceChange[] | undefined {
   return changes.every((change) => change !== undefined) ? changes : undefined;
 }
 
+/** A root output's planned change: its name and actions, as `output_changes` gives them. */
+export interface OutputChange {
+  readonly name: string;
+  readonly actions: readonly string[];
+}
+
+/**
+ * Every root output change in a Terraform JSON plan (`output_changes`, a map from output name
+ * to its change), in the plan's order, or undefined when the plan cannot be read: not an
+ * object, `output_changes` not an object, or an output without a printable name or a non-empty
+ * list of printable actions. A plan without `output_changes` changes no output.
+ */
+export function outputChanges(plan: unknown): OutputChange[] | undefined {
+  if (!isRecord(plan)) return undefined;
+  if (plan.output_changes === undefined) return [];
+  if (!isRecord(plan.output_changes)) return undefined;
+  const changes = Object.entries(plan.output_changes).map(([name, change]) => {
+    const actions = readActions(isRecord(change) ? change.actions : undefined);
+    return printable(name) && actions !== undefined ? { name, actions } : undefined;
+  });
+  return changes.every((change) => change !== undefined) ? changes : undefined;
+}
+
+/**
+ * The object a JSON plan's change (one entry of `resource_changes`, as Terraform gives it)
+ * destroys, by the `id` its `before` names; undefined if it names none.
+ */
+export function destroyedInstance(raw: unknown): string | undefined {
+  if (!isRecord(raw) || !isRecord(raw.change) || !isRecord(raw.change.before)) return undefined;
+  const { id } = raw.change.before;
+  return typeof id === "string" && id !== "" ? id : undefined;
+}
+
 /** Actions that change nothing: reading a data source, or leaving a resource as it is. */
 const UNCHANGED = new Set(["no-op", "read"]);
 
-/** Whether a planned resource change changes anything: not only reads and no-ops. */
-export function changesSomething({ actions }: ResourceChange): boolean {
+/** Whether a planned resource or output change changes anything: not only reads and no-ops. */
+export function changesSomething({ actions }: Pick<ResourceChange, "actions">): boolean {
   return !actions.every((action) => UNCHANGED.has(action));
 }
 
@@ -219,6 +252,17 @@ export interface PlannedControlPlane extends PlannedWorker {
 export interface PlannedDispatch extends PlannedWorker {
   readonly requested: boolean;
   readonly schedule: DispatchSchedule | null;
+}
+
+/**
+ * A worker's dispatch stage as its review shows it: the planned projection, and how many
+ * repositories factory.json places on the worker, which dispatch reconcile has its execution
+ * backend register (`docs/specs/dispatch.md` §Repository registration). The count comes from
+ * factory.json, as the repositories stage's placement does, so a saved plan, bound to
+ * factory.json's text, records nothing more for it.
+ */
+export interface ReviewedDispatch extends PlannedDispatch {
+  readonly registers: number;
 }
 
 function plannedSchedule(settings: DispatchSettings | undefined): DispatchSchedule | null {
@@ -312,9 +356,21 @@ export interface FactoryPlanReview {
   readonly workers: readonly PlannedWorker[];
   readonly repositories: readonly PlannedRepositories[];
   readonly controlPlane: readonly PlannedControlPlane[];
-  readonly dispatch: readonly PlannedDispatch[];
+  readonly dispatch: readonly ReviewedDispatch[];
   readonly stopped: readonly HostKey[];
   readonly pinMove?: PinMove;
+  /** The log archive, for a factory.json enabling it: absent otherwise. */
+  readonly archive?: PlannedArchive;
+}
+
+/**
+ * The log archive in a factory plan: its bucket, and whether the plan creates it with the
+ * archive root, applied before the factory root, or found it present and ready, planning
+ * nothing for it.
+ */
+export interface PlannedArchive {
+  readonly bucket: string;
+  readonly creates: boolean;
 }
 
 /** Backend bootstrap's plan: the bucket it creates, and every resource it creates. */
@@ -335,21 +391,44 @@ export interface FactoryPlanReviewInput {
   readonly dispatch: readonly PlannedDispatch[];
   readonly stopped: readonly HostKey[];
   readonly pinMove?: PinMove | undefined;
+  readonly archive?: PlannedArchive | undefined;
 }
 
-/** The review of a factory plan of `instance`: every declared worker and its repositories. */
+/** Each worker's planned dispatch, with the repositories its dispatch stage registers. */
+function reviewedDispatch(
+  dispatch: readonly PlannedDispatch[],
+  repositories: readonly PlannedRepositories[],
+): ReviewedDispatch[] {
+  const placed = new Map(repositories.map(({ key, placed }) => [key, placed.length]));
+  return dispatch.map(({ key, hostname, requested, schedule }) => ({
+    key,
+    hostname,
+    requested,
+    schedule,
+    registers: placed.get(key) ?? 0,
+  }));
+}
+
+/**
+ * The review of a factory plan of `instance`: every declared worker, its repositories, and
+ * those its dispatch stage registers.
+ */
 export function factoryPlanReview(input: FactoryPlanReviewInput): FactoryPlanReview {
   const workers = declaredWorkers(input.instance, input.target.factoryId);
+  const repositories = plannedRepositories(workers, input.instance);
   return {
     kind: "factory",
     target: input.target,
     changes: input.changes,
     workers,
-    repositories: plannedRepositories(workers, input.instance),
+    repositories,
     controlPlane: input.controlPlane,
-    dispatch: input.dispatch,
+    dispatch: reviewedDispatch(input.dispatch, repositories),
     stopped: input.stopped,
     ...(input.pinMove === undefined ? {} : { pinMove: input.pinMove }),
+    ...(input.archive === undefined
+      ? {}
+      : { archive: { bucket: input.archive.bucket, creates: input.archive.creates } }),
   };
 }
 
@@ -527,8 +606,9 @@ interface SavedPlanBinding {
 
 /**
  * A saved factory plan's record, kept beside its factory Terraform plan file
- * (`factory.tfplan`) in the local plan store. It holds no configuration values: factory.json
- * is bound by its SHA-256. A record without `kind` is one.
+ * (`factory.tfplan`), and the archive root's (`archive.tfplan`) when it creates the log
+ * archive, in the local plan store. It holds no configuration values: factory.json is bound
+ * by its SHA-256. A record without `kind` is one. `changes` are the factory root's alone.
  */
 export interface SavedFactoryPlan extends SavedPlanBinding {
   readonly kind?: never;
@@ -544,6 +624,11 @@ export interface SavedFactoryPlan extends SavedPlanBinding {
    * never installs them, even once they run again.
    */
   readonly stopped_workers: readonly HostKey[];
+  /**
+   * For a factory.json enabling the log archive, whether the plan creates it: then it also
+   * binds the archive root's Terraform plan file (`archive.tfplan`). Absent otherwise.
+   */
+  readonly creates_archive?: boolean;
 }
 
 /**
@@ -576,6 +661,8 @@ export interface NewSavedPlan extends PlanCircumstances {
   readonly controlPlane?: readonly PlannedControlPlane[];
   readonly dispatch?: readonly PlannedDispatch[];
   readonly stopped?: readonly HostKey[];
+  /** The log archive as planned, for a factory.json enabling it. */
+  readonly archive?: PlannedArchive | undefined;
 }
 
 function copyChanges(changes: readonly ResourceChange[]): ResourceChange[] {
@@ -614,6 +701,7 @@ export function newSavedPlan(plan: NewSavedPlan): SavedFactoryPlan {
       schedule,
     })),
     stopped_workers: [...(plan.stopped ?? [])],
+    ...(plan.archive === undefined ? {} : { creates_archive: plan.archive.creates }),
   };
 }
 
@@ -765,7 +853,13 @@ function hasBindingFields(document: Record<string, unknown>): boolean {
 }
 
 /** What only a factory plan records; a bootstrap record holding any of them is unreadable. */
-const FACTORY_PLAN_FIELDS = ["state_revision", "control_plane", "dispatch", "stopped_workers"];
+const FACTORY_PLAN_FIELDS = [
+  "state_revision",
+  "control_plane",
+  "dispatch",
+  "stopped_workers",
+  "creates_archive",
+];
 
 function parseBootstrapPlan(document: Record<string, unknown>): SavedBootstrapPlan | undefined {
   if (FACTORY_PLAN_FIELDS.some((field) => document[field] !== undefined)) return undefined;
@@ -796,21 +890,35 @@ function parseFactoryPlan(
   const controlPlane = readControlPlane(document.control_plane, factoryId);
   const dispatch = readDispatch(document.dispatch, factoryId);
   const stopped = readStoppedWorkers(document.stopped_workers);
+  const createsArchive = document.creates_archive;
   if (
     changes === undefined ||
     controlPlane === undefined ||
     dispatch === undefined ||
     stopped === undefined ||
+    !(createsArchive === undefined || typeof createsArchive === "boolean") ||
     !(document.state_revision === null || printable(document.state_revision)) ||
     !hasBindingFields(document)
   )
     return undefined;
+  // Each field read by name, so nothing the record holds beyond them reaches the plan.
   return {
-    ...(document as unknown as SavedFactoryPlan),
+    schema_version: PLAN_SCHEMA_VERSION,
+    plan_id: document.plan_id as string,
+    factory_id: document.factory_id as FactoryId,
+    instance_path: document.instance_path as string,
+    configuration_sha256: document.configuration_sha256 as string,
+    release: document.release as Release,
+    assets_sha256: document.assets_sha256 as string,
+    account_id: document.account_id as string,
+    state_revision: document.state_revision as string | null,
+    created_at: document.created_at as string,
+    expires_at: document.expires_at as string,
     changes,
     control_plane: controlPlane,
     dispatch,
     stopped_workers: stopped,
+    ...(createsArchive === undefined ? {} : { creates_archive: createsArchive }),
   };
 }
 
@@ -858,6 +966,10 @@ export type StaleReason =
   | { readonly kind: "state_bucket_missing" }
   /** The state bucket a bootstrap plan was planned to create exists now, ready or not. */
   | { readonly kind: "state_bucket_created" }
+  /** The log archive a factory plan was planned to create exists now, ready or not. */
+  | { readonly kind: "archive_created" }
+  /** The log archive a factory plan found present no longer exists. */
+  | { readonly kind: "archive_missing" }
   /** The EC2 inventory could not be read to check that worker `key` is still stopped. */
   | { readonly kind: "inventory_unreadable"; readonly key: HostKey }
   /** Worker `key` was stopped when it was planned, and is not now. */
@@ -919,6 +1031,20 @@ export function stateStaleness(
 ): StaleReason | undefined {
   if ((revision ?? null) === plan.state_revision) return undefined;
   return { kind: "state_changed" };
+}
+
+/**
+ * Why a plan may no longer be applied once the factory lock is held, a saved one before its
+ * apply and any once approved: the log archive it was planned to create exists now (`exists`),
+ * or the one it found present is gone. Undefined while the archive is as planned, and for a
+ * plan of a factory without one.
+ */
+export function archiveStaleness(
+  plan: Pick<SavedFactoryPlan, "creates_archive">,
+  exists: boolean,
+): StaleReason | undefined {
+  if (plan.creates_archive === undefined || plan.creates_archive !== exists) return undefined;
+  return { kind: exists ? "archive_created" : "archive_missing" };
 }
 
 /**

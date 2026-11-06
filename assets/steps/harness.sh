@@ -1,17 +1,21 @@
 #!/usr/bin/env bash
-# Install step `harness` (docs/specs/host-protocol.md §apply): Codex and Claude Code for the
-# runtime account at the versions and registry integrity values versions.env pins.
+# Install step `harness` (docs/specs/host-protocol.md §apply): Codex's enforced system
+# requirements, then Codex and Claude Code for the runtime account at the versions and registry
+# integrity values versions.env pins.
 # Wrapped from v1's agent-harness/scripts/setup-host.sh (deleted in #102); `host apply` runs
 # it as root after `user`, with FFFACTORY_STEPS naming this release's steps directory, and
-# records its result. Idempotent: agents already at their pins are left alone.
-# TODO(re-evaluate when this step is next changed, which D3 makes the time to port it to
-# TypeScript): read npm pack's JSON without jq.
+# records its result. Idempotent: agents already at their pins are left alone, and the
+# requirements are rewritten with the same bytes.
+# TODO(re-evaluate when this step's npm install is next changed, which D3 makes the time to
+# port it to TypeScript): read npm pack's JSON without jq.
 set -Eeuo pipefail
 
 readonly FACTORY_USER="factory"
 readonly FACTORY_GROUP="factory"
 readonly FACTORY_HOME="/home/factory"
 readonly FACTORY_PATH="${FACTORY_HOME}/.local/bin:/usr/local/bin:/usr/bin:/bin"
+readonly CODEX_SYSTEM_DIR="/etc/codex"
+readonly CODEX_REQUIREMENTS="${CODEX_SYSTEM_DIR}/requirements.toml"
 
 temp_paths=()
 cleanup() {
@@ -40,6 +44,27 @@ source "${VERSIONS_FILE}"
 : "${CLAUDE_CODE_VERSION:?CLAUDE_CODE_VERSION is required}"
 : "${CLAUDE_CODE_INTEGRITY:?CLAUDE_CODE_INTEGRITY is required}"
 
+# Codex's requirements bind every Codex process, `codex app-server` included, and neither the
+# runtime account's config.toml nor `-c` can override them: file credential storage, no update
+# check, and no persistent auto-updating daemon, which would keep stale keys and could leave
+# the pin. Written whole beside the target, then renamed over it.
+write_codex_requirements() {
+  local staged
+  install -d -o root -g root -m 0755 "${CODEX_SYSTEM_DIR}"
+  staged="$(mktemp "${CODEX_REQUIREMENTS}.XXXXXX")"
+  temp_paths+=("${staged}")
+  cat >"${staged}" <<'TOML'
+cli_auth_credentials_store = "file"
+check_for_update_on_startup = false
+[features]
+daemon_auto_start = false
+TOML
+  chown root:root "${staged}"
+  chmod 0644 "${staged}"
+  mv -fT -- "${staged}" "${CODEX_REQUIREMENTS}"
+  echo "harness: Codex requirements are in ${CODEX_REQUIREMENTS}."
+}
+
 factory_command() {
   (cd "${FACTORY_HOME}" && runuser -u "${FACTORY_USER}" -- env \
     HOME="${FACTORY_HOME}" PATH="${FACTORY_PATH}" DISABLE_UPDATES=1 "$@")
@@ -62,6 +87,8 @@ download_package() {
     fail "integrity mismatch for ${package_name}@${package_version}"
   fi
 }
+
+write_codex_requirements
 
 if codex_current="$(factory_command codex --version 2>/dev/null)" &&
   claude_current="$(factory_command claude --version 2>/dev/null)" &&

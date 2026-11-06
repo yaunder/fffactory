@@ -16,6 +16,7 @@ import {
   type DispatchAdoption,
   type DispatchInspection,
   type DispatchProjection,
+  type RecordedInspection,
   DISPATCH_PROJECTION_PATH,
   DISPATCH_RESULT_PATH,
   dispatchInspectionJson,
@@ -24,11 +25,21 @@ import {
 } from "../domain/dispatch-projection";
 import { HOST_PROTOCOL_VERSION, WORKER_PATHS } from "../domain/host-protocol";
 import { REPOSITORY_MANIFEST_PATH } from "../domain/repository-placement";
+import { placedCheckouts, type RepositoryRegistration } from "../domain/repository-registration";
+import { WORK_ROOTS } from "../domain/work-inspection";
 import type { ProcessOutcome } from "../infrastructure/local-tool-probe";
 import type { ApplySystem } from "./apply";
+import { factoryPaseo } from "./control-plane";
+import { executionBackend } from "./execution-backend";
+import { FACTORY_HOME } from "./runtime-account";
 
 const TIMEOUT_MS = 15 * 60_000;
-const FACTORY_HOME = "/home/factory";
+// TODO(re-evaluate when a dispatch reconcile is seen outlasting the CLI's WORKFLOW_TIMEOUT_MS,
+// or the schedule's TIMEOUT_MS changes): give reconcileDispatch one deadline under
+// WORKFLOW_TIMEOUT_MS that the schedule's --check, --apply and the registration share, as
+// activity's budget sits under its CLI wait.
+/** Every execution backend call of one repository registration together. */
+const REGISTRATION_BUDGET_MS = 2 * 60_000;
 const STABLE_DISPATCHER = "/usr/local/bin/factory-dispatch";
 const INSTALLED_SKILL = `${FACTORY_HOME}/.agents/skills/dispatch/SKILL.md`;
 const CLAUDE_SKILL = `${FACTORY_HOME}/.claude/skills/dispatch`;
@@ -132,7 +143,7 @@ async function installAssets(root: string): Promise<boolean> {
   return changes.some(Boolean);
 }
 
-function stateFor(projection: DispatchProjection, changed: boolean): DispatchInspection {
+function stateFor(projection: DispatchProjection, changed: boolean): RecordedInspection {
   if (!projection.requested)
     return {
       protocol_version: HOST_PROTOCOL_VERSION,
@@ -150,7 +161,7 @@ function stateFor(projection: DispatchProjection, changed: boolean): DispatchIns
   return { protocol_version: HOST_PROTOCOL_VERSION, state: "active", blockers: [], changed };
 }
 
-function failed(blockers: DispatchProjection["blockers"], reason: string): DispatchInspection {
+function failed(blockers: DispatchProjection["blockers"], reason: string): RecordedInspection {
   return { protocol_version: HOST_PROTOCOL_VERSION, state: "failed", blockers, reason };
 }
 
@@ -184,11 +195,74 @@ function reconcileResult(
   matches: boolean,
   applied: ProcessOutcome | undefined,
   assetsChanged: boolean,
-): DispatchInspection {
+): RecordedInspection {
   if (matches) return stateFor(projection, assetsChanged);
   return applied !== undefined && exited(applied, [0])
     ? stateFor(projection, true)
     : failed(projection.blockers, "dispatch schedule did not reconcile");
+}
+
+/** Whether every path from the repository root down to `checkout` is a directory, never a link. */
+async function presentOnDisk(root: string, checkout: string): Promise<boolean> {
+  const components = checkout.slice(WORK_ROOTS.repositories.length + 1).split("/");
+  const paths = components.map((_, index) =>
+    [WORK_ROOTS.repositories, ...components.slice(0, index + 1)].join("/"),
+  );
+  for (const path of [WORK_ROOTS.repositories, ...paths]) {
+    const directory = await lstat(pathAt(root, path)).then(
+      (details) => details.isDirectory(),
+      () => false,
+    );
+    if (!directory) return false;
+  }
+  return true;
+}
+
+/**
+ * The checkouts this worker's repository manifest places that are directories on disk, whatever
+ * their sync result, in placement order: one not yet cloned is left out, and so is one reached
+ * through a link, the repository root's or any directory's down to it, as sync refuses it.
+ * Without a manifest, none: nothing placed has reached the worker. Undefined when the manifest
+ * cannot be read or is invalid: what it places is unknown.
+ */
+async function presentCheckouts(root: string): Promise<readonly string[] | undefined> {
+  let text: string;
+  try {
+    text = await readFile(pathAt(root, REPOSITORY_MANIFEST_PATH), "utf8");
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "ENOENT" ? [] : undefined;
+  }
+  const placed = placedCheckouts(text);
+  if (!placed.ok) return undefined;
+  const present = await Promise.all(
+    placed.checkouts.map((checkout) => presentOnDisk(root, checkout)),
+  );
+  return placed.checkouts.filter((_, index) => present[index]);
+}
+
+/**
+ * Makes the placed checkouts present on disk available through the worker's execution backend
+ * (`docs/specs/dispatch.md` §Repository registration), never Paseo directly; or none when the
+ * manifest cannot be read, or anything throws: the schedule's result is persisted regardless.
+ */
+async function registerRepositories(
+  system: ApplySystem,
+): Promise<RepositoryRegistration | undefined> {
+  try {
+    const checkouts = await presentCheckouts(system.root);
+    if (checkouts === undefined) return undefined;
+    const backend = executionBackend(factoryPaseo(system, REGISTRATION_BUDGET_MS));
+    return await backend.registerRepositories(checkouts);
+  } catch {
+    return undefined;
+  }
+}
+
+/** The stored registration, carried as it is. */
+function registrationOf(inspection: DispatchInspection) {
+  return "repository_registration" in inspection && inspection.repository_registration
+    ? { repository_registration: inspection.repository_registration }
+    : {};
 }
 
 async function readResult(root: string): Promise<DispatchInspection> {
@@ -255,7 +329,13 @@ export function workerDispatch(system: ApplySystem): HostDispatch {
       const matches = await scheduleMatches(projectionPath, input, () => runSchedule("--check"));
       await atomically(projectionPath, input);
       const reconciled = matches ? undefined : await runSchedule("--apply");
-      const result = reconcileResult(parsed.projection, matches, reconciled, assetsChanged);
+      const schedule = reconcileResult(parsed.projection, matches, reconciled, assetsChanged);
+      // After the schedule, whatever the projection; it never changes the schedule's result.
+      const registration = await registerRepositories(system);
+      const result: RecordedInspection =
+        registration === undefined
+          ? schedule
+          : { ...schedule, repository_registration: registration };
       await atomically(resultPath, `${dispatchInspectionJson(result)}\n`);
       return result;
     },
@@ -271,6 +351,7 @@ export function workerDispatch(system: ApplySystem): HostDispatch {
         state: "failed",
         blockers: "blockers" in saved ? saved.blockers : [],
         reason: "dispatch schedule differs from its recorded state",
+        ...registrationOf(saved),
       };
     },
   };

@@ -14,7 +14,14 @@ import type { ObservedMachineState } from "../../src/domain/worker-lifecycle";
 import type { TailnetAdmin, TailnetDeviceList } from "../../src/application/tailnet-admin";
 import type { TailnetPeers } from "../../src/application/tailnet-peers";
 import type { CredentialSelection } from "../../src/domain/aws-account";
-import { hostProjection, hostProjectionJson } from "../../src/domain/host-projection";
+import {
+  controlPlaneProjection,
+  type HostCredentials,
+  type HostLogArchive,
+  hostProjection,
+  hostProjectionJson,
+  parseHostProjection,
+} from "../../src/domain/host-projection";
 import {
   HOST_PROTOCOL_VERSION,
   type HostInspection,
@@ -38,10 +45,12 @@ import {
 import { ENROLLMENTS, type EnrollmentState, type Verification } from "../../src/domain/readiness";
 import {
   type RepositoryWork,
+  type WorkArchive,
   type WorkInspection,
   workInspectionJson,
 } from "../../src/domain/work-inspection";
 import type { Machine, MachineInventory } from "../../src/domain/status";
+import type { VpcInventory } from "../../src/domain/teardown";
 import type { PeerView, TailnetDevice, TailnetPeer, WorkerAddress } from "../../src/domain/tailnet";
 import type { WorkerEndpoint } from "../../src/host/endpoint";
 import { sha256Text } from "../../src/infrastructure/release-tarball";
@@ -111,18 +120,28 @@ export function machine(
   return { instanceId, state, hostKey };
 }
 
-/** MachineInventorySource returning fixed machines, recording each request. */
+/**
+ * MachineInventorySource returning fixed machines and tagged VPCs (none by default), recording
+ * each request: machine listings in `requests`, VPC listings in `vpcRequests`.
+ */
 export function fakeMachineInventory(
   inventory: MachineInventory = { kind: "machines", machines: [] },
+  vpcs: VpcInventory = { kind: "vpcs", vpcIds: [] },
 ) {
-  const requests: { credentials: CredentialSelection; region: string; factoryId: FactoryId }[] = [];
+  type Request = { credentials: CredentialSelection; region: string; factoryId: FactoryId };
+  const requests: Request[] = [];
+  const vpcRequests: Request[] = [];
   const machines: MachineInventorySource = {
     list: async (credentials, region, factoryId) => {
       requests.push({ credentials, region, factoryId });
       return inventory;
     },
+    listVpcs: async (credentials, region, factoryId) => {
+      vpcRequests.push({ credentials, region, factoryId });
+      return vpcs;
+    },
   };
-  return { machines, requests };
+  return { machines, requests, vpcRequests };
 }
 
 /**
@@ -204,6 +223,8 @@ export function projectionSha256(
   key: string,
   release: string,
   paseoPasswordSecret?: SecretReference,
+  credentials?: HostCredentials,
+  logArchive?: HostLogArchive,
 ): string {
   return sha256Text(
     hostProjectionJson(
@@ -212,6 +233,8 @@ export function projectionSha256(
         key as HostKey,
         release as Release,
         paseoPasswordSecret,
+        credentials,
+        logArchive,
       ),
     ),
   );
@@ -226,9 +249,18 @@ export function readyWorker(
   key: string,
   release: string,
   paseoPasswordSecret?: SecretReference,
+  credentials?: HostCredentials,
+  logArchive?: HostLogArchive,
 ): HostInspection {
   const hostname = `${factoryId}-${key}`;
-  const sha256 = projectionSha256(factoryId, key, release, paseoPasswordSecret);
+  const sha256 = projectionSha256(
+    factoryId,
+    key,
+    release,
+    paseoPasswordSecret,
+    credentials,
+    logArchive,
+  );
   return inspection(
     hostname,
     {
@@ -270,7 +302,8 @@ export function answers(document: HostInspection): HostCommandOutcome {
   return { kind: "completed", exitCode: 0, stdout: hostInspectionJson(document) };
 }
 
-function dispatchAnswer(dispatch: DispatchInspection): HostCommandOutcome {
+/** The activator's answer to `dispatch inspect` or `dispatch reconcile`, at its exit status. */
+export function dispatchAnswer(dispatch: DispatchInspection): HostCommandOutcome {
   const failed = dispatch.state === "failed" || dispatch.state === "unreadable";
   const pending = dispatch.state === "pending" || dispatch.state === "none";
   return {
@@ -297,18 +330,21 @@ function repositoriesAnswer(
 
 /**
  * `host work inspect`'s answer for `hostname`: its checkouts and worktrees as `repositories`
- * (none by default), inspected to the end unless `complete` says otherwise.
+ * (none by default), inspected to the end unless `complete` says otherwise, and the log
+ * archive's backlog as `archive` (none, as an older worker answers, unless given).
  */
 export function workAnswer(
   hostname: string,
   repositories: readonly RepositoryWork[] = [],
   complete = true,
+  archive?: WorkArchive,
 ): HostCommandOutcome {
   const document: WorkInspection = {
     protocol_version: HOST_PROTOCOL_VERSION,
     hostname,
     complete,
     repositories,
+    ...(archive === undefined ? {} : { archive }),
   };
   return { kind: "completed", exitCode: 0, stdout: workInspectionJson(document) };
 }
@@ -375,15 +411,23 @@ const NOT_REQUESTED: DispatchInspection = {
 
 /**
  * `document` as the worker reports it once it keeps `projection`: its configuration, and its
- * install record's, are that text's real SHA-256, as `host apply` records them.
+ * install record's, are that text's real SHA-256, as `host apply` records them, and a
+ * projection carrying credential references or the log archive has its control-plane part
+ * digested apart, as `host inspect` does.
  */
 function holding(document: HostInspection, projection: string | undefined): HostInspection {
   if (projection === undefined) return document;
   const sha256 = sha256Text(projection);
+  const parsed = parseHostProjection(projection);
+  const controlPlane = parsed.ok
+    ? hostProjectionJson(controlPlaneProjection(parsed.document))
+    : projection;
+  const part =
+    controlPlane === projection ? {} : { control_plane_sha256: sha256Text(controlPlane) };
   const { installation } = document;
   return {
     ...document,
-    configuration: { state: "present", sha256 },
+    configuration: { state: "present", sha256, ...part },
     installation:
       "configuration_sha256" in installation
         ? { ...installation, configuration_sha256: sha256 }
@@ -494,7 +538,8 @@ export function fakeWorker(
     reconcileRepositories: async () => {
       throw new Error("host repositories --apply was not expected");
     },
-    activity: async () => ({ kind: "idle" }),
+    activity: async () => ({ kind: "listed", agents: [] }),
+    agents: async () => ({ kind: "listed", agents: [] }),
     install: async () => ({ kind: "done" }),
     reload: async () => ({ kind: "done" }),
     restart: async () => ({ kind: "done" }),
@@ -509,6 +554,7 @@ export function fakeWorker(
     inspectWork: async () => {
       throw new Error("host work inspect was not expected");
     },
+    collect: async () => ({ kind: "not_configured" }),
     isRoot: () => false,
     ...overrides,
   };

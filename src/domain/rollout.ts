@@ -14,7 +14,7 @@ import {
   type HostApplyResult,
 } from "./installation";
 import type { HostKey } from "./instance";
-import type { Verification } from "./readiness";
+import type { EnrollmentId, Verification } from "./readiness";
 import { ADMIN_CONSOLE, type TailnetLocation, thenRerunApply, type Verdict } from "./status";
 import { WORKER_ADMIN, WORKER_PATHS } from "./host-protocol";
 
@@ -24,11 +24,15 @@ export interface WorkerIdentity {
 }
 
 export type WorkerOutcome =
-  /** Installed and verified; its enrollment may still be pending. */
+  /**
+   * Installed and verified; its enrollment may still be pending. `delivered` holds the accounts
+   * whose credential its projection delivered, from factory.json, never from the worker.
+   */
   | (WorkerIdentity & {
       readonly kind: "installed";
       readonly release: string;
       readonly verification: Verification;
+      readonly delivered: readonly EnrollmentId[];
     })
   /** Not attempted for a known reason that does not stop the rollout. */
   | (WorkerIdentity & {
@@ -186,13 +190,14 @@ function failureOutcome(worker: WorkerIdentity, result: HostApplyRecord): Worker
 }
 
 /**
- * What the activator's answer means for the worker installing `release`. Only a document for
- * this worker and release counts.
+ * What the activator's answer means for the worker installing `release`, whose projection
+ * `delivered` those accounts' credentials. Only a document for this worker and release counts.
  */
 export function activationOutcome(
   worker: WorkerIdentity,
   release: string,
   answer: ActivationAnswer,
+  delivered: readonly EnrollmentId[],
 ): WorkerOutcome {
   if (answer.kind === "no_result")
     return failed(worker, `Installing failed: ${answer.reason}`, CHECK_STATUS);
@@ -214,6 +219,7 @@ export function activationOutcome(
             kind: "installed",
             release: result.release,
             verification: result.verification,
+            delivered,
           };
   }
 }

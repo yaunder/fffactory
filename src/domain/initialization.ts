@@ -29,6 +29,16 @@ export function generateFactoryId(randomBytes: RandomBytes): FactoryId {
   return `${FACTORY_ID_PREFIX}${randomAlphanumeric(randomBytes, SUFFIX_LENGTH)}` as FactoryId;
 }
 
+const GENERATED_ID = new RegExp(`^${FACTORY_ID_PREFIX}[a-z0-9]{${SUFFIX_LENGTH}}$`);
+
+/**
+ * Whether `factoryId` has the form `generateFactoryId` gives: `fff-` and eight lowercase letters
+ * or digits. No other generated ID can extend it with a hyphen, so its namespace is its own.
+ */
+export function isGeneratedFactoryId(factoryId: FactoryId): boolean {
+  return GENERATED_ID.test(factoryId);
+}
+
 export interface FilledInstance {
   readonly instance: FactoryInstance;
   /** Field paths taken from the defaults, in the order they were filled. */

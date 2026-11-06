@@ -44,6 +44,8 @@ export interface DispatchGateInputs {
   readonly releaseHealthy: boolean;
   /** The GitHub credential's enrollment state, from the worker's verification. */
   readonly githubCredential: EnrollmentState;
+  /** factory.json delivers the GitHub token to the worker (`deliveredAccounts`). */
+  readonly githubDelivered: boolean;
   /** Whether every placed checkout synchronized (the repository stage). */
   readonly repositorySync: RepositoryReadiness;
   /** Whether FFFlow adoption passes for the placed repositories (the `WorkflowQueue`). */
@@ -79,7 +81,11 @@ export function githubCredential(verification: Verification | null): EnrollmentS
   return verification.enrollment.find((entry) => entry.id === "github")?.state ?? "unknown";
 }
 
-function githubGate(state: EnrollmentState, hostname: string): DispatchGateResult {
+function githubGate(
+  state: EnrollmentState,
+  delivered: boolean,
+  hostname: string,
+): DispatchGateResult {
   const failed =
     state === "pending"
       ? `GitHub is not authenticated for the runtime account on ${hostname}`
@@ -89,7 +95,7 @@ function githubGate(state: EnrollmentState, hostname: string): DispatchGateResul
     state === "enrolled",
     "GitHub is authenticated for the runtime account",
     failed,
-    describeNextAction(enrollmentNextAction("github", hostname)),
+    describeNextAction(enrollmentNextAction("github", hostname, delivered)),
   );
 }
 
@@ -106,7 +112,7 @@ export function evaluateDispatchGates(
       "The worker's release is not installed and verified",
       "Install and verify the release with `fffactory apply`",
     ),
-    githubGate(inputs.githubCredential, hostname),
+    githubGate(inputs.githubCredential, inputs.githubDelivered, hostname),
     result(
       "repository_sync",
       inputs.repositorySync === "ready",

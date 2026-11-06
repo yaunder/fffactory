@@ -95,13 +95,13 @@ jobs:
         run: bun install --frozen-lockfile
 
       # The rendered user data, not its template: Terraform interpolation is not shell.
-      - name: Shellcheck the bootstrap scripts, the install steps and the repository-skills gate
+      - name: Shellcheck the bootstrap scripts, the install steps, the Paseo programs and check, and the repository-skills gate
         run: |
           rendered="$(mktemp -d)"
           bun tests/support/bootstrap-fixtures-main.ts "$rendered"
           shellcheck assets/terraform/bootstrap/fffactory-activate "$rendered/user-data.sh" \
             scripts/bootstrap-test.sh scripts/repository-skills.sh tests/bootstrap/*.sh tests/bootstrap/stand-in-steps/*.sh \
-            assets/steps/*.sh
+            assets/steps/*.sh assets/steps/control-plane/*.sh tests/paseo/*.sh
 
       # Each case in a fresh amazonlinux:2023 container with no network and no AWS; host
       # apply's cases run the real linux-x64 worker executable over stand-in install steps.

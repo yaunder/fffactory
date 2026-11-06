@@ -114,8 +114,9 @@ for a human to type a command. It is deliberately small:
 - A Paseo schedule on each host starts a fresh agent on a fixed cadence.
 - That agent runs a factory-owned dispatch skill. The skill lists `ready`
   issues across the repositories placed on that host, applies the readiness
-  checks, counts the factory agents already running on the host, and starts
-  at most `cap - running` new agents.
+  checks, counts the agents it started that are still working or waiting on
+  a person (asking the worker's own `fffactory host agents`, never Paseo), and
+  starts at most `cap - running` new agents.
 - Each new agent is created in a Paseo worktree off the repository's declared
   branch with an initial prompt of `/fff:work-epic <id>`. Dispatching
   `/fff:work-issue <n>` is added once the task-level logic is agreed upstream.

@@ -11,6 +11,9 @@
   "state_backend": {
     "bucket": "example-fffactory-state-123456789012"
   },
+  "log_archive": {
+    "enabled": true
+  },
   "network": {
     "vpc_cidr": "10.78.0.0/16",
     "public_subnet_cidr": "10.78.1.0/24",

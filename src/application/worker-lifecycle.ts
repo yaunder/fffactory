@@ -24,11 +24,13 @@ import {
   accountExpectation,
   type CredentialSelection,
 } from "../domain/aws-account";
+import { workerActivity } from "../domain/control-plane";
 import type { HeldLock } from "../domain/factory-lock";
 import { hostProjectionSha256, projectHost, type Sha256 } from "../domain/host-projection";
 import type { RandomBytes } from "../domain/initialization";
 import {
   assessCompleteness,
+  deliveredAccounts,
   type FactoryId,
   type FactoryInstance,
   type Host,
@@ -52,11 +54,13 @@ import {
 } from "../domain/host-removal";
 import {
   finishOperation,
+  type InspectionRecord,
   type OperationRecord,
   type OperationStatus,
   operationKey,
   type StageStatus,
   startStageOperation,
+  withInspection,
   withMachine,
   withStage,
 } from "../domain/operation";
@@ -68,7 +72,6 @@ import {
   type ResourceChange,
   resourceChanges,
 } from "../domain/plan";
-import type { SecretMaterial } from "../domain/secrets";
 import { placedRepositories } from "../domain/repository-placement";
 import { hostName } from "../domain/resource-naming";
 import { recordedHostKeys } from "../domain/stable-host-keys";
@@ -106,15 +109,22 @@ import {
   TARGET_STATE,
   type TerminateInspection,
   terminateGate,
+  terminateGateActions,
   thenRerunWorker,
   typedKeyConfirms,
   waitStep,
   type WorkerCommand,
   WORKER_OPERATIONS,
 } from "../domain/worker-lifecycle";
+import {
+  type RemovalObservation,
+  saysUnarchived,
+  type UnarchivedEvidence,
+  workerRemovability,
+} from "../domain/worker-removability";
 import type { OperationLocation } from "./apply-factory";
 import type { CallerIdentity } from "./caller-identity";
-import type { ControlPlane } from "./control-plane";
+import { type ControlPlane, readAgents } from "./control-plane";
 import {
   acquireFactoryLock,
   type FactoryLock,
@@ -125,8 +135,6 @@ import {
 } from "./factory-lock";
 import type { HostTransport } from "./host-transport";
 import type { InstanceStore } from "./instance-store";
-import { inspectRepositories } from "./inspect-repositories";
-import { inspectWork } from "./inspect-work";
 import { inspectWorker } from "./inspect-worker";
 import type { LockStore, StateBucket } from "./lock-store";
 import type { MachineControl, MachineRequest, MachineTarget } from "./machine-control";
@@ -140,6 +148,7 @@ import { type AccountRequirement, requireExpectedAccount } from "./require-expec
 import type { SecretStore } from "./secret-store";
 import type { TailnetAdmin, TailnetAdminSession } from "./tailnet-admin";
 import type { TailnetPeers } from "./tailnet-peers";
+import { deleteDevices, inspectForRemoval, openTailnetAdmin } from "./worker-removal";
 
 export interface WorkerLifecycleDependencies {
   readonly identity: CallerIdentity;
@@ -148,7 +157,7 @@ export interface WorkerLifecycleDependencies {
   readonly control: MachineControl;
   readonly peers: TailnetPeers;
   readonly transport: HostTransport;
-  /** Reads stop's agent activity; without one, a running worker cannot be inspected. */
+  /** Reads stop's agents; without one, a running worker cannot be inspected. */
   readonly controlPlane: ControlPlane | undefined;
   readonly prompt: OperatorPrompt;
   /** Reads terminate's Tailscale admin client secret. */
@@ -246,7 +255,17 @@ export type PowerProgress =
   /** Terraform applies the removal plan. */
   | { readonly kind: "applying_removal" }
   /** factory.json no longer declares the host. */
-  | { readonly kind: "configuration_written"; readonly key: HostKey; readonly path: string };
+  | { readonly kind: "configuration_written"; readonly key: HostKey; readonly path: string }
+  /**
+   * Terminate: the worker's unarchived evidence, as its inspection document records it, shown
+   * before any question when it is said (`saysUnarchived`); unknown when it was not inspected
+   * (S1). It never refuses (S2).
+   */
+  | {
+      readonly kind: "unarchived";
+      readonly hostname: string;
+      readonly unarchived: UnarchivedEvidence;
+    };
 
 export type WorkerPower =
   /** No terminal to confirm at, and no `--yes`. */
@@ -318,6 +337,8 @@ export type WorkerPower =
       readonly changed: boolean;
       readonly awaited: boolean;
       readonly verdict?: Verdict;
+      /** Terminate: the worker's unarchived evidence its inspection recorded, when it is said. */
+      readonly unarchived?: UnarchivedEvidence;
       readonly devices?: DeviceRemoval;
       readonly leftover?: Refusal | undefined;
       readonly operation: OperationLocation;
@@ -515,6 +536,9 @@ function powerLog(deps: WorkerLifecycleDependencies, power: Power, lock: Factory
     stage: (status: StageStatus) => write(withStage(record, stage, status, clock())),
     machine: (instanceId: string, state: ObservedMachineState) =>
       write(withMachine(record, { ...power.worker, instance_id: instanceId, state }, clock())),
+    /** Terminate's inspection of the worker, at the step reached. */
+    inspection: (inspection: InspectionRecord) =>
+      write(withInspection(record, inspection, clock())),
     /** Ends the record; resolves to why its write failed, if it did. */
     finish: (status: StageStatus, outcome: Exclude<OperationStatus, "running">, failure?: string) =>
       write(
@@ -535,6 +559,13 @@ export type Removal = "applying" | "written";
 interface Progress {
   requested: boolean;
   removal?: Removal;
+  /** Terminate's worker's unarchived evidence, once its inspection is recorded. */
+  unarchived?: UnarchivedEvidence;
+}
+
+/** The unarchived evidence a terminate's result says, when its inspection said it. */
+function unarchivedOf({ unarchived }: Progress): { readonly unarchived?: UnarchivedEvidence } {
+  return unarchived === undefined ? {} : { unarchived };
 }
 
 function interruptedUnder(log: PowerLog, progress: Progress): WorkerPower {
@@ -681,6 +712,8 @@ async function awaitUnderWay(
   progress: Progress,
   machine: Machine,
 ): Promise<WorkerPower> {
+  // Terminate only waits for a machine already being terminated: no gate runs for it.
+  await recordInspection(deps, power, log, progress, { kind: "shutting_down" });
   const admin = await adminFor(deps, power, log);
   if (deps.interrupted()) return interruptedUnder(log, progress);
   if (admin.kind === "refused") return refusedUnder(log, admin.refusal);
@@ -703,9 +736,9 @@ async function awaitUnderWay(
 }
 
 /**
- * Terminate's tailnet admin session, opened before EC2 is asked anything so a client that
- * cannot delete the worker's devices refuses the terminate instead of leaving them behind.
- * The client secret is read here, given to the admin client, and kept nowhere.
+ * Terminate's tailnet admin session (`openTailnetAdmin`), opened before EC2 is asked anything so
+ * a client that cannot delete the worker's devices refuses the terminate instead of leaving them
+ * behind.
  */
 async function adminFor(
   deps: WorkerLifecycleDependencies,
@@ -719,27 +752,20 @@ async function adminFor(
     return { kind: "open", session: undefined };
   await log.stage("authorizing");
   const { key } = power.worker;
-  let secret: SecretMaterial;
-  try {
-    secret = await deps.secrets.read({
-      reference: power.adminClient,
-      region: power.region,
-      credentials: power.request.credentials,
-    });
-  } catch (error) {
-    return {
-      kind: "refused",
-      refusal: adminSecretUnreadable(power.command as TerminateCommand, key, reasonOf(error)),
-    };
+  const command = power.command as TerminateCommand;
+  const opening = await openTailnetAdmin(deps, {
+    reference: power.adminClient,
+    region: power.region,
+    credentials: power.request.credentials,
+  });
+  switch (opening.kind) {
+    case "unreadable":
+      return { kind: "refused", refusal: adminSecretUnreadable(command, key, opening.reason) };
+    case "unusable":
+      return { kind: "refused", refusal: adminClientUnusable(command, key, opening.reason) };
+    case "open":
+      return opening;
   }
-  if (deps.interrupted()) return { kind: "open", session: undefined };
-  const opening = await deps.tailnetAdmin.open(secret);
-  if (opening.kind === "failed")
-    return {
-      kind: "refused",
-      refusal: adminClientUnusable(power.command as TerminateCommand, key, opening.reason),
-    };
-  return { kind: "open", session: opening.session };
 }
 
 /** The gates of stop and terminate, for a machine `act` found in `state`. */
@@ -747,13 +773,14 @@ function gates(
   deps: WorkerLifecycleDependencies,
   power: Power,
   log: PowerLog,
+  progress: Progress,
   machine: Machine,
 ): Promise<Refusal | undefined> {
   switch (power.action) {
     case "stop":
       return stopGates(deps, power, log);
     case "terminate":
-      return terminateGates(deps, power, log, machine);
+      return terminateGates(deps, power, log, progress, machine);
     case "start":
       return Promise.resolve(undefined);
   }
@@ -770,7 +797,7 @@ async function act(
   progress: Progress,
   machine: Machine,
 ): Promise<WorkerPower> {
-  const refusal = await gates(deps, power, log, machine);
+  const refusal = await gates(deps, power, log, progress, machine);
   if (deps.interrupted()) return interruptedUnder(log, progress);
   if (refusal !== undefined) return refusedUnder(log, refusal);
   const admin = await adminFor(deps, power, log);
@@ -870,75 +897,92 @@ async function stopInspection(
   const location = locateWorker(await deps.peers.view(), power.worker, power.tag, then);
   if (location.kind === "blocked")
     return { kind: "unlocated", tailnet: location.tailnet, verdict: location.verdict };
-  if (deps.controlPlane === undefined)
-    return {
-      kind: "activity",
-      activity: {
-        kind: "unknown",
-        reason: "this fffactory cannot reach the worker's control plane",
-      },
-    };
-  return { kind: "activity", activity: await deps.controlPlane.activeAgents(location.worker) };
+  return {
+    kind: "activity",
+    activity: workerActivity(await readAgents(deps.controlPlane, location.worker)),
+  };
 }
 
 /**
- * Terminate's gates (`docs/specs/worker-lifecycle.md` §Gates (terminate)): a stopped machine
- * passes uninspected; a running worker is located in the tailnet, and its agent activity, last
- * repository result and current work read, unless `--force` skips them. Undefined when
+ * Terminate's gates (`docs/specs/worker-lifecycle.md` §Gates (terminate)) over what it observed
+ * of the worker (`terminateObservation`), recorded first (`recordInspection`). Undefined when
  * terminate may go on, or once interrupted.
  */
 async function terminateGates(
   deps: WorkerLifecycleDependencies,
   power: Power,
   log: PowerLog,
+  progress: Progress,
   machine: Machine,
 ): Promise<Refusal | undefined> {
+  const observed = await terminateObservation(deps, power, log, machine);
+  if (observed === undefined) return undefined;
+  await recordInspection(deps, power, log, progress, observed);
+  return terminateGate(observed, power.worker, power.command as TerminateCommand);
+}
+
+/**
+ * What terminate's gates judge: a stopped machine passes uninspected; a running worker is
+ * located in the tailnet, and its agent activity, last repository result and current work read,
+ * unless `--force` skips them. Undefined once interrupted.
+ */
+async function terminateObservation(
+  deps: WorkerLifecycleDependencies,
+  power: Power,
+  log: PowerLog,
+  machine: Machine,
+): Promise<TerminateInspection | undefined> {
   if (machine.state === "stopped") {
     // Accepted risk: unpushed work on a stopped worker's disk goes unreported.
     deps.progress({ kind: "uninspected_stopped" });
-    return terminateGate({ kind: "stopped" }, power.worker, power.command as TerminateCommand);
+    return { kind: "stopped" };
   }
   if (power.request.force) {
     deps.progress({ kind: "forced", action: "terminate" });
-    return terminateGate({ kind: "forced" }, power.worker, power.command as TerminateCommand);
+    return { kind: "forced" };
   }
   await log.stage("inspecting");
   // TODO(re-evaluate when dispatch gains a pause): pause dispatch on the worker before this
   // inspection, as for stop: until then an agent dispatch starts between the check and the
   // terminate ends with the machine (an accepted race, epic #5).
-  const inspection = await terminateInspection(deps, power);
-  if (inspection === undefined) return undefined;
-  return terminateGate(inspection, power.worker, power.command as TerminateCommand);
+  return terminateInspection(deps, power);
 }
 
 /**
- * The running worker's agent activity and last repository result, then its current work: only
- * once the activity is read, since both go through the activator, which runs one operation at a
- * time, and only when the activity does not already refuse, which would leave the activator
- * held for nothing (`INSPECT_WORK_TIMEOUT_MS`). Undefined once interrupted, which asks the
- * worker nothing more.
+ * Records terminate's inspection of the worker (§Operation record): whether `--force` was given,
+ * and the inspection document `worker inspect --json` prints for what it `observed`; and shows
+ * its unarchived evidence, before any question, keeping it for the result, when it is said
+ * (`saysUnarchived`). Stop and start record none.
  */
-async function terminateInspection(
+async function recordInspection(
+  deps: WorkerLifecycleDependencies,
+  power: Power,
+  log: PowerLog,
+  progress: Progress,
+  observed: RemovalObservation,
+) {
+  if (power.action !== "terminate") return;
+  const actions = terminateGateActions(power.command as TerminateCommand, power.worker.key);
+  const { inspection } = workerRemovability(power.worker, observed, actions);
+  const { unarchived } = inspection;
+  if (saysUnarchived(power.request.instance.log_archive?.enabled === true, unarchived)) {
+    progress.unarchived = unarchived;
+    deps.progress({ kind: "unarchived", hostname: power.worker.hostname, unarchived });
+  }
+  return log.inspection({ forced: power.request.force, document: inspection });
+}
+
+/** The running worker's fresh inspection (`inspectForRemoval`); undefined once interrupted. */
+function terminateInspection(
   deps: WorkerLifecycleDependencies,
   power: Power,
 ): Promise<TerminateInspection | undefined> {
-  const then = thenRerunWorker(power.command, power.worker.key);
-  const location = locateWorker(await deps.peers.view(), power.worker, power.tag, then);
-  if (location.kind === "blocked") return { kind: "unlocated", verdict: location.verdict };
-  const [activity, repositories] = await Promise.all([
-    deps.controlPlane === undefined
-      ? {
-          kind: "unknown" as const,
-          reason: "this fffactory cannot reach the worker's control plane",
-        }
-      : deps.controlPlane.activeAgents(location.worker),
-    inspectRepositories(deps.transport, location.worker),
-  ]);
-  if (deps.interrupted()) return undefined;
-  if (activity.kind !== "idle") return { kind: "activity", activity };
-  const work = await inspectWork(deps.transport, location.worker);
   const placed = placedRepositories(power.request.instance.repositories ?? [], power.host);
-  return { kind: "inspected", repositories, work, placed: placed.map(({ path }) => path) };
+  return inspectForRemoval(
+    deps,
+    { worker: power.worker, tag: power.tag, placed: placed.map(({ path }) => path) },
+    thenRerunWorker(power.command, power.worker.key),
+  );
 }
 
 /**
@@ -1139,6 +1183,7 @@ async function reached(
     changed,
     awaited,
     ...(verdict === undefined ? {} : { verdict }),
+    ...unarchivedOf(progress),
     ...(removal ?? {}),
     operation: log.location,
     recordFailure,
@@ -1177,14 +1222,7 @@ async function removeDevices(
     power.worker.hostname,
     power.tag,
   );
-  const removed: string[] = [];
-  const failed: { readonly id: string; readonly reason: string }[] = [];
-  for (const device of tagged) {
-    if (deps.interrupted()) break;
-    const deletion = await admin.remove(device.id);
-    if (deletion.kind === "removed") removed.push(device.id);
-    else failed.push({ id: device.id, reason: deletion.reason });
-  }
+  const { removed, failed } = await deleteDevices(admin, tagged, deps.interrupted);
   return { kind: "listed", removed, failed, untagged: untagged.map((device) => device.id) };
 }
 
@@ -1239,9 +1277,10 @@ async function readiness(
     hostname: power.worker.hostname,
     release: power.pinned,
     configurationSha256: hostProjectionSha256(
-      projectHost(power.factoryId, power.pinned, power.host),
+      projectHost(power.request.instance, power.factoryId, power.pinned, power.host),
       deps.sha256,
     ),
+    delivered: deliveredAccounts(power.request.instance, power.host.key).map(({ id }) => id),
   }).verdict;
 }
 
@@ -1268,6 +1307,7 @@ async function terminateAbsent(
   progress: Progress,
 ): Promise<WorkerPower> {
   deps.progress({ kind: "absent", ...power.worker });
+  await recordInspection(deps, power, log, progress, { kind: "absent" });
   const admin = await adminFor(deps, power, log);
   if (deps.interrupted()) return interruptedUnder(log, progress);
   if (admin.kind === "refused") return refusedUnder(log, admin.refusal);
@@ -1548,6 +1588,7 @@ async function writeAndClean(
     changed: true,
     awaited: removing.awaited,
     removed: true,
+    ...unarchivedOf(progress),
     ...(removal ?? {}),
     operation: log.location,
     recordFailure,

@@ -53,13 +53,17 @@ smoke:
     bun scripts/build.ts linux-x64
     ./scripts/smoke-test.sh dist/fffactory-linux-x64
 
-# Check the Terraform modules with the managed Terraform: fmt, validate, namespacing, empty factory and removal plans (downloads Terraform and the AWS provider)
+# Check the Terraform modules with the managed Terraform: fmt, validate, namespacing, empty factory, removal and destroy plans (downloads Terraform and the AWS provider)
 terraform-check:
     bun scripts/terraform-check.ts
 
 # Test the worker bootstrap (user data and root activator) in Amazon Linux 2023 containers (needs Docker)
 bootstrap-test *cases:
     ./scripts/bootstrap-test.sh {{cases}}
+
+# Check that the pinned Paseo accepts only the password hash fffactory writes and that no agent sees PASEO_PASSWORD (Linux with user namespaces; downloads Paseo)
+paseo-check:
+    ./tests/paseo/hash-only-daemon.sh
 
 # Run all quality checks (format, lint, typecheck, coverage - fastest first)
 check-all: format-check lint-check typecheck coverage repository-skills
