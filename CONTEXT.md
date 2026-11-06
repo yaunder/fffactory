@@ -63,4 +63,8 @@ started unattended.
 
 The selected mechanism for hosting and supervising runs on a worker.
 
+It also owns repository registration: making each repository placed on the
+worker available for supervision in its own terms, such as a Paseo project
+([dispatch §Repository registration](docs/specs/dispatch.md#repository-registration)).
+
 **Avoid:** Control plane when referring specifically to execution hosting.

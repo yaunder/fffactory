@@ -36,6 +36,13 @@ and no secret reference. The manifest is configuration, so it reaches the
 worker on standard input, never as a command token
 ([host protocol](host-protocol.md)).
 
+Placement also decides which repositories the worker's execution backend
+registers: every dispatch reconcile reads this manifest and registers each
+placed checkout present on disk, Paseo projects on a Paseo worker, adding only
+([dispatch §Repository registration](dispatch.md#repository-registration)).
+The plan's Dispatch row counts them, and apply names any left unregistered
+([plan and apply §Apply](plan-apply.md#apply)).
+
 ## The repository stage
 
 For each declared worker, in factory.json's order, the stage:

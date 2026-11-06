@@ -7,6 +7,7 @@
 import type { SecretReference } from "../domain/instance";
 import { SecretMaterial } from "../domain/secrets";
 import type { ProcessOutcome } from "../infrastructure/local-tool-probe";
+import { systemCode } from "./failures";
 
 /** The AWS CLI as root: the instance role, no pager. */
 export const AWS_ENV = {
@@ -16,7 +17,6 @@ export const AWS_ENV = {
   AWS_PAGER: "",
 };
 const AWS_ERROR = /An error occurred \(([A-Za-z][A-Za-z0-9.]{0,63})\)/;
-const ERROR_CODE = /^[A-Z0-9_]{1,32}$/;
 
 /** Runs the AWS CLI's argv as root with `AWS_ENV`, within the caller's deadline. */
 export type RunAsRoot = (argv: readonly string[]) => Promise<ProcessOutcome>;
@@ -38,7 +38,7 @@ function readFailure(outcome: ProcessOutcome): string {
     case "not_found":
       return "reading its secret failed (the AWS CLI is not installed)";
     case "not_started":
-      return `reading its secret failed (${ERROR_CODE.test(outcome.code) ? outcome.code : "unexpected error"})`;
+      return `reading its secret failed (${systemCode(outcome.code)})`;
   }
 }
 

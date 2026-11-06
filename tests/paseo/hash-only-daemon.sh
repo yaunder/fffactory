@@ -2,7 +2,8 @@
 # Proves, against the pinned Paseo, that the daemon a worker runs authenticates with only the
 # bcrypt hash fffactory writes, that nothing it launches sees PASEO_PASSWORD, that it downloads
 # no speech model with the merged config, that it accepts factory-dispatch's launch and list
-# flags, and that it answers the agent list and inspection the worker's agent adapter reads
+# flags, that it answers the agent list and inspection the worker's agent adapter reads, and that
+# its project commands register a checkout once and refuse a missing directory
 # (docs/specs/control-plane.md §The Paseo pin, §Agent states):
 #
 #   tests/paseo/hash-only-daemon.sh            # just paseo-check
@@ -18,7 +19,7 @@
 # the environment an agent is launched with.
 #
 # Needs Linux with unprivileged user namespaces (unshare), Node.js 22 with npm, jq, curl,
-# python3, Bun, and the network to download the package.
+# python3, Bun, Git, and the network to download the package.
 set -Eeuo pipefail
 
 root="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -119,6 +120,55 @@ PYTHON
   fi
   pass 'no password is refused'
 
+  # The project contract the worker's execution backend registers placed checkouts by, read, as
+  # its adapter reads it, from standard output only: a temporary Git checkout is registered once
+  # however often it is created, and a missing directory is refused and registers nothing.
+  local checkout="${work}/repos/example" missing="${work}/repos/missing" created project_id projects
+  local count err
+  local git=(env -i HOME="${work}/cli" PATH=/usr/bin:/bin GIT_CONFIG_NOSYSTEM=1 git)
+  { "${git[@]}" init -q "${checkout}" && "${git[@]}" -C "${checkout}" -c user.name=factory \
+    -c user.email=factory@localhost commit -q --allow-empty -m initial; } ||
+    fail 'the temporary checkout could not be made'
+  list_projects() {
+    as_factory aws-right project ls --json 2>"${work}/project.err" ||
+      fail "project ls failed: $(<"${work}/project.err")"
+  }
+  projects="$(list_projects)"
+  [[ $(jq -r 'type' <<<"${projects}") == array ]] || fail "project ls printed no array: ${projects}"
+  created="$(as_factory aws-right project create "${checkout}" --json 2>"${work}/project.err")" ||
+    fail "project create failed: $(<"${work}/project.err")"
+  project_id="$(jq -er --arg path "${checkout}" \
+    'select(type == "object" and .path == $path and .kind == "git") | .projectId | strings' \
+    <<<"${created}")" || fail "project create did not print the checkout's git project: ${created}"
+  projects="$(list_projects)"
+  jq -e --argjson created "${created}" --arg path "${checkout}" 'type == "array" and
+    all(.[]; [.projectId, .name, .kind, .path] | all(type == "string")) and
+    [.[] | select(.path == $path)] == [$created]' <<<"${projects}" >/dev/null ||
+    fail "project ls does not list, once, the project create printed (${created}):
+${projects}"
+  pass 'project create registers a checkout as a git project, and project ls lists the same object'
+
+  out="$(as_factory aws-right project create "${checkout}" --json 2>"${work}/project.err")" ||
+    fail "a second project create failed: $(<"${work}/project.err")"
+  [[ $(jq -r '.projectId' <<<"${out}") == "${project_id}" ]] ||
+    fail "a second project create did not return the same project: ${out}"
+  count="$(jq -r 'length' <<<"${projects}")"
+  projects="$(list_projects)"
+  [[ $(jq -r 'length' <<<"${projects}") == "${count}" &&
+    $(jq -r --arg path "${checkout}" '[.[] | select(.path == $path)] | length' <<<"${projects}") == 1 ]] ||
+    fail "a second project create added a project: ${projects}"
+  pass 'a second project create returns the same project and adds none'
+
+  if out="$(as_factory aws-right project create "${missing}" --json 2>"${work}/project.err")"; then
+    fail "project create registered a missing directory: ${out}"
+  fi
+  err="$(<"${work}/project.err")"
+  [[ -z ${out} && ${err} == *PROJECT_CREATE_FAILED* && ${err} == *'Directory not found'* ]] ||
+    fail "project create refused a missing directory otherwise (stdout: ${out}; stderr: ${err})"
+  [[ $(list_projects | jq -cS .) == "$(jq -cS . <<<"${projects}")" ]] ||
+    fail "a refused project create changed the projects: $(list_projects)"
+  pass 'project create refuses a missing directory (PROJECT_CREATE_FAILED) and registers nothing'
+
   # Launched and listed with the flags factory-dispatch uses; like it, read only standard output
   # (0.12+ notes a created workspace on standard error).
   out="$(as_factory aws-right run --provider claude --cwd "${home}" --no-wait --json \
@@ -173,7 +223,7 @@ if [[ ${1:-} == --sandboxed ]]; then
   exit 0
 fi
 
-for tool in unshare node npm jq curl python3 bun; do
+for tool in unshare node npm jq curl python3 bun git; do
   command -v "${tool}" >/dev/null || fail "${tool} is required"
 done
 work="$(mktemp -d)"

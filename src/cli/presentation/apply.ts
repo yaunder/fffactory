@@ -6,6 +6,7 @@
  * after the operation record, any diagnostics and an upgrade's pin notice. The stages decide
  * every outcome and its published next action; this lays them out, saying each once.
  */
+import { type DispatchOutcome, registrationGap } from "../../application/apply-dispatch";
 import type { FactoryApply } from "../../application/apply-factory";
 import type { WorkerProgress } from "../../application/apply-workers";
 import { type DispatchGate, dispatchNextActions } from "../../domain/dispatch-readiness";
@@ -432,29 +433,41 @@ function leftBy<T extends { readonly kind: string }, K extends T["kind"]>(
 }
 
 /**
- * Dispatch's next actions, in its order: a failure's or a skip's, and a pending worker's gates
- * but for those another stage's action covers, worded as dispatch words its gates.
+ * One worker's dispatch next actions: a failure's or a skip's, or a pending worker's gates but
+ * for those another stage's action covers, worded as dispatch words its gates.
+ */
+function outcomeActions(result: Applied, outcome: DispatchOutcome): Left[] {
+  switch (outcome.kind) {
+    case "failed":
+    case "skipped":
+      return [laterStage(outcome.key, outcome.nextAction)];
+    case "pending": {
+      const covered = coveredGates(result, outcome.key);
+      const coveredActions = dispatchNextActions({
+        kind: "pending",
+        gates: outcome.gates,
+        blocking: outcome.blocking.filter(({ gate }) => covered.has(gate)),
+      });
+      return outcome.nextActions
+        .filter((action) => !coveredActions.includes(action))
+        .map((action) => laterStage(outcome.key, action));
+    }
+    default:
+      return [];
+  }
+}
+
+/**
+ * Dispatch's next actions, in its order, each worker's outcome's, then its registration gap's,
+ * a rerun that registers the checkouts left unregistered.
  */
 function dispatchActions(result: Applied): Left[] {
   return (result.dispatch ?? []).flatMap((outcome): Left[] => {
-    switch (outcome.kind) {
-      case "failed":
-      case "skipped":
-        return [laterStage(outcome.key, outcome.nextAction)];
-      case "pending": {
-        const covered = coveredGates(result, outcome.key);
-        const coveredActions = dispatchNextActions({
-          kind: "pending",
-          gates: outcome.gates,
-          blocking: outcome.blocking.filter(({ gate }) => covered.has(gate)),
-        });
-        return outcome.nextActions
-          .filter((action) => !coveredActions.includes(action))
-          .map((action) => laterStage(outcome.key, action));
-      }
-      default:
-        return [];
-    }
+    const gap = registrationGap(outcome);
+    return [
+      ...outcomeActions(result, outcome),
+      ...(gap === undefined ? [] : [laterStage(outcome.key, gap.nextAction)]),
+    ];
   });
 }
 

@@ -24,7 +24,7 @@ import {
   hostMachineAddress,
   type PlannedArchive,
   type PlannedControlPlane,
-  type PlannedDispatch,
+  type ReviewedDispatch,
   type PlannedRepositories,
   type PlannedWorker,
   type PlanReview,
@@ -234,10 +234,26 @@ function repositoryRows(plans: readonly PlannedRepositories[], stopped: readonly
   ];
 }
 
-function dispatchChange({ requested, schedule }: PlannedDispatch): Inline {
-  if (!requested || schedule === null) return "remove the factory dispatch schedule if it exists";
+/**
+ * The placed repositories the dispatch stage registers, before its schedule action; nothing for
+ * a worker placing none, whose registration asks the backend nothing. Worded for Paseo, the one
+ * execution backend a worker selects.
+ */
+// TODO(re-evaluate when a second execution backend adapter is built): word the registration in
+// the terms of the backend factory.json selects for the worker, not Paseo's alone.
+function registration(registers: number): string {
+  if (registers === 0) return "";
+  return registers === 1
+    ? "register 1 placed repository as a Paseo project; "
+    : `register ${registers} placed repositories as Paseo projects; `;
+}
+
+function dispatchChange({ requested, schedule, registers }: ReviewedDispatch): Inline {
+  const registering = registration(registers);
+  if (!requested || schedule === null)
+    return `${registering}remove the factory dispatch schedule if it exists`;
   return [
-    "install the dispatcher and skill, then reconcile ",
+    `${registering}install the dispatcher and skill, then reconcile `,
     verbatim(`${schedule.cron} ${schedule.timezone}`),
     " with ",
     verbatim(`${schedule.provider}/${schedule.model}`),
@@ -249,7 +265,7 @@ function dispatchChange({ requested, schedule }: PlannedDispatch): Inline {
 }
 
 /** The dispatch stage, then the end-to-end verification that follows it. */
-function dispatchRows(plans: readonly PlannedDispatch[], stopped: readonly HostKey[]) {
+function dispatchRows(plans: readonly ReviewedDispatch[], stopped: readonly HostKey[]) {
   if (plans.length === 0) return [];
   return [
     stageRow(

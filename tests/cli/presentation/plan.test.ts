@@ -102,7 +102,12 @@ function staged(workers: readonly PlannedWorker[], fields: Partial<FactoryPlanRe
       observation: "no-release",
       changes: ["paseo-package" as const, "service-definition" as const],
     })),
-    dispatch: workers.map((worker) => ({ ...worker, requested: false, schedule: null })),
+    dispatch: workers.map((worker) => ({
+      ...worker,
+      requested: false,
+      schedule: null,
+      registers: 0,
+    })),
     ...fields,
   });
 }
@@ -239,6 +244,7 @@ describe("the plan section (plan-apply §Plan)", () => {
         {
           ...BUILDER_1,
           requested: true,
+          registers: 0,
           schedule: {
             cron: "*/15 * * * *",
             timezone: "UTC",
@@ -260,6 +266,26 @@ describe("the plan section (plan-apply §Plan)", () => {
       "    ~ builder-1   install the dispatcher and skill, then reconcile */15 * * * * UTC with codex/configured-model, mode workspace-write, cwd /home/factory",
     ]);
   });
+
+  test.each([
+    [0, "remove the factory dispatch schedule if it exists"],
+    [
+      1,
+      "register 1 placed repository as a Paseo project; remove the factory dispatch schedule if it exists",
+    ],
+    [
+      3,
+      "register 3 placed repositories as Paseo projects; remove the factory dispatch schedule if it exists",
+    ],
+  ])(
+    "a worker placing %d repositories has the Dispatch row name their registration",
+    (registers, row) => {
+      const shown = staged([BUILDER_1], {
+        dispatch: [{ ...BUILDER_1, requested: false, schedule: null, registers }],
+      });
+      expect(plain(planSection(shown, {})).at(-2)).toBe(`    ~ builder-1   ${row}`);
+    },
+  );
 
   test("an upgrade's plan shows its pin move beside the release (plan-apply §The pin move and the plan)", () => {
     const shown = review({ pinMove: pinMove("0.2.0", release("0.3.0")) });
@@ -317,6 +343,7 @@ describe("data in the plan is shown verbatim (cli output §Layout blocks)", () =
       {
         ...BUILDER_1,
         requested: true,
+        registers: 0,
         schedule: {
           cron: "*/15 * * * *",
           timezone: "UTC",

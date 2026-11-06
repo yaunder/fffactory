@@ -20,13 +20,13 @@ import {
 } from "../domain/collector-installation";
 import type { HostProjection } from "../domain/host-projection";
 import type { ProcessOutcome } from "../infrastructure/local-tool-probe";
+import { ended, errorCode } from "./failures";
 import type { WorkerSystem } from "./inspect";
 import { writeRootFile } from "./root-files";
 
 const SYSTEMCTL = "/usr/bin/systemctl";
 /** systemctl's whole environment: no pager, no colors, nothing of root's. */
 const SYSTEMCTL_ENV = { PATH: "/usr/sbin:/usr/bin:/sbin:/bin", LANG: "C.UTF-8" } as const;
-const ERROR_CODE = /^[A-Z0-9_]{1,32}$/;
 const [SERVICE_UNIT, TIMER_UNIT] = COLLECTOR_UNITS;
 
 /** What of the host projection the step reads: the worker's identity and the log archive. */
@@ -42,25 +42,6 @@ export interface StepLog {
 class Refused extends Error {
   constructor(readonly reason: string) {
     super(reason);
-  }
-}
-
-function errorCode(error: unknown): string {
-  const code = (error as NodeJS.ErrnoException | undefined)?.code;
-  return typeof code === "string" && ERROR_CODE.test(code) ? code : "unexpected error";
-}
-
-/** How a command that did not succeed ended, as `<what> ...`; undefined when it succeeded. */
-function ended(what: string, outcome: ProcessOutcome): string | undefined {
-  switch (outcome.kind) {
-    case "exited":
-      return outcome.exitCode === 0 ? undefined : `${what} exited with status ${outcome.exitCode}`;
-    case "timed_out":
-      return `${what} timed out`;
-    case "not_found":
-      return `${what} could not be started (ENOENT)`;
-    case "not_started":
-      return `${what} could not be started (${ERROR_CODE.test(outcome.code) ? outcome.code : "unexpected error"})`;
   }
 }
 

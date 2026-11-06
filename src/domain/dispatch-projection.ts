@@ -3,6 +3,11 @@ import type { DispatchGate } from "./dispatch-readiness";
 import { DISPATCH_GATES } from "./dispatch-readiness";
 import { HOST_PROTOCOL_VERSION, remoteCommand, WORKER_PATHS } from "./host-protocol";
 import type { DispatchSettings } from "./instance";
+import {
+  parseRepositoryRegistration,
+  type RepositoryRegistration,
+  repositoryRegistrationDocument,
+} from "./repository-registration";
 
 export const DISPATCH_PROJECTION_PATH = "/var/lib/fffactory/dispatch.json";
 export const DISPATCH_RESULT_PATH = "/var/lib/fffactory/dispatch-result.json";
@@ -32,29 +37,45 @@ export interface DispatchProjection {
   readonly schedule: DispatchSchedule | null;
 }
 
+/**
+ * What a reconcile's repository registration did (`docs/specs/dispatch.md` §Repository
+ * registration), on every state a reconcile records. Absent from an older worker's result, and
+ * when the worker could not read its repository manifest. It never decides the state, the
+ * blockers or `changed`, which are the schedule's.
+ */
+interface Registered {
+  readonly repository_registration?: RepositoryRegistration;
+}
+
 export type DispatchInspection =
   | {
       readonly protocol_version: typeof HOST_PROTOCOL_VERSION;
       readonly state: "none" | "unreadable";
     }
-  | {
+  | (Registered & {
       readonly protocol_version: typeof HOST_PROTOCOL_VERSION;
       readonly state: "not_requested" | "active";
       readonly blockers: readonly [];
       readonly changed: boolean;
-    }
-  | {
+    })
+  | (Registered & {
       readonly protocol_version: typeof HOST_PROTOCOL_VERSION;
       readonly state: "pending";
       readonly blockers: readonly DispatchGate[];
       readonly changed: boolean;
-    }
-  | {
+    })
+  | (Registered & {
       readonly protocol_version: typeof HOST_PROTOCOL_VERSION;
       readonly state: "failed";
       readonly blockers: readonly DispatchGate[];
       readonly reason: string;
-    };
+    });
+
+/** An inspection a reconcile records: any but `none` and `unreadable`. */
+export type RecordedInspection = Exclude<
+  DispatchInspection,
+  { readonly state: "none" | "unreadable" }
+>;
 
 export type DispatchAdoption = {
   readonly protocol_version: typeof HOST_PROTOCOL_VERSION;
@@ -238,8 +259,25 @@ export function parseDispatchProjection(text: string): DispatchProjectionParse {
     : { ok: false, reason: "the dispatch projection is not canonical" };
 }
 
+/** The inspection's own fields in a stable order, its registration last as its own document. */
+function inspectionDocument(inspection: DispatchInspection) {
+  const base = {
+    protocol_version: inspection.protocol_version,
+    state: inspection.state,
+    ...("blockers" in inspection ? { blockers: inspection.blockers } : {}),
+    ...("changed" in inspection ? { changed: inspection.changed } : {}),
+    ...("reason" in inspection ? { reason: inspection.reason } : {}),
+  };
+  return "repository_registration" in inspection && inspection.repository_registration
+    ? {
+        ...base,
+        repository_registration: repositoryRegistrationDocument(inspection.repository_registration),
+      }
+    : base;
+}
+
 export function dispatchInspectionJson(inspection: DispatchInspection): string {
-  return JSON.stringify(inspection, null, 2);
+  return JSON.stringify(inspectionDocument(inspection), null, 2);
 }
 
 export function dispatchInspectionExitCode(inspection: DispatchInspection): 0 | 1 | 2 {
@@ -250,7 +288,7 @@ export function dispatchInspectionExitCode(inspection: DispatchInspection): 0 | 
 function parsedInspection(
   item: Record<string, unknown>,
   blockers: DispatchGate[],
-): DispatchInspection | undefined {
+): RecordedInspection | undefined {
   const changed = typeof item.changed === "boolean" ? item.changed : undefined;
   if ((item.state === "not_requested" || item.state === "active") && blockers.length === 0)
     return changed === undefined
@@ -270,7 +308,7 @@ function parsedInspection(
 function failedInspection(
   reason: unknown,
   blockers: DispatchGate[],
-): DispatchInspection | undefined {
+): RecordedInspection | undefined {
   return typeof reason === "string" && NON_EMPTY.test(reason)
     ? { protocol_version: HOST_PROTOCOL_VERSION, state: "failed", blockers, reason }
     : undefined;
@@ -287,7 +325,11 @@ export function parseDispatchInspection(text: string): DispatchInspection | unde
   if (item.state === "none" || item.state === "unreadable")
     return { protocol_version: HOST_PROTOCOL_VERSION, state: item.state };
   const blockers = blockersOf(item.blockers);
-  return blockers === undefined ? undefined : parsedInspection(item, blockers);
+  const inspection = blockers === undefined ? undefined : parsedInspection(item, blockers);
+  const registration = parseRepositoryRegistration(item.repository_registration);
+  return inspection === undefined || registration === undefined
+    ? inspection
+    : { ...inspection, repository_registration: registration };
 }
 
 export function dispatchAdoptionJson(adoption: DispatchAdoption): string {
