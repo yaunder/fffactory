@@ -406,6 +406,20 @@ fffactory relies on these Paseo contracts, held by 0.15.0
   every label given. `run --background` is a deprecated alias of `--no-wait`
   from 0.12, warns on standard error and is removed after 2027-04-01
   ([dispatch §The dispatch programs and skill](dispatch.md#the-dispatch-programs-and-skill)).
+- `paseo project ls --json` prints a JSON array of the projects, one object per
+  project with its `projectId`, `name`, `kind` (`git` for a Git checkout) and
+  `path`. `paseo project create DIR --json` registers an existing directory and
+  prints that project as one such object on standard output, the same object
+  `ls` lists for it. Created with a normalized absolute path, its `path` is that
+  path exactly, so a placed checkout's absolute path finds its row. A second
+  `create` on the same directory returns the same `projectId` and adds no
+  project. `create` on a missing directory exits non-zero, prints nothing on
+  standard output, prints its error (`PROJECT_CREATE_FAILED`,
+  `Directory not found`) on standard error and registers nothing.
+  `just paseo-check` proves these against the pin through `paseo-auth.sh` on a
+  temporary Git checkout. `ls` also omits archived projects, read from
+  `@getpaseo/server`'s source and not proved: the pinned CLI cannot archive a
+  project (`project` has only `create`, `ls`, `rename` and `delete`).
 - `paseo daemon reload` reloads the configuration without restarting.
 - From 0.13 the daemon rewrites a stored `running` or `initializing` agent to
   `closed` at startup, before any client connects: a restart never resumes a
