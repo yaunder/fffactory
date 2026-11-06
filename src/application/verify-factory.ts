@@ -14,9 +14,13 @@
  * it is, never absent, and its verdict names the skip and its next action. A worker whose
  * machine is stopped is sent nothing by any stage: it is reported `stopped`, and does not keep
  * the factory from being ready.
+ *
+ * A reconciled worker whose execution backend did not register every placed checkout present
+ * (`registrationGap`, `docs/specs/dispatch.md` §Repository registration) is not ready either,
+ * its dispatch verdict left as it is: its details name each unregistered checkout, then a rerun.
  */
 import type { ControlPlaneOutcome } from "./apply-control-plane";
-import type { DispatchOutcome } from "./apply-dispatch";
+import { type DispatchOutcome, registrationGap } from "./apply-dispatch";
 import type { RepositoryOutcome } from "./apply-repositories";
 import type { HostKey } from "../domain/instance";
 import type { WorkerOutcome } from "../domain/rollout";
@@ -116,6 +120,12 @@ function skipActions(outcome: WorkerOutcome, dispatch: DispatchOutcome | undefin
   return [...new Set(actions)];
 }
 
+/** Each checkout dispatch's registration left unregistered, then the rerun; none without a gap. */
+function registrationDetails(dispatch: DispatchOutcome | undefined): string[] {
+  const gap = dispatch === undefined ? undefined : registrationGap(dispatch);
+  return gap === undefined ? [] : [...gap.unregistered, gap.nextAction];
+}
+
 /** A stopped worker: no stage sent it anything, so there is nothing to verify. */
 function stoppedWorker(outcome: WorkerOutcome): WorkerVerification {
   return {
@@ -147,12 +157,15 @@ function verifyWorker(
   if (repos !== "synchronized") details.push(`Repositories are ${repos}`);
   if (control !== "applied") details.push(`Control plane is ${control}`);
   details.push(...dispatchDetails(outcome, dispatch), ...skipActions(outcome, dispatch));
+  const unregistered = registrationDetails(dispatch);
+  details.push(...unregistered);
 
   const ready =
     release === "healthy" &&
     repos === "synchronized" &&
     control === "applied" &&
-    (disp === "active" || disp === "not_requested");
+    (disp === "active" || disp === "not_requested") &&
+    unregistered.length === 0;
   return {
     key: outcome.key,
     hostname: outcome.hostname,

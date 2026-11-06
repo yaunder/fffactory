@@ -2,7 +2,7 @@ import { parseArgs } from "node:util";
 import { applyFactory, type FactoryApply } from "../../application/apply-factory";
 import type { WorkerProgress } from "../../application/apply-workers";
 import type { ControlPlaneOutcome } from "../../application/apply-control-plane";
-import type { DispatchOutcome } from "../../application/apply-dispatch";
+import { type DispatchOutcome, registrationGap } from "../../application/apply-dispatch";
 import type { Approval } from "../../application/approval";
 import type { PlanRefusal } from "../../application/plan-factory";
 import { isPlanId, type PlanReview } from "../../domain/plan";
@@ -188,10 +188,20 @@ function controlPlaneExit(outcomes: readonly ControlPlaneOutcome[] | undefined):
   return outcomes?.some((outcome) => outcome.kind === "deferred") ? 2 : 0;
 }
 
-/** A skipped worker, sent nothing because an earlier stage skipped it or the tailnet no longer locates it, is not a failure: 2. */
+/**
+ * A skipped worker, sent nothing because an earlier stage skipped it or the tailnet no longer
+ * locates it, is not a failure: 2. Nor is a placed checkout its execution backend left
+ * unregistered, a convenience that never fails an apply but is never silent: 2
+ * (`docs/specs/plan-apply.md` §Apply).
+ */
 function dispatchExit(outcomes: readonly DispatchOutcome[] | undefined): 0 | 1 | 2 {
   if (outcomes?.some((outcome) => outcome.kind === "failed")) return 1;
-  return outcomes?.some((outcome) => outcome.kind === "pending" || outcome.kind === "skipped")
+  return outcomes?.some(
+    (outcome) =>
+      outcome.kind === "pending" ||
+      outcome.kind === "skipped" ||
+      registrationGap(outcome) !== undefined,
+  )
     ? 2
     : 0;
 }

@@ -254,6 +254,17 @@ export interface PlannedDispatch extends PlannedWorker {
   readonly schedule: DispatchSchedule | null;
 }
 
+/**
+ * A worker's dispatch stage as its review shows it: the planned projection, and how many
+ * repositories factory.json places on the worker, which dispatch reconcile has its execution
+ * backend register (`docs/specs/dispatch.md` §Repository registration). The count comes from
+ * factory.json, as the repositories stage's placement does, so a saved plan, bound to
+ * factory.json's text, records nothing more for it.
+ */
+export interface ReviewedDispatch extends PlannedDispatch {
+  readonly registers: number;
+}
+
 function plannedSchedule(settings: DispatchSettings | undefined): DispatchSchedule | null {
   if (settings?.enabled !== true) return null;
   const { cron, timezone, provider, model, mode, cwd } = settings;
@@ -345,7 +356,7 @@ export interface FactoryPlanReview {
   readonly workers: readonly PlannedWorker[];
   readonly repositories: readonly PlannedRepositories[];
   readonly controlPlane: readonly PlannedControlPlane[];
-  readonly dispatch: readonly PlannedDispatch[];
+  readonly dispatch: readonly ReviewedDispatch[];
   readonly stopped: readonly HostKey[];
   readonly pinMove?: PinMove;
   /** The log archive, for a factory.json enabling it: absent otherwise. */
@@ -383,17 +394,36 @@ export interface FactoryPlanReviewInput {
   readonly archive?: PlannedArchive | undefined;
 }
 
-/** The review of a factory plan of `instance`: every declared worker and its repositories. */
+/** Each worker's planned dispatch, with the repositories its dispatch stage registers. */
+function reviewedDispatch(
+  dispatch: readonly PlannedDispatch[],
+  repositories: readonly PlannedRepositories[],
+): ReviewedDispatch[] {
+  const placed = new Map(repositories.map(({ key, placed }) => [key, placed.length]));
+  return dispatch.map(({ key, hostname, requested, schedule }) => ({
+    key,
+    hostname,
+    requested,
+    schedule,
+    registers: placed.get(key) ?? 0,
+  }));
+}
+
+/**
+ * The review of a factory plan of `instance`: every declared worker, its repositories, and
+ * those its dispatch stage registers.
+ */
 export function factoryPlanReview(input: FactoryPlanReviewInput): FactoryPlanReview {
   const workers = declaredWorkers(input.instance, input.target.factoryId);
+  const repositories = plannedRepositories(workers, input.instance);
   return {
     kind: "factory",
     target: input.target,
     changes: input.changes,
     workers,
-    repositories: plannedRepositories(workers, input.instance),
+    repositories,
     controlPlane: input.controlPlane,
-    dispatch: input.dispatch,
+    dispatch: reviewedDispatch(input.dispatch, repositories),
     stopped: input.stopped,
     ...(input.pinMove === undefined ? {} : { pinMove: input.pinMove }),
     ...(input.archive === undefined

@@ -5,7 +5,7 @@
  * outcome and what is still to enroll; this lays it out.
  */
 import type { ControlPlaneOutcome } from "../../application/apply-control-plane";
-import type { DispatchOutcome } from "../../application/apply-dispatch";
+import { type DispatchOutcome, registrationGap } from "../../application/apply-dispatch";
 import type { RepositoryOutcome } from "../../application/apply-repositories";
 import type { HostKey } from "../../domain/instance";
 import {
@@ -21,11 +21,12 @@ import { type Inline, type NextPart, type Row, step, verbatim } from "./blocks";
 import { fffactoryCommand, type Selection } from "./command-line";
 import type { Status } from "./style";
 
-/** Each later stage's label, in the plan's order. */
+/** Each later stage's label, in the plan's order, and dispatch's registration gap after it. */
 const STAGES = {
   controlPlane: "Control plane",
   repositories: "Repositories",
   dispatch: "Dispatch",
+  registration: "Registration",
 };
 /** Every worker's stages align, whichever ran for it. */
 const STAGE_WIDTH = Math.max(...Object.values(STAGES).map((label) => Bun.stringWidth(label)));
@@ -167,6 +168,23 @@ function dispatchRow(outcome: DispatchOutcome, worker: WorkerOutcome): Row | und
 }
 
 /**
+ * The placed checkouts dispatch's registration left unregistered, each under the row with its
+ * reason, in the words verification records; no row when none was left, the Dispatch row alone
+ * saying how dispatch ended.
+ */
+function registrationRow(outcome: DispatchOutcome): Row | undefined {
+  const gap = registrationGap(outcome);
+  if (gap === undefined) return undefined;
+  const count = gap.unregistered.length;
+  return {
+    status: "attention",
+    label: STAGES.registration,
+    value: `${count} placed ${count === 1 ? "repository" : "repositories"} not registered`,
+    details: [{ kind: "text", lines: gap.unregistered.map((line) => [verbatim(line)]) }],
+  };
+}
+
+/**
  * A worker's row in the Result: its key, its workers-stage outcome, and under it each later
  * stage that ran for it, in the plan's order. Its status is its worst stage's, so a worker
  * whose enrollment is pending, or whose later stage is pending or failed, is never shown ready.
@@ -178,6 +196,7 @@ export function workerRow(outcome: WorkerOutcome, later: LaterStages, selection:
     later.controlPlane && controlPlaneRow(later.controlPlane),
     later.repositories && repositoriesRow(later.repositories, outcome),
     later.dispatch && dispatchRow(later.dispatch, outcome),
+    later.dispatch && registrationRow(later.dispatch),
   ].filter((row): row is Row => row !== undefined);
   const status = worst([own.status, ...stages.map((row) => row.status)]) ?? own.status;
   return {

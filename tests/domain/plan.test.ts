@@ -165,7 +165,7 @@ describe("the CLI/pin match guard", () => {
 });
 
 describe("the plan's workers and review (plan-apply §Layer mapping)", () => {
-  test("a factory review carries every approved stage: workers, their repositories, control plane, dispatch and stopped workers", () => {
+  test("a factory review carries every approved stage: workers, their repositories, control plane, dispatch with its registrations and stopped workers", () => {
     const instance = {
       schema_version: 1 as const,
       hosts: [
@@ -198,7 +198,11 @@ describe("the plan's workers and review (plan-apply §Layer mapping)", () => {
         { ...builder2, placed: [] },
       ],
       controlPlane,
-      dispatch,
+      // Each worker's dispatch stage registers the repositories factory.json places on it (#135).
+      dispatch: [
+        { ...builder1, requested: false, schedule: null, registers: 2 },
+        { ...builder2, requested: false, schedule: null, registers: 0 },
+      ],
       stopped,
     });
     const move = { from: "0.2.0" as Release, to: TARGET.release };

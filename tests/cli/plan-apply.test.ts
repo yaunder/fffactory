@@ -42,6 +42,10 @@ import {
   STATE_BUCKET_ADDRESS,
 } from "../support/fake-provisioner";
 import { newSavedBootstrapPlan } from "../../src/domain/plan";
+import {
+  type RepositoryRegistration,
+  repositoryRegistration,
+} from "../../src/domain/repository-registration";
 import { fakePrompt } from "../support/fake-secrets";
 import { type Behavior, fakeTerraform } from "../support/fake-terraform";
 import { MemoryInstanceStore } from "../support/memory-instance-store";
@@ -174,6 +178,16 @@ const CONVERGE = [
 /** The plan's row for a factory that declares no worker. */
 const NO_WORKERS =
   "  Workers          none declared. Declare a host in factory.json's hosts, then create it with `fffactory apply`.";
+
+/** factory.json placing one repository, `product`, on builder-1, its dispatch not requested. */
+const PLACING = `${JSON.stringify(
+  {
+    ...requestingDispatch(),
+    hosts: (requestingDispatch().hosts ?? []).map(({ dispatch: _, ...host }) => host),
+  },
+  null,
+  2,
+)}\n`;
 
 function text(hosts: string[], overrides: object = {}): string {
   return `${JSON.stringify({ ...declaring(...hosts), ...overrides }, null, 2)}\n`;
@@ -310,9 +324,19 @@ describe("fffactory plan (plan-apply §Plan)", () => {
       "  Repositories     one worker at a time",
       "    ~ builder-1   reconcile 1 placed repository as factory; preserve and report unmanaged checkouts",
       "  Dispatch         after every readiness gate",
-      "    ~ builder-1   install the dispatcher and skill, then reconcile */15 * * * * UTC with claude/configured-model, mode default, cwd /home/factory",
+      "    ~ builder-1   register 1 placed repository as a Paseo project; install the dispatcher and skill, then reconcile */15 * * * * UTC with claude/configured-model, mode default, cwd /home/factory",
       "  Verification     end to end: observe each worker's release, repositories, Paseo and actual dispatch schedule",
     ]);
+  });
+
+  test("the Dispatch row names the registration of the placed repositories, dispatch requested or not (#135)", async () => {
+    const { context, out } = cli({ hosts: ["builder-1"], document: PLACING });
+    expect(await run(["plan"], context)).toBe(0);
+    const dispatch = out.indexOf("  Dispatch         after every readiness gate");
+    expect(out[dispatch + 1]).toBe(
+      "    ~ builder-1   register 1 placed repository as a Paseo project; remove the factory " +
+        "dispatch schedule if it exists",
+    );
   });
 
   test("its human output is colored only on a stream that is (cli-output §Color)", async () => {
@@ -1115,6 +1139,71 @@ describe("fffactory apply (plan-apply §Apply)", () => {
           "rerun `fffactory apply`.",
       ]);
       expect(out.some((line) => line.includes("failed") || line.includes("absent"))).toBe(false);
+    });
+  });
+
+  describe("a worker's repository registration (#135)", () => {
+    const PRODUCT = "/workspace/repos/product";
+
+    /** Applies PLACING to builder-1, its dispatch reconcile reporting `registration`. */
+    function applying(registration?: RepositoryRegistration) {
+      return cli({
+        hosts: ["builder-1"],
+        interactive: true,
+        answers: ["yes"],
+        document: PLACING,
+        controlPlane: fakeControlPlane("healthy", agentsIn()).controlPlane,
+        workflowQueue: fakeWorkflowQueue(registration === undefined ? {} : { registration }).queue,
+      });
+    }
+
+    /** builder-1's Result, from its row to the operation record. */
+    const workerResult = (out: readonly string[]) =>
+      out.slice(
+        out.indexOf(ENROLLMENT_PENDING),
+        out.findIndex((line) => RECORD_LINE.test(line)),
+      );
+
+    test.each([
+      ["registered", repositoryRegistration("paseo", [{ path: PRODUCT, state: "registered" }])],
+      ["already present", repositoryRegistration("paseo", [{ path: PRODUCT, state: "present" }])],
+      ["not reported, as by an older worker", undefined],
+    ])("%s leaves the Result and exit 0 as they were", async (_, registration) => {
+      const { context, out, err, lockStore } = applying(registration);
+      expect(await run(["apply"], context)).toBe(0);
+      expect(err).toEqual([]);
+      expect(workerResult(out)).toEqual([
+        ENROLLMENT_PENDING,
+        "    ✔ Control plane   applied",
+        "    ✔ Repositories    synchronized",
+        "      Dispatch        not requested",
+        "  ! Verification       The factory is ready: every worker is verified end to end · " +
+          "enrollment pending on 1 worker",
+      ]);
+      expect([...lockStore.operations.values()].at(-1)?.status).toBe("succeeded");
+    });
+
+    test("a failed one names each unregistered checkout and a rerun, and exits 2, never 1", async () => {
+      const { context, out, err, lockStore } = applying(
+        repositoryRegistration("paseo", [
+          { path: PRODUCT, state: "failed", reason: "registering it as a Paseo project timed out" },
+        ]),
+      );
+      expect(await run(["apply"], context)).toBe(2);
+      expect(err).toEqual([]);
+      expect(workerResult(out)).toEqual([
+        ENROLLMENT_PENDING,
+        "    ✔ Control plane   applied",
+        "    ✔ Repositories    synchronized",
+        "      Dispatch        not requested",
+        "    ! Registration    1 placed repository not registered",
+        `      ${PRODUCT} is not registered: registering it as a Paseo project timed out`,
+        "  ! Verification       The factory is not ready: 1 of 1 workers need attention · " +
+          "enrollment pending on 1 worker",
+      ]);
+      const next = out.slice(out.indexOf(NEXT));
+      expect(next.slice(0, 2)).toEqual([NEXT, "  builder-1: Rerun `fffactory apply`"]);
+      expect([...lockStore.operations.values()].at(-1)?.status).toBe("partial");
     });
   });
 

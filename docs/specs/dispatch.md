@@ -313,6 +313,16 @@ in the result the endpoint persists and in the one it returns.
   reports the schedule drifted. A stored result without it, written by an
   earlier release, still parses, with no registration.
 
+Apply reports it ([plan and apply §Apply](plan-apply.md#apply)). The plan's
+Dispatch row names the registration of the repositories factory.json places
+on each worker. Each reconciled worker's dispatch outcome (`active`, `pending`
+or `not_requested`, unchanged by it) carries the registration its reconcile
+returned (`apply-dispatch.ts`); one that failed is never a failure but a gap
+(`registrationGap`): the worker is not ready, the Result names each
+unregistered checkout with its reason and the Next block ``Rerun `fffactory
+apply` ``, and apply exits 2, never 1. Every checkout `registered` or `present`
+adds nothing to the Result, and neither does a worker reporting none.
+
 It runs here because the activator already allows `dispatch reconcile`: the
 change ships as release code and reaches existing workers through `fffactory
 upgrade` and apply. A new activator action would not, the activator being
@@ -405,7 +415,18 @@ was observed active after schedule reconciliation; the factory is ready when eve
 deferred maintenance or a skipped worker is not a failure, but the factory has
 not reached its requested end state until a later apply completes it, and
 `fffactory apply` exits 2. A failed dispatch reconciliation is a command failure
-and exits 1.
+and exits 1. A worker whose execution backend left a placed checkout
+unregistered ([Repository registration](#repository-registration)) is not ready
+either, its dispatch verdict as it is: its details name each such checkout,
+`PATH is not registered: REASON`, then ``Rerun `fffactory apply` ``, and apply
+exits 2.
+
+Tested in `tests/application/apply-dispatch.test.ts` (every gate, skipped and
+stopped workers, and the registration each reconciled outcome carries, none
+from an older worker or a schedule that did not reconcile, and the gap a failed
+checkout leaves) and `tests/application/verify-factory.test.ts` (each verdict,
+skips and stopped workers, and a registration gap leaving a worker not ready
+with its dispatch verdict unchanged).
 
 A worker the workers stage skipped keeps whatever release it had: its release
 verdict is `skipped`, `Release left as is: SUMMARY`, never `absent`, and a

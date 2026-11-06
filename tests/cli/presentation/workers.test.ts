@@ -8,7 +8,7 @@ import {
   workerEnrollmentOf,
   workerRow,
 } from "../../../src/cli/presentation/workers";
-import { plainStyle } from "../../../src/cli/presentation/style";
+import { ansiStyle, plainStyle } from "../../../src/cli/presentation/style";
 import type { HostKey } from "../../../src/domain/instance";
 import {
   ENROLLMENTS,
@@ -16,6 +16,7 @@ import {
   type EnrollmentState,
   type Verification,
 } from "../../../src/domain/readiness";
+import { repositoryRegistration } from "../../../src/domain/repository-registration";
 import { stoppedOutcome, type WorkerOutcome } from "../../../src/domain/rollout";
 
 const HOST = "fff-abcd1234-builder-1";
@@ -129,6 +130,71 @@ describe("a worker's result row (plan and apply §Apply)", () => {
       "! builder-1   installed and verified · every account enrolled",
       "  ! Control plane   deferred · Maintenance (password) was deferred while agents may be busy",
       "  ! Repositories    unresolved · 1 checkout is divergent",
+    ]);
+  });
+
+  test("checkouts left unregistered: a Registration row under Dispatch, each checkout with its reason as data", () => {
+    const active: DispatchOutcome = {
+      ...WORKER,
+      kind: "active",
+      changed: false,
+      gates: [],
+      registration: repositoryRegistration("paseo", [
+        {
+          path: "/workspace/repos/a",
+          state: "failed",
+          reason: "registering it as a Paseo project timed out",
+        },
+        { path: "/workspace/repos/b", state: "present" },
+        {
+          path: "/workspace/repos/`c`d",
+          state: "failed",
+          reason: "Paseo's project list was invalid",
+        },
+      ]),
+    };
+    expect(
+      lines(
+        workerRow(
+          ENROLLED,
+          { controlPlane: applied, repositories: synchronized, dispatch: active },
+          {},
+        ),
+      ),
+    ).toEqual([
+      "! builder-1   installed and verified · every account enrolled",
+      "  ✔ Control plane   applied",
+      "  ✔ Repositories    synchronized",
+      "  ✔ Dispatch        active",
+      "  ! Registration    2 placed repositories not registered",
+      "    /workspace/repos/a is not registered: registering it as a Paseo project timed out",
+      "    /workspace/repos/`c`d is not registered: Paseo's project list was invalid",
+    ]);
+    const colored = render(ansiStyle, [
+      {
+        kind: "rows",
+        rows: [
+          workerRow(
+            ENROLLED,
+            { controlPlane: applied, repositories: synchronized, dispatch: active },
+            {},
+          ),
+        ],
+      },
+    ]);
+    expect(colored.at(-1)).toBe(
+      "    /workspace/repos/`c`d is not registered: Paseo's project list was invalid",
+    );
+    expect(colored.at(-1)).not.toContain(ansiStyle.code("c"));
+    const registered: DispatchOutcome = {
+      ...notRequested,
+      registration: repositoryRegistration("paseo", [
+        { path: "/workspace/repos/a", state: "registered" },
+      ]),
+    };
+    expect(lines(workerRow(ENROLLED, { dispatch: registered }, {}))).toEqual([
+      "✔ builder-1   installed and verified · every account enrolled",
+      "    Dispatch        not requested",
     ]);
   });
 

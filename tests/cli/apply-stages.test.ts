@@ -17,6 +17,7 @@ import { verifyFactory } from "../../src/application/verify-factory";
 import type { HostKey } from "../../src/domain/instance";
 import { HOST_PROTOCOL_VERSION } from "../../src/domain/protocol-fields";
 import { ENROLLMENTS } from "../../src/domain/readiness";
+import { repositoryRegistration } from "../../src/domain/repository-registration";
 import type { WorkerOutcome } from "../../src/domain/rollout";
 import { harness } from "../support/cli-harness";
 import { MemoryInstanceStore } from "../support/memory-instance-store";
@@ -247,6 +248,43 @@ describe("fffactory apply, phase-3 report (plan-apply §Apply)", () => {
     };
     const skippedResult = applied({ workers: [installed("builder-1")], dispatch: [skipped] });
     expect(reportApply(skippedResult.result, skippedResult.context, APPLYING)).toBe(2);
+  });
+
+  test("a checkout left unregistered exits 2 even without verification, and never outweighs a failure (#135)", () => {
+    const gap = {
+      registration: repositoryRegistration("paseo", [
+        {
+          path: "/workspace/repos/product",
+          state: "failed",
+          reason: "registering it as a Paseo project timed out",
+        },
+      ]),
+    };
+    const active: DispatchOutcome = {
+      key: "builder-1" as HostKey,
+      hostname: host("builder-1"),
+      kind: "active",
+      changed: false,
+      gates: [],
+      ...gap,
+    };
+    const unregistered = applied({ workers: [installed("builder-1")], dispatch: [active] });
+    expect(reportApply(unregistered.result, unregistered.context, APPLYING)).toBe(2);
+    expect(unregistered.err).toEqual([]);
+    expect(unregistered.out).toContain("  builder-1: Rerun `fffactory apply`");
+
+    const failed: DispatchOutcome = {
+      key: "builder-2" as HostKey,
+      hostname: host("builder-2"),
+      kind: "failed",
+      summary: "Schedule reconciliation failed",
+      nextAction: "Repair Paseo",
+    };
+    const both = applied({
+      workers: [installed("builder-1"), installed("builder-2")],
+      dispatch: [active, failed],
+    });
+    expect(reportApply(both.result, both.context, APPLYING)).toBe(1);
   });
 
   test("every repository, control-plane, dispatch and verification branch, each action once", () => {
