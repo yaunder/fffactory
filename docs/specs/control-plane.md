@@ -325,7 +325,7 @@ fffactory does not reference (which `paseo-auth.sh`, with no reference, could
 not send), a password stored by hand with `paseo daemon set-password` included.
 
 `paseo-auth.sh` is only for fffactory's own Paseo CLI calls (activity, reload,
-the dispatch schedule and dispatch): it reads that one host's reference, fetches
+the dispatch schedule, dispatch and repository registration): it reads that one host's reference, fetches
 the value directly from Secrets Manager, puts it only in `PASEO_PASSWORD` of
 the Paseo CLI it execs, and the daemon checks it against the hash. The value
 never enters an argument or log. This replaces v1's generated per-host secret

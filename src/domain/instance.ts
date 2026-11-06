@@ -283,6 +283,9 @@ function checkRepositories(document: Record<string, unknown>, issues: Issue[]): 
   return new Set(byKey.map((entry) => entry.key));
 }
 
+// TODO(re-evaluate when factory.json's schema_version next changes): refuse a repository key a
+// host places twice (`duplicateKeys` here, `uniqueItems` in the schema). Valid today, it is
+// counted twice in the plan's Repositories and Dispatch rows and registered twice.
 function checkPlacement(host: KeyedEntry, declared: Set<string>, issues: Issue[]): void {
   const placed = host.value.repositories;
   if (!Array.isArray(placed)) return;
