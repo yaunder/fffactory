@@ -31,6 +31,7 @@ import type { ProcessOutcome } from "../infrastructure/local-tool-probe";
 import { sha256Text } from "../infrastructure/release-tarball";
 import { workerCollectorStep } from "./collector-step";
 import { workerCredentials } from "./credentials";
+import { errorCode } from "./failures";
 import { exists, markerRecords, operatingSystem, tokenOr, type WorkerSystem } from "./inspect";
 import type { ExclusiveLock } from "./install-lock";
 import { workerPlugins } from "./plugins";
@@ -193,12 +194,6 @@ function recorder(system: ApplySystem, initial: HostApplyRecord) {
       return record;
     },
   };
-}
-
-/** An error's code, such as EISDIR, in a form a document can carry. */
-function errorCode(error: unknown): string {
-  const code = (error as NodeJS.ErrnoException | undefined)?.code;
-  return typeof code === "string" && /^[A-Z0-9_]{1,32}$/.test(code) ? code : "unexpected error";
 }
 
 /** Opens a step's log afresh, readable by `fffactory-admin`. */

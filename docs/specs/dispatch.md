@@ -255,6 +255,75 @@ A [skipped worker](#skipped-workers) is sent no projection, so its schedule is
 left as it is.
 The adapter never invokes a removed v1 command or an arbitrary sudo command.
 
+## Repository registration
+
+Every repository factory.json places on a worker is made available for
+supervision through the worker's
+[execution backend](../../CONTEXT.md#execution-backend), so the operator can
+work on it from the backend's own client without adding it by hand.
+
+### The execution backend
+
+The checkouts are the absolute paths of the repositories the host's repository
+manifest ([repositories](repositories.md), `REPOSITORY_MANIFEST_PATH`) places,
+under `/workspace/repos`, in placement order (`placedCheckouts`). A manifest
+that is not version 2 JSON, or places a repository it does not hold or one
+whose path is not a relative checkout path, is refused in fffactory's words,
+never quoted.
+
+The worker-side `ExecutionBackend` (`src/host/execution-backend.ts`) has one
+operation, `registerRepositories(checkouts)`. Given the absolute paths of placed
+checkouts present on disk, it returns a backend-neutral result:
+
+- `backend`: the backend's name, `paseo`;
+- `checkouts`: per checkout, its `path` and `state`: `registered` (newly),
+  `present` (already), `failed` with a `reason` in fffactory's own words, never
+  the tool's output, or `not_applicable` (a backend with nothing to register);
+- `changed`: whether any checkout was `registered`.
+
+It only adds: it never deletes, renames or archives a project, and never
+reloads or restarts the daemon. With no checkouts it asks the backend nothing.
+
+The backend is chosen in one place, `executionBackend`, hardwired to Paseo:
+factory.json has no backend selector until a second backend is built.
+
+The Paseo adapter (`src/host/paseo-backend.ts`), the only code naming Paseo's
+project commands, runs them through the `PaseoCommand` it is given: the Paseo
+CLI as `factory`, authenticated by the active release's `paseo-auth.sh`, the
+one `paseoAgents` takes; it builds no command of its own, and the password is
+never one of its arguments. It relies on the project contract proved against
+the pin ([control plane §The Paseo pin](control-plane.md#the-paseo-pin)):
+
+1. `paseo project ls --json`: each checkout whose absolute path is a listed
+   project's `path` is `present`;
+2. `paseo project create <path> --json` for each checkout not listed, in order:
+   exit 0 is `registered`. Listing first keeps a rerun a true no-op
+   (`changed: false`) and leaves existing projects untouched.
+
+If listing fails (it exits non-zero, times out, cannot start, or prints
+anything but a JSON array of objects each with a string `path`), every checkout
+is `failed` and nothing is created. One failed `create` fails only that
+checkout. The reasons say what fffactory did and how it ended: `listing
+Paseo's projects exited with status 1`, `Paseo's project list was invalid`,
+`registering it as a Paseo project timed out`.
+
+The result's document, carried by the dispatch inspection, has the keys
+`backend`, `changed` and `checkouts` in that order, each checkout `path`,
+`state` and, when `failed`, `reason`. Its reader ignores fields it does not
+know; an absent document, from a worker whose release predates registration, is
+no result, and so is a malformed one (an unknown backend or state, a path
+outside `/workspace/repos` or escaping it, a failure without a one-line
+printable reason, or `changed` disagreeing with the checkouts), so it never
+invalidates the document carrying it.
+
+Tested in `tests/domain/repository-registration.test.ts` (the placed checkouts
+from a manifest, the result, its document and reader) and
+`tests/host/paseo-backend.test.ts`, over a fake `PaseoCommand` answering as
+0.15.0 prints: nothing missing creates nothing and changes nothing; some missing
+creates only those; a rerun is a no-op; listing failing fails every checkout;
+one create failing fails only it, with no Paseo output in its reason; only `ls`
+and `create` are ever run; and the password reaches no argument or result.
+
 ## End-to-end verification
 
 Apply's last stage joins every declared worker's outcome across the stages into
@@ -312,9 +381,13 @@ configuration flag alone.
 | The root endpoint, asset installation, privilege drop and persisted observation | host | `src/host/dispatch.ts` |
 | The dispatch program, schedule reconciler and skill | release assets | `assets/steps/dispatch/` |
 | The agents the capacity check counts (`host agents`), translated by the one Paseo adapter | host | `src/host/control-plane.ts`, `src/cli/commands/host.ts` |
+| The placed checkouts' absolute paths, the registration result, its document and reader | domain (pure) | `src/domain/repository-registration.ts` |
+| The `ExecutionBackend` seam and its one selection point | host | `src/host/execution-backend.ts` |
+| The Paseo adapter: `project ls`, then `project create` for the missing | host | `src/host/paseo-backend.ts` |
 
 Introduced by [#105](https://github.com/yaunder/factory/issues/105). Skipped
 workers: [#134](https://github.com/yaunder/factory/issues/134). A delivered
 GitHub token's next action: [#70](https://github.com/yaunder/fffactory/issues/70).
 Stopping dispatch: [#84](https://github.com/yaunder/fffactory/issues/84).
 Capacity from `host agents`: [#100](https://github.com/yaunder/fffactory/issues/100).
+The execution backend's repository registration: [#133](https://github.com/yaunder/fffactory/issues/133).

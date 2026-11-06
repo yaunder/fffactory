@@ -41,6 +41,9 @@ temporary directories by `worker-scenarios.ts`, never the real `/`.
   Secrets Manager answering the Paseo password: it checks the hash setup is sent with
   `bcryptjs`'s `compareSync`, and searches every argument, environment value and setup input
   for the password.
+- `paseo-backend.test.ts` runs the Paseo adapter over a fake `PaseoCommand` answering `project
+  ls` and `project create` as Paseo 0.15.0 prints them, and searches every argument and result
+  for the auth wrapper's password.
 - `verify.test.ts` answers every command with a scripted runner; `inspect.test.ts` covers the
   unprivileged read-only inspection.
 - `collect.test.ts` runs the collection run (`docs/specs/collector.md` §Run) over a Claude root

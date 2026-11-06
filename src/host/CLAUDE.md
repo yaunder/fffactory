@@ -48,9 +48,23 @@ and `host collect --once`, which the log archive's timer runs as `factory`
   the active release's auth wrapper itself in `factory`'s clean environment
   (`FACTORY_ENV`), within the activity's budget, prints the activity document, and exits 1
   when the agents are unknown, so dispatch fails safe.
+- `execution-backend.ts` is the worker-side `ExecutionBackend` seam (`docs/specs/dispatch.md`
+  §Repository registration), not an `application/` port: one operation,
+  `registerRepositories`, the one with a caller. Run operations join it only when dispatch moves
+  behind it. `executionBackend` is the one place a backend is chosen, hardwired to Paseo until a
+  second adapter exists (its TODO). A backend only adds: it never deletes, renames or archives
+  what the backend holds, and never reloads or restarts it. Its result is
+  `domain/repository-registration.ts`'s, failures in fffactory's words.
+- `paseo-backend.ts`, the Paseo adapter, is the only code naming Paseo's project commands:
+  `project ls --json`, then `project create PATH --json` for each checkout not listed, each
+  through the `PaseoCommand` it is given (the auth wrapper as `factory`), never a `runuser` of
+  its own. A failed list fails every checkout; a failed create fails only its own.
 - `secret-value.ts` reads a delivered secret by its ARN with `/usr/bin/aws` as root, for the
   `credentials` step and the control-plane install: a `SecretMaterial`, or why not in
   fffactory's words (the AWS error's name at most).
+- `failures.ts` is how a failure is said in fffactory's words, shared rather than copied: a
+  system error's code at most (`systemCode`, `errorCode`, else `unexpected error`), and how a
+  command ended (`ended`), never its output.
 - `host dispatch` runs only through the activator's fixed `adoption`, `reconcile` and
   `inspect` actions and shares that lock. It installs only the active release's assets,
   persists canonical desired and observed state, and drops to `factory` for FFFlow,
