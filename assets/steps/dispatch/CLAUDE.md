@@ -6,7 +6,10 @@ TypeScript only when next touched for another reason). Apply's dispatch stage
 activates dispatch on a worker only once every readiness gate passes
 (`src/application/apply-dispatch.ts`, `src/domain/dispatch-readiness.ts`,
 `src/application/workflow-queue.ts`, `src/infrastructure/ffflow-github-workflow-queue.ts`).
-Spec: [docs/specs/dispatch.md](../../../docs/specs/dispatch.md).
+Spec: [docs/specs/dispatch.md](../../../docs/specs/dispatch.md) (the program and skill),
+[docs/specs/dispatch-trigger.md](../../../docs/specs/dispatch-trigger.md) (the schedule
+reconciler) and [docs/specs/execution-backend.md](../../../docs/specs/execution-backend.md) (the
+launch, and the boundary whose allow-list names these files).
 
 - `factory-dispatch` pulls ready FFFlow epics on a host into top-level Paseo
   agents and worktrees. It never merges, force-pushes, deletes branches, closes

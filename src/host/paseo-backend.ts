@@ -1,10 +1,10 @@
 /**
- * The Paseo execution backend (`docs/specs/dispatch.md` §Repository registration): a placed
- * checkout is available for supervision once it is a Paseo project. The only code that names
- * Paseo's project commands. It runs them through the `PaseoCommand` it is given (as `factory`,
- * authenticated by the active release's `paseo-auth.sh`), never a command of its own, lists
- * first and creates only the projects missing, so a rerun changes nothing. No Paseo output
- * reaches its result: a failure is said in fffactory's words.
+ * The Paseo execution backend (`docs/specs/execution-backend.md` §The `ExecutionBackend`
+ * contract): a placed checkout is available for supervision once it is a Paseo project. The
+ * only code that names Paseo's project commands. It runs them through the `PaseoCommand` it is
+ * given (as `factory`, authenticated by the active release's `paseo-auth.sh`), never a command
+ * of its own, lists first and creates only the projects missing, so a rerun changes nothing. No
+ * Paseo output reaches its result: a failure is said in fffactory's words.
  */
 import {
   type CheckoutRegistration,

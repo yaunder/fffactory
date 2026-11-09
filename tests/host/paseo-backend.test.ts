@@ -48,7 +48,7 @@ function fakePaseo(
   return { paseo, calls };
 }
 
-describe("the Paseo execution backend (docs/specs/dispatch.md §Repository registration)", () => {
+describe("the Paseo execution backend (docs/specs/execution-backend.md §The ExecutionBackend contract)", () => {
   test("nothing missing: lists once, creates nothing, changes nothing", async () => {
     const { paseo, calls } = fakePaseo([ALPHA, BETA, "/home/factory/elsewhere"]);
     expect(await paseoBackend(paseo).registerRepositories([ALPHA, BETA])).toEqual({

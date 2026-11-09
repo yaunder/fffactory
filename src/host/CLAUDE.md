@@ -49,8 +49,8 @@ and `host collect --once`, which the log archive's timer runs as `factory`
   the active release's auth wrapper itself in `factory`'s clean environment
   (`FACTORY_ENV`), within the activity's budget, prints the activity document, and exits 1
   when the agents are unknown, so dispatch fails safe.
-- `execution-backend.ts` is the worker-side `ExecutionBackend` seam (`docs/specs/dispatch.md`
-  §Repository registration), not an `application/` port: one operation,
+- `execution-backend.ts` is the worker-side `ExecutionBackend` seam
+  (`docs/specs/execution-backend.md`), not an `application/` port: one operation,
   `registerRepositories`, the one with a caller. Run operations join it only when dispatch moves
   behind it. `executionBackend` is the one place a backend is chosen, hardwired to Paseo until a
   second adapter exists (its TODO). A backend only adds: it never deletes, renames or archives

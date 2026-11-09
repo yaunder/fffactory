@@ -1,8 +1,9 @@
 /**
  * The worker's execution backend (CONTEXT.md: the selected mechanism for hosting and supervising
  * runs on a worker), as far as fffactory asks it anything: making the placed checkouts available
- * for supervision in its own terms (`docs/specs/dispatch.md` §Repository registration). A
- * worker-side seam, not an `application/` port: nothing on the operator side calls it.
+ * for supervision in its own terms (`docs/specs/execution-backend.md` §The `ExecutionBackend`
+ * contract). A worker-side seam, not an `application/` port: nothing on the operator side calls
+ * it.
  */
 import type { RepositoryRegistration } from "../domain/repository-registration";
 import type { PaseoCommand } from "./control-plane";

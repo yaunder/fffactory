@@ -19,6 +19,11 @@ Dependencies point inward: `domain <- application <- infrastructure, cli`, and
 ## Rules
 
 - Define a port in `application/` only when a use case calls it. No speculative ports.
+- Only the files on the execution-backend boundary's allow-list name Paseo's behavior: its
+  CLI, paths, environment, port, unit, package or auth wrapper
+  (`docs/specs/execution-backend.md` §The boundary, `tests/execution-backend-boundary.test.ts`).
+  New code reaches Paseo through `ExecutionBackend` or `ControlPlane`, never directly; #93's
+  quarantined names stay in the files that use them today.
 - Human-only layout lives in `cli/presentation/`; `domain/` and `application/` return data.
   Published wording, the words a JSON report carries (`summary`, `next_action`, `details`),
   stays where it is made, and human output reuses it rather than restating it. The exceptions

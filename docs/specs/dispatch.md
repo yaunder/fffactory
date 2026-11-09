@@ -1,12 +1,19 @@
 # Dispatch
 
-Dispatch pulls ready FFFlow epics on a worker into top-level Paseo agents and
-worktrees. factory.json *requests* dispatch on a host, but apply keeps it
-*inactive* until every readiness gate passes, and a later apply activates it
-automatically once they do. Requested dispatch and active dispatch are distinct
-states. Apply ends with an end-to-end verification that joins every stage.
+Dispatch pulls ready FFFlow epics on a worker into runs its execution backend
+hosts: top-level Paseo agents and worktrees today. factory.json *requests*
+dispatch on a host, but apply keeps it *inactive* until every readiness gate
+passes, and a later apply activates it automatically once they do. Requested
+dispatch and active dispatch are distinct states. Apply ends with an end-to-end
+verification that joins every stage.
 Design:
 [fffactory-v2.md §Repositories and dispatch](../designs/fffactory-v2.md#repositories-and-dispatch).
+
+This spec is dispatch policy and its activation: what may run, and when apply
+lets it. It is one of Orchestration's three peer parts; when dispatch runs is
+the [trigger](dispatch-trigger.md)'s, and how a run is started, observed and
+supervised is the [execution backend](execution-backend.md)'s
+([execution backend §Orchestration's three parts](execution-backend.md#orchestrations-three-parts)).
 
 Dispatch is apply's fourth worker stage, after the workers, repository and
 control-plane stages ([plan and apply §Apply](plan-apply.md#apply)), under the
@@ -49,7 +56,8 @@ guessing dispatch ready.
 ## Activation
 
 When every gate passes, the stage activates dispatch by reconciling the
-factory-owned Paseo schedule through the `WorkflowQueue`, a **live** change
+factory-owned Paseo schedule ([dispatch trigger](dispatch-trigger.md)) through
+the `WorkflowQueue`, a **live** change
 ([control-plane §Change classification](control-plane.md#change-classification)):
 it never restarts the daemon, so it never interrupts an active agent. Reconciling
 reports whether it changed anything; when the schedule already matches, nothing
@@ -144,56 +152,25 @@ it is.
 
 ## The dispatch programs and skill
 
-The dispatch program (`factory-dispatch`), the Paseo schedule reconciler
-(`dispatch-schedule.sh`) and the dispatch skill ship in the release assets
-(`assets/steps/dispatch/`). When dispatch becomes active, the root-owned host
-dispatch endpoint installs the program as `/usr/local/bin/factory-dispatch` and
-the skill in the `factory` account's canonical `.agents/skills/dispatch`
-directory, with Claude Code's `.claude/skills/dispatch` as a link to it. The dispatcher pulls ready FFFlow epics
-into top-level Paseo agents and worktrees; it never merges, force-pushes,
-deletes branches, closes issues, deploys infrastructure or converges hosts. The
-schedule reconciler reconciles the one factory-owned schedule from the
-versioned desired dispatch projection, as the unprivileged `factory` account,
-refusing to run as root. The projection contains every schedule input: cron,
-timezone, provider, model, mode and absolute working directory. An enabled
-declaration missing any input is incomplete; nothing is defaulted. Their behavior is held by the Python tests
-that ship beside them,
-`assets/steps/dispatch/tests/test_factory_dispatch.py` and
-`test_dispatch_schedule.py`, run in CI (not by `bun test`).
+The dispatch program (`factory-dispatch`) and the dispatch skill ship in the
+release assets (`assets/steps/dispatch/`), beside the trigger's schedule
+reconciler. When dispatch becomes active, the root-owned host dispatch endpoint
+installs the program as `/usr/local/bin/factory-dispatch` and the skill in the
+`factory` account's canonical `.agents/skills/dispatch` directory, with Claude
+Code's `.claude/skills/dispatch` as a link to it. The dispatcher pulls ready
+FFFlow epics into runs the execution backend hosts; it never merges,
+force-pushes, deletes branches, closes issues, deploys infrastructure or
+converges hosts. Its behavior is held by the Python tests that ship beside it,
+`assets/steps/dispatch/tests/test_factory_dispatch.py`, run in CI (not by
+`bun test`).
 
-The dispatcher launches an epic's agent with `paseo run --no-wait --json` in a
-new branch-off worktree workspace, labelled `factory-dispatch=true`,
-`factory-repository=<alias>`, `factory-epic=<number>` and
-`factory-dispatched-at=<stamp>`, and reads the `agentId` from standard output.
-It never passes `--background`, Paseo's deprecated alias of `--no-wait`, removed
-after 2027-04-01. It drops `PASEO_AGENT_ID` and `PASEO_WORKSPACE_ID` from the
-launch's environment, so the agent is top-level and its workspace inherits
-nothing from the scheduled agent that runs the dispatcher. Its duplicate check
-(`previously_dispatched`) lists the agents labelled for the epic with
-`paseo ls --global --background` and the label filters, so it also sees agents
-in background workspaces, which a bare `ls` hides
-([control plane §The Paseo pin](control-plane.md#the-paseo-pin)); any listed
-agent, finished or not, means the epic was already dispatched.
+An epic the backend lists any run for, finished or not, was already
+dispatched, and is never launched again.
 
-The reconciler finds the schedule by its `factory-dispatch` name, fails on more
-than one, and changes it in place, keeping its ID and run history: any
-difference in cadence, timezone, provider, model, mode, working directory or
-prompt is one `paseo schedule update`, followed by `schedule resume` when the
-schedule was paused, and a run limit or expiry that is set is cleared in the
-same update (`--no-max-runs`, `--no-expires-in`, which Paseo 0.11.4 and later
-honor and 0.9.1 misread as values). An ordinary update sends neither flag. Only a schedule
-that no update can bring to the declared state is deleted and created again,
-losing its history: a completed one, one with a thinking option, or one whose
-target is not a new agent. It reads the inspected schedule, run history
-included, on standard input, never as an argument, so a large history neither
-reports drift nor stops reconciliation
-([#43](https://github.com/yaunder/fffactory/issues/43)).
-
-Paseo keeps every run of a schedule in its record
-(`~/.paseo/schedules/<id>.json`), and `schedule inspect` returns all of them.
-0.15.0 has no setting that bounds or prunes that history, so it grows by one
-entry per dispatch run for as long as the schedule lives. fffactory does not
-edit Paseo's private state to trim it.
+The schedule reconciler moved to
+[dispatch trigger §The Paseo schedule reconciler](dispatch-trigger.md#the-paseo-schedule-reconciler).
+The launch and the duplicate check's listing moved to
+[execution backend §Start](execution-backend.md#start) and [§Inspect](execution-backend.md#inspect).
 
 Moving the dispatch skill into the release is why it is no longer a canonical
 repository skill: `scripts/repository-skills.sh` no longer lists
@@ -275,9 +252,10 @@ unresolved checkout is still one the operator wants to open. A placed checkout
 not yet cloned is left out, and so is one reached through a symbolic link (the
 repository root, the checkout, or any directory between), as the sync program
 refuses it ([repositories](repositories.md)). It hands those to the selected
-[execution backend](#the-execution-backend), never to Paseo directly, the
-backend's Paseo command being `factoryPaseo` (`src/host/control-plane.ts`), the
-one activity takes, all its calls within one two-minute budget. The result is
+[execution backend](execution-backend.md#the-executionbackend-contract), never
+to Paseo directly, the backend's Paseo command being `factoryPaseo`
+(`src/host/control-plane.ts`), the one activity takes, all its calls within one
+two-minute budget. The result is
 the inspection's `repository_registration`
 ([host protocol §The dispatch inspection document](host-protocol.md#the-dispatch-inspection-document)),
 in the result the endpoint persists and in the one it returns.
@@ -344,65 +322,7 @@ fixtures.
 
 ### The execution backend
 
-The checkouts are the absolute paths of the repositories the host's repository
-manifest ([repositories](repositories.md), `REPOSITORY_MANIFEST_PATH`) places,
-under `/workspace/repos`, in placement order (`placedCheckouts`). A manifest
-that is not version 2 JSON, or places a repository it does not hold or one
-whose path is not a relative checkout path, is refused in fffactory's words,
-never quoted.
-
-The worker-side `ExecutionBackend` (`src/host/execution-backend.ts`) has one
-operation, `registerRepositories(checkouts)`. Given the absolute paths of placed
-checkouts present on disk, it returns a backend-neutral result:
-
-- `backend`: the backend's name, `paseo`;
-- `checkouts`: per checkout, its `path` and `state`: `registered` (newly),
-  `present` (already), `failed` with a `reason` in fffactory's own words, never
-  the tool's output, or `not_applicable` (a backend with nothing to register);
-- `changed`: whether any checkout was `registered`.
-
-It only adds: it never deletes, renames or archives a project, and never
-reloads or restarts the daemon. With no checkouts it asks the backend nothing.
-
-The backend is chosen in one place, `executionBackend`, hardwired to Paseo:
-factory.json has no backend selector until a second backend is built.
-
-The Paseo adapter (`src/host/paseo-backend.ts`), the only code naming Paseo's
-project commands, runs them through the `PaseoCommand` it is given: the Paseo
-CLI as `factory`, authenticated by the active release's `paseo-auth.sh`, the
-one `paseoAgents` takes; it builds no command of its own, and the password is
-never one of its arguments. It relies on the project contract proved against
-the pin ([control plane §The Paseo pin](control-plane.md#the-paseo-pin)):
-
-1. `paseo project ls --json`: each checkout whose absolute path is a listed
-   project's `path` is `present`;
-2. `paseo project create <path> --json` for each checkout not listed, in order:
-   exit 0 is `registered`. Listing first keeps a rerun a true no-op
-   (`changed: false`) and leaves existing projects untouched.
-
-If listing fails (it exits non-zero, times out, cannot start, or prints
-anything but a JSON array of objects each with a string `path`), every checkout
-is `failed` and nothing is created. One failed `create` fails only that
-checkout. The reasons say what fffactory did and how it ended: `listing
-Paseo's projects exited with status 1`, `Paseo's project list was invalid`,
-`registering it as a Paseo project timed out`.
-
-The result's document, carried by the dispatch inspection, has the keys
-`backend`, `changed` and `checkouts` in that order, each checkout `path`,
-`state` and, when `failed`, `reason`. Its reader ignores fields it does not
-know; an absent document, from a worker whose release predates registration, is
-no result, and so is a malformed one (an unknown backend or state, a path
-outside `/workspace/repos` or escaping it, a failure without a one-line
-printable reason, or `changed` disagreeing with the checkouts), so it never
-invalidates the document carrying it.
-
-Tested in `tests/domain/repository-registration.test.ts` (the placed checkouts
-from a manifest, the result, its document and reader) and
-`tests/host/paseo-backend.test.ts`, over a fake `PaseoCommand` answering as
-0.15.0 prints: nothing missing creates nothing and changes nothing; some missing
-creates only those; a rerun is a no-op; listing failing fails every checkout;
-one create failing fails only it, with no Paseo output in its reason; only `ls`
-and `create` are ever run; and the password reaches no argument or result.
+Moved to [execution backend §The `ExecutionBackend` contract](execution-backend.md#the-executionbackend-contract).
 
 ## End-to-end verification
 
@@ -470,11 +390,13 @@ configuration flag alone.
 | The FFFlow/GitHub adapter over `HostTransport` | infrastructure | `src/infrastructure/ffflow-github-workflow-queue.ts` |
 | The versioned desired and observed dispatch documents, the not-requested projection that stops dispatch and how stopping ended (`DispatchStop`) | domain (pure) | `src/domain/dispatch-projection.ts` |
 | The root endpoint, asset installation, privilege drop, persisted observation, and registering the placed checkouts present on disk after the schedule | host | `src/host/dispatch.ts` |
-| The dispatch program, schedule reconciler and skill | release assets | `assets/steps/dispatch/` |
-| The agents the capacity check counts (`host agents`), translated by the one Paseo adapter | host | `src/host/control-plane.ts`, `src/cli/commands/host.ts` |
-| The placed checkouts' absolute paths, the registration result, its document and reader | domain (pure) | `src/domain/repository-registration.ts` |
-| The `ExecutionBackend` seam and its one selection point | host | `src/host/execution-backend.ts` |
-| The Paseo adapter: `project ls`, then `project create` for the missing | host | `src/host/paseo-backend.ts` |
+| The dispatch program and skill | release assets | `assets/steps/dispatch/factory-dispatch`, `assets/steps/dispatch/skill/` |
+| The agents the capacity check counts, `host agents` (their translation is the backend's) | host | `src/cli/commands/host.ts` |
+
+The schedule reconciler's layers are in
+[dispatch trigger §Layer mapping](dispatch-trigger.md#layer-mapping); the
+`ExecutionBackend` seam's, its adapter's and the registration result's in
+[execution backend §Layer mapping](execution-backend.md#layer-mapping).
 
 Introduced by [#105](https://github.com/yaunder/factory/issues/105). Skipped
 workers: [#134](https://github.com/yaunder/factory/issues/134). A delivered
@@ -483,3 +405,5 @@ Stopping dispatch: [#84](https://github.com/yaunder/fffactory/issues/84).
 Capacity from `host agents`: [#100](https://github.com/yaunder/fffactory/issues/100).
 The execution backend's repository registration: [#133](https://github.com/yaunder/fffactory/issues/133);
 registered on every dispatch reconcile: [#134](https://github.com/yaunder/fffactory/issues/134).
+Narrowed to policy and activation, the trigger and the backend split out:
+[#139](https://github.com/yaunder/fffactory/issues/139).

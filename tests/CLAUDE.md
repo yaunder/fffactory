@@ -9,6 +9,11 @@ colors one with `styles`, and which keeps both streams' lines in the order writt
 out from domain data, pure like `domain/`, while `application/` tests assert that data, never
 its text).
 Each test maps to a section of a spec in `docs/specs/`.
+`execution-backend-boundary.test.ts` is a repository check, not a layer: it reads `src/`,
+`assets/` and `scripts/` as text and fails for a file outside its allow-list naming Paseo's
+behavior, or a #93 name outside the files quarantined for it, and for an entry no longer needed
+(`docs/specs/execution-backend.md` §The boundary). A task moving Paseo calls behind a seam
+removes its entries there.
 `domain/fixtures/archive/` holds archive format v1's documents and the collector's checkpoint
 (`docs/specs/collector.md`), each its serializer's output byte for byte; the collection run
 and the archive's reader read the same fixtures. The collection run (`host/collect.test.ts`)

@@ -405,7 +405,7 @@ fffactory relies on these Paseo contracts, held by 0.15.0
   labels it, and `paseo ls --label key=value` keeps only the agents carrying
   every label given. `run --background` is a deprecated alias of `--no-wait`
   from 0.12, warns on standard error and is removed after 2027-04-01
-  ([dispatch §The dispatch programs and skill](dispatch.md#the-dispatch-programs-and-skill)).
+  ([execution backend §Start](execution-backend.md#start)).
 - `paseo project ls --json` prints a JSON array of the projects, one object per
   project with its `projectId`, `name`, `kind` (`git` for a Git checkout) and
   `path`. `paseo project create DIR --json` registers an existing directory and
@@ -468,3 +468,9 @@ one of the five statuses, and `agent inspect` with its `Id` and a
 | SSH adapter | infrastructure | `src/infrastructure/paseo-control-plane.ts` |
 | Setup, config merge, auth, unit and pin | release assets | `assets/steps/control-plane/` |
 | The pin against the hash | check | `tests/paseo/hash-only-daemon.sh` (`just paseo-check`) |
+
+This spec is the execution backend's maintenance
+([execution backend §Responsibilities](execution-backend.md#responsibilities),
+R7). Paseo as the backend itself, its responsibilities, the run contract and
+the boundary that keeps its behavior in allow-listed adapters, is
+[execution backend](execution-backend.md).

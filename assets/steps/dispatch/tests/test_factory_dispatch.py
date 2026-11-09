@@ -2,6 +2,7 @@
 
 """Run the dispatcher against a local Git remote and mocked GitHub, Paseo and fffactory CLIs."""
 
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -275,6 +276,25 @@ class FactoryDispatchTest(unittest.TestCase):
                 self.assertFalse(self.gh_calls.exists())
                 self.assertFalse(self.paseo_args.exists())
                 self.assertEqual(self.ls_calls(), [])
+
+    def test_a_tick_overlapping_a_running_one_fails_before_anything_runs(self):
+        # The running tick holds factory-dispatch.lock in PASEO_HOME for its whole run
+        # (docs/specs/dispatch-trigger.md): an overlapping tick reads no agent or epic, runs no
+        # sync and launches nothing. Once the lock is free, the next tick runs.
+        lock_path = Path(self.env["PASEO_HOME"]) / "factory-dispatch.lock"
+        lock_path.parent.mkdir(parents=True)
+        with lock_path.open("w") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            result = self.dispatcher()
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertTrue(result.stderr.startswith("factory dispatch: "), result.stderr)
+        self.assertEqual(result.stdout, "")
+        self.assertFalse(self.fffactory_calls.exists())
+        self.assertFalse(self.gh_calls.exists())
+        self.assertFalse(self.sync_calls.exists())
+        self.assertEqual(self.ls_calls(), [])
+        self.assertFalse(self.paseo_args.exists())
+        self.assertEqual(self.invoke()["started"][0]["agent_id"], "agent-1")
 
     def test_a_malformed_agent_fails_the_tick_never_frees_a_slot(self):
         # Each answer is unreadable, not idle: an agent `host agents` would never print, or a
