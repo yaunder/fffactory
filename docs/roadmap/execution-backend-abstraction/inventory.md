@@ -1,7 +1,10 @@
 # Paseo touch points on origin/main (fdbf5d6, release 0.0.10, Paseo 0.15.0)
 
 Inventory taken 2026-11-06 from the worktree /tmp/fffactory-origin-main. This
-is the seed for the boundary test's allow-list (plan step 1).
+is the seed for the boundary test's allow-list (plan step 1), and a snapshot of
+the code before the epic: after #145 the tracked inventory is the final
+allow-list in `docs/specs/execution-backend.md` §The allow-list, and only #93's
+quarantined names remain outside it.
 
 ## Worker side
 

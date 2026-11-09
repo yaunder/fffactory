@@ -9,7 +9,9 @@ gate passes (`src/application/apply-dispatch.ts`, `src/domain/dispatch-readiness
 Spec: [docs/specs/dispatch.md](../../../docs/specs/dispatch.md) (the dispatcher and skill),
 [docs/specs/dispatch-trigger.md](../../../docs/specs/dispatch-trigger.md) (the schedule
 reconciler) and [docs/specs/execution-backend.md](../../../docs/specs/execution-backend.md) (the
-launch, and the boundary whose allow-list names the reconciler).
+launch, and the boundary whose allow-list names the reconciler and its test). Only the
+reconciler and its test name Paseo's behavior here: the skill stays backend-neutral, saying
+"the execution backend" where it means Paseo.
 
 - `skill/SKILL.md` is the dispatch skill. The host endpoint installs it into the
   `factory` account's canonical `.agents/skills` directory and links Claude's

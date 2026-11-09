@@ -48,7 +48,10 @@ export interface BackendAnswers {
   readonly restart?: ControlPlaneAction;
 }
 
-/** The Paseo backend's layout (`src/host/paseo-backend.ts`), as `tests/host/paseo-backend.test.ts` pins it. */
+/**
+ * The Paseo backend's layout (`src/host/paseo-backend.ts`), as `tests/host/paseo-backend.test.ts`
+ * pins it.
+ */
 export const PASEO_LAYOUT: BackendLayout = {
   workspaceRoots: [{ path: "/home/factory/.paseo/worktrees", depth: 3 }],
   privateFiles: ["/home/factory/.paseo/config.json"],

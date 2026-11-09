@@ -1,11 +1,12 @@
 # Control plane
 
-Each worker runs Paseo as the `factory` account. `fffactory plan` derives the
-Paseo changes for every worker from factory.json, the release identity and the
-worker's inspection. `fffactory apply` installs those release-owned assets and
-performs the classified lifecycle action through the worker protocol. It never
-uses v1 marker files, deployed input directories, global wrapper paths, SSM or
-an operator-selected privileged command.
+Each worker runs its [execution backend](execution-backend.md), Paseo, as the
+`factory` account; this spec keeps it installed and healthy. `fffactory plan`
+derives the Paseo changes for every worker from factory.json, the release
+identity and the worker's inspection. `fffactory apply` installs those
+release-owned assets and performs the classified lifecycle action through the
+worker protocol. It never uses v1 marker files, deployed input directories,
+global wrapper paths, SSM or an operator-selected privileged command.
 
 Paseo agents may run for days, and restarting the daemon ends their turns,
 provider processes, terminals and background commands. Apply therefore checks
@@ -475,7 +476,7 @@ one of the five statuses, and `agent inspect` with its `Id` and a
 | Deferral and reconciliation | application | `src/application/apply-control-plane.ts`, `apply-factory.ts` |
 | Worker endpoint: privilege, the projection, the password read by reference; the rest asked of the execution backend | host | `src/host/control-plane.ts`, `src/host/secret-value.ts` |
 | The Paseo backend's maintenance and agents: setup with the bcrypt hash, reload, restart, the run adapter (`paseoRuns`) | host | `src/host/paseo-backend.ts` ([execution backend](execution-backend.md#layer-mapping)) |
-| SSH adapter | infrastructure | `src/infrastructure/paseo-control-plane.ts` |
+| The Paseo backend's operator-side adapter: the health probe on its port, the activator's actions over SSH | infrastructure | `src/infrastructure/paseo-control-plane.ts` |
 | Setup, config merge, auth, unit and pin | release assets | `assets/steps/control-plane/` |
 | The pin against the hash | check | `tests/paseo/hash-only-daemon.sh` (`just paseo-check`) |
 
@@ -483,4 +484,11 @@ This spec is the execution backend's maintenance
 ([execution backend §Responsibilities](execution-backend.md#responsibilities),
 R7). Paseo as the backend itself, its responsibilities, the run contract and
 the boundary that keeps its behavior in allow-listed adapters, is
-[execution backend](execution-backend.md).
+[execution backend](execution-backend.md). Of this spec's modules, only the two
+Paseo adapters, `src/host/paseo-backend.ts` and
+`src/infrastructure/paseo-control-plane.ts`, and `assets/steps/control-plane/`
+name Paseo's behavior (#93's [quarantined](execution-backend.md#the-quarantine)
+names aside); the port, the plan, apply and the worker endpoint reach it through
+`ControlPlane` and `ExecutionBackend`
+([execution backend §The allow-list](execution-backend.md#the-allow-list),
+[#145](https://github.com/yaunder/fffactory/issues/145)).

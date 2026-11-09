@@ -1,10 +1,15 @@
-# assets/steps/control-plane: the Paseo control-plane step
+# assets/steps/control-plane: the Paseo execution backend's programs
 
-The factory's control-plane programs, shipped in the release assets. The setup
-program installs Paseo and its systemd unit without a lifecycle action; the CLI
-drives installation, activity, reload, restart and health through the
-`ControlPlane` port
-(`src/application/control-plane.ts`, `src/infrastructure/paseo-control-plane.ts`).
+The Paseo execution backend's shipped programs, on the boundary's allow-list
+([docs/specs/execution-backend.md](../../../docs/specs/execution-backend.md)
+§The allow-list). The setup program installs Paseo and its systemd unit without
+a lifecycle action. The operator's CLI drives installation, activity, reload,
+restart and health through the `ControlPlane` port
+(`src/application/control-plane.ts`, `src/infrastructure/paseo-control-plane.ts`);
+on the worker, the `ExecutionBackend`'s Paseo adapter (`src/host/paseo-backend.ts`)
+runs these programs. Only those adapters name them, and the Paseo trigger and its
+reconciler (`src/host/paseo-trigger.ts`, `assets/steps/dispatch/dispatch-schedule.sh`)
+name `paseo-auth.sh`; #93's quarantined operator text naming `paseo.service` aside.
 Spec: [docs/specs/control-plane.md](../../../docs/specs/control-plane.md).
 
 - `setup-host.sh` installs the pinned Paseo package, resolves the worker's

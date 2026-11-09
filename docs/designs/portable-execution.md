@@ -1,10 +1,13 @@
 # Portable execution and supervision
 
 Status: discussion draft for the conversation with Brian. The terminal/tmux
-product requirement below is confirmed; the interfaces and ownership changes
-are proposals. This document does not change shipped behavior or supersede
-[AGENTS.md](../../AGENTS.md), [SDLC.md](../../SDLC.md), or the
-[adopted v2 design](fffactory-v2.md).
+product requirement below is confirmed. Of the run interface, start and inspect
+have shipped as `ExecutionBackend.startRun` and `runs`, with the trigger behind
+its own seam ([execution backend](../specs/execution-backend.md), epic
+[#136](https://github.com/yaunder/fffactory/issues/136)); connect and stop, run
+bookkeeping and the other ownership changes remain proposals. This document
+does not change shipped behavior or supersede [AGENTS.md](../../AGENTS.md),
+[SDLC.md](../../SDLC.md), or the [adopted v2 design](fffactory-v2.md).
 
 ## What we want to offer
 
@@ -39,9 +42,9 @@ and what a replacement would need to provide.
 | Prepare workers | Provision AWS machines, establish access, install pinned runtimes and coding agents, and synchronize placed repositories | `fffactory` apply stages; [v2 design](fffactory-v2.md) |
 | Define the workflow | Resolve captured tasks, implement and test them, run reviews and gates, and hand off a PR | FFFlow's `work-epic` skill inside Claude Code; [SDLC](../../SDLC.md) |
 | Select eligible work | Read ready GitHub epics, check dependencies and existing branches/PRs, and enforce the per-worker capacity of one | [dispatcher.ts](../../src/host/dispatcher.ts) |
-| Trigger selection | Start a fresh dispatch agent periodically through a reconciled schedule | Paseo schedule; [dispatch-schedule.sh](../../assets/steps/dispatch/dispatch-schedule.sh) |
-| Host execution | Launch an agent with a prompt, provider, model and mode in a new worktree | Dispatcher calls to Paseo `run` |
-| Track launches | Count labeled active agents and look for an existing labeled agent for the same repository and epic | Dispatcher calls to Paseo `ls` |
+| Trigger selection | Start a fresh dispatch agent periodically through a reconciled schedule | `DispatchTrigger`, its Paseo adapter over a Paseo schedule; [dispatch trigger](../specs/dispatch-trigger.md) |
+| Host execution | Launch an agent with a prompt, provider, model and mode in a new worktree | The dispatcher's `ExecutionBackend.startRun`, Paseo `run` in its adapter; [execution backend §Start](../specs/execution-backend.md#start) |
+| Track launches | Count active agents and look for an existing run launched for the same repository and epic | The dispatcher's `ExecutionBackend.runs`, Paseo `ls` and its labels in its adapter; [execution backend §Inspect](../specs/execution-backend.md#inspect) |
 | Enable supervision | Expose agent sessions, activity, timelines, questions, permissions and intervention through enrolled clients | Paseo daemon and clients; [SDLC worktree ownership](../../SDLC.md#worktree-ownership) |
 | Maintain execution software | Install and inspect Paseo, classify changes, and defer maintenance when agents may be active | [ControlPlane](../../src/application/control-plane.ts) and [control-plane spec](../specs/control-plane.md) |
 | Activate dispatch safely | Check worker release, credentials, repositories, FFFlow adoption and Paseo health before enabling the schedule | [WorkflowQueue](../../src/application/workflow-queue.ts) and [dispatch spec](../specs/dispatch.md) |

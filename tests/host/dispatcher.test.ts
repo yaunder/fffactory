@@ -125,19 +125,21 @@ console.log(JSON.stringify(value));
 `;
 
 /**
- * Paseo behind the auth wrapper, for the cases through the real adapter. The epic's labelled
- * list answers the test's dispatched runs for that epic (`idle` for any state but `working`);
- * the launch records how it was run and adds a working dispatched run. The adapter's own lists
- * answer the rows a test writes.
+ * Paseo behind the auth wrapper, for the cases through the real adapter. A work's labelled list
+ * answers the test's dispatched runs for that repository and epic (`idle` for any state but
+ * `working`); the launch records how it was run and adds a working dispatched run for its
+ * labels. The adapter's own lists answer the rows a test writes.
  */
 const PASEO = String.raw`
 const read = (path, empty) => existsSync(path) ? JSON.parse(readFileSync(path, "utf8")) : empty;
+const label = (name) => a.find((arg) => arg.startsWith(name + "="))?.slice(name.length + 1);
 if (a[0] === "ls") {
   appendFileSync(files.ls, JSON.stringify({ args: a, agent: process.env.PASEO_AGENT_ID ?? null }) + "\n");
-  const epic = a.find((arg) => arg.startsWith("factory-epic="));
+  const epic = label("factory-epic");
   if (epic !== undefined) {
-    const runs = read(files.agents, { agents: [] }).agents.filter(
-      (run) => run.dispatched && "factory-epic=" + run.work?.workItem === epic);
+    const repository = label("factory-repository");
+    const runs = read(files.agents, { agents: [] }).agents.filter((run) =>
+      run.dispatched && run.work?.repository === repository && String(run.work?.workItem) === epic);
     console.log(JSON.stringify(runs.map(({ id, state }) => ({ id, status: state === "working" ? "initializing" : "idle" }))));
   } else if (existsSync(files.rowsFail)) {
     console.error("connect ECONNREFUSED 127.0.0.1\nat the daemon");
@@ -154,8 +156,8 @@ if (a[0] === "ls") {
     workspace: process.env.PASEO_WORKSPACE_ID ?? null, marker: process.env.MOCK_MARKER ?? null,
   }));
   const document = read(files.agents, { agents: [] });
-  const epic = Number(a.find((arg) => arg.startsWith("factory-epic=")).slice("factory-epic=".length));
-  document.agents.push({ id: "agent-1", state: "working", dispatched: true, work: { repository: "product", workItem: epic } });
+  const work = { repository: label("factory-repository"), workItem: Number(label("factory-epic")) };
+  document.agents.push({ id: "agent-1", state: "working", dispatched: true, work });
   writeFileSync(files.agents, JSON.stringify(document));
   console.log(JSON.stringify({ agentId: "agent-1", status: "running" }));
 } else { console.error("unexpected paseo command: " + a); process.exit(1); }
@@ -169,12 +171,17 @@ function git(args: string[], cwd?: string): string {
 
 /**
  * The worker's runs in fffactory's states: (id, state, dispatched, and for a dispatched one the
- * epic of `product` it was launched for, 101 unless given) each.
+ * epic it was launched for, 101 unless given, and its repository, `product` unless given) each.
  */
-async function agents(...list: [string, AgentState, boolean, number?][]) {
-  const runs: Run[] = list.map(([id, state, dispatched, epic]) =>
+async function agents(...list: [string, AgentState, boolean, number?, string?][]) {
+  const runs: Run[] = list.map(([id, state, dispatched, epic, repository]) =>
     dispatched
-      ? { id, state, dispatched, work: { repository: "product", workItem: epic ?? 101 } }
+      ? {
+          id,
+          state,
+          dispatched,
+          work: { repository: repository ?? "product", workItem: epic ?? 101 },
+        }
       : { id, state, dispatched },
   );
   await writeFile(files.agents, JSON.stringify({ agents: runs }));
@@ -516,6 +523,18 @@ describe("launching (dispatch §The dispatcher)", () => {
       if (tick.kind !== "dispatched") throw new Error(`the tick failed: ${JSON.stringify(tick)}`);
       expect(tick.summary.skipped[0]?.reason).toBe("existing dispatched agent");
       expect(await launched()).toBe(false);
+    },
+    SLOW,
+  );
+
+  test(
+    "through the Paseo backend, another repository's run for the same epic is no duplicate",
+    async () => {
+      await agents(["agent-other", "finished", true, 101, "elsewhere"]);
+      const tick = await dispatcher({ select: executionBackend });
+      if (tick.kind !== "dispatched") throw new Error(`the tick failed: ${JSON.stringify(tick)}`);
+      expect(tick.summary.skipped).toEqual([]);
+      expect(await launched()).toBe(true);
     },
     SLOW,
   );

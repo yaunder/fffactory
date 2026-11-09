@@ -3,11 +3,11 @@
  * contract): the only worker code that names Paseo's CLI, its auth wrapper, its setup program,
  * its unit, its password's bcrypt cost, the labels that carry a run's launch identity, the
  * environment a launch must not inherit, and its layout: where it keeps its worktrees and its
- * configuration. It runs the Paseo CLI only as `factory`, authenticated
- * by the active release's `paseo-auth.sh`: from root through `runuser` in `factory`'s clean
- * environment, otherwise the wrapper itself in the environment of the process it acts for, or
- * that clean one. Every command it runs is within the one budget it was made with. No Paseo
- * output reaches its results: a failure is said in fffactory's words.
+ * configuration. It runs the Paseo CLI only as `factory`, authenticated by the active release's
+ * `paseo-auth.sh`: from root through `runuser` in `factory`'s clean environment, otherwise the
+ * wrapper itself in the environment of the process it acts for, or that clean one. Every command
+ * it runs is within the one budget it was made with. No Paseo output reaches its results: a
+ * failure is said in fffactory's words.
  */
 import { join } from "node:path";
 import { hashSync } from "bcryptjs";

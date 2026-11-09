@@ -1,11 +1,12 @@
 /**
  * The `collector` install step (`docs/specs/host-protocol.md` §The collector step): with the log
  * archive in the host projection, the collector's configuration and its systemd service and
- * timer, the service never reading the execution backend's private files, written as root, then systemd reloaded and the timer enabled and started. It never
- * starts a collection, asks how one went or waits for one: the collector's health is not the
- * install's. Without the archive, it disables and stops the timer, stops a run under way, and
- * removes the units and the configuration, keeping the collector's state directory; on a worker
- * that never had the collector it does nothing. Runs only inside locked `host apply`.
+ * timer, the service never reading the execution backend's private files, written as root, then
+ * systemd reloaded and the timer enabled and started. It never starts a collection, asks how one
+ * went or waits for one: the collector's health is not the install's. Without the archive, it
+ * disables and stops the timer, stops a run under way, and removes the units and the
+ * configuration, keeping the collector's state directory; on a worker that never had the
+ * collector it does nothing. Runs only inside locked `host apply`.
  */
 import { lstat, rm } from "node:fs/promises";
 import { join } from "node:path";

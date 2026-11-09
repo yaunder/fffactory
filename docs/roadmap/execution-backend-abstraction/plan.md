@@ -254,3 +254,9 @@ Epic #136 (2026-11-08):
 - #143 T5 — Runs on the seam: startRun and runs (depends on #142)
 - #144 T6 — The backend's layout as data (depends on #140)
 - #145 T7 — Tighten the boundary and document the layer (depends on #141, #143, #144)
+
+Outcome (#145): the guard's allow-list is step 6's, scanned as `src/`,
+`assets/` and `scripts/`: the three adapters, `assets/steps/control-plane/**`,
+`dispatch-schedule.sh` and its shipped Python test. The adapters' tests under
+`tests/` and `tests/paseo/` need no entry because `tests/` is not scanned
+(D5). The #93 quarantine stays with its TODO.

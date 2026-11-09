@@ -2,14 +2,14 @@
  * The worker side of `host work inspect` (`docs/specs/host-protocol.md` §work inspect): the
  * current state of every checkout under the repository root, every workspace under the execution
  * backend's workspace roots (its layout), and every worktree Git lists for their repositories,
- * read fresh as the runtime account. It changes
- * nothing: Git runs with optional locks off, so no index is refreshed and no lock file is
- * taken, with no fsmonitor hook and no LFS filter (which would clean a stat-stale file into
- * `.git/lfs/objects`), never fetches, and no file's content or name reaches the document. A
- * clean filter a repository defines under another name still runs, as the runtime account, the
- * account whose repository defines it. A populated submodule is inspected as a repository of its
- * own. What it cannot search to the end, it reports incomplete; what Git cannot fully report on
- * (a file it is told to assume unchanged, a directory it warns it cannot open), unreadable.
+ * read fresh as the runtime account. It changes nothing: Git runs with optional locks off, so no
+ * index is refreshed and no lock file is taken, with no fsmonitor hook and no LFS filter (which
+ * would clean a stat-stale file into `.git/lfs/objects`), never fetches, and no file's content
+ * or name reaches the document. A clean filter a repository defines under another name still
+ * runs, as the runtime account, the account whose repository defines it. A populated submodule
+ * is inspected as a repository of its own. What it cannot search to the end, it reports
+ * incomplete; what Git cannot fully report on (a file it is told to assume unchanged, a
+ * directory it warns it cannot open), unreadable.
  */
 import { constants, type Dirent } from "node:fs";
 import { lstat, open, readdir, realpath } from "node:fs/promises";
@@ -400,9 +400,9 @@ async function worktreeWork(
     owned: false,
   });
   if (unpushed === undefined) return unreadable();
-  // TODO(re-evaluate when a worker's agents initialise submodules in the backend's workspaces): a missing
-  // worktree's own `.git/worktrees/<id>/modules/` can still hold submodule commits pushed
-  // nowhere; report each Git directory there as unreadable, as `unusedModules` does.
+  // TODO(re-evaluate when a worker's agents initialise submodules in backend workspaces): a
+  // missing worktree's own `.git/worktrees/<id>/modules/` can still hold submodule commits
+  // pushed nowhere; report each Git directory there as unreadable, as `unusedModules` does.
   if (listed.prunable || !(await exists(listed.path)))
     return {
       work: {

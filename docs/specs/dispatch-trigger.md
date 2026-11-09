@@ -134,9 +134,15 @@ Its behavior is held by the Python tests that ship beside it,
 | The Paseo trigger: the reconciler run as `factory` with `PASEO_HOME` and `FACTORY_PASEO_BIN`, and its answer read | host (adapter) | `src/host/paseo-trigger.ts` |
 | The Paseo schedule reconciler | release assets | `assets/steps/dispatch/dispatch-schedule.sh` |
 
+Only the Paseo trigger and its reconciler, with the reconciler's test, name
+Paseo's behavior here; `src/host/dispatch.ts` and the operator's
+`WorkflowQueue` reach the trigger through its seam
+([execution backend §The allow-list](execution-backend.md#the-allow-list)).
+
 Split from [dispatch](dispatch.md) by
 [#139](https://github.com/yaunder/fffactory/issues/139) (epic
 [#136](https://github.com/yaunder/fffactory/issues/136)); the `DispatchTrigger`
 seam and its Paseo adapter:
 [#141](https://github.com/yaunder/fffactory/issues/141); the dispatch lock out
-of `$PASEO_HOME`: [#142](https://github.com/yaunder/fffactory/issues/142).
+of `$PASEO_HOME`: [#142](https://github.com/yaunder/fffactory/issues/142); the
+final allow-list: [#145](https://github.com/yaunder/fffactory/issues/145).

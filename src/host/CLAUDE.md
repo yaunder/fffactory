@@ -52,56 +52,64 @@ Rules:
   backend's `runs` within the activity's budget, read as agents (`workerAgents`, so no run's
   launched work reaches the document), prints the activity document, and exits 1
   when the agents are unknown, so that dispatcher fails safe.
-- `dispatcher.ts` is the dispatcher (`docs/specs/dispatch.md` §The dispatcher), `host dispatch run
-  [--adoption-only]`, run as `factory` by the dispatch skill, never through the activator, so a
-  tick never waits on the install lock; it refuses root, as `host agents` does, in both the
-  command and here (so nothing it creates in `factory`'s files becomes root's). It is the Python `factory-dispatch`, ported faithfully: keep its
-  commands, their arguments, environment and order, its skip reasons, summary and exit codes as
-  they are unless the spec changes them. Its rules are `domain/dispatch-policy.ts`'s; it reads
-  commands' output as the shared `ProcessRunner` decodes it, stripped (`toolText`), and tells a
-  skippable refusal (`DispatchError`) from what fails the tick. It holds `DISPATCH_LOCK`, in
-  `factory`'s own state directory, from before it reads the agents to its end, and, while Paseo's
-  home is there, the Python dispatcher's lock the adapter names (`RETIRED_DISPATCH_LOCK`, its
-  TODO), so a Python tick an upgrade overtook still excludes it; it reads capacity from the
-  backend's `runs` (`executionBackend`, within `AGENTS_BUDGET_MS`), never a Paseo status, asks
-  `runs` for each ready epic's work for the duplicate check (`launchedFor`), and launches only
-  through `startRun`, with the invocation `domain/dispatch-policy.ts` makes; both of those it
-  asks of a backend selected for the call within `COMMAND_TIMEOUT_MS`, in its own environment.
-  It names no backend's command, flag, label or environment. `rootAdoption` is the same adoption
-  check, in process for the activator's `dispatch adoption`, as root, each check dropped to
-  `factory`. It takes the backend selection as a parameter only so its tests can give a fake.
+- `dispatcher.ts` is the dispatcher (`docs/specs/dispatch.md` §The dispatcher), `host dispatch
+  run [--adoption-only]`, run as `factory` by the dispatch skill, never through the activator, so
+  a tick never waits on the install lock; it refuses root, as `host agents` does, in both the
+  command and here (so nothing it creates in `factory`'s files becomes root's). It is the Python
+  `factory-dispatch`, ported faithfully: keep its commands, their arguments, environment and
+  order, its skip reasons, summary and exit codes as they are unless the spec changes them. Its
+  rules are `domain/dispatch-policy.ts`'s; it reads commands' output as the shared
+  `ProcessRunner` decodes it, stripped (`toolText`), and tells a skippable refusal
+  (`DispatchError`) from what fails the tick. It holds `DISPATCH_LOCK`, in `factory`'s own state
+  directory, from before it reads the agents to its end, and, while Paseo's home is there, the
+  Python dispatcher's lock the adapter names (`RETIRED_DISPATCH_LOCK`, its TODO), so a Python
+  tick an upgrade overtook still excludes it; it reads capacity from the backend's `runs`
+  (`executionBackend`, within `AGENTS_BUDGET_MS`), never a Paseo status, asks `runs` for each
+  ready epic's work for the duplicate check (`launchedFor`), and launches only through
+  `startRun`, with the invocation `domain/dispatch-policy.ts` makes; both of those it asks of a
+  backend selected for the call within `COMMAND_TIMEOUT_MS`, in its own environment. It names no
+  backend's command, flag, label or environment. `rootAdoption` is the same adoption check, in
+  process for the activator's `dispatch adoption`, as root, each check dropped to `factory`. It
+  takes the backend selection as a parameter only so its tests can give a fake.
+- The worker reaches its execution backend only through `ExecutionBackend` and its trigger only
+  through `DispatchTrigger`, each chosen in one place; `paseo-backend.ts` and `paseo-trigger.ts`
+  are the only code here naming Paseo's behavior (`tests/execution-backend-boundary.test.ts`;
+  #93's quarantined names aside). A second backend or trigger is another adapter, never a branch
+  in an endpoint.
 - `execution-backend.ts` is the worker's one execution-backend interface, `ExecutionBackend`
   (`docs/specs/execution-backend.md`), not an `application/` port: `layout()` (`BackendLayout`:
   its workspace roots, each with its depth, and its private files, as data, running nothing;
   `host work inspect` searches the roots after the repository root, the `collector` step hides
-  the files, and `domain/` takes both as input, naming no backend's path), `registerRepositories`, the
-  runs group `startRun(request)` and `runs(work?)` (`domain/run.ts`'s types; the endpoint reads
-  runs as agents), and the maintenance group `install(projection, password)`, `reload`,
-  `restart` (`done` for a backend with no daemon). Stop and connect stay off it until a caller
-  needs them (the spec's TODO). `executionBackend(system, budgetMs, environment?)` is the one
-  place a backend is chosen, hardwired to Paseo until a second adapter exists (its TODO); every
-  command the backend runs falls within that budget, and `environment`, given only by the
-  dispatcher, is the process it acts for. Registration only adds: it never deletes, renames or archives what the backend
-  holds, and never reloads or restarts it. Results are in fffactory's states and words.
+  the files, and `domain/` takes both as input, naming no backend's path),
+  `registerRepositories`, the runs group `startRun(request)` and `runs(work?)` (`domain/run.ts`'s
+  types; the endpoint reads runs as agents), and the maintenance group `install(projection,
+  password)`, `reload`, `restart` (`done` for a backend with no daemon). Stop and connect stay
+  off it until a caller needs them (the spec's TODO). `executionBackend(system, budgetMs,
+  environment?)` is the one place a backend is chosen, hardwired to Paseo until a second adapter
+  exists (its TODO); every command the backend runs falls within that budget, and `environment`,
+  given only by the dispatcher, is the process it acts for. Registration only adds: it never
+  deletes, renames or archives what the backend holds, and never reloads or restarts it. Results
+  are in fffactory's states and words.
 - `paseo-backend.ts`, the Paseo adapter, is the only worker code naming Paseo's CLI, setup
   program, unit, bcrypt cost or paths (`tests/execution-backend-boundary.test.ts`); its layout is
-  `~factory/.paseo/worktrees`, 3 levels down, and `~factory/.paseo/config.json`. It runs the Paseo CLI
-  only as `factory` through the active release's `paseo-auth.sh` (`paseoCli`): from root by
-  `runuser` and `env -i` with `FACTORY_ENV`, otherwise the wrapper itself in the caller's
-  environment its selection was given, or `FACTORY_ENV`;
-  `RETIRED_DISPATCH_LOCK` names the Python dispatcher's lock in Paseo's home, which the dispatcher
-  also takes until no worker runs a release from before #142.
-  `paseoRuns` is the one place Paseo's agent statuses are known: it translates them into `domain/control-plane.ts`'s `AgentState`, inspects only `running`
-  agents, and answers `unknown` for anything it cannot read; no Paseo status, field or label
-  reaches a result. A launch identity is Paseo labels (`factory-dispatch`, `factory-repository`,
+  `~factory/.paseo/worktrees`, 3 levels down, and `~factory/.paseo/config.json`. It runs the
+  Paseo CLI only as `factory` through the active release's `paseo-auth.sh` (`paseoCli`): from
+  root by `runuser` and `env -i` with `FACTORY_ENV`, otherwise the wrapper itself in the caller's
+  environment its selection was given, or `FACTORY_ENV`; `RETIRED_DISPATCH_LOCK` names the Python
+  dispatcher's lock in Paseo's home, which the dispatcher also takes until no worker runs a
+  release from before #142. `paseoRuns` is the one place Paseo's agent statuses are known: it
+  translates them into `domain/control-plane.ts`'s `AgentState`, inspects only `running` agents,
+  and answers `unknown` for anything it cannot read; no Paseo status, field or label reaches a
+  result. A launch identity is Paseo labels (`factory-dispatch`, `factory-repository`,
   `factory-epic`, `factory-dispatched-at`), never seen by a caller: a work's runs are the list
   labelled for it, since Paseo's list prints no label. `startRun` is `run --no-wait --json` in a
   new branch-off worktree workspace, from the checkout, in the caller's environment without
-  `PASEO_AGENT_ID` and `PASEO_WORKSPACE_ID`, its handle the printed `agentId`. Registration is `project ls --json`, then `project create PATH --json` for
-  each checkout not listed; a failed list fails every checkout, a failed create only its own.
-  Install hashes the password (bcryptjs at Paseo's cost) and invokes only the active release's
-  setup program, the reference and the hash on its standard input; the password reaches only
-  the hash function. Reload is `daemon reload`; restart is the fixed Paseo systemd action.
+  `PASEO_AGENT_ID` and `PASEO_WORKSPACE_ID`, its handle the printed `agentId`. Registration is
+  `project ls --json`, then `project create PATH --json` for each checkout not listed; a failed
+  list fails every checkout, a failed create only its own. Install hashes the password (bcryptjs
+  at Paseo's cost) and invokes only the active release's setup program, the reference and the
+  hash on its standard input; the password reaches only the hash function. Reload is `daemon
+  reload`; restart is the fixed Paseo systemd action.
 - `dispatch-trigger.ts` is the worker's `DispatchTrigger` (`docs/specs/dispatch-trigger.md`), a
   worker-side seam beside `ExecutionBackend`, not an `application/` port: `reconcile(projection)`
   to the projection the endpoint persisted first, and `inspect()` against it, each answering a
@@ -201,26 +209,25 @@ Rules:
 - `collect.ts` is one collection run (`docs/specs/collector.md` §Run), run as `factory`, not
   through the activator: it takes `collect.lock` in its own state directory (`COLLECTOR_STATE`,
   the unit's `StateDirectory`, `domain/collector-installation.ts`) and ends `busy` when another
-  holds it; it never names `WORKER_PATHS.applyLock`, so it never
-  blocks or waits on an install. It decides by `domain/collector.ts` alone and writes only
-  through an injected `ArchiveWriter` (`domain/archive-format.ts`): `incarnation.json` when it
-  is given one, blobs, then the journal
-  record, then the checkpoint (atomically), whose entries take a capture only once its record
-  is stored. It finds sources by `lstat`, opens them `O_NOFOLLOW` and reads one only while it is
-  still the device and inode found and `/proc/self/fd` (`CollectSystem.openFiles`) shows it
-  open at its own path under the Claude root's real path (its parent resolved, its own name
-  kept); found open elsewhere or unverifiable, it fails the run (`SourcePathMismatch`,
+  holds it; it never names `WORKER_PATHS.applyLock`, so it never blocks or waits on an install.
+  It decides by `domain/collector.ts` alone and writes only through an injected `ArchiveWriter`
+  (`domain/archive-format.ts`): `incarnation.json` when it is given one, blobs, then the journal
+  record, then the checkpoint (atomically), whose entries take a capture only once its record is
+  stored. It finds sources by `lstat`, opens them `O_NOFOLLOW` and reads one only while it is
+  still the device and inode found and `/proc/self/fd` (`CollectSystem.openFiles`) shows it open
+  at its own path under the Claude root's real path (its parent resolved, its own name kept);
+  found open elsewhere or unverifiable, it fails the run (`SourcePathMismatch`,
   `OpenPathUnverified`) and leaves the source, never silently. An append's tail is kept only
   while its prefix, hashed again after the tail's read on the same open file, is still the one
   captured, so a rewrite is never spliced (§Capture). Its discovery is bounded by
   `COLLECTION_BUDGET.entries` and a quarter of its time: the checkpoint's recent sources first,
   by path, within half of each, then the walk resumed from `discovery_after`, never fewer than
   `WALK_MINIMUM` entries so a slow recheck never stalls it, never the whole tree at once
-  (§Budgets); `discoverSources`, the backlog's, always walks from the beginning. It never
-  changes a source. Its
-  time budget bounds the decisions' hashing too, newest first, with half the budget, so a run always reaches its checkpoint (§Budgets). File-system failures are
-  reported by their error code, a vanished source is none, and an error without a code is
-  thrown. Tests run it over a worker in a temporary directory and `tests/support/memory-archive.ts`.
+  (§Budgets); `discoverSources`, the backlog's, always walks from the beginning. It never changes
+  a source. Its time budget bounds the decisions' hashing too, newest first, with half the
+  budget, so a run always reaches its checkpoint (§Budgets). File-system failures are reported by
+  their error code, a vanished source is none, and an error without a code is thrown. Tests run
+  it over a worker in a temporary directory and `tests/support/memory-archive.ts`.
 - `host collect --once` (`collection.ts`, `docs/specs/collector.md` §Credentials and
   publishing) is the other subcommand run as `factory`, by the log archive's timer, never
   through the activator; it refuses root. Without `/etc/fffactory/collector.json` it does

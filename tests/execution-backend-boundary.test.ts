@@ -57,27 +57,34 @@ const COMMANDS = [
 ].join("|");
 
 /**
+ * The gap between words of one command line: blanks, or a shell's escaped line break. Never a
+ * bare newline, so a name ending one line and a command word starting the next is no run.
+ */
+const GAP = String.raw`(?:[ \t]|\\\r?\n)+`;
+
+/**
  * Root options before the command, each with an optional value: `--json`, `-o json`, `--host=h`.
  * A value never starts with a dash, so a run of options parses one way, in linear time.
  */
-const OPTIONS = String.raw`(?:\s+-[-\w]+(?:[= ][^\s-]\S*)?)*`;
+const OPTIONS = String.raw`(?:${GAP}-[-\w]+(?:[= ][^\s-]\S*)?)*`;
 
 /** The same, as quoted argument-list elements: `"--json", `, `"-o", "json", `. */
 const OPTION_ELEMENTS = String.raw`(?:["']-[^"']*["']\s*,\s*(?:["'][^"'-][^"']*["']\s*,\s*)?)*`;
 
 /**
- * The Paseo CLI run with one of its commands, after any root options: on a command line
- * (`paseo ls`, `paseo -o json ls`, `"$paseo" ls`, `"${PASEO}" ls`), as an argument list whose
- * program is `paseo` by name, path or a variable so named (`["paseo", "ls"]`,
- * `["paseo", "--json", "ls"]`, `execFile("/…/paseo", ["ls"])`, `command_json(PASEO, "ls")`),
- * as an argument list given to a function named `paseo` (`paseo(["project", "ls"])`), or
- * through a TypeScript handle that runs it. The backend's name alone (`["paseo"]`,
- * `("paseo", [])`) is none of these, nor is it followed by a quoted key that is also a command
- * (`"runtime": "paseo", "status": "ok"`).
+ * The Paseo CLI run with one of its commands, after any root options: on one command line, or
+ * one continued by a shell's escaped line break (`paseo ls`, `paseo -o json ls`, `"$paseo" ls`,
+ * `"${PASEO}" \` then `schedule ls`), as an argument list whose program is `paseo` by name,
+ * path or a variable so named (`["paseo", "ls"]`, `["paseo", "--json", "ls"]`,
+ * `execFile("/…/paseo", ["ls"])`, `command_json(PASEO, "ls")`), as an argument list given to a
+ * function named `paseo` (`paseo(["project", "ls"])`), or through a TypeScript handle that runs
+ * it. The backend's name alone (`["paseo"]`, `("paseo", [])`) is none of these, nor is it
+ * followed by a quoted key that is also a command (`"runtime": "paseo", "status": "ok"`), nor a
+ * command word on the next line (`backend: paseo` then `status: ok`).
  */
 const CLI = new RegExp(
   [
-    String.raw`\b(?:paseo|PASEO)\}?["']?${OPTIONS}\s+(?:${COMMANDS})\b`,
+    String.raw`\b(?:paseo|PASEO)\}?["']?${OPTIONS}${GAP}(?:${COMMANDS})\b`,
     String.raw`(?:["'](?:[^"'\s]*\/)?paseo["']|\b(?:paseo|PASEO)\b)\s*,\s*\[?\s*${OPTION_ELEMENTS}["'](?:${COMMANDS})["'](?!\s*:)`,
     String.raw`\bpaseo\s*\(\s*\[\s*${OPTION_ELEMENTS}["'](?:${COMMANDS})["']`,
     String.raw`\b(?:PaseoCommand|paseoCli|paseoRuns)\b`,
@@ -96,12 +103,12 @@ const BEHAVIOR: readonly Token[] = [
 ];
 
 /**
- * The files that may name Paseo's behavior, as globs over repository paths: the tracked
- * inventory of `docs/specs/execution-backend.md` §The boundary. The adapters stay; every other
- * entry leaves with the epic #136 task that moves its Paseo calls behind a seam.
+ * The files that may name Paseo's behavior, as globs over repository paths: the Paseo adapters
+ * of the three seams and their shipped assets (`docs/specs/execution-backend.md` §The
+ * allow-list). Their tests under `tests/` need no entry, since `tests/` is not scanned; a test
+ * shipped beside an asset is scanned, and listed. Anything else reaches Paseo through a seam.
  */
 const ALLOW_LIST: readonly string[] = [
-  // The adapters and their shipped assets.
   "src/host/paseo-backend.ts",
   "src/host/paseo-trigger.ts",
   "src/infrastructure/paseo-control-plane.ts",
@@ -315,7 +322,10 @@ describe("the boundary's rules", () => {
     ["the Paseo CLI", 'execFile("paseo", ["--host", "worker", "--no-color", "ls"]);'],
     ["the Paseo CLI", '"$PASEO" ls'],
     ["the Paseo CLI", "$PASEO ls"],
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: shell parameter expansion, deliberately
     ["the Paseo CLI", '"${PASEO}" schedule ls'],
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: shell parameter expansion, deliberately
+    ["the Paseo CLI", '"${paseo}" \\\n  schedule ls --json'],
     ["the Paseo CLI", '"$PASEO" --format json ls'],
     ["the Paseo CLI", 'await paseo(["project", "ls", "--json"]);'],
     ["Paseo's paths", 'const ROOT = "/home/factory/.paseo/worktrees";'],
@@ -347,6 +357,8 @@ describe("the boundary's rules", () => {
       'repositoryRegistration("paseo", checkouts.map(failed));',
       '{ "runtime": "paseo",\n  "status": "ok" }',
       "{'backend': 'paseo', 'logs': []}",
+      "backend: paseo\nstatus: ok",
+      'backend = "paseo"\nstart = 1',
     ].join("\n");
     expect(violations(FIXTURE, [file("src/domain/repository-registration.ts", text)])).toEqual([]);
   });

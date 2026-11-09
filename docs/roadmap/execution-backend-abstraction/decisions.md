@@ -56,7 +56,8 @@
    `PASEO_*` env, port 6767, `paseo.service`, `@getpaseo`. Names #93 owns (`paseo-password`,
    `paseo_password_secret*`, `paseo-package`, `paseo-configuration`, `paseo_health`,
    `paseo_changed`, `PASEO_CLIENTS`, "Paseo" in human output) sit in a second list marked
-   `TODO(re-evaluate when #93 lands): remove`. `dispatch-schedule.sh` stays where it is, allow-listed.
+   `TODO(re-evaluate when #93 lands): remove`. `dispatch-schedule.sh` stays where it is, allow-listed
+   with its shipped Python test, the one test the scan reaches (#145).
    Rejected alternatives:
      - scan for the bare word only after #93: the guard waits on another epic.
      - move `dispatch-schedule.sh` under `assets/steps/control-plane/`: tidier allow-list, but

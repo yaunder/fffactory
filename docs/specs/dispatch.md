@@ -1,7 +1,8 @@
 # Dispatch
 
 Dispatch pulls ready FFFlow epics on a worker into runs its execution backend
-hosts: top-level Paseo agents and worktrees today. factory.json *requests*
+hosts, each a top-level agent in a fresh worktree the backend owns (Paseo's
+today). factory.json *requests*
 dispatch on a host, but apply keeps it *inactive* until every readiness gate
 passes, and a later apply activates it automatically once they do. Requested
 dispatch and active dispatch are distinct states. Apply ends with an end-to-end
@@ -281,9 +282,10 @@ fake execution backend holding the runs (the real Paseo backend over a stand-in
 auth wrapper where a case goes through it end to end). It covers every
 scenario the Python tests held, and the exact run request and GitHub commands,
 the caller's environment reaching them and the backend, a run for another epic
-being no duplicate, the end-to-end launch and duplicate list through the Paseo
-backend, the lock and the Python dispatcher's, the failures of a tick (the
-epic's runs unreadable, a run not started) and output that is not UTF-8.
+or another repository's run for the same epic being no duplicate, the
+end-to-end launch and duplicate list through the Paseo backend, the lock and
+the Python dispatcher's, the failures of a tick (the epic's runs unreadable, a
+run not started) and output that is not UTF-8.
 `tests/domain/dispatch-policy.test.ts` covers the rules,
 `tests/host/dispatch.test.ts` the root adoption, `tests/cli/host.test.ts` the
 command's output and exit codes, root refused among them.
@@ -500,7 +502,11 @@ configuration flag alone.
 The trigger's seam, its Paseo adapter and the schedule reconciler's layers are in
 [dispatch trigger §Layer mapping](dispatch-trigger.md#layer-mapping); the
 `ExecutionBackend` seam's, its adapter's and the registration result's in
-[execution backend §Layer mapping](execution-backend.md#layer-mapping).
+[execution backend §Layer mapping](execution-backend.md#layer-mapping). None of
+dispatch's own modules or its skill names Paseo's behavior (#93's
+[quarantined](execution-backend.md#the-quarantine) names aside): they reach the
+backend and the trigger only through their seams
+([execution backend §The boundary](execution-backend.md#the-boundary)).
 
 Introduced by [#105](https://github.com/yaunder/factory/issues/105). Skipped
 workers: [#134](https://github.com/yaunder/factory/issues/134). A delivered
@@ -512,4 +518,6 @@ registered on every dispatch reconcile: [#134](https://github.com/yaunder/fffact
 Narrowed to policy and activation, the trigger and the backend split out:
 [#139](https://github.com/yaunder/fffactory/issues/139). The dispatcher in
 TypeScript, `host dispatch run`: [#142](https://github.com/yaunder/fffactory/issues/142)
-([#107](https://github.com/yaunder/fffactory/issues/107)).
+([#107](https://github.com/yaunder/fffactory/issues/107)). The skill and the
+workflow queue's words backend-neutral:
+[#145](https://github.com/yaunder/fffactory/issues/145).

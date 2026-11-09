@@ -9,10 +9,10 @@ human a way back into them. Paseo is its first and only adapter. Design:
 
 This spec holds what the backend is responsible for, the run contract, the
 `ExecutionBackend` contract as it exists today, and the boundary that keeps
-Paseo's behavior inside its adapters. Until the epic
-[#136](https://github.com/yaunder/fffactory/issues/136) completes, part of that
-behavior still sits outside the seam; the boundary's allow-list is the tracked
-inventory of where.
+Paseo's behavior inside its adapters: since the epic
+[#136](https://github.com/yaunder/fffactory/issues/136), every Paseo
+interaction goes through a seam, and only the adapters and their shipped
+assets name Paseo's behavior.
 
 ## Orchestration's three parts
 
@@ -329,7 +329,7 @@ outside the allow-list that names:
 
 | Behavior | What it matches |
 | --- | --- |
-| the Paseo CLI | a run of `paseo` with one of the top-level commands of the pinned 0.15.0 (`agent`, `archive`, `attach`, `clone`, `daemon`, `delete`, `heartbeat`, `hooks`, `host`, `hub`, `import`, `inspect`, `logs`, `ls`, `onboard`, `pair`, `permit`, `plugin`, `project`, `provider`, `reload`, `restart`, `run`, `schedule`, `script`, `send`, `speech`, `start`, `status`, `stop`, `terminal`, `usage`, `wait`, `workspace`, `worktree`): after any root options before the command (`--json`, `-o json`, `--host=h`; an option's value never starts with a dash): on a command line, also through a shell variable named `paseo` or `PASEO` (`paseo -o json ls`, `"$paseo" ls`, `"${PASEO}" schedule ls`); or as an argument list whose program is the string `paseo`, a path ending in `/paseo`, or a variable named `paseo` or `PASEO` (`["paseo", "ls"]`, `["paseo", "-o", "json", "ls"]`, `execFile("paseo", ["ls"])`, `command_json(PASEO, "ls")`), but not when the command is a quoted key (`"runtime": "paseo", "status": "ok"`); or a function named `paseo` called with an argument list (`paseo(["project", "ls"])`); and the TypeScript handles that run it, `PaseoCommand`, `paseoCli` and `paseoRuns` |
+| the Paseo CLI | a run of `paseo` with one of the top-level commands of the pinned 0.15.0 (`agent`, `archive`, `attach`, `clone`, `daemon`, `delete`, `heartbeat`, `hooks`, `host`, `hub`, `import`, `inspect`, `logs`, `ls`, `onboard`, `pair`, `permit`, `plugin`, `project`, `provider`, `reload`, `restart`, `run`, `schedule`, `script`, `send`, `speech`, `start`, `status`, `stop`, `terminal`, `usage`, `wait`, `workspace`, `worktree`): after any root options before the command (`--json`, `-o json`, `--host=h`; an option's value never starts with a dash): on a command line, its words separated by blanks or a shell's escaped line break but never a bare newline (`backend: paseo` then `status: ok` on the next line is no run), also through a shell variable named `paseo` or `PASEO` (`paseo -o json ls`, `"$paseo" ls`, `"${PASEO}" schedule ls`, `"${paseo}" \` then `schedule ls`); or as an argument list whose program is the string `paseo`, a path ending in `/paseo`, or a variable named `paseo` or `PASEO` (`["paseo", "ls"]`, `["paseo", "-o", "json", "ls"]`, `execFile("paseo", ["ls"])`, `command_json(PASEO, "ls")`), but not when the command is a quoted key (`"runtime": "paseo", "status": "ok"`); or a function named `paseo` called with an argument list (`paseo(["project", "ls"])`); and the TypeScript handles that run it, `PaseoCommand`, `paseoCli` and `paseoRuns` |
 | Paseo's paths | `.paseo`, and `paseoWorktrees`, the name the work inspection once gave its worktree root |
 | Paseo's environment | `PASEO_` followed by a letter, also inside a longer name such as `FACTORY_PASEO_BIN` |
 | Paseo's port | `6767` |
@@ -345,11 +345,13 @@ assets are scanned, as files under `assets/`.
 
 ### The allow-list
 
-The allow-list is the tracked inventory of Paseo's behavior. Each entry leaves
-with the task of epic #136 that moves its calls behind a seam; the adapters
-stay.
+The allow-list is final: the Paseo adapters of the three seams and the assets
+they ship, nothing else. Everything else reaches Paseo through a seam:
+`ExecutionBackend`, `DispatchTrigger` or the operator-side `ControlPlane`
+([control plane](control-plane.md)). A new file that names Paseo's behavior
+fails the check unless it is another such adapter or asset.
 
-| Entry | Names | Stays, or leaves with |
+| Entry | Names | Why it stays |
 | --- | --- | --- |
 | `src/host/paseo-backend.ts` | the CLI and its handles, the auth wrapper, the unit, the package, the environment a launch drops (`PASEO_AGENT_ID`, `PASEO_WORKSPACE_ID`), a path (the Python dispatcher's lock, `RETIRED_DISPATCH_LOCK`, until no worker runs a release from before #142) | stays: the `ExecutionBackend` adapter |
 | `src/host/paseo-trigger.ts` | the environment (`PASEO_HOME`, `FACTORY_PASEO_BIN`), the auth wrapper | stays: the `DispatchTrigger` adapter |
@@ -357,9 +359,13 @@ stay.
 | `assets/steps/control-plane/**` | everything: install, config, auth wrapper, unit, pin, and their tests | stays: the backend's shipped assets |
 | `assets/steps/dispatch/dispatch-schedule.sh` and its `tests/test_dispatch_schedule.py` | the CLI, the environment, the auth wrapper | stays: the Paseo trigger's shipped reconciler |
 
-An entry is never kept once nothing in it names Paseo's behavior: the check
-fails on an allow-list entry that matches no file naming any, so the list
-shrinks with the code.
+The adapters' tests under `tests/` (`tests/host/paseo-backend.test.ts`,
+`tests/host/paseo-trigger.test.ts`,
+`tests/infrastructure/paseo-control-plane.test.ts`) and the checks against
+the pinned Paseo in `tests/paseo/` name Paseo's behavior too, and need no
+entry: `tests/` is not scanned. An entry is never kept once nothing in it
+names Paseo's behavior: the check fails on an allow-list entry that matches no
+file naming any.
 
 ### The quarantine
 
@@ -387,8 +393,10 @@ name, or that the allow-list already covers.
 Tested in `tests/execution-backend-boundary.test.ts`: every file under the
 scanned roots against the allow-list and the quarantine, every entry still
 needed, and over fixtures each behavior named outside the allow-list, an
-allow-listed file by path and by glob, prose naming Paseo, a quarantined name in
-its own file and in another, and stale entries.
+allow-listed file by path and by glob, a command line continued by an escaped
+line break, prose naming Paseo, the backend's name before a command word on the
+next line, a long run of root options, a quarantined name in its own file and
+in another, and stale entries.
 
 ## Layer mapping
 
@@ -416,6 +424,7 @@ TypeScript, its launch and duplicate check inline:
 [#142](https://github.com/yaunder/fffactory/issues/142); runs on the seam,
 `startRun` and `runs`: [#143](https://github.com/yaunder/fffactory/issues/143);
 the backend's layout as data, `layout`:
-[#144](https://github.com/yaunder/fffactory/issues/144).
+[#144](https://github.com/yaunder/fffactory/issues/144); the final allow-list:
+[#145](https://github.com/yaunder/fffactory/issues/145).
 The `ExecutionBackend` contract:
 [#133](https://github.com/yaunder/fffactory/issues/133).

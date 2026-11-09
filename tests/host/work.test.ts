@@ -31,6 +31,7 @@ import {
   WORK_GIT_TIMEOUT_MS,
   workerWork,
 } from "../../src/host/work";
+import { type BackendAnswers, fakeExecutionBackend } from "../support/fake-execution-backend";
 import {
   AS_FACTORY,
   addSubmodule,
@@ -43,7 +44,6 @@ import {
   submoduleGit,
 } from "./work-scenarios";
 import { WORKER_HOSTNAME } from "./worker-scenarios";
-import { type BackendAnswers, fakeExecutionBackend } from "../support/fake-execution-backend";
 
 let world: GitWorld;
 let outside: string;

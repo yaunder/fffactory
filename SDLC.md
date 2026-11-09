@@ -15,9 +15,17 @@ another's state.
 
 | Concern | Owner | What it owns | What it never does |
 | --- | --- | --- | --- |
-| Machines | this repository (`fffactory` and its releases) | hosts, runtimes, pinned plugins, repository inventory, verification | define task workflow or hold task state |
-| Dispatch | Paseo | agents, sessions, worktrees, permissions, timelines, schedules | decide what a task must do to be done |
+| Machines | this repository (`fffactory` and its releases) | hosts, runtimes, pinned plugins, repository inventory, verification, and dispatch policy: what may run | define task workflow or hold task state |
+| Execution | the execution backend and the dispatch trigger (both Paseo today) | agents, sessions, worktrees, permissions, timelines; the schedule that starts dispatch | decide what a task must do to be done, or what may run |
 | Workflow | FFFlow | planning, capture, the work loop, review discipline, audit | provision hosts or start agents |
+
+Dispatch policy, the trigger and the execution backend are the three peer
+parts of the Orchestration layer
+([CONTEXT.md §Layers](CONTEXT.md#layers)): the
+[dispatch](docs/specs/dispatch.md), [dispatch trigger](docs/specs/dispatch-trigger.md)
+and [execution backend](docs/specs/execution-backend.md) specs. fffactory reaches
+the backend and the trigger only through its seams, so Paseo is replaceable by
+another adapter without changing the workflow below.
 
 The factory previously closed its own repository-contract, task-loop, and
 task-state issues (#4, #6, #13) as owned by "Paseo and the workflow skills."
@@ -37,7 +45,7 @@ tracker plus the pull request.
 | Breakdown | `plan-breakdown` | laptop | human with agent | task files in the plan directory | every task has scope, dependencies, acceptance criteria |
 | Capture | `plan-capture` | laptop | agent | epic and task issues in GitHub | issues exist with dependency comments |
 | Ready | none; a human decision | GitHub | human | `ready` label on the epic issue | see [Readiness](#readiness) |
-| Work | `work-epic` (later `work-issue`) | factory host | Paseo agent | branch, commits, pull request | level-appropriate gates pass, PR opened |
+| Work | `work-epic` (later `work-issue`) | factory host | agent the execution backend hosts | branch, commits, pull request | level-appropriate gates pass, PR opened |
 | Review and merge | none; GitHub review | GitHub | human | merged pull request | human approval |
 | Audit | `audit` | laptop or host | agent | audit findings, optionally a plan | above-threshold findings become plans |
 
@@ -73,16 +81,17 @@ state the factory adds to the tracker.
 
 `work-epic` is the first dispatch unit: one epic, one branch, one squashed
 commit per task, one pull request. It is already how work is started
-interactively today, and it runs correctly inside a Paseo worktree because it
-never creates a worktree of its own. Dispatching at the epic granularity also
-matches how planning produces work: `plan-capture` writes one epic per plan
-or phase, so `ready` on the epic is one label per unit of planned work.
+interactively today, and it runs correctly inside the execution backend's
+worktree because it never creates a worktree of its own. Dispatching at the
+epic granularity also matches how planning produces work: `plan-capture`
+writes one epic per plan or phase, so `ready` on the epic is one label per
+unit of planned work.
 
 `work-issue` as a dispatch unit is deferred. One pull request per task changes
 how readiness, dependencies between tasks, and per-task review compose, and
 that logic should be agreed with the upstream maintainer before the factory
-encodes it. It runs correctly inside a Paseo worktree today and remains
-available interactively.
+encodes it. It runs correctly inside the execution backend's worktree today and
+remains available interactively.
 
 Stacked epics, where epic two branches off epic one's branch while that pull
 request awaits merge, are deferred. `work-epic` hard-codes `origin/main` as its
@@ -91,50 +100,58 @@ base today. The change is an upstream contribution, not a fork; see
 
 ## Worktree ownership
 
-Two worktree conventions exist: Paseo creates worktrees under
-`~/.paseo/worktrees`, and FFFlow's `work-fanout` creates `worktrees/<task-id>/`
-inside the project root.
+Two worktree conventions exist: the execution backend creates worktrees under
+its own workspace roots (Paseo's are under `~/.paseo/worktrees`), and FFFlow's
+`work-fanout` creates `worktrees/<task-id>/` inside the project root.
 
-On factory hosts, **Paseo owns worktrees.** Every unit of work runs as a
-top-level Paseo agent in a Paseo-created worktree branched off fresh `main`.
-FFFlow skills run inside that worktree and never create nested worktrees.
-Consequences:
+On factory hosts, **the execution backend owns worktrees.** Every unit of work
+runs as a top-level agent the backend starts in a fresh worktree it creates,
+branched off the repository's declared branch
+([execution backend §Start](docs/specs/execution-backend.md#start)). fffactory
+learns where those worktrees live only from the backend's layout
+([§Layout](docs/specs/execution-backend.md#layout)). FFFlow skills run inside
+that worktree and never create nested worktrees. Consequences:
 
-- `work-fanout` is not used on hosts until it gains an executor that spawns
-  Paseo agents instead of in-session subagents. Parallelism comes from the
-  dispatcher starting several agents, not from one agent forking itself.
-- Each unit of work has its own Paseo timeline, permission queue, activity
-  signal, and kill switch. A stalled unit is visible from any enrolled client.
+- `work-fanout` is not used on hosts until it gains an executor that starts
+  runs through the execution backend instead of in-session subagents.
+  Parallelism comes from the dispatcher starting several runs, not from one
+  agent forking itself.
+- Each unit of work has its own timeline, permission queue, activity signal,
+  and kill switch in the execution backend. A stalled unit is visible from any
+  enrolled client.
 
 ## Dispatcher
 
 The dispatcher is the piece that makes the factory pull work rather than wait
 for a human to type a command. It is deliberately small:
 
-- A Paseo schedule on each host starts a fresh agent on a fixed cadence.
+- The dispatch trigger on each host, a Paseo schedule today, starts a fresh
+  agent on a fixed cadence
+  ([dispatch trigger](docs/specs/dispatch-trigger.md)).
 - That agent runs a factory-owned dispatch skill. The skill lists `ready`
   issues across the repositories placed on that host, applies the readiness
   checks, counts the agents it started that are still working or waiting on
   a person (asking the worker's own `fffactory`, whose execution backend
-  translates the agents, never reading a Paseo status itself), and
+  translates the agents, never reading a backend's status itself), and
   starts at most `cap - running` new agents.
-- Each new agent is created in a Paseo worktree off the repository's declared
-  branch with an initial prompt of `/fff:work-epic <id>`. Dispatching
+- The execution backend starts each new agent in a fresh worktree off the
+  repository's declared branch with an initial prompt of
+  `/fff:work-epic <id>`. Dispatching
   `/fff:work-issue <n>` is added once the task-level logic is agreed upstream.
 - The dispatcher never merges, never force-pushes, and never deletes
   worktrees. Cleanup after merge is a separate reviewed policy, matching the
   repository synchronization precedent.
 
-The cap is one unit of work per host. The dispatcher depends on Paseo's
-schedules and worktree isolation and on the FFFlow plugin, both pinned in the
-release (`assets/steps/control-plane/versions.env`,
+The cap is one unit of work per host. The dispatcher depends on the trigger,
+the execution backend's worktree isolation and the FFFlow plugin, all pinned in
+the release (Paseo in `assets/steps/control-plane/versions.env`, FFFlow in
 `assets/steps/plugins.json`). The PR-checkpoint protocol inside
 `work-issue` is session-local and `work-epic` opens exactly one pull request,
 so an agent started by the dispatcher never hits the checkpoint. `work-epic`
 does stop and ask on unexpected state such as an existing branch or a task
 without acceptance criteria; the readiness checks above are designed to make
-those stops rare, and when one happens it surfaces as a Paseo permission or
-question that any enrolled client can answer.
+those stops rare, and when one happens it surfaces as a permission request or
+question in the execution backend that any enrolled client can answer.
 
 The factory repository is outside the managed work inventory (#59). The
 dispatch skill therefore ships in the release (`assets/steps/dispatch/`), and
@@ -166,8 +183,10 @@ Each operator's factory.json owns its inventory; this repository holds none.
 - **Claude Code is the first executor.** FFFlow is a Claude Code plugin. Codex
   remains pinned in the release but has no FFFlow path until upstream adds one.
   Codex compatibility is deferred.
-- **Control-plane orchestration.** Parallelism is one Paseo agent per unit of
-  work, started by the dispatcher, rather than in-session fan-out.
+- **Execution-backend orchestration.** Parallelism is one run per unit of
+  work, started by the dispatcher through the execution backend, rather than
+  in-session fan-out. The backend, Paseo today, is replaceable behind its
+  seam (epic [#136](https://github.com/yaunder/fffactory/issues/136)).
 - **`ready` label on epics as the human gate**, with computed branch,
   open-PR, and dependency checks at dispatch time. Epics are dispatched with
   `work-epic` first. Task-level dispatch with `work-issue` waits on a
