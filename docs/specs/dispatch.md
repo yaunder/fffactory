@@ -213,7 +213,7 @@ rules are `src/domain/dispatch-policy.ts`, its reads and launch
    `/home/factory/.paseo/factory-dispatch.lock` too (the upgrade above); either
    lock another tick holds fails the tick (`another dispatch tick holds its
    lock`), holding neither. It holds both to the tick's end.
-4. Reads the worker's agents for [capacity](#capacity).
+4. Reads the worker's runs for [capacity](#capacity).
 5. For each repository: runs the active release's FFFlow adoption check
    (`check-ffflow-adoption.sh REMOTE BRANCH`); a repository failing it is
    skipped with `FFFlow adoption check failed: ` and the check's error, and its
@@ -228,22 +228,35 @@ rules are `src/domain/dispatch-policy.ts`, its reads and launch
    named by an open pull request's title or body (`#N`, the exact number), and
    no remote `epic/N` branch exists.
    A ready epic is launched unless the worker has no slot (`host cap reached`)
-   or the backend lists a run dispatch launched for it, finished or not
-   (`existing dispatched agent`): an epic is never launched twice. Before the
+   or the backend's `runs`, asked for the epic's work (the repository's alias
+   and the epic's number), holds a run dispatch launched for it, finished or
+   not (`existing dispatched agent`): an epic is never launched twice. Before the
    launch, the release's repository program plans then applies the placed
    checkouts (`sync-repositories.sh --plan`, `--apply`), the checkout is checked
    again as above, fetched, and must be at `origin/BRANCH`; any refusal skips
    the epic with its reason (a diverged checkout's `DIVERGED`, from `--plan`).
+   It launches through the backend's `startRun`
+   ([execution backend §Start](execution-backend.md#start)): the epic's launch
+   identity, the checkout, `origin/BRANCH`, the branch
+   `dispatch/epic-N-STAMP`, the `/fff:work-epic N` invocation, which tells the
+   agent to create `epic/N` from `origin/BRANCH` in "this fresh worktree"
+   (`workEpicInvocation`), and the schedule's provider, model and mode.
 7. Prints its summary.
 
 Its commands are the Python dispatcher's, with the same arguments, in the
 environment and working directory it was started with (the scheduled agent's),
 the repository program also given `FACTORY_REPOSITORY_ROOT`; each within 15
-minutes, where the Python waited without limit. Their output is decoded as
-UTF-8, leniently (a byte that is not becomes U+FFFD), and stripped of the
-whitespace around it; output that should be JSON and is not, corrupt bytes
-included, fails the tick (`invalid JSON from gh: ...`, or `from paseo`). The
-manifest and the projection are read as UTF-8 the same way.
+minutes, where the Python waited without limit. The backend acts for it in that
+environment for the epic's runs and the launch, each within 15 minutes too
+([execution backend §The `ExecutionBackend` contract](execution-backend.md#the-executionbackend-contract)).
+Their output is decoded as UTF-8, leniently (a byte that is not becomes
+U+FFFD), and stripped of the whitespace around it; output that should be JSON
+and is not, corrupt bytes included, fails the tick (`invalid JSON from gh:
+...`). Runs the backend cannot read for the epic fail the tick (`the epic's
+runs could not be read: REASON`), and so does a run it could not start (`the
+epic's run could not be started: REASON`), each reason in fffactory's words,
+never the backend's output. The manifest and the projection are read as UTF-8
+the same way.
 
 What it prints is the agent's timeline's, not a protocol document, JSON
 indented by two spaces: `host`, `cap`, `running`, `considered` (`repository`,
@@ -263,12 +276,14 @@ placed repository passed ([The `WorkflowQueue` connector](#the-workflowqueue-con
 
 Tested in `tests/host/dispatcher.test.ts`, in process against a worker laid out
 in a temporary root: a real local Git remote standing in for GitHub's, the
-release's real adoption check and repository program, a stand-in `gh` and
-Paseo auth wrapper, and a fake execution backend for the agents (the real Paseo
-backend over the stand-in where the case is the adapter's). It covers every
-scenario the Python tests held, and the exact launch and GitHub commands, the
-caller's environment reaching them, the lock and the Python dispatcher's, the
-failures of a tick and output that is not UTF-8.
+release's real adoption check and repository program, a stand-in `gh`, and a
+fake execution backend holding the runs (the real Paseo backend over a stand-in
+auth wrapper where a case goes through it end to end). It covers every
+scenario the Python tests held, and the exact run request and GitHub commands,
+the caller's environment reaching them and the backend, a run for another epic
+being no duplicate, the end-to-end launch and duplicate list through the Paseo
+backend, the lock and the Python dispatcher's, the failures of a tick (the
+epic's runs unreadable, a run not started) and output that is not UTF-8.
 `tests/domain/dispatch-policy.test.ts` covers the rules,
 `tests/host/dispatch.test.ts` the root adoption, `tests/cli/host.test.ts` the
 command's output and exit codes, root refused among them.
@@ -276,8 +291,8 @@ command's output and exit codes, root refused among them.
 ## Capacity
 
 A worker runs at most one dispatched epic agent at a time
-(`DISPATCH_CAPACITY`). The dispatcher counts the agents holding that slot from
-the execution backend's `agents`
+(`DISPATCH_CAPACITY`). The dispatcher counts the runs holding that slot from
+the execution backend's `runs`
 ([execution backend §The `ExecutionBackend` contract](execution-backend.md#the-executionbackend-contract)),
 in process, within 90 seconds, never from a Paseo status: the backend's
 adapter translates Paseo's agents as for every other gate
@@ -294,9 +309,7 @@ free slot: `the worker's agents could not be read: REASON`, the backend's
 reason in fffactory's words, never Paseo's output. The adapter reads one
 malformed agent (no or an unknown status, a missing or malformed ID) as the
 whole list unreadable rather than skipping it, since skipping it could free a
-slot it holds, and ignores fields it does not know. The duplicate check and the
-launch stay Paseo-specific inside the dispatcher until
-[#143](https://github.com/yaunder/fffactory/issues/143).
+slot it holds, and ignores fields it does not know.
 
 Tested in `tests/host/dispatcher.test.ts`: each state, dispatched or not,
 holding the slot or not; the agents of `tests/host/fixtures/activity-agents.json`,
@@ -479,8 +492,8 @@ configuration flag alone.
 | The FFFlow/GitHub adapter over `HostTransport` | infrastructure | `src/infrastructure/ffflow-github-workflow-queue.ts` |
 | The versioned desired and observed dispatch documents, the not-requested projection that stops dispatch and how stopping ended (`DispatchStop`) | domain (pure) | `src/domain/dispatch-projection.ts` |
 | The root endpoint, asset installation, privilege drop, persisted observation, the trigger reconciled and inspected through `DispatchTrigger`, and registering the placed checkouts present on disk after the schedule | host | `src/host/dispatch.ts` |
-| Dispatch policy: the placed repositories, readiness, capacity by the busy rule, the launch's names and the summary | domain (pure) | `src/domain/dispatch-policy.ts` |
-| The dispatcher: GitHub and Git reads as `factory`, the lock and, until no worker runs a release from before #142, the Python dispatcher's (`RETIRED_DISPATCH_LOCK`, from the Paseo adapter), the adoption check (also in process from root for `dispatch adoption`), the agents from the backend, the launch and duplicate check through the Paseo adapter's `callerPaseo` until [#143](https://github.com/yaunder/fffactory/issues/143) | host | `src/host/dispatcher.ts` |
+| Dispatch policy: the placed repositories, readiness, capacity by the busy rule, the launch's names and invocation, and the summary | domain (pure) | `src/domain/dispatch-policy.ts` |
+| The dispatcher: GitHub and Git reads as `factory`, the lock and, until no worker runs a release from before #142, the Python dispatcher's (`RETIRED_DISPATCH_LOCK`, from the Paseo adapter), the adoption check (also in process from root for `dispatch adoption`), the runs from the backend for capacity and the duplicate check, the launch through its `startRun`, naming no backend's command | host | `src/host/dispatcher.ts` |
 | `host dispatch run [--adoption-only]`, refused as root | host (driving) | `src/cli/commands/host.ts` |
 | The dispatch skill | release assets | `assets/steps/dispatch/skill/` |
 

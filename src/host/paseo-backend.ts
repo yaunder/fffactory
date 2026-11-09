@@ -1,26 +1,22 @@
 /**
  * The Paseo execution backend (`docs/specs/execution-backend.md` §The `ExecutionBackend`
  * contract): the only worker code that names Paseo's CLI, its auth wrapper, its setup program,
- * its unit and its password's bcrypt cost. It runs the Paseo CLI only as `factory`,
- * authenticated by the active release's `paseo-auth.sh`: from root through `runuser` in
- * `factory`'s clean environment, otherwise the wrapper itself in that environment. Every command
- * it runs is within the one budget it was made with. No Paseo output reaches its results: a
- * failure is said in fffactory's words.
+ * its unit, its password's bcrypt cost, the labels that carry a run's launch identity and the
+ * environment a launch must not inherit. It runs the Paseo CLI only as `factory`, authenticated
+ * by the active release's `paseo-auth.sh`: from root through `runuser` in `factory`'s clean
+ * environment, otherwise the wrapper itself in the environment of the process it acts for, or
+ * that clean one. Every command it runs is within the one budget it was made with. No Paseo
+ * output reaches its results: a failure is said in fffactory's words.
  */
 import { join } from "node:path";
 import { hashSync } from "bcryptjs";
-import {
-  AGENT_ID,
-  type Agent,
-  type AgentState,
-  type ControlPlaneAction,
-  type WorkerAgents,
-} from "../domain/control-plane";
+import { AGENT_ID, type AgentState, type ControlPlaneAction } from "../domain/control-plane";
 import { WORKER_PATHS } from "../domain/host-protocol";
 import {
   type CheckoutRegistration,
   repositoryRegistration,
 } from "../domain/repository-registration";
+import type { LaunchedWork, Run, RunRequest, RunStart, WorkerRuns } from "../domain/run";
 import type { SecretMaterial } from "../domain/secrets";
 import type { ProcessOutcome } from "../infrastructure/local-tool-probe";
 import type { ApplySystem } from "./apply";
@@ -41,37 +37,31 @@ const FACTORY_ENV = {
   PATH: "/home/factory/.local/bin:/usr/local/bin:/usr/bin:/bin",
 };
 
+type Environment = Readonly<Record<string, string>>;
 /** Runs the Paseo CLI with `args`, as `factory` and authenticated. */
 type PaseoCommand = (args: readonly string[]) => Promise<ProcessOutcome>;
-/** Where, and in what environment, a caller already running as `factory` runs the Paseo CLI. */
-export interface PaseoCaller {
-  readonly cwd?: string;
-  readonly env: Readonly<Record<string, string>>;
-}
-/** Runs the Paseo CLI with `args`, authenticated, from where and in the environment `caller` says. */
-export type CallerPaseoCommand = (
-  args: readonly string[],
-  caller: PaseoCaller,
-) => Promise<ProcessOutcome>;
 /** Runs `argv` as the caller, with root's environment and `stdin` when given. */
 type Command = (argv: readonly string[], stdin?: string) => Promise<ProcessOutcome>;
+
+interface Within {
+  readonly env: Environment;
+  readonly stdin?: string;
+  readonly cwd?: string;
+}
 
 /** A command run, every run of it within one budget from now. */
 function budgeted(
   system: ApplySystem,
   budgetMs: number,
-): (
-  argv: readonly string[],
-  env: Readonly<Record<string, string>>,
-  stdin?: string,
-) => Promise<ProcessOutcome> {
+): (argv: readonly string[], options: Within) => Promise<ProcessOutcome> {
   const deadline = system.now().getTime() + budgetMs;
-  return async (argv, env, stdin) => {
+  return async (argv, { env, stdin, cwd }) => {
     const left = deadline - system.now().getTime();
     if (left <= 0) return { kind: "timed_out" };
     return system.run(argv, left, {
       env,
       ...(stdin === undefined ? {} : { stdin: new TextEncoder().encode(stdin) }),
+      ...(cwd === undefined ? {} : { cwd }),
     });
   };
 }
@@ -83,14 +73,15 @@ function authWrapper(system: ApplySystem): string {
 
 /**
  * The Paseo CLI as `factory`: from root, dropped to it with `runuser` into its clean
- * environment; run as anyone else (the dispatcher's `host agents`, as `factory`), the wrapper
- * itself in that environment, since Paseo's state is `factory`'s.
+ * environment; run as anyone else (as `factory`: `host agents`, the dispatcher), the wrapper
+ * itself, since Paseo's state is `factory`'s, in the environment of the process it acts for
+ * (`caller`, the dispatcher's), or else that clean one.
  */
-function paseoCli(system: ApplySystem): {
-  argv: readonly string[];
-  env: typeof ENV | typeof FACTORY_ENV;
-} {
-  if (!system.isRoot()) return { argv: [authWrapper(system)], env: FACTORY_ENV };
+function paseoCli(
+  system: ApplySystem,
+  caller: Environment | undefined,
+): { argv: readonly string[]; env: Environment } {
+  if (!system.isRoot()) return { argv: [authWrapper(system)], env: caller ?? FACTORY_ENV };
   const clean = Object.entries(FACTORY_ENV).map(([name, value]) => `${name}=${value}`);
   return {
     argv: [
@@ -115,21 +106,6 @@ function failure(outcome: ProcessOutcome, what: string): ControlPlaneAction {
   return { kind: "failed", reason: `${what} ${outcome.kind}` };
 }
 
-// TODO(re-evaluate when task 5 lands): through startRun/runs
-/**
- * The Paseo CLI for the dispatcher's launch and duplicate check (`src/host/dispatcher.ts`), which
- * already runs as `factory`: the active release's auth wrapper itself, from the directory and in
- * the environment the dispatcher gives, as the Python dispatcher ran it, each run within
- * `timeoutMs`.
- */
-export function callerPaseo(system: ApplySystem, timeoutMs: number): CallerPaseoCommand {
-  return (args, caller) =>
-    system.run([authWrapper(system), ...args], timeoutMs, {
-      ...(caller.cwd === undefined ? {} : { cwd: caller.cwd }),
-      env: caller.env,
-    });
-}
-
 // TODO(re-evaluate when no worker runs a release from before #142): stop taking RETIRED_DISPATCH_LOCK
 /**
  * The lock the Python dispatcher of releases before #142 holds for its tick, in Paseo's home. A
@@ -151,9 +127,22 @@ const STATE_OF: Readonly<Record<string, AgentState | "running">> = {
 };
 /** Every agent, background workspaces' too; `--label` keeps the ones dispatch launched. */
 const LIST = ["ls", "--global", "--background"] as const;
+/**
+ * A launch identity as Paseo's labels: every run dispatch launches carries them, and `ls
+ * --label` keeps only the agents carrying every label given. Paseo's list prints no label.
+ */
 const DISPATCHED = ["--label", "factory-dispatch=true"] as const;
+const workLabels = (work: LaunchedWork) => [
+  ...DISPATCHED,
+  "--label",
+  `factory-repository=${work.repository}`,
+  "--label",
+  `factory-epic=${work.workItem}`,
+];
+/** The scheduled agent's own identity, which would make a launch its child, in its workspace. */
+const AGENT_IDENTITY = new Set(["PASEO_AGENT_ID", "PASEO_WORKSPACE_ID"]);
 
-type Unread = Extract<WorkerAgents, { kind: "unknown" }>;
+type Unread = Extract<WorkerRuns, { kind: "unknown" }>;
 const unread = (reason: string): Unread => ({ kind: "unknown", reason });
 
 interface Row {
@@ -205,27 +194,78 @@ async function stateOf(paseo: PaseoCommand, agent: Row): Promise<AgentState | Un
   return pending.length > 0 ? "needs_input" : "working";
 }
 
+/** The listed agents as runs, each marked by `mark`; inspected only once every status is known. */
+async function translated(
+  paseo: PaseoCommand,
+  rows: readonly Row[],
+  mark: (row: Row) => Pick<Run, "dispatched" | "work">,
+): Promise<WorkerRuns> {
+  if (rows.some((agent) => !Object.hasOwn(STATE_OF, agent.status)))
+    return unread("Paseo reported an agent status fffactory does not know");
+  const runs: Run[] = [];
+  for (const agent of rows) {
+    const state = await stateOf(paseo, agent);
+    if (typeof state !== "string") return state;
+    runs.push({ id: agent.id, state, ...mark(agent) });
+  }
+  return { kind: "listed", runs };
+}
+
 /**
- * The worker's agents in fffactory's states (`docs/specs/control-plane.md` §Agent states). The
+ * The worker's runs in fffactory's states (`docs/specs/control-plane.md` §Agent states). The
  * only code that knows Paseo's statuses: it lists every agent, marks the ones dispatch
- * labelled, and inspects only the running ones for a pending permission. Anything it cannot
- * read makes the whole answer unknown, never a guess.
+ * labelled, and inspects only the running ones for a pending permission; given `work`, it lists
+ * only the agents labelled for it. Anything it cannot read makes the whole answer unknown, never
+ * a guess.
  */
-async function paseoAgents(paseo: PaseoCommand): Promise<WorkerAgents> {
+async function paseoRuns(paseo: PaseoCommand, work?: LaunchedWork): Promise<WorkerRuns> {
+  if (work !== undefined) {
+    const launched = listed(await paseo([...LIST, ...workLabels(work), "--json"]));
+    if ("kind" in launched) return launched;
+    const { repository, workItem } = work;
+    return translated(paseo, launched, () => ({
+      dispatched: true,
+      work: { repository, workItem },
+    }));
+  }
   const all = listed(await paseo([...LIST, "--json"]));
   if ("kind" in all) return all;
   const dispatched = listed(await paseo([...LIST, ...DISPATCHED, "--json"]));
   if ("kind" in dispatched) return dispatched;
-  if (all.some((agent) => !Object.hasOwn(STATE_OF, agent.status)))
-    return unread("Paseo reported an agent status fffactory does not know");
   const launched = new Set(dispatched.map((agent) => agent.id));
-  const agents: Agent[] = [];
-  for (const agent of all) {
-    const state = await stateOf(paseo, agent);
-    if (typeof state !== "string") return state;
-    agents.push({ id: agent.id, state, dispatched: launched.has(agent.id) });
-  }
-  return { kind: "listed", agents };
+  return translated(paseo, all, (agent) => ({ dispatched: launched.has(agent.id) }));
+}
+
+/**
+ * `paseo run`'s arguments for `request`: top-level, without waiting (never `--background`, its
+ * deprecated alias), in a new branch-off worktree workspace made from the checkout, labelled
+ * with its launch identity, the prompt last.
+ */
+function launchArguments(request: RunRequest): readonly string[] {
+  const { launch, agent } = request;
+  return [
+    ...["run", "--no-wait", "--json", "--provider", `${agent.provider}/${agent.model}`],
+    ...["--mode", agent.mode, "--new-workspace", "worktree", "--worktree-mode", "branch-off"],
+    ...["--new-branch", request.branch, "--base", request.base, "--cwd", request.checkout],
+    ...workLabels(launch),
+    ...["--label", `factory-dispatched-at=${launch.attempt}`],
+    request.invocation,
+  ];
+}
+
+/** The launch's environment: `env` without the scheduled agent's identity. */
+const withoutAgentIdentity = (env: Environment): Environment =>
+  Object.fromEntries(Object.entries(env).filter(([name]) => !AGENT_IDENTITY.has(name)));
+
+/** A launch's handle, from the `agentId` it printed; or why not. */
+function started(outcome: ProcessOutcome): RunStart {
+  const failed = ended("starting a Paseo run", outcome);
+  if (failed !== undefined || outcome.kind !== "exited")
+    return { kind: "failed", reason: failed ?? "starting a Paseo run failed" };
+  const id = fields(json(outcome.stdout))?.agentId;
+  return typeof id === "string" && AGENT_ID.test(id)
+    ? { kind: "started", handle: { id } }
+    : { kind: "failed", reason: "Paseo's answer to the run was invalid" };
 }
 
 /** The paths of the projects `project ls --json` printed, or why they could not be read. */
@@ -267,12 +307,20 @@ function setupInput(
   return { ok: true, input: `${reference}\n${hashSync(value, PASEO_BCRYPT_COST)}\n` };
 }
 
-/** The Paseo backend on `system`, every command it runs within `budgetMs` from now. */
-export function paseoBackend(system: ApplySystem, budgetMs: number): ExecutionBackend {
+/**
+ * The Paseo backend on `system`, every command it runs within `budgetMs` from now; as `factory`,
+ * in `caller`'s environment when given.
+ */
+export function paseoBackend(
+  system: ApplySystem,
+  budgetMs: number,
+  caller?: Environment,
+): ExecutionBackend {
   const runWithin = budgeted(system, budgetMs);
-  const cli = paseoCli(system);
-  const paseo: PaseoCommand = (args) => runWithin([...cli.argv, ...args], cli.env);
-  const run: Command = (argv, stdin) => runWithin(argv, ENV, stdin);
+  const cli = paseoCli(system, caller);
+  const paseo: PaseoCommand = (args) => runWithin([...cli.argv, ...args], { env: cli.env });
+  const run: Command = (argv, stdin) =>
+    runWithin(argv, stdin === undefined ? { env: ENV } : { env: ENV, stdin });
   const setup = join(system.root, WORKER_PATHS.activeRelease, "steps/control-plane/setup-host.sh");
   return {
     async registerRepositories(checkouts) {
@@ -288,7 +336,12 @@ export function paseoBackend(system: ApplySystem, budgetMs: number): ExecutionBa
         results.push(known.has(path) ? { path, state: "present" } : await registered(paseo, path));
       return repositoryRegistration("paseo", results);
     },
-    agents: () => paseoAgents(paseo),
+    async startRun(request) {
+      const argv = [...cli.argv, ...launchArguments(request)];
+      const env = withoutAgentIdentity(cli.env);
+      return started(await runWithin(argv, { env, cwd: request.checkout }));
+    },
+    runs: (work) => paseoRuns(paseo, work),
     async install(projection, password) {
       const input = setupInput(projection.paseo_password_secret, password);
       if (!input.ok) return { kind: "failed", reason: input.reason };

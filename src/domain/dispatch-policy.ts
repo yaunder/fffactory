@@ -148,6 +148,15 @@ export function dispatchStamp(now: Date): string {
 /** The branch a launch's fresh workspace starts on. */
 export const dispatchBranch = (epic: number, stamp: string) => `dispatch/epic-${epic}-${stamp}`;
 
+/**
+ * The launch's workflow invocation: FFFlow's `work-epic` on the epic, its branch made from the
+ * repository's declared remote branch `base`, as work-epic would otherwise make it from main.
+ */
+export const workEpicInvocation = (epic: number, base: string) =>
+  `/fff:work-epic ${epic}\n\n` +
+  "This fresh worktree starts on a dispatch branch; create " +
+  `${epicBranch(epic)} from ${base} here as work-epic requires.`;
+
 /** The slots dispatch's agents hold: the dispatched ones the busy rule counts. */
 export function busyDispatched(agents: readonly Agent[]): number {
   const activity = workerActivity({
@@ -185,7 +194,7 @@ export type Skipped =
 export interface Started {
   readonly repository: string;
   readonly epic: number;
-  readonly agent_id: unknown;
+  readonly agent_id: string;
 }
 
 /** What one tick considered, skipped and started, as it prints it. */

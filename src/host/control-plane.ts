@@ -4,11 +4,12 @@
  * actions, and `host agents`, the dispatcher's read of the same agents as `factory`. It decides
  * privilege, reads the host projection and the password it references, and hands everything
  * else to the worker's execution backend from the one selection point, never a backend's
- * commands of its own.
+ * commands of its own: the agents are the backend's runs, read as agents.
  */
 import type { ControlPlaneAction, WorkerAgents } from "../domain/control-plane";
 import { type HostProjection, parseHostProjection } from "../domain/host-projection";
 import { CREDENTIAL_COMMAND_TIMEOUT_MS } from "../domain/installation";
+import { workerAgents } from "../domain/run";
 import type { SecretMaterial } from "../domain/secrets";
 import type { ApplySystem } from "./apply";
 import { type BackendSelection, executionBackend } from "./execution-backend";
@@ -60,12 +61,12 @@ export function workerControlPlane(
   return {
     async activity() {
       if (!system.isRoot()) return { kind: "unknown", reason: "not root" };
-      return backend(ACTIVITY_BUDGET_MS).agents();
+      return workerAgents(await backend(ACTIVITY_BUDGET_MS).runs());
     },
     async agents() {
       // The backend's state is factory's: as root its files there would become root's.
       if (system.isRoot()) return { kind: "unknown", reason: "run as root" };
-      return backend(ACTIVITY_BUDGET_MS).agents();
+      return workerAgents(await backend(ACTIVITY_BUDGET_MS).runs());
     },
     async install() {
       if (!system.isRoot()) return { kind: "failed", reason: "not root" };

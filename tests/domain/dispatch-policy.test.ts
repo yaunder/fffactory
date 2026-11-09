@@ -24,6 +24,7 @@ import {
   pullRequestFor,
   SKIPS,
   toolText,
+  workEpicInvocation,
 } from "../../src/domain/dispatch-policy";
 
 describe("capacity (dispatch §Capacity)", () => {
@@ -205,6 +206,13 @@ describe("the launch's inputs", () => {
     expect(stamp).toBe("20261109T070503Z");
     expect(dispatchBranch(101, stamp)).toBe("dispatch/epic-101-20261109T070503Z");
     expect(epicBranch(101)).toBe("epic/101");
+  });
+
+  test("the invocation works the epic in the fresh worktree, its branch from the declared one", () => {
+    expect(workEpicInvocation(101, "origin/develop")).toBe(
+      "/fff:work-epic 101\n\nThis fresh worktree starts on a dispatch branch; create " +
+        "epic/101 from origin/develop here as work-epic requires.",
+    );
   });
 });
 

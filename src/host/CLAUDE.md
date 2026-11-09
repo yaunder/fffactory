@@ -17,9 +17,11 @@ Rules:
   (`tests/host/protocol-contract.test.ts`), and follows the protocol's versioning rule.
 - Run systems tools through the injected `ProcessRunner` with a fixed environment and a
   timeout, by absolute path where a worker has one. The one exception is the dispatcher
-  (`dispatcher.ts`), which runs `gh`, `git`, the release's repository programs and Paseo's
-  auth wrapper in the environment and directory it was started with (`DispatchCaller`), as the
-  Python dispatcher did, and its skip reasons carry a command's error, as that one's did.
+  (`dispatcher.ts`), which runs `gh`, `git` and the release's repository programs in the
+  environment and directory it was started with (`DispatchCaller`), and has the backend act
+  for it in that environment for the epic's runs and the launch (the selection's
+  `environment`), as the Python dispatcher did; its skip reasons carry a command's error, as
+  that one's did.
 - `apply`, repository reconciliation, and `verify` run as root. `host apply` runs only
   through the activator, which gives it
   no arguments and the host projection on standard input. It holds the install lock
@@ -47,7 +49,8 @@ Rules:
 - `host agents --json` is run by neither the operator's fffactory nor the activator: a
   release's Python dispatcher before #142 runs it as `factory` for its capacity check, until the
   upgraded release's dispatch reconcile replaces it (its TODO). It refuses root, asks the
-  backend's `agents` within the activity's budget, prints the activity document, and exits 1
+  backend's `runs` within the activity's budget, read as agents (`workerAgents`, so no run's
+  launched work reaches the document), prints the activity document, and exits 1
   when the agents are unknown, so that dispatcher fails safe.
 - `dispatcher.ts` is the dispatcher (`docs/specs/dispatch.md` §The dispatcher), `host dispatch run
   [--adoption-only]`, run as `factory` by the dispatch skill, never through the activator, so a
@@ -59,31 +62,38 @@ Rules:
   skippable refusal (`DispatchError`) from what fails the tick. It holds `DISPATCH_LOCK`, in
   `factory`'s own state directory, from before it reads the agents to its end, and, while Paseo's
   home is there, the Python dispatcher's lock the adapter names (`RETIRED_DISPATCH_LOCK`, its
-  TODO), so a Python tick an upgrade overtook still excludes it; it reads the agents from the
-  backend's `agents` (`executionBackend`, within `AGENTS_BUDGET_MS`), never a Paseo status. Its
-  launch and labelled duplicate check still call Paseo through the adapter's `callerPaseo`,
-  allow-listed until #143 moves them behind the seam. `rootAdoption` is the same adoption check,
-  in process for the activator's `dispatch adoption`, as root, each check dropped to `factory`. It
-  takes the backend and Paseo selections as parameters only so its tests can give fakes.
+  TODO), so a Python tick an upgrade overtook still excludes it; it reads capacity from the
+  backend's `runs` (`executionBackend`, within `AGENTS_BUDGET_MS`), never a Paseo status, asks
+  `runs` for each ready epic's work for the duplicate check (`launchedFor`), and launches only
+  through `startRun`, with the invocation `domain/dispatch-policy.ts` makes; both of those it
+  asks of a backend selected for the call within `COMMAND_TIMEOUT_MS`, in its own environment.
+  It names no backend's command, flag, label or environment. `rootAdoption` is the same adoption
+  check, in process for the activator's `dispatch adoption`, as root, each check dropped to
+  `factory`. It takes the backend selection as a parameter only so its tests can give a fake.
 - `execution-backend.ts` is the worker's one execution-backend interface, `ExecutionBackend`
-  (`docs/specs/execution-backend.md`), not an `application/` port: `registerRepositories`,
-  `agents`, and the maintenance group `install(projection, password)`, `reload`, `restart`
-  (`done` for a backend with no daemon). Run operations join it only when dispatch moves behind
-  it. `executionBackend(system, budgetMs)` is the one place a backend is chosen, hardwired to
-  Paseo until a second adapter exists (its TODO); every command the backend runs falls within
-  that budget. Registration only adds: it never deletes, renames or archives what the backend
+  (`docs/specs/execution-backend.md`), not an `application/` port: `registerRepositories`, the
+  runs group `startRun(request)` and `runs(work?)` (`domain/run.ts`'s types; the endpoint reads
+  runs as agents), and the maintenance group `install(projection, password)`, `reload`,
+  `restart` (`done` for a backend with no daemon). Stop and connect stay off it until a caller
+  needs them (the spec's TODO). `executionBackend(system, budgetMs, environment?)` is the one
+  place a backend is chosen, hardwired to Paseo until a second adapter exists (its TODO); every
+  command the backend runs falls within that budget, and `environment`, given only by the
+  dispatcher, is the process it acts for. Registration only adds: it never deletes, renames or archives what the backend
   holds, and never reloads or restarts it. Results are in fffactory's states and words.
 - `paseo-backend.ts`, the Paseo adapter, is the only worker code naming Paseo's CLI, setup
   program, unit or bcrypt cost (`tests/execution-backend-boundary.test.ts`). It runs the Paseo CLI
   only as `factory` through the active release's `paseo-auth.sh` (`paseoCli`): from root by
-  `runuser` and `env -i` with `FACTORY_ENV`, otherwise the wrapper itself with `FACTORY_ENV`;
-  `callerPaseo` runs the wrapper itself in the dispatcher's own environment and directory
-  (`CallerPaseoCommand`), for its launch and duplicate check alone (its TODO);
+  `runuser` and `env -i` with `FACTORY_ENV`, otherwise the wrapper itself in the caller's
+  environment its selection was given, or `FACTORY_ENV`;
   `RETIRED_DISPATCH_LOCK` names the Python dispatcher's lock in Paseo's home, which the dispatcher
   also takes until no worker runs a release from before #142.
-  `paseoAgents` is the one place Paseo's agent statuses are known: it translates them into `domain/control-plane.ts`'s `AgentState`, inspects only `running`
+  `paseoRuns` is the one place Paseo's agent statuses are known: it translates them into `domain/control-plane.ts`'s `AgentState`, inspects only `running`
   agents, and answers `unknown` for anything it cannot read; no Paseo status, field or label
-  reaches a result. Registration is `project ls --json`, then `project create PATH --json` for
+  reaches a result. A launch identity is Paseo labels (`factory-dispatch`, `factory-repository`,
+  `factory-epic`, `factory-dispatched-at`), never seen by a caller: a work's runs are the list
+  labelled for it, since Paseo's list prints no label. `startRun` is `run --no-wait --json` in a
+  new branch-off worktree workspace, from the checkout, in the caller's environment without
+  `PASEO_AGENT_ID` and `PASEO_WORKSPACE_ID`, its handle the printed `agentId`. Registration is `project ls --json`, then `project create PATH --json` for
   each checkout not listed; a failed list fails every checkout, a failed create only its own.
   Install hashes the password (bcryptjs at Paseo's cost) and invokes only the active release's
   setup program, the reference and the hash on its standard input; the password reaches only

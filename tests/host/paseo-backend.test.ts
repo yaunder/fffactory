@@ -10,6 +10,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { hostProjection } from "../../src/domain/host-projection";
+import type { RunRequest } from "../../src/domain/run";
 import type { FactoryId, HostKey, Release, SecretReference } from "../../src/domain/instance";
 import { SecretMaterial } from "../../src/domain/secrets";
 import type { ApplySystem } from "../../src/host/apply";
@@ -78,6 +79,7 @@ interface Call {
   readonly timeout: number;
   readonly env: Readonly<Record<string, string>>;
   readonly stdin: string | undefined;
+  readonly cwd?: string;
 }
 
 const exited = (exitCode: number, stdout = "", stderr = ""): ProcessOutcome => ({
@@ -97,6 +99,7 @@ function recording(answer: (paseo: readonly string[], argv: readonly string[]) =
       timeout,
       env: { ...(options?.env ?? {}) },
       stdin: options?.stdin === undefined ? undefined : new TextDecoder().decode(options.stdin),
+      ...(options?.cwd === undefined ? {} : { cwd: options.cwd }),
     });
     // Paseo's own arguments follow the auth wrapper, however the wrapper itself was run.
     const wrapper = argv.findIndex((arg) => arg.endsWith(AUTH));
@@ -350,12 +353,12 @@ function agents(answers: {
 const LIST = ["ls", "--global", "--background", "--json"];
 const DISPATCHED = ["ls", "--global", "--background", "--label", "factory-dispatch=true", "--json"];
 
-describe("the worker's agents in fffactory's states (docs/specs/control-plane.md §Agent states)", () => {
+describe("the worker's runs in fffactory's states (docs/specs/control-plane.md §Agent states)", () => {
   test("from root, drops to factory and runs the active release's auth wrapper", async () => {
     const scripted = agents({ all: [row("one", "idle")] });
-    expect(await backend(scripted.run).agents()).toEqual({
+    expect(await backend(scripted.run).runs()).toEqual({
       kind: "listed",
-      agents: [{ id: "one", state: "finished", dispatched: false }],
+      runs: [{ id: "one", state: "finished", dispatched: false }],
     });
     expect(scripted.calls.map((call) => call.argv)).toEqual([
       [...asFactory(), ...LIST],
@@ -370,9 +373,9 @@ describe("the worker's agents in fffactory's states (docs/specs/control-plane.md
       dispatched: [row("a1", "running")],
       inspect: { a1: inspection("a1", [{ id: "p", tool: "Bash" }]) },
     });
-    expect(await backend(scripted.run, { isRoot: false }).agents()).toEqual({
+    expect(await backend(scripted.run, { isRoot: false }).runs()).toEqual({
       kind: "listed",
-      agents: [
+      runs: [
         { id: "a1", state: "needs_input", dispatched: true },
         { id: "b2", state: "finished", dispatched: false },
       ],
@@ -394,9 +397,9 @@ describe("the worker's agents in fffactory's states (docs/specs/control-plane.md
     "translates an agent Paseo reports %s as %s, without inspecting it",
     async (status, state) => {
       const scripted = agents({ all: [row("one", status)] });
-      expect(await backend(scripted.run).agents()).toEqual({
+      expect(await backend(scripted.run).runs()).toEqual({
         kind: "listed",
-        agents: [{ id: "one", state, dispatched: false }],
+        runs: [{ id: "one", state, dispatched: false }],
       });
       expect(scripted.paseo().filter((call) => call.includes("inspect"))).toEqual([]);
     },
@@ -412,9 +415,9 @@ describe("the worker's agents in fffactory's states (docs/specs/control-plane.md
         all: [row("one", "running")],
         inspect: { one: inspection("one", pending) },
       });
-      expect(await backend(scripted.run).agents()).toEqual({
+      expect(await backend(scripted.run).runs()).toEqual({
         kind: "listed",
-        agents: [{ id: "one", state, dispatched: false }],
+        runs: [{ id: "one", state, dispatched: false }],
       });
       expect(scripted.paseo().at(-1)).toEqual(["agent", "inspect", "one", "--json"]);
     },
@@ -432,9 +435,9 @@ describe("the worker's agents in fffactory's states (docs/specs/control-plane.md
       dispatched: [row("b2", "idle"), row("c3", "running")],
       inspect: { a1: inspection("a1", []), c3: inspection("c3", [{ id: "p", tool: "Edit" }]) },
     });
-    expect(await backend(scripted.run).agents()).toEqual({
+    expect(await backend(scripted.run).runs()).toEqual({
       kind: "listed",
-      agents: [
+      runs: [
         { id: "a1", state: "working", dispatched: false },
         { id: "b2", state: "finished", dispatched: true },
         { id: "c3", state: "needs_input", dispatched: true },
@@ -452,7 +455,7 @@ describe("the worker's agents in fffactory's states (docs/specs/control-plane.md
 
   test("a worker with no agents lists none", async () => {
     const scripted = agents({ all: [] });
-    expect(await backend(scripted.run).agents()).toEqual({ kind: "listed", agents: [] });
+    expect(await backend(scripted.run).runs()).toEqual({ kind: "listed", runs: [] });
   });
 
   test("a status fffactory does not know makes the whole answer unknown, before any inspection", async () => {
@@ -460,7 +463,7 @@ describe("the worker's agents in fffactory's states (docs/specs/control-plane.md
       all: [row("one", "running"), row("two", "permission")],
       inspect: { one: inspection("one", []) },
     });
-    expect(await backend(scripted.run).agents()).toEqual({
+    expect(await backend(scripted.run).runs()).toEqual({
       kind: "unknown",
       reason: "Paseo reported an agent status fffactory does not know",
     });
@@ -471,7 +474,7 @@ describe("the worker's agents in fffactory's states (docs/specs/control-plane.md
     "a running agent it cannot inspect makes the answer unknown (%#)",
     async (outcome) => {
       const scripted = agents({ all: [row("one", "running")], inspect: { one: outcome } });
-      expect(await backend(scripted.run).agents()).toEqual({
+      expect(await backend(scripted.run).runs()).toEqual({
         kind: "unknown",
         reason: "a Paseo agent could not be inspected",
       });
@@ -486,7 +489,7 @@ describe("the worker's agents in fffactory's states (docs/specs/control-plane.md
     [JSON.stringify({ Id: "other", Status: "running", PendingPermissions: [] })],
   ])("an inspection it cannot read makes the answer unknown: %s", async (stdout) => {
     const scripted = agents({ all: [row("one", "running")], inspect: { one: exited(0, stdout) } });
-    expect(await backend(scripted.run).agents()).toEqual({
+    expect(await backend(scripted.run).runs()).toEqual({
       kind: "unknown",
       reason: "a Paseo agent's inspection was invalid",
     });
@@ -502,7 +505,7 @@ describe("the worker's agents in fffactory's states (docs/specs/control-plane.md
     ['["one"]'],
   ])("conservatively reads Paseo's agent list %s as unknown", async (stdout) => {
     const scripted = agents({ all: exited(0, stdout) });
-    expect(await backend(scripted.run).agents()).toEqual({
+    expect(await backend(scripted.run).runs()).toEqual({
       kind: "unknown",
       reason: "Paseo activity was invalid",
     });
@@ -513,7 +516,7 @@ describe("the worker's agents in fffactory's states (docs/specs/control-plane.md
     "conservatively reads Paseo's dispatched list %s as unknown",
     async (stdout) => {
       const scripted = agents({ all: [row("one", "idle")], dispatched: exited(0, stdout) });
-      expect(await backend(scripted.run).agents()).toEqual({
+      expect(await backend(scripted.run).runs()).toEqual({
         kind: "unknown",
         reason: "Paseo activity was invalid",
       });
@@ -524,7 +527,7 @@ describe("the worker's agents in fffactory's states (docs/specs/control-plane.md
     "treats a failed Paseo %s list as unknown",
     async (list) => {
       const scripted = agents({ all: [row("one", "idle")], [list]: { kind: "timed_out" } });
-      expect(await backend(scripted.run).agents()).toEqual({
+      expect(await backend(scripted.run).runs()).toEqual({
         kind: "unknown",
         reason: "Paseo activity could not be read",
       });
@@ -545,7 +548,7 @@ describe("the worker's agents in fffactory's states (docs/specs/control-plane.md
         clock += 40_000;
         return scripted.run(argv, timeout, options);
       };
-      const answer = await backend(run, { isRoot, now: () => new Date(clock) }).agents();
+      const answer = await backend(run, { isRoot, now: () => new Date(clock) }).runs();
       expect(answer).toEqual({ kind: "unknown", reason: "a Paseo agent could not be inspected" });
       expect(timeouts).toEqual([90_000, 50_000, 10_000]);
       expect(scripted.paseo().map((call) => call.at(-2))).toEqual([
@@ -555,6 +558,214 @@ describe("the worker's agents in fffactory's states (docs/specs/control-plane.md
       ]);
     },
   );
+});
+
+const PRODUCT_101 = { repository: "product", workItem: 101 };
+const LAUNCHED_FOR = [
+  "ls",
+  "--global",
+  "--background",
+  "--label",
+  "factory-dispatch=true",
+  "--label",
+  "factory-repository=product",
+  "--label",
+  "factory-epic=101",
+  "--json",
+];
+/** The dispatcher's environment: the scheduled agent's, its own Paseo identity among it. */
+const CALLER_ENV = {
+  HOME: "/home/factory",
+  PATH: "/home/factory/.local/bin:/usr/local/bin:/usr/bin:/bin",
+  PASEO_HOME: "/home/factory/.paseo",
+  PASEO_AGENT_ID: "scheduled-agent",
+  PASEO_WORKSPACE_ID: "scheduled-workspace",
+  MARKER: "the caller's",
+};
+const caller = (run: ProcessRunner, budgetMs = BUDGET_MS) =>
+  executionBackend(worker(run, { isRoot: false }), budgetMs, CALLER_ENV);
+
+describe("the runs dispatch launched for some work (docs/specs/execution-backend.md §Inspect)", () => {
+  test("lists only the agents labelled for it, background workspaces' too, each launched for it", async () => {
+    const scripted = agents({
+      all: [],
+      dispatched: [row("old", "closed"), row("live", "running")],
+      inspect: { live: inspection("live", []) },
+    });
+    expect(await backend(scripted.run).runs(PRODUCT_101)).toEqual({
+      kind: "listed",
+      runs: [
+        { id: "old", state: "stopped", dispatched: true, work: PRODUCT_101 },
+        { id: "live", state: "working", dispatched: true, work: PRODUCT_101 },
+      ],
+    });
+    expect(scripted.paseo()).toEqual([LAUNCHED_FOR, ["agent", "inspect", "live", "--json"]]);
+  });
+
+  test("for a caller that gives its environment, runs the wrapper itself in it, as it is", async () => {
+    const scripted = agents({ all: [], dispatched: [row("old", "idle")] });
+    expect(await caller(scripted.run).runs(PRODUCT_101)).toEqual({
+      kind: "listed",
+      runs: [{ id: "old", state: "finished", dispatched: true, work: PRODUCT_101 }],
+    });
+    expect(scripted.calls).toEqual([
+      {
+        argv: [join(root, AUTH), ...LAUNCHED_FOR],
+        timeout: BUDGET_MS,
+        env: CALLER_ENV,
+        stdin: undefined,
+      },
+    ]);
+  });
+
+  test("none launched for it lists none", async () => {
+    const scripted = agents({ all: [row("other", "running")], dispatched: [] });
+    expect(await backend(scripted.run).runs(PRODUCT_101)).toEqual({ kind: "listed", runs: [] });
+    expect(scripted.paseo()).toEqual([LAUNCHED_FOR]);
+  });
+
+  test.each([
+    [{ kind: "timed_out" } as const, "Paseo activity could not be read"],
+    [exited(1, "", "connect ECONNREFUSED"), "Paseo activity could not be read"],
+    [exited(0, '{"agents":[]}'), "Paseo activity was invalid"],
+    [exited(0, "[{}]"), "Paseo activity was invalid"],
+    [json([row("one", "permission")]), "Paseo reported an agent status fffactory does not know"],
+  ])("a list it cannot read is unknown, never none (%#)", async (dispatched, reason) => {
+    const scripted = agents({ all: [], dispatched });
+    expect(await backend(scripted.run).runs(PRODUCT_101)).toEqual({ kind: "unknown", reason });
+  });
+});
+
+/** A request to start a run, as the dispatcher makes it. */
+const REQUEST: RunRequest = {
+  launch: { ...PRODUCT_101, attempt: "20261109T070503Z" },
+  checkout: "/workspace/repos/product",
+  base: "origin/main",
+  branch: "dispatch/epic-101-20261109T070503Z",
+  invocation: "/fff:work-epic 101\n\nWork it.",
+  agent: { provider: "codex", model: "configured-model", mode: "default" },
+};
+/** Paseo's arguments for it: exactly the Python dispatcher's. */
+const LAUNCH = [
+  "run",
+  "--no-wait",
+  "--json",
+  "--provider",
+  "codex/configured-model",
+  "--mode",
+  "default",
+  "--new-workspace",
+  "worktree",
+  "--worktree-mode",
+  "branch-off",
+  "--new-branch",
+  "dispatch/epic-101-20261109T070503Z",
+  "--base",
+  "origin/main",
+  "--cwd",
+  "/workspace/repos/product",
+  "--label",
+  "factory-dispatch=true",
+  "--label",
+  "factory-repository=product",
+  "--label",
+  "factory-epic=101",
+  "--label",
+  "factory-dispatched-at=20261109T070503Z",
+  "/fff:work-epic 101\n\nWork it.",
+];
+
+/** A scripted Paseo launching every run as `agent-1`, as 0.15.0 answers `run --no-wait --json`. */
+const launching = (answer: ProcessOutcome = json({ agentId: "agent-1", status: "running" })) =>
+  recording(([verb]) => (verb === "run" ? answer : exited(2, "", "unknown command")));
+
+describe("starting a run (docs/specs/execution-backend.md §Start)", () => {
+  test("launches with the dispatcher's exact arguments, from the checkout, in its environment without its Paseo identity", async () => {
+    const scripted = launching();
+    expect(await caller(scripted.run, 900_000).startRun(REQUEST)).toEqual({
+      kind: "started",
+      handle: { id: "agent-1" },
+    });
+    const { PASEO_AGENT_ID, PASEO_WORKSPACE_ID, ...rest } = CALLER_ENV;
+    expect(scripted.calls).toEqual([
+      {
+        argv: [join(root, AUTH), ...LAUNCH],
+        timeout: 900_000,
+        env: rest,
+        stdin: undefined,
+        cwd: REQUEST.checkout,
+      },
+    ]);
+    // Top-level: the launch inherits neither the scheduled agent nor its workspace.
+    const env = scripted.calls[0]?.env ?? {};
+    expect(Object.keys(env)).not.toContain("PASEO_AGENT_ID");
+    expect(Object.keys(env)).not.toContain("PASEO_WORKSPACE_ID");
+    expect(env).toEqual({
+      HOME: "/home/factory",
+      PATH: "/home/factory/.local/bin:/usr/local/bin:/usr/bin:/bin",
+      PASEO_HOME: "/home/factory/.paseo",
+      MARKER: "the caller's",
+    });
+    expect([PASEO_AGENT_ID, PASEO_WORKSPACE_ID]).toEqual([
+      "scheduled-agent",
+      "scheduled-workspace",
+    ]);
+  });
+
+  test("launches without waiting, by the current flag, never its deprecated alias", async () => {
+    const scripted = launching();
+    await caller(scripted.run).startRun(REQUEST);
+    const [args] = scripted.paseo();
+    expect(args).toContain("--no-wait");
+    expect(args).not.toContain("--background");
+  });
+
+  test("without a caller's environment, as factory in its clean one", async () => {
+    const scripted = launching();
+    await backend(scripted.run, { isRoot: false }).startRun(REQUEST);
+    expect(scripted.calls.map(({ argv, env, cwd }) => ({ argv, env, cwd }))).toEqual([
+      { argv: [join(root, AUTH), ...LAUNCH], env: FACTORY_ENV, cwd: REQUEST.checkout },
+    ]);
+  });
+
+  test("from root, drops to factory in its clean environment, from the checkout", async () => {
+    const scripted = launching();
+    expect((await backend(scripted.run).startRun(REQUEST)).kind).toBe("started");
+    expect(scripted.calls.map(({ argv, env, cwd }) => ({ argv, env, cwd }))).toEqual([
+      { argv: [...asFactory(), ...LAUNCH], env: ROOT_ENV, cwd: REQUEST.checkout },
+    ]);
+  });
+
+  test.each([
+    [exited(1, "AUTH_FAILED", "Paseo said no"), "starting a Paseo run exited with status 1"],
+    [{ kind: "timed_out" } as const, "starting a Paseo run timed out"],
+    [{ kind: "not_found" } as const, "starting a Paseo run could not be started (ENOENT)"],
+    [exited(0, "not json"), "Paseo's answer to the run was invalid"],
+    [json([{ agentId: "agent-1" }]), "Paseo's answer to the run was invalid"],
+    [json({ status: "running" }), "Paseo's answer to the run was invalid"],
+    [json({ agentId: 7 }), "Paseo's answer to the run was invalid"],
+    [json({ agentId: "--all" }), "Paseo's answer to the run was invalid"],
+  ])(
+    "a launch that fails, or whose answer it cannot read, fails in fffactory's words (%#)",
+    async (answer, reason) => {
+      const scripted = launching(answer);
+      const start = await caller(scripted.run).startRun(REQUEST);
+      expect(start).toEqual({ kind: "failed", reason });
+      expect(JSON.stringify(start)).not.toContain("Paseo said no");
+    },
+  );
+
+  test("a launch that would start past the budget is not run, and has timed out", async () => {
+    let clock = 0;
+    const scripted = launching();
+    const paseo = backend(scripted.run, { now: () => new Date(clock) });
+    clock = BUDGET_MS;
+    expect(await paseo.startRun(REQUEST)).toEqual({
+      kind: "failed",
+      reason: "starting a Paseo run timed out",
+    });
+    expect(scripted.calls).toEqual([]);
+  });
 });
 
 /** Answers every command 0. */
@@ -693,6 +904,18 @@ describe("maintenance (docs/specs/control-plane.md §Worker protocol and privile
 });
 
 describe("the execution backend selection", () => {
+  test("is Paseo, as factory in its clean environment unless its caller gives its own", async () => {
+    const scripted = agents({ all: [] });
+    await executionBackend(worker(scripted.run, { isRoot: false }), 60_000).runs();
+    await executionBackend(worker(scripted.run, { isRoot: false }), 60_000, CALLER_ENV).runs();
+    expect(scripted.calls.map((call) => call.env)).toEqual([
+      FACTORY_ENV,
+      FACTORY_ENV,
+      CALLER_ENV,
+      CALLER_ENV,
+    ]);
+  });
+
   test("is Paseo, its commands within the budget the caller gives", async () => {
     const scripted = projects([ALPHA]);
     const result = await executionBackend(worker(scripted.run), 60_000).registerRepositories([

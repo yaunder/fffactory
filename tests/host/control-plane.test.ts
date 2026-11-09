@@ -13,6 +13,7 @@ import type { ControlPlaneAction, WorkerAgents } from "../../src/domain/control-
 import { hostProjection, hostProjectionJson } from "../../src/domain/host-projection";
 import { CREDENTIAL_COMMAND_TIMEOUT_MS } from "../../src/domain/installation";
 import type { FactoryId, HostKey, Release, SecretReference } from "../../src/domain/instance";
+import type { WorkerRuns } from "../../src/domain/run";
 import type { ApplySystem } from "../../src/host/apply";
 import { workerControlPlane } from "../../src/host/control-plane";
 import type {
@@ -53,6 +54,19 @@ const AGENTS: WorkerAgents = {
   kind: "listed",
   agents: [
     { id: "a1", state: "needs_input", dispatched: true },
+    { id: "b2", state: "finished", dispatched: false },
+  ],
+};
+/** The backend's runs those agents are: a run's launched work is no part of an agent. */
+const RUNS: WorkerRuns = {
+  kind: "listed",
+  runs: [
+    {
+      id: "a1",
+      state: "needs_input",
+      dispatched: true,
+      work: { repository: "product", workItem: 101 },
+    },
     { id: "b2", state: "finished", dispatched: false },
   ],
 };
@@ -104,19 +118,20 @@ function endpoint(
 }
 
 describe("host agents, the dispatcher's read of the backend's agents", () => {
-  test("reads the agents from the backend the selection point chose, within the activity's budget", async () => {
-    const { controlPlane, calls, budgets } = endpoint({
+  test("reads the agents as the backend's runs, from the selection point, within the activity's budget", async () => {
+    const { controlPlane, calls, budgets, environments } = endpoint({
       isRoot: false,
-      answers: { agents: AGENTS },
+      answers: { runs: RUNS },
     });
     expect(await controlPlane.agents()).toEqual(AGENTS);
-    expect(calls).toEqual([{ method: "agents" }]);
+    expect(calls).toEqual([{ method: "runs" }]);
     expect(budgets).toEqual([ACTIVITY_BUDGET_MS]);
+    expect(environments).toEqual([undefined]);
   });
 
   test("passes the backend's unknown agents on as they are", async () => {
     const unknown: WorkerAgents = { kind: "unknown", reason: "Paseo activity could not be read" };
-    const { controlPlane } = endpoint({ isRoot: false, answers: { agents: unknown } });
+    const { controlPlane } = endpoint({ isRoot: false, answers: { runs: unknown } });
     expect(await controlPlane.agents()).toEqual(unknown);
   });
 
@@ -129,9 +144,9 @@ describe("host agents, the dispatcher's read of the backend's agents", () => {
 
 describe("the worker control-plane endpoint", () => {
   test("activity reads the agents from the backend as root, within the activity's budget", async () => {
-    const { controlPlane, calls, budgets } = endpoint({ answers: { agents: AGENTS } });
+    const { controlPlane, calls, budgets } = endpoint({ answers: { runs: RUNS } });
     expect(await controlPlane.activity()).toEqual(AGENTS);
-    expect(calls).toEqual([{ method: "agents" }]);
+    expect(calls).toEqual([{ method: "runs" }]);
     expect(budgets).toEqual([ACTIVITY_BUDGET_MS]);
   });
 

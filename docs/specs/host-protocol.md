@@ -1194,8 +1194,8 @@ release's executable, and not through the activator, so it never waits on the
 host-operation lock and needs no root. It changes nothing.
 
 It lists the agents through the same execution backend as
-[control-plane activity](#control-plane-activity) (its `agents`, the Paseo
-adapter's `paseoAgents`), but the backend runs the active release's
+[control-plane activity](#control-plane-activity) (its `runs`, read as agents,
+the Paseo adapter's `paseoRuns`), but the backend runs the active release's
 `paseo-auth.sh` itself, as `factory`, with only `HOME=/home/factory` and
 `factory`'s `PATH` in its environment, every Paseo call within the same
 90-second budget. It prints the [activity document](#the-activity-document),
@@ -1279,7 +1279,7 @@ never elsewhere: it prints no path, no AWS or SDK message and no credential.
 | Worker | `src/host/dispatch-trigger.ts`, `src/host/paseo-trigger.ts` | `DispatchTrigger` and its one selection point; `paseoTrigger`, the Paseo adapter running the schedule reconciler as `factory` ([dispatch trigger](dispatch-trigger.md)). |
 | Worker | `src/host/work.ts` | `workerWork`: the work inspection, over the worker's working trees, as `factory`, read-only, and the archive's backlog, from the collector's checkpoint and its discovery (`discoverSources` in `src/host/collect.ts`), as root. |
 | Worker | `src/host/control-plane.ts` | `workerControlPlane`: the control-plane activity, install, reload and restart, and `host agents`: privilege, the projection and the password read by reference, the rest asked of the execution backend. |
-| Worker | `src/host/execution-backend.ts`, `src/host/paseo-backend.ts` | `ExecutionBackend` and its one selection point; `paseoBackend`, the Paseo adapter, with `paseoAgents` translating Paseo's agents into fffactory's states ([execution backend](execution-backend.md)). |
+| Worker | `src/host/execution-backend.ts`, `src/host/paseo-backend.ts` | `ExecutionBackend` and its one selection point; `paseoBackend`, the Paseo adapter, with `paseoRuns` translating Paseo's agents into fffactory's states ([execution backend](execution-backend.md)). |
 | Worker | `src/host/collect.ts` | `collectOnce`: one collection run under the collector's own lock, through an `ArchiveWriter` ([collector §Run](collector.md#run)). |
 | Worker | `src/host/collection.ts` | `workerCollection`: `host collect --once`, its configuration, the run and its heartbeat; `localCollectionSystem`, this worker's, checking open sources in `/proc/self/fd` (`OPEN_FILES`). |
 | Worker | `src/host/s3-archive-writer.ts` | `openInstanceArchive`: the `ArchiveWriter` over S3 with the instance role's IMDSv2 credentials, its incarnation and account from STS. |
@@ -1308,7 +1308,7 @@ fixture from the same Paseo, and the dispatcher's tests
 answer. `tests/host/control-plane.test.ts` runs `host agents`
 over a fake backend (root refused, the 90-second budget the selection is given,
 an unknown answer passed on), `tests/host/paseo-backend.test.ts` the Paseo
-backend's agents over a scripted Paseo (the auth wrapper run as itself, in
+backend's runs over a scripted Paseo (the auth wrapper run as itself, in
 `factory`'s environment, the budget each command is given, an unreadable list),
 and `tests/cli/host.test.ts` its exit statuses and refusals, `host dispatch
 run`'s (its summary, its adoption report and exit 2, a failed tick's one line,

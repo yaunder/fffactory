@@ -5,9 +5,10 @@
  * selection point. A worker-side seam, not an `application/` port: nothing on the operator side
  * calls it. Its results are in fffactory's states and words, never the backend's own.
  */
-import type { ControlPlaneAction, WorkerAgents } from "../domain/control-plane";
+import type { ControlPlaneAction } from "../domain/control-plane";
 import type { HostProjection } from "../domain/host-projection";
 import type { RepositoryRegistration } from "../domain/repository-registration";
+import type { LaunchedWork, RunRequest, RunStart, WorkerRuns } from "../domain/run";
 import type { SecretMaterial } from "../domain/secrets";
 import type { ApplySystem } from "./apply";
 import { paseoBackend } from "./paseo-backend";
@@ -20,10 +21,16 @@ export interface ExecutionBackend {
    */
   registerRepositories(checkouts: readonly string[]): Promise<RepositoryRegistration>;
   /**
-   * The worker's agents in fffactory's states, each with whether dispatch launched it; unknown,
-   * with fffactory's reason, when any of it cannot be read.
+   * Starts a run for `request`'s launch identity, in a fresh workspace made from its checkout, on
+   * a new branch from its base: its handle, or why not in fffactory's words.
    */
-  agents(): Promise<WorkerAgents>;
+  startRun(request: RunRequest): Promise<RunStart>;
+  /**
+   * The runs the backend holds, in fffactory's states, each with whether dispatch launched it;
+   * given `work`, only the runs dispatch launched for it, in any state, each with that work.
+   * Unknown, with fffactory's reason, when any of it cannot be read.
+   */
+  runs(work?: LaunchedWork): Promise<WorkerRuns>;
   /**
    * Installs the backend's software for the host `projection` describes, with the password the
    * projection references, read by the caller (none when it references none). Never starts or
@@ -39,10 +46,18 @@ export interface ExecutionBackend {
   restart(): Promise<ControlPlaneAction>;
 }
 
-/** Chooses the worker's backend on `system`, every command it runs within `budgetMs` from now. */
-export type BackendSelection = (system: ApplySystem, budgetMs: number) => ExecutionBackend;
+/**
+ * Chooses the worker's backend on `system`, every command it runs within `budgetMs` from now.
+ * `environment` is the one of the process it acts for, which a backend run as that process runs
+ * its commands in; without it, the backend's own.
+ */
+export type BackendSelection = (
+  system: ApplySystem,
+  budgetMs: number,
+  environment?: Readonly<Record<string, string>>,
+) => ExecutionBackend;
 
 /** The worker's execution backend: the one place it is chosen. */
 // TODO(re-evaluate when a second execution backend adapter is built): select the backend from factory.json's hosts[].execution_backend
-export const executionBackend: BackendSelection = (system, budgetMs) =>
-  paseoBackend(system, budgetMs);
+export const executionBackend: BackendSelection = (system, budgetMs, environment) =>
+  paseoBackend(system, budgetMs, environment);

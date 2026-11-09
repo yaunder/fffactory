@@ -41,9 +41,10 @@ temporary directories by `worker-scenarios.ts`, never the real `/`.
   argument, environment value and log line for the material it used.
 - `control-plane.test.ts` runs the control-plane endpoint and `host agents` over a fake
   `ExecutionBackend` (`support/fake-execution-backend.ts`, which records every call and every
-  budget its selection was given) and, for install, Secrets Manager answering the Paseo
-  password: privilege, the projection, the password read and handed on, the budgets, and the
-  backend's answers passed on. It runs no backend command.
+  budget and environment its selection was given, and keeps to the run contract: asked for a
+  work's runs, only those `launchedFor` it) and, for install, Secrets Manager answering the
+  Paseo password: privilege, the projection, the password read and handed on, the budgets, and
+  the backend's answers passed on, its runs read as agents. It runs no backend command.
 - `dispatch.test.ts` runs the dispatch endpoint over a fake `DispatchTrigger`
   (`support/fake-dispatch-trigger.ts`, which keeps one trigger as a reconciler would over the
   persisted projection, records every call and timeout, and answers as a test sets), and a
@@ -55,12 +56,14 @@ temporary directories by `worker-scenarios.ts`, never the real `/`.
   root, a real bare Git remote that `GIT_CONFIG_GLOBAL`'s `insteadOf` puts in GitHub's place,
   the release's real FFFlow adoption check and repository program (the latter behind a wrapper
   recording each mode), a stand-in `gh` on the caller's `PATH` answering by `MOCK_READINESS`,
-  and a stand-in for the auth wrapper that answers the duplicate check and the launch from the
-  test's agents, records how it was run, and answers the Paseo adapter's own lists where a case
-  is the adapter's (the real backend selected). Stand-ins are Bun scripts behind a shell
-  wrapper with their paths written in, since the adapter's own calls get a clean environment.
-  The agents come from `support/fake-execution-backend.ts` otherwise, read afresh from the
-  test's world so a launch takes the slot. It holds the real dispatch lock (`flockExclusive`),
+  and the runs from `support/fake-execution-backend.ts`, read afresh from the test's world
+  (each dispatched run with the epic it was launched for), whose `startRun` records the request
+  and takes the slot. Where a case goes through the real Paseo backend end to end (the real
+  selection), a stand-in for the auth wrapper answers the epic's labelled list and the launch
+  from the test's runs, records how it was run, and answers the adapter's own lists from rows
+  the test writes. Stand-ins are Bun scripts behind a shell wrapper with their paths written in,
+  since the adapter's own calls may get a clean environment. The exact Paseo commands are
+  `paseo-backend.test.ts`'s. It holds the real dispatch lock (`flockExclusive`),
   and the Python dispatcher's under the temporary root's Paseo home where a case needs it.
   `dispatch.test.ts` covers the activator's adoption over a scripted runner.
 - `paseo-trigger.test.ts` runs the Paseo trigger over a scripted runner: the reconciler's exact
@@ -69,9 +72,10 @@ temporary directories by `worker-scenarios.ts`, never the real `/`.
   `dispatch-schedule.sh` prints it, read into the trigger's inspection.
 - `paseo-backend.test.ts` runs the Paseo adapter over a scripted runner: Paseo's own arguments
   after the auth wrapper, however it was run (from root by `runuser`, or as `factory`), answered
-  as Paseo 0.15.0 prints them (`project ls` and `project create`, the agent lists and each
-  agent's inspection), and setup and `systemctl`. It asserts each command, environment, budget
-  and setup input; checks the hash setup is sent with `bcryptjs`'s `compareSync`; and searches
+  as Paseo 0.15.0 prints them (`project ls` and `project create`, the agent lists, a work's
+  labelled list and each agent's inspection, and `run`'s `agentId`), and setup and `systemctl`.
+  It asserts each command, environment (the caller's as given, the launch's without
+  `PASEO_AGENT_ID` and `PASEO_WORKSPACE_ID`), directory, budget and setup input; checks the hash setup is sent with `bcryptjs`'s `compareSync`; and searches
   every argument, environment value, setup input and result for the password.
 - `verify.test.ts` answers every command with a scripted runner; `inspect.test.ts` covers the
   unprivileged read-only inspection.

@@ -2,10 +2,11 @@
  * The worker's dispatcher (`docs/specs/dispatch.md` §The dispatcher, §Capacity), the port of the
  * Python `factory-dispatch`, run in process as `factory` against a worker laid out in a
  * temporary root: a real local Git remote standing in for GitHub's (`insteadOf`), the release's
- * real FFFlow adoption check and repository program, a stand-in `gh` on the caller's PATH, a
- * stand-in for the Paseo auth wrapper, and a fake execution backend for the agents (or, where a
- * case is the Paseo adapter's, the real one over the stand-in). Each case is one of the Python
- * tests', named in the epic's mapping.
+ * real FFFlow adoption check and repository program, a stand-in `gh` on the caller's PATH, and a
+ * fake execution backend holding the test's runs (or, where a case goes through the Paseo
+ * adapter end to end, the real one over a stand-in for its auth wrapper). Each case is one of
+ * the Python tests', named in the epic's mapping. The exact Paseo commands are the adapter's,
+ * proved in `paseo-backend.test.ts`.
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import {
@@ -21,7 +22,7 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { type Agent, type AgentState, parseActivityDocument } from "../../src/domain/control-plane";
+import { type AgentState, parseActivityDocument } from "../../src/domain/control-plane";
 import {
   DISPATCH_PROJECTION_PATH,
   dispatchProjection,
@@ -34,6 +35,7 @@ import {
   REPOSITORY_MANIFEST_PATH,
   SYNC_SCRIPT,
 } from "../../src/domain/repository-placement";
+import type { Run, RunRequest, WorkerRuns } from "../../src/domain/run";
 import type { ApplySystem } from "../../src/host/apply";
 import {
   DISPATCH_LOCK,
@@ -123,17 +125,20 @@ console.log(JSON.stringify(value));
 `;
 
 /**
- * Paseo behind the auth wrapper. The dispatcher's duplicate check lists the dispatched agents
- * of the worker (ignoring the other labels); its launch records how it was run and adds a
- * working dispatched agent. The adapter's own lists answer the rows a test writes.
+ * Paseo behind the auth wrapper, for the cases through the real adapter. The epic's labelled
+ * list answers the test's dispatched runs for that epic (`idle` for any state but `working`);
+ * the launch records how it was run and adds a working dispatched run. The adapter's own lists
+ * answer the rows a test writes.
  */
 const PASEO = String.raw`
 const read = (path, empty) => existsSync(path) ? JSON.parse(readFileSync(path, "utf8")) : empty;
 if (a[0] === "ls") {
   appendFileSync(files.ls, JSON.stringify({ args: a, agent: process.env.PASEO_AGENT_ID ?? null }) + "\n");
-  if (a.some((arg) => arg.startsWith("factory-epic="))) {
-    const agents = read(files.agents, { agents: [] }).agents;
-    console.log(JSON.stringify(agents.filter((agent) => agent.dispatched).map(({ id }) => ({ id }))));
+  const epic = a.find((arg) => arg.startsWith("factory-epic="));
+  if (epic !== undefined) {
+    const runs = read(files.agents, { agents: [] }).agents.filter(
+      (run) => run.dispatched && "factory-epic=" + run.work?.workItem === epic);
+    console.log(JSON.stringify(runs.map(({ id, state }) => ({ id, status: state === "working" ? "initializing" : "idle" }))));
   } else if (existsSync(files.rowsFail)) {
     console.error("connect ECONNREFUSED 127.0.0.1\nat the daemon");
     process.exit(1);
@@ -149,7 +154,8 @@ if (a[0] === "ls") {
     workspace: process.env.PASEO_WORKSPACE_ID ?? null, marker: process.env.MOCK_MARKER ?? null,
   }));
   const document = read(files.agents, { agents: [] });
-  document.agents.push({ id: "agent-1", state: "working", dispatched: true });
+  const epic = Number(a.find((arg) => arg.startsWith("factory-epic=")).slice("factory-epic=".length));
+  document.agents.push({ id: "agent-1", state: "working", dispatched: true, work: { repository: "product", workItem: epic } });
   writeFileSync(files.agents, JSON.stringify(document));
   console.log(JSON.stringify({ agentId: "agent-1", status: "running" }));
 } else { console.error("unexpected paseo command: " + a); process.exit(1); }
@@ -161,10 +167,17 @@ function git(args: string[], cwd?: string): string {
   return result.stdout.toString().trim();
 }
 
-/** The worker's agents in fffactory's states: (id, state, dispatched) each. */
-async function agents(...list: [string, AgentState, boolean][]) {
-  const document = { agents: list.map(([id, state, dispatched]) => ({ id, state, dispatched })) };
-  await writeFile(files.agents, JSON.stringify(document));
+/**
+ * The worker's runs in fffactory's states: (id, state, dispatched, and for a dispatched one the
+ * epic of `product` it was launched for, 101 unless given) each.
+ */
+async function agents(...list: [string, AgentState, boolean, number?][]) {
+  const runs: Run[] = list.map(([id, state, dispatched, epic]) =>
+    dispatched
+      ? { id, state, dispatched, work: { repository: "product", workItem: epic ?? 101 } }
+      : { id, state, dispatched },
+  );
+  await writeFile(files.agents, JSON.stringify({ agents: runs }));
 }
 
 async function writeProjection(active = true) {
@@ -263,13 +276,24 @@ function worker(isRoot = false): ApplySystem {
   };
 }
 
-/** The backend's agents as the test's world holds them. */
+/** The backend's runs as the test's world holds them; a start records its request and takes a slot. */
 function backend() {
+  const world = async () => JSON.parse(await readFile(files.agents, "utf8")) as { agents: Run[] };
   return fakeExecutionBackend({
-    agents: async () => ({
-      kind: "listed",
-      agents: JSON.parse(await readFile(files.agents, "utf8")).agents as Agent[],
-    }),
+    runs: async () => ({ kind: "listed", runs: (await world()).agents }),
+    startRun: async (request) => {
+      await writeFile(files.run, JSON.stringify(request));
+      const document = await world();
+      const { repository, workItem } = request.launch;
+      document.agents.push({
+        id: "agent-1",
+        state: "working",
+        dispatched: true,
+        work: { repository, workItem },
+      });
+      await writeFile(files.agents, JSON.stringify(document));
+      return { kind: "started", handle: { id: "agent-1" } };
+    },
   });
 }
 
@@ -308,13 +332,19 @@ async function lines(path: string): Promise<unknown[]> {
   }
 }
 
-/** The duplicate check's Paseo lists. */
+/** The duplicate check's Paseo lists, through the real adapter. */
 async function duplicateChecks() {
   return ((await lines(files.ls)) as { args: string[]; agent: string | null }[]).filter(
     ({ args }) => args.some((arg) => arg.startsWith("factory-epic=")),
   );
 }
 
+/** The request the backend was asked to start. */
+async function launchRequest() {
+  return JSON.parse(await readFile(files.run, "utf8")) as RunRequest;
+}
+
+/** How Paseo's launch was run, through the real adapter. */
 async function launchCall() {
   return JSON.parse(await readFile(files.run, "utf8")) as {
     args: string[];
@@ -330,7 +360,6 @@ const launched = () =>
     () => true,
     () => false,
   );
-const after = (args: string[], flag: string) => args[args.indexOf(flag) + 1];
 
 /** No epic was read, no sync run, no duplicate checked and nothing launched. */
 async function nothingDispatched() {
@@ -346,23 +375,27 @@ async function nothingRan() {
   expect(await lines(files.ls)).toEqual([]);
 }
 
+/** The prompt the dispatcher asks the backend to start epic 101 with, off `base`. */
+const invocation = (base = "origin/main") =>
+  "/fff:work-epic 101\n\nThis fresh worktree starts on a dispatch branch; create " +
+  `epic/101 from ${base} here as work-epic requires.`;
+
 describe("launching (dispatch §The dispatcher)", () => {
   test(
-    "starts one top-level agent, then respects the cap",
+    "starts one run, then respects the cap",
     async () => {
       const first = await invoke();
       expect(first.started).toEqual([{ repository: "product", epic: 101, agent_id: "agent-1" }]);
-      const call = await launchCall();
-      expect(call.parent).toBeNull();
-      expect(call.workspace).toBeNull();
-      expect(after(call.args, "--provider")).toBe("codex/configured-model");
-      expect(after(call.args, "--mode")).toBe("default");
-      expect(call.args).toContain("--new-workspace");
-      expect(call.args).toContain("factory-epic=101");
-      const prompt = call.args.at(-1) ?? "";
-      expect(prompt.startsWith("/fff:work-epic 101\n")).toBe(true);
-      expect(prompt).not.toContain("epic:<id>");
-      expect(prompt).toContain("create epic/101 from origin/main");
+      const request = await launchRequest();
+      expect(request.agent).toEqual({
+        provider: "codex",
+        model: "configured-model",
+        mode: "default",
+      });
+      expect(request.launch).toMatchObject({ repository: "product", workItem: 101 });
+      expect(request.invocation.startsWith("/fff:work-epic 101\n")).toBe(true);
+      expect(request.invocation).not.toContain("epic:<id>");
+      expect(request.invocation).toContain("create epic/101 from origin/main");
       const second = await invoke();
       expect(second.started).toEqual([]);
       expect(second.skipped[0]?.reason).toBe("host cap reached");
@@ -371,9 +404,55 @@ describe("launching (dispatch §The dispatcher)", () => {
   );
 
   test(
-    "launches with exactly the Python dispatcher's arguments, from the checkout, in the caller's environment",
+    "asks the backend for the epic's runs, then to start it, acting for the caller",
     async () => {
-      const summary = await invoke();
+      const chosen = backend();
+      const tick = await dispatcher({ select: chosen.select });
+      if (tick.kind !== "dispatched") throw new Error(`the tick failed: ${JSON.stringify(tick)}`);
+      const request: RunRequest = {
+        launch: { repository: "product", workItem: 101, attempt: "20261109T070503Z" },
+        checkout: files.checkout,
+        base: "origin/main",
+        branch: "dispatch/epic-101-20261109T070503Z",
+        invocation: invocation(),
+        agent: { provider: "codex", model: "configured-model", mode: "default" },
+      };
+      expect(chosen.calls).toEqual([
+        { method: "runs" },
+        { method: "runs", work: { repository: "product", workItem: 101 } },
+        { method: "startRun", request },
+      ]);
+      // Capacity within the agents' budget; the duplicate check and the launch each within a
+      // command's, in the caller's own environment.
+      expect(chosen.budgets).toEqual([90_000, 900_000, 900_000]);
+      const callerEnvironment = { ...environment, MOCK_READINESS: "ready" };
+      expect(chosen.environments).toEqual([undefined, callerEnvironment, callerEnvironment]);
+      // gh gets the caller's whole environment.
+      const gh = (await lines(files.gh)) as { marker: string }[];
+      expect(new Set(gh.map(({ marker }) => marker))).toEqual(new Set(["the caller's"]));
+      expect(tick.summary).toEqual({
+        host: HOST,
+        cap: 1,
+        running: 0,
+        considered: [{ repository: "product", epic: 101 }],
+        skipped: [],
+        started: [{ repository: "product", epic: 101, agent_id: "agent-1" }],
+        running_after: 1,
+      });
+    },
+    SLOW,
+  );
+
+  test(
+    "through the Paseo backend, launches exactly as the Python dispatcher did, top-level, from the checkout, in the caller's environment",
+    async () => {
+      await agents(["agent-other", "finished", true, 102]);
+      const summary = await (async () => {
+        const tick = await dispatcher({ select: executionBackend });
+        if (tick.kind !== "dispatched") throw new Error(`the tick failed: ${JSON.stringify(tick)}`);
+        return tick.summary;
+      })();
+      expect(summary.started).toEqual([{ repository: "product", epic: 101, agent_id: "agent-1" }]);
       const call = await launchCall();
       expect(call.args).toEqual([
         "run",
@@ -401,60 +480,42 @@ describe("launching (dispatch §The dispatcher)", () => {
         "factory-epic=101",
         "--label",
         "factory-dispatched-at=20261109T070503Z",
-        "/fff:work-epic 101\n\nThis fresh Paseo worktree starts on a dispatch branch; create " +
-          "epic/101 from origin/main here as work-epic requires.",
+        invocation(),
       ]);
       expect(call.cwd).toBe(await realpath(files.checkout));
       expect(call.marker).toBe("the caller's");
-      // gh and the duplicate check get the caller's whole environment, its Paseo identity too.
-      const gh = (await lines(files.gh)) as { marker: string }[];
-      expect(new Set(gh.map(({ marker }) => marker))).toEqual(new Set(["the caller's"]));
-      expect((await duplicateChecks()).map(({ agent }) => agent)).toEqual(["scheduled-agent"]);
-      expect(summary).toEqual({
-        host: HOST,
-        cap: 1,
-        running: 0,
-        considered: [{ repository: "product", epic: 101 }],
-        skipped: [],
-        started: [{ repository: "product", epic: 101, agent_id: "agent-1" }],
-        running_after: 1,
-      });
-    },
-    SLOW,
-  );
-
-  test(
-    "launches without waiting, by the current flag",
-    async () => {
-      // --background is Paseo's deprecated alias of --no-wait, removed after 2027-04-01.
-      await invoke();
-      const { args } = await launchCall();
-      expect(args).toContain("--no-wait");
-      expect(args).not.toContain("--background");
-    },
-    SLOW,
-  );
-
-  test(
-    "the duplicate check includes background workspaces",
-    async () => {
-      // Paseo 0.12+ hides agents in background workspaces from ls unless asked.
-      await agents(["agent-old", "finished", true]);
-      await invoke();
-      const calls = await duplicateChecks();
-      expect(calls).toHaveLength(1);
-      expect(calls[0]?.args).toEqual([
-        "ls",
-        "--global",
-        "--background",
-        "--label",
-        "factory-dispatch=true",
-        "--label",
-        "factory-repository=product",
-        "--label",
-        "factory-epic=101",
-        "--json",
+      expect(call.parent).toBeNull();
+      expect(call.workspace).toBeNull();
+      // The duplicate check lists background workspaces' runs too, in the caller's whole
+      // environment, its Paseo identity among it.
+      const checks = await duplicateChecks();
+      expect(checks.map(({ args }) => args)).toEqual([
+        [
+          "ls",
+          "--global",
+          "--background",
+          "--label",
+          "factory-dispatch=true",
+          "--label",
+          "factory-repository=product",
+          "--label",
+          "factory-epic=101",
+          "--json",
+        ],
       ]);
+      expect(checks.map(({ agent }) => agent)).toEqual(["scheduled-agent"]);
+    },
+    SLOW,
+  );
+
+  test(
+    "through the Paseo backend, a run labelled for the epic prevents a duplicate",
+    async () => {
+      await agents(["agent-old", "finished", true]);
+      const tick = await dispatcher({ select: executionBackend });
+      if (tick.kind !== "dispatched") throw new Error(`the tick failed: ${JSON.stringify(tick)}`);
+      expect(tick.summary.skipped[0]?.reason).toBe("existing dispatched agent");
+      expect(await launched()).toBe(false);
     },
     SLOW,
   );
@@ -472,6 +533,53 @@ describe("launching (dispatch §The dispatcher)", () => {
   );
 
   test(
+    "a run dispatch launched for another epic is no duplicate",
+    async () => {
+      await agents(["agent-old", "finished", true, 102]);
+      const summary = await invoke();
+      expect(summary.skipped).toEqual([]);
+      expect(summary.started).toEqual([{ repository: "product", epic: 101, agent_id: "agent-1" }]);
+    },
+    SLOW,
+  );
+
+  test(
+    "runs it cannot read for the epic fail the tick before anything is launched",
+    async () => {
+      const chosen = backend();
+      const unknown: WorkerRuns = { kind: "unknown", reason: "Paseo activity was invalid" };
+      const select: typeof chosen.select = (system, budgetMs, env) => {
+        const real = chosen.select(system, budgetMs, env);
+        return {
+          ...real,
+          runs: (work) => (work === undefined ? real.runs() : Promise.resolve(unknown)),
+        };
+      };
+      expect(await dispatcher({ select })).toEqual({
+        kind: "failed",
+        reason: "the epic's runs could not be read: Paseo activity was invalid",
+      });
+      expect(await readFile(files.sync).catch(() => "")).toBe("");
+      expect(await launched()).toBe(false);
+    },
+    SLOW,
+  );
+
+  test(
+    "a run the backend could not start fails the tick in its words",
+    async () => {
+      const chosen = fakeExecutionBackend({
+        startRun: { kind: "failed", reason: "starting a Paseo run exited with status 1" },
+      });
+      expect(await dispatcher({ select: chosen.select })).toEqual({
+        kind: "failed",
+        reason: "the epic's run could not be started: starting a Paseo run exited with status 1",
+      });
+    },
+    SLOW,
+  );
+
+  test(
     "a non-main branch and the configured executor are honored",
     async () => {
       git(["branch", "-m", "develop"], files.checkout);
@@ -479,9 +587,9 @@ describe("launching (dispatch §The dispatcher)", () => {
       await writeManifest("develop");
       const summary = await invoke();
       expect(summary.started[0]?.agent_id).toBe("agent-1");
-      const call = await launchCall();
-      expect(after(call.args, "--base")).toBe("origin/develop");
-      expect(call.args.at(-1)).toContain("from origin/develop");
+      const request = await launchRequest();
+      expect(request.base).toBe("origin/develop");
+      expect(request.invocation).toBe(invocation("origin/develop"));
     },
     SLOW,
   );
@@ -489,9 +597,9 @@ describe("launching (dispatch §The dispatcher)", () => {
 
 describe("capacity (dispatch §Capacity)", () => {
   test(
-    "asks the execution backend's agents, never a Paseo list",
+    "asks the execution backend's runs, never a Paseo list",
     async () => {
-      // The backend translates its agents into fffactory's states (D7): the capacity check lists
+      // The backend translates its runs into fffactory's states (D7): the capacity check lists
       // nothing itself, so no Paseo status reaches the dispatcher.
       await agents(["agent-busy", "working", true]);
       const chosen = backend();
@@ -500,7 +608,7 @@ describe("capacity (dispatch §Capacity)", () => {
         if (tick.kind !== "dispatched") throw new Error("the tick failed");
         return tick.summary;
       })();
-      expect(chosen.calls).toEqual([{ method: "agents" }]);
+      expect(chosen.calls).toEqual([{ method: "runs" }]);
       expect(chosen.budgets).toEqual([90_000]);
       expect(await lines(files.ls)).toEqual([]);
       expect(summary.skipped[0]?.reason).toBe("host cap reached");
@@ -553,11 +661,10 @@ describe("capacity (dispatch §Capacity)", () => {
       // dispatched one finished.
       const text = await readFile(join(import.meta.dir, "fixtures/activity-agents.json"), "utf8");
       const parsed = parseActivityDocument(text);
-      if (!parsed.ok) throw new Error("fixture unreadable");
+      if (!parsed.ok || parsed.document.kind !== "listed") throw new Error("fixture unreadable");
+      const runs: WorkerRuns = { kind: "listed", runs: parsed.document.agents };
       const summary = await (async () => {
-        const tick = await dispatcher({
-          select: fakeExecutionBackend({ agents: parsed.document }).select,
-        });
+        const tick = await dispatcher({ select: fakeExecutionBackend({ runs }).select });
         if (tick.kind !== "dispatched") throw new Error("the tick failed");
         return tick.summary;
       })();
@@ -576,7 +683,7 @@ describe("capacity (dispatch §Capacity)", () => {
     "agents the backend cannot read (%s) fail the tick before anything is read or launched",
     async (reason) => {
       const tick = await dispatcher({
-        select: fakeExecutionBackend({ agents: { kind: "unknown", reason } }).select,
+        select: fakeExecutionBackend({ runs: { kind: "unknown", reason } }).select,
       });
       expect(tick).toEqual({
         kind: "failed",

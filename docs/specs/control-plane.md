@@ -142,11 +142,11 @@ concept ([#98](https://github.com/yaunder/fffactory/issues/98)):
 | `stopped` | not loaded |
 
 They are `AgentState` in `src/domain/control-plane.ts`. Only the worker's
-Paseo adapter (`paseoAgents`, `src/host/paseo-backend.ts`), the execution
-backend's `agents` ([execution backend §The `ExecutionBackend` contract](execution-backend.md#the-executionbackend-contract)),
+Paseo adapter (`paseoRuns`, `src/host/paseo-backend.ts`), the execution
+backend's `runs` ([execution backend §The `ExecutionBackend` contract](execution-backend.md#the-executionbackend-contract)),
 which `host control-plane activity`, `host agents`
 ([host protocol §agents](host-protocol.md#agents)) and the dispatcher's capacity
-check ask, knows Paseo's statuses;
+and duplicate checks ask, knows Paseo's statuses;
 no dispatcher code reads one ([dispatch §Capacity](dispatch.md#capacity)). It lists every agent
 with `paseo ls --global --background --json`, then those dispatch launched
 with the same list and `--label factory-dispatch=true`, and translates each
@@ -474,7 +474,7 @@ one of the five statuses, and `agent inspect` with its `Id` and a
 | Deferral words | domain | `src/domain/change-classification.ts` (`maintenanceDeferral`, `preActivationDeferral`) |
 | Deferral and reconciliation | application | `src/application/apply-control-plane.ts`, `apply-factory.ts` |
 | Worker endpoint: privilege, the projection, the password read by reference; the rest asked of the execution backend | host | `src/host/control-plane.ts`, `src/host/secret-value.ts` |
-| The Paseo backend's maintenance and agents: setup with the bcrypt hash, reload, restart, the agent adapter (`paseoAgents`) | host | `src/host/paseo-backend.ts` ([execution backend](execution-backend.md#layer-mapping)) |
+| The Paseo backend's maintenance and agents: setup with the bcrypt hash, reload, restart, the run adapter (`paseoRuns`) | host | `src/host/paseo-backend.ts` ([execution backend](execution-backend.md#layer-mapping)) |
 | SSH adapter | infrastructure | `src/infrastructure/paseo-control-plane.ts` |
 | Setup, config merge, auth, unit and pin | release assets | `assets/steps/control-plane/` |
 | The pin against the hash | check | `tests/paseo/hash-only-daemon.sh` (`just paseo-check`) |

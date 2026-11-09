@@ -3,13 +3,14 @@
  * run`, which the dispatch skill runs as `factory` on the trigger's cadence. It pulls ready FFFlow
  * epics into runs the execution backend hosts, one at a time, judged by `domain/dispatch-policy.ts`
  * over what it reads here: GitHub through `gh`, the checkouts through `git` and the release's
- * repository programs, and the agents through `ExecutionBackend.agents`. It never merges,
- * force-pushes, deletes branches, closes issues, deploys infrastructure or converges hosts.
+ * repository programs, and the runs through `ExecutionBackend.runs`. It starts a run only
+ * through `ExecutionBackend.startRun`, naming no backend's command, flag or label. It never
+ * merges, force-pushes, deletes branches, closes issues, deploys infrastructure or converges
+ * hosts.
  *
  * It is the Python `factory-dispatch` it replaces, ported faithfully: the same commands in the
- * environment and directory it was started with, the same rules, summary and exit codes. Its
- * launch and duplicate check still name Paseo here, through the adapter's `CallerPaseoCommand`,
- * until task 5 moves them behind the seam.
+ * environment and directory it was started with, the same rules, summary and exit codes; the
+ * backend acts for it in that environment.
  */
 import { lstat, mkdir, readFile, realpath, stat } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
@@ -36,6 +37,7 @@ import {
   type Started,
   type TaskIssue,
   toolText,
+  workEpicInvocation,
 } from "../domain/dispatch-policy";
 import { DISPATCH_PROJECTION_PATH, parseDispatchProjection } from "../domain/dispatch-projection";
 import {
@@ -43,18 +45,26 @@ import {
   REPOSITORY_MANIFEST_PATH,
   SYNC_SCRIPT,
 } from "../domain/repository-placement";
+import { type LaunchedWork, launchedFor } from "../domain/run";
 import { WORK_ROOTS } from "../domain/work-inspection";
 import type { ProcessOutcome } from "../infrastructure/local-tool-probe";
 import type { ApplySystem } from "./apply";
-import { type BackendSelection, executionBackend } from "./execution-backend";
+import {
+  type BackendSelection,
+  type ExecutionBackend,
+  executionBackend,
+} from "./execution-backend";
 import { ended } from "./failures";
 import type { HeldLock } from "./install-lock";
-import { type CallerPaseoCommand, callerPaseo, RETIRED_DISPATCH_LOCK } from "./paseo-backend";
+import { RETIRED_DISPATCH_LOCK } from "./paseo-backend";
 import { FACTORY_HOME } from "./runtime-account";
 
-/** Each command's timeout. The Python dispatcher waited on its commands without one. */
+/**
+ * Each command's timeout, and the backend's for the epic's runs and for its launch, each. The
+ * Python dispatcher waited on its commands without one.
+ */
 const COMMAND_TIMEOUT_MS = 15 * 60_000;
-/** The backend's agents, every call of it together, as `host agents` bounded them. */
+/** The backend's runs for capacity, every call of it together, as `host agents` bounded them. */
 const AGENTS_BUDGET_MS = 90_000;
 /** The whole adoption from root, as the activator's adoption ran the Python program. */
 const ADOPTION_TIMEOUT_MS = 15 * 60_000;
@@ -293,7 +303,8 @@ interface Tick {
   readonly system: ApplySystem;
   readonly caller: DispatchCaller;
   readonly run: Run;
-  readonly paseo: CallerPaseoCommand;
+  /** The backend for one call, acting for the caller, within a command's timeout. */
+  readonly backend: () => ExecutionBackend;
   readonly host: string;
   readonly schedule: { readonly provider: string; readonly model: string; readonly mode: string };
   readonly considered: ConsideredEpic[];
@@ -302,97 +313,28 @@ interface Tick {
   running: number;
 }
 
-/**
- * Paseo's JSON answer to `args`, through the adapter's command, in the caller's environment
- * unless given another; its failures read as the dispatcher's other commands'.
- */
-function paseoJson(tick: Tick, args: readonly string[], options: RunOptions = {}) {
-  const run: Run = async (argv, given = {}) =>
-    output(
-      argv,
-      await tick.paseo(argv.slice(1), { ...given, env: given.env ?? tick.caller.environment }),
-    );
-  return json(run, ["paseo", ...args], options);
+/** Whether the backend holds any run dispatch launched for `work`, finished or not. */
+async function previouslyDispatched(tick: Tick, work: LaunchedWork): Promise<boolean> {
+  const runs = await tick.backend().runs(work);
+  if (runs.kind !== "listed") throw new Error(`the epic's runs could not be read: ${runs.reason}`);
+  return launchedFor(runs.runs, work).length > 0;
 }
 
-// TODO(re-evaluate when task 5 lands): through startRun/runs
-/** Whether the backend lists any run dispatch launched for the epic, finished or not. */
-async function previouslyDispatched(tick: Tick, alias: string, epic: number): Promise<boolean> {
-  const rows = await paseoJson(tick, [
-    "ls",
-    "--global",
-    "--background",
-    "--label",
-    "factory-dispatch=true",
-    "--label",
-    `factory-repository=${alias}`,
-    "--label",
-    `factory-epic=${epic}`,
-    "--json",
-  ]);
-  if (!Array.isArray(rows)) throw new DispatchError("Paseo returned an invalid agent list");
-  return rows.length > 0;
-}
-
-/** The caller's environment without the scheduled agent's own Paseo identity. */
-function launchEnvironment(environment: Readonly<Record<string, string>>) {
-  return Object.fromEntries(
-    Object.entries(environment).filter(
-      ([name]) => name !== "PASEO_AGENT_ID" && name !== "PASEO_WORKSPACE_ID",
-    ),
-  );
-}
-
-// TODO(re-evaluate when task 5 lands): through startRun/runs
-/** Launches the epic's agent, top-level, in a fresh workspace branched off `remoteRef`. */
-async function launch(
-  tick: Tick,
-  alias: string,
-  epic: number,
-  checkout: string,
-  remoteRef: string,
-) {
-  const stamp = dispatchStamp(tick.system.now());
-  // work-epic defaults to main; use the repository's declared remote branch.
-  const prompt =
-    `/fff:work-epic ${epic}\n\n` +
-    "This fresh Paseo worktree starts on a dispatch branch; create " +
-    `${epicBranch(epic)} from ${remoteRef} here as work-epic requires.`;
-  const response = await paseoJson(
-    tick,
-    [
-      "run",
-      "--no-wait",
-      "--json",
-      "--provider",
-      `${tick.schedule.provider}/${tick.schedule.model}`,
-      "--mode",
-      tick.schedule.mode,
-      "--new-workspace",
-      "worktree",
-      "--worktree-mode",
-      "branch-off",
-      "--new-branch",
-      dispatchBranch(epic, stamp),
-      "--base",
-      remoteRef,
-      "--cwd",
-      checkout,
-      "--label",
-      "factory-dispatch=true",
-      "--label",
-      `factory-repository=${alias}`,
-      "--label",
-      `factory-epic=${epic}`,
-      "--label",
-      `factory-dispatched-at=${stamp}`,
-      prompt,
-    ],
-    { cwd: checkout, env: launchEnvironment(tick.caller.environment) },
-  );
-  const fields = fieldsOf(response, "the launch's answer");
-  if (!Object.hasOwn(fields, "agentId")) throw new Error("the launch's answer has no agentId");
-  return fields.agentId;
+/** Starts the epic's run in a fresh workspace from the checkout, its branch off `base`: its ID. */
+async function launch(tick: Tick, reads: RepositoryReads, epic: number, base: string) {
+  const attempt = dispatchStamp(tick.system.now());
+  const { provider, model, mode } = tick.schedule;
+  const start = await tick.backend().startRun({
+    launch: { repository: reads.repository.alias, workItem: epic, attempt },
+    checkout: reads.checkout,
+    base,
+    branch: dispatchBranch(epic, attempt),
+    invocation: workEpicInvocation(epic, base),
+    agent: { provider, model, mode },
+  });
+  if (start.kind !== "started")
+    throw new Error(`the epic's run could not be started: ${start.reason}`);
+  return start.handle.id;
 }
 
 /** The repository's GitHub reads for one tick. */
@@ -487,11 +429,12 @@ function prepared(tick: Tick, reads: RepositoryReads, remoteRef: string) {
 async function launched(tick: Tick, reads: RepositoryReads, epic: number) {
   const alias = reads.repository.alias;
   if (capacityReached(tick.running)) return SKIPS.capReached;
-  if (await previouslyDispatched(tick, alias, epic)) return SKIPS.dispatched;
+  if (await previouslyDispatched(tick, { repository: alias, workItem: epic }))
+    return SKIPS.dispatched;
   const remoteRef = `origin/${reads.repository.branch}`;
   const refused = await prepared(tick, reads, remoteRef);
   if (refused !== undefined) return refused;
-  const agentId = await launch(tick, alias, epic, reads.checkout, remoteRef);
+  const agentId = await launch(tick, reads, epic, remoteRef);
   tick.started.push({ repository: alias, epic, agent_id: agentId });
   tick.running += 1;
   return undefined;
@@ -553,12 +496,12 @@ async function repositoryTick(tick: Tick, repository: DispatchRepository) {
   for (const epic of [...epics].sort((a, b) => a - b)) await epicTick(tick, reads, epic);
 }
 
-/** The tick under its lock: the agents first, then every placed repository's ready epics. */
+/** The tick under its lock: the runs first, then every placed repository's ready epics. */
 async function locked(tick: Tick, select: BackendSelection, placed: readonly DispatchRepository[]) {
-  const agents = await select(tick.system, AGENTS_BUDGET_MS).agents();
-  if (agents.kind !== "listed")
-    throw new Error(`the worker's agents could not be read: ${agents.reason}`);
-  tick.running = busyDispatched(agents.agents);
+  const runs = await select(tick.system, AGENTS_BUDGET_MS).runs();
+  if (runs.kind !== "listed")
+    throw new Error(`the worker's agents could not be read: ${runs.reason}`);
+  tick.running = busyDispatched(runs.runs);
   const running = tick.running;
   for (const repository of placed) await repositoryTick(tick, repository);
   return {
@@ -613,7 +556,6 @@ async function dispatchTick(
   system: ApplySystem,
   caller: DispatchCaller,
   select: BackendSelection,
-  paseo: CallerPaseoCommand,
 ): Promise<DispatchSummary> {
   const host = system.hostname().split(".")[0] ?? "";
   const placed = await placedOn(system, host);
@@ -621,8 +563,9 @@ async function dispatchTick(
   const held = await dispatchLocks(system);
   try {
     const run = asCaller(system, caller);
+    const backend = () => select(system, COMMAND_TIMEOUT_MS, caller.environment);
     const tick: Tick = {
-      ...{ system, caller, run, paseo, host, schedule },
+      ...{ system, caller, run, backend, host, schedule },
       ...{ considered: [], skipped: [], started: [], running: 0 },
     };
     return await locked(tick, select, placed);
@@ -638,13 +581,12 @@ async function adoptionOnly(system: ApplySystem, caller: DispatchCaller) {
 
 /**
  * The dispatcher on `system`, run by `caller` as `factory`. `select` is the worker's backend
- * selection point and `paseoFor` the Paseo CLI's; tests give fakes.
+ * selection point; tests give a fake's.
  */
 export function workerDispatcher(
   system: ApplySystem,
   caller: DispatchCaller,
   select: BackendSelection = executionBackend,
-  paseoFor: (system: ApplySystem, timeoutMs: number) => CallerPaseoCommand = callerPaseo,
 ): HostDispatcher {
   return {
     async runDispatch(adoption) {
@@ -653,8 +595,7 @@ export function workerDispatcher(
       if (system.isRoot()) return { kind: "failed", reason: "run as root" };
       try {
         if (adoption) return { kind: "adoption", report: await adoptionOnly(system, caller) };
-        const paseo = paseoFor(system, COMMAND_TIMEOUT_MS);
-        return { kind: "dispatched", summary: await dispatchTick(system, caller, select, paseo) };
+        return { kind: "dispatched", summary: await dispatchTick(system, caller, select) };
       } catch (error) {
         return { kind: "failed", reason: error instanceof Error ? error.message : String(error) };
       }
