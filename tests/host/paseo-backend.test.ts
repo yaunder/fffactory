@@ -21,6 +21,7 @@ import type {
   ProcessOutcome,
   ProcessRunner,
 } from "../../src/infrastructure/local-tool-probe";
+import { PASEO_LAYOUT } from "../support/fake-execution-backend";
 import { system } from "./worker-scenarios";
 
 let root: string;
@@ -899,6 +900,22 @@ describe("maintenance (docs/specs/control-plane.md §Worker protocol and privile
     const paseo = backend(scripted.run, { now: () => new Date(clock) });
     clock = BUDGET_MS;
     expect(await paseo.restart()).toEqual({ kind: "failed", reason: "Paseo restart timed_out" });
+    expect(scripted.calls).toEqual([]);
+  });
+});
+
+describe("the backend's layout (docs/specs/execution-backend.md §Layout)", () => {
+  test("is Paseo's worktrees, three levels down, and its configuration, the password hash's file", () => {
+    const scripted = projects([]);
+    for (const isRoot of [true, false]) {
+      const layout = paseoBackend(worker(scripted.run, { isRoot }), BUDGET_MS).layout();
+      expect(layout).toEqual({
+        workspaceRoots: [{ path: "/home/factory/.paseo/worktrees", depth: 3 }],
+        privateFiles: ["/home/factory/.paseo/config.json"],
+      });
+      // The fake backend's default, so host tests over it read and write what Paseo's would.
+      expect(layout).toEqual(PASEO_LAYOUT);
+    }
     expect(scripted.calls).toEqual([]);
   });
 });

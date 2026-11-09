@@ -1,8 +1,9 @@
 /**
  * The Paseo execution backend (`docs/specs/execution-backend.md` §The `ExecutionBackend`
  * contract): the only worker code that names Paseo's CLI, its auth wrapper, its setup program,
- * its unit, its password's bcrypt cost, the labels that carry a run's launch identity and the
- * environment a launch must not inherit. It runs the Paseo CLI only as `factory`, authenticated
+ * its unit, its password's bcrypt cost, the labels that carry a run's launch identity, the
+ * environment a launch must not inherit, and its layout: where it keeps its worktrees and its
+ * configuration. It runs the Paseo CLI only as `factory`, authenticated
  * by the active release's `paseo-auth.sh`: from root through `runuser` in `factory`'s clean
  * environment, otherwise the wrapper itself in the environment of the process it acts for, or
  * that clean one. Every command it runs is within the one budget it was made with. No Paseo
@@ -20,7 +21,7 @@ import type { LaunchedWork, Run, RunRequest, RunStart, WorkerRuns } from "../dom
 import type { SecretMaterial } from "../domain/secrets";
 import type { ProcessOutcome } from "../infrastructure/local-tool-probe";
 import type { ApplySystem } from "./apply";
-import type { ExecutionBackend } from "./execution-backend";
+import type { BackendLayout, ExecutionBackend } from "./execution-backend";
 import { ended } from "./failures";
 
 /** Paseo's own cost: `DAEMON_PASSWORD_BCRYPT_COST` in `@getpaseo/server`'s auth.js. */
@@ -106,13 +107,26 @@ function failure(outcome: ProcessOutcome, what: string): ControlPlaneAction {
   return { kind: "failed", reason: `${what} ${outcome.kind}` };
 }
 
+/** Paseo's home, `factory`'s `~/.paseo`. */
+const PASEO_HOME = `${FACTORY_ENV.HOME}/.paseo`;
+
+/**
+ * Paseo's layout (`docs/specs/execution-backend.md` §Layout): its worktrees, searched three
+ * levels down (`SDLC.md` §Worktree ownership), and its configuration, which holds the daemon
+ * password's hash.
+ */
+const PASEO_LAYOUT: BackendLayout = {
+  workspaceRoots: [{ path: `${PASEO_HOME}/worktrees`, depth: 3 }],
+  privateFiles: [`${PASEO_HOME}/config.json`],
+};
+
 // TODO(re-evaluate when no worker runs a release from before #142): stop taking RETIRED_DISPATCH_LOCK
 /**
  * The lock the Python dispatcher of releases before #142 holds for its tick, in Paseo's home. A
  * tick still running under it when an upgrade's dispatch reconcile swaps the skill must exclude
  * the next one, so the dispatcher takes it too while its directory is there.
  */
-export const RETIRED_DISPATCH_LOCK = `${FACTORY_ENV.HOME}/.paseo/factory-dispatch.lock`;
+export const RETIRED_DISPATCH_LOCK = `${PASEO_HOME}/factory-dispatch.lock`;
 
 /**
  * fffactory's state for each Paseo status but `running`, which is `working` or `needs_input`
@@ -323,6 +337,7 @@ export function paseoBackend(
     runWithin(argv, stdin === undefined ? { env: ENV } : { env: ENV, stdin });
   const setup = join(system.root, WORKER_PATHS.activeRelease, "steps/control-plane/setup-host.sh");
   return {
+    layout: () => PASEO_LAYOUT,
     async registerRepositories(checkouts) {
       if (checkouts.length === 0) return repositoryRegistration("paseo", []);
       const known = projectPaths(await paseo(["project", "ls", "--json"]));

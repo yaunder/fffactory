@@ -577,7 +577,7 @@ output into the step's log. A file it cannot write, remove or look at, or a
 1`, ...) and stops the steps there; the step logs its own lines, never a value
 of the configuration.
 
-The service (`COLLECTOR_SERVICE_UNIT`):
+The service (`collectorServiceUnit`), as on a Paseo worker:
 
 ```ini
 [Unit]
@@ -630,11 +630,15 @@ TimeoutStopSec=20s
   it, and it never holds Paseo up.
 - **Sandboxed**: the file system read-only but for its state directory, home
   directories read-only, no privilege gain, a private `/tmp`.
-- **No credentials.** `factory`'s credential stores are inaccessible to it
-  (`COLLECTOR_INACCESSIBLE`): Claude's credentials, session token and
-  `~/.claude.json`, the Anthropic key directory and GitHub's and Codex's stores
-  ([credential delivery](credential-delivery.md)), `~/.aws`, `~/.ssh`,
-  `~/.git-credentials` and Paseo's `config.json`. The collector never reads
+- **No credentials.** `factory`'s credential stores are inaccessible to it,
+  then the execution backend's private files (`collectorInaccessible`):
+  Claude's credentials, session token and `~/.claude.json`, the Anthropic key
+  directory and GitHub's and Codex's stores
+  ([credential delivery](credential-delivery.md)), `~/.aws`, `~/.ssh` and
+  `~/.git-credentials`, then the files the backend's layout declares private
+  ([execution backend §Layout](execution-backend.md#layout)), Paseo's
+  `config.json` on a Paseo worker. `host apply` takes them from the layout of
+  the backend the worker's one selection point chooses. The collector never reads
   them (it never collects them, [collector §Sources](collector.md#sources)),
   so a defect or a compromised dependency in it cannot read them either. Each
   is optional (`-`), so a worker without one still starts the run, and none is,
@@ -685,10 +689,12 @@ A minute after boot, then a minute after each run ends; systemd never starts a
 run while one is active.
 
 Tests: `tests/domain/collector-installation.test.ts` reads every directive
-above from the unit text and finds no tie to any unit;
+above from the unit text, a backend's private files hidden after the credential
+stores, and finds no tie to any unit;
 `tests/host/collector-step.test.ts` runs the step over a worker in a temporary
-directory with a scripted `systemctl` (installing, a rerun, removing with the
-state kept, a worker that never had it, every failure), and runs the AWS SDK
+directory with a scripted `systemctl` (installing, the private files it is
+given hidden last, a rerun, removing with the state kept, a worker that never
+had it, every failure), and runs the AWS SDK
 under the service's environment, assembled from the unit text by systemd's
 rules, against a `~/.aws` and inherited settings pointing elsewhere, sending
 nothing (`tests/support/aws-endpoint-probe-main.ts`); `tests/host/apply.test.ts`
@@ -881,10 +887,12 @@ account `factory`, which owns the checkouts.
 ### What it reads
 
 1. **Working trees.** Every directory holding a `.git` (a directory or a
-   file) under `/workspace/repos`, at most 4 levels down, then under
-   `/home/factory/.paseo/worktrees`, where Paseo creates its worktrees
-   ([SDLC §Worktree ownership](../../SDLC.md#worktree-ownership)), at most 3
-   levels down; nothing below a working tree, and no symbolic link, is
+   file) under `/workspace/repos`, at most 4 levels down, then under each of
+   the execution backend's workspace roots, at the depth its layout gives, in
+   its order ([execution backend §Layout](execution-backend.md#layout)): on a
+   Paseo worker, `/home/factory/.paseo/worktrees`, where Paseo creates its
+   worktrees ([SDLC §Worktree ownership](../../SDLC.md#worktree-ownership)), at
+   most 3 levels down. Nothing below a working tree, and no symbolic link, is
    followed. Directories are listed as root, without reading any file. A
    search root reached through a symbolic link (the root itself or any
    directory above it, such as `/home/factory/.paseo`) is not searched, as
@@ -1272,12 +1280,12 @@ never elsewhere: it prints no path, no AWS or SDK message and no credential.
 | Worker | `src/host/apply.ts` | `workerApplier` over an `ApplySystem` (a `WorkerSystem` with the clock, privilege, standard input, release and install lock): the steps, their logs and the record. |
 | Worker | `src/host/install-lock.ts` | `flockExclusive`: the install lock over `flock(2)`, through libc. |
 | Worker | `src/host/credentials.ts` | `workerCredentials`: the `credentials` install step ([credential delivery](credential-delivery.md)). |
-| Worker | `src/host/collector-step.ts` | `workerCollectorStep`: the `collector` install step ([§The collector step](#the-collector-step)). |
+| Worker | `src/host/collector-step.ts` | `workerCollectorStep`: the `collector` install step ([§The collector step](#the-collector-step)), given the execution backend's private files by `host apply`. |
 | Worker | `src/host/verify.ts` | `workerVerifier`: the verifiers and enrollment checks. |
 | Worker | `src/host/dispatch.ts` | Dispatch adoption, installation, reconciliation and checked observation through the dispatch trigger, with privilege drop, and registering the placed checkouts through the execution backend after the schedule. |
 | Worker | `src/host/dispatcher.ts` | `workerDispatcher`: `host dispatch run`, the dispatcher, and `rootAdoption`, the adoption check the activator's `dispatch adoption` runs ([dispatch §The dispatcher](dispatch.md#the-dispatcher)). |
 | Worker | `src/host/dispatch-trigger.ts`, `src/host/paseo-trigger.ts` | `DispatchTrigger` and its one selection point; `paseoTrigger`, the Paseo adapter running the schedule reconciler as `factory` ([dispatch trigger](dispatch-trigger.md)). |
-| Worker | `src/host/work.ts` | `workerWork`: the work inspection, over the worker's working trees, as `factory`, read-only, and the archive's backlog, from the collector's checkpoint and its discovery (`discoverSources` in `src/host/collect.ts`), as root. |
+| Worker | `src/host/work.ts` | `workerWork`: the work inspection, over the worker's working trees under the repository root and the execution backend's workspace roots, as `factory`, read-only, and the archive's backlog, from the collector's checkpoint and its discovery (`discoverSources` in `src/host/collect.ts`), as root. |
 | Worker | `src/host/control-plane.ts` | `workerControlPlane`: the control-plane activity, install, reload and restart, and `host agents`: privilege, the projection and the password read by reference, the rest asked of the execution backend. |
 | Worker | `src/host/execution-backend.ts`, `src/host/paseo-backend.ts` | `ExecutionBackend` and its one selection point; `paseoBackend`, the Paseo adapter, with `paseoRuns` translating Paseo's agents into fffactory's states ([execution backend](execution-backend.md)). |
 | Worker | `src/host/collect.ts` | `collectOnce`: one collection run under the collector's own lock, through an `ArchiveWriter` ([collector §Run](collector.md#run)). |
@@ -1365,10 +1373,11 @@ throw, the environment, streamed standard input, every failure
 classification), `tests/infrastructure/tailscale-peers.test.ts`,
 `tests/cli/host.test.ts`, `tests/cli/status-executable.test.ts`,
 `tests/host/work.test.ts` (`host work inspect` over real Git repositories in a
-temporary worker: each kind of work, ignored files, missing and unreadable
-worktrees, a stale worktree registration over an independent clone inside and
-outside the roots, a bare repository, nothing written, the time budget;
-`tests/host/work-scenarios.ts`), `tests/host/work-archive.test.ts` (the
+temporary worker, over a fake backend with Paseo's layout: each kind of work,
+ignored files, missing and unreadable worktrees, a stale worktree registration
+over an independent clone inside and outside the roots, a bare repository,
+another backend's workspace root searched at its depth, nothing written, the
+time budget; `tests/host/work-scenarios.ts`), `tests/host/work-archive.test.ts` (the
 archive's backlog: not collected, nothing unarchived, a new, grown and
 rewritten source, no checkpoint, a checkpoint that is a symbolic link, the
 allowlist and symbolic links, the time budget),

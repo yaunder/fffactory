@@ -28,8 +28,10 @@ temporary directories by `worker-scenarios.ts`, never the real `/`.
   real install lock (`install-lock.test.ts`) under the temporary root's `/run`.
 - `work.test.ts` runs `host work inspect` over real Git repositories that `work-scenarios.ts`
   lays out in a temporary worker root, with a remote outside it; its runner checks each command
-  drops to `factory`, then runs the rest as the test's user. `protocol-contract.test.ts` builds
-  `fixtures/work-unresolved.json` from the same real Git, and `work-archive-backlog.json` from
+  drops to `factory`, then runs the rest as the test's user. It searches the workspace roots of
+  a fake backend (`support/fake-execution-backend.ts`), whose layout is Paseo's unless a test
+  gives another, so its paths are a Paseo worker's. `protocol-contract.test.ts` builds
+  `fixtures/work-unresolved.json` from the same real Git, over the real selection, Paseo's, and `work-archive-backlog.json` from
   `work-scenarios.ts`'s `archivingWorker`. `work-archive.test.ts` runs its archive section over a
   Claude root, the collector's configuration and a checkpoint laid out there
   (`configureCollector`, `saveCheckpoint`, `captured`), each write a later modification time.
@@ -41,8 +43,9 @@ temporary directories by `worker-scenarios.ts`, never the real `/`.
   argument, environment value and log line for the material it used.
 - `control-plane.test.ts` runs the control-plane endpoint and `host agents` over a fake
   `ExecutionBackend` (`support/fake-execution-backend.ts`, which records every call and every
-  budget and environment its selection was given, and keeps to the run contract: asked for a
-  work's runs, only those `launchedFor` it) and, for install, Secrets Manager answering the
+  budget and environment its selection was given, keeps to the run contract: asked for a
+  work's runs, only those `launchedFor` it, and answers Paseo's layout, `PASEO_LAYOUT`, unless
+  given another) and, for install, Secrets Manager answering the
   Paseo password: privilege, the projection, the password read and handed on, the budgets, and
   the backend's answers passed on, its runs read as agents. It runs no backend command.
 - `dispatch.test.ts` runs the dispatch endpoint over a fake `DispatchTrigger`
@@ -89,7 +92,8 @@ temporary directories by `worker-scenarios.ts`, never the real `/`.
   `collect.test.ts` gives the run no `incarnation.json` unless a test does, so put indices
   count only the run's own objects.
 - `collector-step.test.ts` runs the `collector` install step over a scripted `systemctl` that
-  writes to the step's log as the real one does. It also spawns
+  writes to the step's log as the real one does, given Paseo's private files (`PASEO_LAYOUT`)
+  unless a test gives a backend's own. It also spawns
   `support/aws-endpoint-probe-main.ts` under the service's environment, assembled from the unit
   text by systemd's rules (the manager's variables, then `Environment=`, then
   `UnsetEnvironment=`), with a `~/.aws` and inherited settings pointing at closed local ports, and

@@ -11,6 +11,7 @@ import {
   type WorktreeWork,
   workFindings,
   workInspectionJson,
+  workRoots,
 } from "../../src/domain/work-inspection";
 
 const HOSTNAME = "fff-abcd1234-builder-1";
@@ -59,6 +60,24 @@ function inspection(
     ...overrides,
   };
 }
+
+describe("where the inspection looks (host-protocol §work inspect / What it reads)", () => {
+  test("the repository root first, four levels down, then the backend's workspace roots in its order", () => {
+    const workspaces = [
+      { path: "/srv/workspaces", depth: 2 },
+      { path: "/home/factory/runs", depth: 3 },
+    ];
+    expect(workRoots(workspaces)).toEqual([
+      { path: "/workspace/repos", depth: 4 },
+      { path: "/srv/workspaces", depth: 2 },
+      { path: "/home/factory/runs", depth: 3 },
+    ]);
+  });
+
+  test("a backend with no workspace roots leaves the repository root alone", () => {
+    expect(workRoots([])).toEqual([{ path: "/workspace/repos", depth: 4 }]);
+  });
+});
 
 describe("the work inspection document (host-protocol §work inspect)", () => {
   test("serializes with a stable key order and reads back without loss", () => {

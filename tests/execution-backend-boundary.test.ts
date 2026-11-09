@@ -108,10 +108,6 @@ const ALLOW_LIST: readonly string[] = [
   "assets/steps/control-plane/**",
   "assets/steps/dispatch/dispatch-schedule.sh",
   "assets/steps/dispatch/tests/test_dispatch_schedule.py",
-  // Until #144: the backend's layout as data.
-  "src/host/work.ts",
-  "src/domain/work-inspection.ts",
-  "src/domain/collector-installation.ts",
 ];
 
 interface Quarantined extends Token {

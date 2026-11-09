@@ -4,7 +4,8 @@
  * endpoints and the dispatcher are tested without any backend's commands: it answers as given,
  * keeps to the run contract (asked for some work's runs, only the dispatched runs launched for
  * it, by `launchedFor`), and records every call and every budget and environment it was
- * selected with.
+ * selected with. Its layout is Paseo's unless given, so what a worker reads and writes by it
+ * stays byte for byte what the Paseo backend's gives.
  */
 import type { ControlPlaneAction } from "../../src/domain/control-plane";
 import type { HostProjection } from "../../src/domain/host-projection";
@@ -17,7 +18,11 @@ import {
   type WorkerRuns,
 } from "../../src/domain/run";
 import type { SecretMaterial } from "../../src/domain/secrets";
-import type { BackendSelection, ExecutionBackend } from "../../src/host/execution-backend";
+import type {
+  BackendLayout,
+  BackendSelection,
+  ExecutionBackend,
+} from "../../src/host/execution-backend";
 
 export type BackendCall =
   | { readonly method: "registerRepositories"; readonly checkouts: readonly string[] }
@@ -28,6 +33,7 @@ export type BackendCall =
       readonly projection: HostProjection;
       readonly password: SecretMaterial | undefined;
     }
+  | { readonly method: "layout" }
   | { readonly method: "reload" }
   | { readonly method: "restart" };
 
@@ -36,15 +42,25 @@ export interface BackendAnswers {
   readonly runs?: WorkerRuns | (() => Promise<WorkerRuns>);
   /** How a start ends, or how to start the run (by default, started as `run-1`). */
   readonly startRun?: RunStart | ((request: RunRequest) => Promise<RunStart>);
+  readonly layout?: BackendLayout;
   readonly install?: ControlPlaneAction;
   readonly reload?: ControlPlaneAction;
   readonly restart?: ControlPlaneAction;
 }
 
+/** The Paseo backend's layout (`src/host/paseo-backend.ts`), as `tests/host/paseo-backend.test.ts` pins it. */
+export const PASEO_LAYOUT: BackendLayout = {
+  workspaceRoots: [{ path: "/home/factory/.paseo/worktrees", depth: 3 }],
+  privateFiles: ["/home/factory/.paseo/config.json"],
+};
+
 const DONE: ControlPlaneAction = { kind: "done" };
 const STARTED: RunStart = { kind: "started", handle: { id: "run-1" } };
 
-/** A backend answering `answers` (by default no runs, nothing registered, every action done). */
+/**
+ * A backend answering `answers` (by default no runs, nothing registered, every action done, and
+ * Paseo's layout).
+ */
 export function fakeExecutionBackend(answers: BackendAnswers = {}) {
   const calls: BackendCall[] = [];
   const budgets: number[] = [];
@@ -65,6 +81,10 @@ export function fakeExecutionBackend(answers: BackendAnswers = {}) {
       const runs = typeof answer === "function" ? await answer() : answer;
       if (work === undefined || runs.kind !== "listed") return runs;
       return { kind: "listed", runs: launchedFor(runs.runs, work) };
+    },
+    layout() {
+      calls.push({ method: "layout" });
+      return answers.layout ?? PASEO_LAYOUT;
     },
     async install(projection, password) {
       calls.push({ method: "install", projection, password });

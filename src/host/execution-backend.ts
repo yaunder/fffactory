@@ -10,10 +10,27 @@ import type { HostProjection } from "../domain/host-projection";
 import type { RepositoryRegistration } from "../domain/repository-registration";
 import type { LaunchedWork, RunRequest, RunStart, WorkerRuns } from "../domain/run";
 import type { SecretMaterial } from "../domain/secrets";
+import type { WorkRoot } from "../domain/work-inspection";
 import type { ApplySystem } from "./apply";
 import { paseoBackend } from "./paseo-backend";
 
+/**
+ * Where the backend keeps what fffactory must know of it on a worker, as data
+ * (`docs/specs/execution-backend.md` §Layout): absolute paths on the worker.
+ */
+export interface BackendLayout {
+  /**
+   * Where it creates workspaces, each with how many levels below it one is looked for, in the
+   * order the work inspection searches them after the repository root.
+   */
+  readonly workspaceRoots: readonly WorkRoot[];
+  /** Its own files the log archive's collector must never read, such as a password hash. */
+  readonly privateFiles: readonly string[];
+}
+
 export interface ExecutionBackend {
+  /** Its layout on the worker; it runs nothing. */
+  layout(): BackendLayout;
   /**
    * Makes each checkout (the absolute path of a placed checkout present on disk) available for
    * supervision. Only adds: never deletes, renames or archives anything the backend holds, and

@@ -71,7 +71,10 @@ Rules:
   check, in process for the activator's `dispatch adoption`, as root, each check dropped to
   `factory`. It takes the backend selection as a parameter only so its tests can give a fake.
 - `execution-backend.ts` is the worker's one execution-backend interface, `ExecutionBackend`
-  (`docs/specs/execution-backend.md`), not an `application/` port: `registerRepositories`, the
+  (`docs/specs/execution-backend.md`), not an `application/` port: `layout()` (`BackendLayout`:
+  its workspace roots, each with its depth, and its private files, as data, running nothing;
+  `host work inspect` searches the roots after the repository root, the `collector` step hides
+  the files, and `domain/` takes both as input, naming no backend's path), `registerRepositories`, the
   runs group `startRun(request)` and `runs(work?)` (`domain/run.ts`'s types; the endpoint reads
   runs as agents), and the maintenance group `install(projection, password)`, `reload`,
   `restart` (`done` for a backend with no daemon). Stop and connect stay off it until a caller
@@ -81,7 +84,8 @@ Rules:
   dispatcher, is the process it acts for. Registration only adds: it never deletes, renames or archives what the backend
   holds, and never reloads or restarts it. Results are in fffactory's states and words.
 - `paseo-backend.ts`, the Paseo adapter, is the only worker code naming Paseo's CLI, setup
-  program, unit or bcrypt cost (`tests/execution-backend-boundary.test.ts`). It runs the Paseo CLI
+  program, unit, bcrypt cost or paths (`tests/execution-backend-boundary.test.ts`); its layout is
+  `~factory/.paseo/worktrees`, 3 levels down, and `~factory/.paseo/config.json`. It runs the Paseo CLI
   only as `factory` through the active release's `paseo-auth.sh` (`paseoCli`): from root by
   `runuser` and `env -i` with `FACTORY_ENV`, otherwise the wrapper itself in the caller's
   environment its selection was given, or `FACTORY_ENV`;
@@ -140,7 +144,10 @@ Rules:
   (`runuser`, `env -i`) with `GIT_OPTIONAL_LOCKS=0`, no fsmonitor and no LFS filter, so it
   writes no index, lock, ref or LFS object and never fetches. Its document carries counts and
   printable paths and branch names only (`printablePath`, `printableBranch`), never a file's
-  name or content. It bounds itself (`WORK_BUDGET_MS`, `WORK_LIMITS`, its search depth) and
+  name or content. It searches the repository root, then the workspace roots of the backend's
+  layout (`workRoots`), choosing the backend from the one selection point, which it takes as a
+  parameter only so its tests can give a fake. It bounds itself (`WORK_BUDGET_MS`,
+  `WORK_LIMITS`, each root's search depth) and
   says `complete: false` rather than guess: a search root reached through a symbolic link, a
   directory at the depth limit holding directories, or a bare repository, is incomplete, never
   no work. A path a repository lists as its worktree is that repository's only when the Git
@@ -181,7 +188,9 @@ Rules:
 - `collector-step.ts` implements the `collector` install step, last in `INSTALL_STEPS`
   (`docs/specs/host-protocol.md` §The collector step), the only other code on the worker that
   reads `log_archive`: with it, `/etc/fffactory/collector.json` and the service and timer
-  `domain/collector-installation.ts` defines, written by root (`root-files.ts`, shared with
+  `domain/collector-installation.ts` defines, the service hiding the backend's private files,
+  which `apply.ts` takes from the layout of the backend the one selection point chooses and
+  passes in, written by root (`root-files.ts`, shared with
   `credentials.ts`), then `/usr/bin/systemctl daemon-reload` and `enable --now` of the timer;
   without it, the timer disabled and a run stopped (each only while its unit file is there), the
   files removed and systemd reloaded, the state directory kept, and nothing at all where none of
