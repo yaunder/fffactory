@@ -42,12 +42,12 @@ holds its behavior:
 | # | Responsibility | Part | Today | Behavior |
 | --- | --- | --- | --- | --- |
 | R1 | Host a run: start a coding agent on a work item in a fresh worktree, with a provider, model, mode and prompt | backend | `factory-dispatch` runs `paseo run` | [§Start](#start) |
-| R2 | List and observe runs: agent states for capacity, maintenance deferral and removal; the launch history the duplicate check reads | backend | `paseoAgents` (`src/host/control-plane.ts`) through `host agents` and `host control-plane activity`; `factory-dispatch`'s labelled `paseo ls` | [§Inspect](#inspect) |
+| R2 | List and observe runs: agent states for capacity, maintenance deferral and removal; the launch history the duplicate check reads | backend | `ExecutionBackend.agents` through `host agents` and `host control-plane activity`; `factory-dispatch`'s labelled `paseo ls` | [§Inspect](#inspect) |
 | R3 | Isolate workspaces: create worktrees and own their paths | backend | Paseo creates them under `/home/factory/.paseo/worktrees`, which work inspection searches (`WORK_ROOTS`); the collector never reads Paseo's `config.json` | [host protocol §work inspect](host-protocol.md#work-inspect), [collector](collector.md) |
 | R4 | Supervise: a human reconnects to a run, inspects it and intervenes | backend | Paseo's clients over Tailscale | [§Connect](#connect) |
 | R5 | Trigger dispatch on a cadence | trigger | `dispatch-schedule.sh` over `paseo schedule` | [dispatch trigger](dispatch-trigger.md) |
 | R6 | Register the placed repositories for supervision | backend | `ExecutionBackend.registerRepositories`, Paseo projects | [§The `ExecutionBackend` contract](#the-executionbackend-contract) |
-| R7 | Keep the backend's software healthy: install, configure, authenticate, run the unit, probe health, reload, restart, classify changes, defer maintenance | maintenance | the `ControlPlane` port and its activator actions; `assets/steps/control-plane/` | [control plane](control-plane.md) |
+| R7 | Keep the backend's software healthy: install, configure, authenticate, run the unit, probe health, reload, restart, classify changes, defer maintenance | maintenance | the `ControlPlane` port and its activator actions, which the worker answers through `ExecutionBackend`'s maintenance group; `assets/steps/control-plane/` | [control plane](control-plane.md) |
 
 R1 to R4 are the run contract below. R6 is a convenience the backend offers
 supervision. R7 maintains whatever the backend is; the operator-side
@@ -64,7 +64,7 @@ those are the adapter's.
 | Operation | The caller supplies | The backend returns | Status |
 | --- | --- | --- | --- |
 | Start | a launch identity (repository alias, work item, attempt stamp), the checkout and base branch, the branch to create, the workflow invocation, and agent settings (provider, model, mode) | a run handle, or a failure in fffactory's words | implemented in `factory-dispatch`, not yet behind the seam ([#143](https://github.com/yaunder/fffactory/issues/143)) |
-| Inspect | nothing, or a launch identity | the runs it holds in fffactory's [agent states](control-plane.md#agent-states), with whether dispatch launched them; unreadable is unknown, never a guess | implemented outside the seam: states by `paseoAgents` ([#140](https://github.com/yaunder/fffactory/issues/140)), launch history in `factory-dispatch` ([#143](https://github.com/yaunder/fffactory/issues/143)) |
+| Inspect | nothing, or a launch identity | the runs it holds in fffactory's [agent states](control-plane.md#agent-states), with whether dispatch launched them; unreadable is unknown, never a guess | states behind the seam (`agents`); launch history in `factory-dispatch`, not yet behind it ([#143](https://github.com/yaunder/fffactory/issues/143)) |
 | Connect | a run | an authorized way to observe and intervene in that same run | not on the interface: Paseo's own clients serve it ([§Connect](#connect)) |
 | Stop | a run | the run stopped, its workspace and history kept | not implemented |
 
@@ -88,11 +88,13 @@ nothing from the scheduled agent that runs the dispatcher. Tested in
 
 ### Inspect
 
-A worker's agents in fffactory's states come from the one Paseo adapter,
-`paseoAgents` ([control plane §Agent states](control-plane.md#agent-states)),
-which `host control-plane activity` and `host agents`
-([host protocol §agents](host-protocol.md#agents)) run; dispatch's capacity
-check reads `host agents` ([dispatch §Capacity](dispatch.md#capacity)).
+A worker's agents in fffactory's states come from the backend's `agents`
+([§The `ExecutionBackend` contract](#the-executionbackend-contract)), whose
+Paseo adapter translates Paseo's statuses
+([control plane §Agent states](control-plane.md#agent-states));
+`host control-plane activity` and `host agents`
+([host protocol §agents](host-protocol.md#agents)) ask it, and dispatch's
+capacity check reads `host agents` ([dispatch §Capacity](dispatch.md#capacity)).
 
 The launch history the duplicate check (`previously_dispatched`) reads is
 still the dispatcher's own Paseo call: it lists the agents labelled for the epic
@@ -109,6 +111,36 @@ daemon directly; fffactory brokers nothing.
 
 ## The `ExecutionBackend` contract
 
+The worker has one execution-backend interface, `ExecutionBackend`
+(`src/host/execution-backend.ts`), and one place that chooses it,
+`executionBackend(system, budgetMs)`, hardwired to Paseo: factory.json has no
+backend selector until a second backend is built. Every command the chosen
+backend runs falls within the budget its caller gives, from when it was
+chosen: a command that would start past it, or outlasts it, has failed. Its
+answers are in fffactory's states and words, never the backend's own status,
+field, label or output. The interface has three groups:
+
+| Group | Operation | Caller |
+| --- | --- | --- |
+| registration | `registerRepositories(checkouts)` | `host dispatch reconcile` ([dispatch §Repository registration](dispatch.md#repository-registration)) |
+| agents | `agents()`: the worker's agents in fffactory's [agent states](control-plane.md#agent-states), each with whether dispatch launched it, or `unknown` with fffactory's reason | `host control-plane activity` (as root) and `host agents` (as `factory`) |
+| maintenance | `install(projection, password)`, `reload()`, `restart()`: each `done`, or `failed` with fffactory's reason | `host control-plane install`, `reload`, `restart` |
+
+The worker endpoints call the seam, never a backend's commands. The
+control-plane endpoint (`src/host/control-plane.ts`) keeps what is the
+activator's, whichever the backend: the privilege rules (`activity` and the
+maintenance actions only as root, `host agents` never as root), the host
+projection read from standard input and checked for this worker, and the
+password the projection references, read by that reference as root
+([control plane §The daemon password](control-plane.md#the-daemon-password)).
+It hands the backend the projection and the password, never judged, and
+passes its answer on as it is. It chooses the backend within 90 seconds for
+the agents (under the CLI's two-minute wait) and two minutes for each
+maintenance action. A backend without a daemon answers `reload` and `restart`
+with `done`.
+
+### Registration
+
 The checkouts are the absolute paths of the repositories the host's repository
 manifest ([repositories](repositories.md), `REPOSITORY_MANIFEST_PATH`) places,
 under `/workspace/repos`, in placement order (`placedCheckouts`). A manifest
@@ -117,9 +149,8 @@ whose path is not a relative checkout path, is refused in fffactory's words,
 never quoted. When registration runs, and what of its result apply reports, is
 dispatch's ([dispatch §Repository registration](dispatch.md#repository-registration)).
 
-The worker-side `ExecutionBackend` (`src/host/execution-backend.ts`) has one
-operation, `registerRepositories(checkouts)`. Given the absolute paths of placed
-checkouts present on disk, it returns a backend-neutral result:
+Given the absolute paths of placed checkouts present on disk,
+`registerRepositories` returns a backend-neutral result:
 
 - `backend`: the backend's name, `paseo`;
 - `checkouts`: per checkout, its `path` and `state`: `registered` (newly),
@@ -130,29 +161,6 @@ checkouts present on disk, it returns a backend-neutral result:
 It only adds: it never deletes, renames or archives a project, and never
 reloads or restarts the daemon. With no checkouts it asks the backend nothing.
 
-The backend is chosen in one place, `executionBackend`, hardwired to Paseo:
-factory.json has no backend selector until a second backend is built.
-
-The Paseo adapter (`src/host/paseo-backend.ts`), the only code naming Paseo's
-project commands, runs them through the `PaseoCommand` it is given: the Paseo
-CLI as `factory`, authenticated by the active release's `paseo-auth.sh`, the
-one `paseoAgents` takes; it builds no command of its own, and the password is
-never one of its arguments. It relies on the project contract proved against
-the pin ([control plane §The Paseo pin](control-plane.md#the-paseo-pin)):
-
-1. `paseo project ls --json`: each checkout whose absolute path is a listed
-   project's `path` is `present`;
-2. `paseo project create <path> --json` for each checkout not listed, in order:
-   exit 0 is `registered`. Listing first keeps a rerun a true no-op
-   (`changed: false`) and leaves existing projects untouched.
-
-If listing fails (it exits non-zero, times out, cannot start, or prints
-anything but a JSON array of objects each with a string `path`), every checkout
-is `failed` and nothing is created. One failed `create` fails only that
-checkout. The reasons say what fffactory did and how it ended: `listing
-Paseo's projects exited with status 1`, `Paseo's project list was invalid`,
-`registering it as a Paseo project timed out`.
-
 The result's document, carried by the dispatch inspection, has the keys
 `backend`, `changed` and `checkouts` in that order, each checkout `path`,
 `state` and, when `failed`, `reason`. Its reader ignores fields it does not
@@ -162,13 +170,51 @@ outside `/workspace/repos` or escaping it, a failure without a one-line
 printable reason, or `changed` disagreeing with the checkouts), so it never
 invalidates the document carrying it.
 
+### The Paseo adapter
+
+`src/host/paseo-backend.ts` is the only worker code that names Paseo's CLI,
+its auth wrapper, its setup program, its unit or its password's bcrypt cost.
+It runs the Paseo CLI only as `factory`, authenticated by the active release's
+`paseo-auth.sh`: from root, through `runuser -u factory` and `env -i` with
+`factory`'s `HOME` and `PATH` alone; run as `factory` (`host agents`), the
+wrapper itself with that environment. The password is never one of its
+arguments. It relies on the contract proved against the pin
+([control plane §The Paseo pin](control-plane.md#the-paseo-pin)):
+
+- **Registration.** `paseo project ls --json`: each checkout whose absolute
+  path is a listed project's `path` is `present`; then `paseo project create
+  <path> --json` for each checkout not listed, in order: exit 0 is
+  `registered`. Listing first keeps a rerun a true no-op (`changed: false`)
+  and leaves existing projects untouched. If listing fails (it exits non-zero,
+  times out, cannot start, or prints anything but a JSON array of objects each
+  with a string `path`), every checkout is `failed` and nothing is created. One
+  failed `create` fails only that checkout. The reasons say what fffactory did
+  and how it ended: `listing Paseo's projects exited with status 1`, `Paseo's
+  project list was invalid`, `registering it as a Paseo project timed out`.
+- **Agents.** `paseo ls --global --background`, its labelled list and
+  `agent inspect` for each running agent, translated into fffactory's states
+  ([control plane §Agent states](control-plane.md#agent-states)).
+- **Maintenance.** `install` hashes the password at Paseo's bcrypt cost and
+  sends the active release's `setup-host.sh` the reference and the hash on
+  standard input ([control plane §The daemon password](control-plane.md#the-daemon-password));
+  `reload` is `paseo daemon reload` as `factory`; `restart` is
+  `systemctl restart paseo.service`. A failure is `Paseo setup`, `Paseo
+  reload` or `Paseo restart` and how it ended (`exited 1`, `timed_out`), never
+  the command's output.
+
 Tested in `tests/domain/repository-registration.test.ts` (the placed checkouts
-from a manifest, the result, its document and reader) and
-`tests/host/paseo-backend.test.ts`, over a fake `PaseoCommand` answering as
-0.15.0 prints: nothing missing creates nothing and changes nothing; some missing
-creates only those; a rerun is a no-op; listing failing fails every checkout;
-one create failing fails only it, with no Paseo output in its reason; only `ls`
-and `create` are ever run; and the password reaches no argument or result.
+from a manifest, the result, its document and reader),
+`tests/host/paseo-backend.test.ts`, over a scripted runner answering as 0.15.0
+prints (the exact commands, as `factory` from root and as itself, and their
+environment; registration: nothing missing creates nothing and changes nothing,
+some missing creates only those, a rerun is a no-op, listing failing fails
+every checkout, one create failing fails only it with no Paseo output in its
+reason, only `ls` and `create` are ever run; the agents; install, reload and
+restart; the budget; and the password reaches no argument, environment, setup
+input or result), and `tests/host/control-plane.test.ts`, the endpoint over a
+fake backend (`tests/support/fake-execution-backend.ts`): privilege, the
+projection, the password read, the budgets it chooses with, and the backend's
+answers passed on.
 
 ## The boundary
 
@@ -179,7 +225,7 @@ outside the allow-list that names:
 
 | Behavior | What it matches |
 | --- | --- |
-| the Paseo CLI | a run of `paseo` with one of the top-level commands of the pinned 0.15.0 (`agent`, `archive`, `attach`, `clone`, `daemon`, `delete`, `heartbeat`, `hooks`, `host`, `hub`, `import`, `inspect`, `logs`, `ls`, `onboard`, `pair`, `permit`, `plugin`, `project`, `provider`, `reload`, `restart`, `run`, `schedule`, `script`, `send`, `speech`, `start`, `status`, `stop`, `terminal`, `usage`, `wait`, `workspace`, `worktree`): after any root options before the command (`--json`, `-o json`, `--host=h`; an option's value never starts with a dash): on a command line, also through a shell variable named `paseo` or `PASEO` (`paseo -o json ls`, `"$paseo" ls`, `"${PASEO}" schedule ls`); or as an argument list whose program is the string `paseo`, a path ending in `/paseo`, or a variable named `paseo` or `PASEO` (`["paseo", "ls"]`, `["paseo", "-o", "json", "ls"]`, `execFile("paseo", ["ls"])`, `command_json(PASEO, "ls")`), but not when the command is a quoted key (`"runtime": "paseo", "status": "ok"`); or a function named `paseo` called with an argument list (`paseo(["project", "ls"])`); and the TypeScript handles that run it, `PaseoCommand`, `factoryPaseo` and `paseoAgents` |
+| the Paseo CLI | a run of `paseo` with one of the top-level commands of the pinned 0.15.0 (`agent`, `archive`, `attach`, `clone`, `daemon`, `delete`, `heartbeat`, `hooks`, `host`, `hub`, `import`, `inspect`, `logs`, `ls`, `onboard`, `pair`, `permit`, `plugin`, `project`, `provider`, `reload`, `restart`, `run`, `schedule`, `script`, `send`, `speech`, `start`, `status`, `stop`, `terminal`, `usage`, `wait`, `workspace`, `worktree`): after any root options before the command (`--json`, `-o json`, `--host=h`; an option's value never starts with a dash): on a command line, also through a shell variable named `paseo` or `PASEO` (`paseo -o json ls`, `"$paseo" ls`, `"${PASEO}" schedule ls`); or as an argument list whose program is the string `paseo`, a path ending in `/paseo`, or a variable named `paseo` or `PASEO` (`["paseo", "ls"]`, `["paseo", "-o", "json", "ls"]`, `execFile("paseo", ["ls"])`, `command_json(PASEO, "ls")`), but not when the command is a quoted key (`"runtime": "paseo", "status": "ok"`); or a function named `paseo` called with an argument list (`paseo(["project", "ls"])`); and the TypeScript handles that run it, `PaseoCommand`, `paseoCli` and `paseoAgents` |
 | Paseo's paths | `.paseo`, and `paseoWorktrees`, the name of its worktree root |
 | Paseo's environment | `PASEO_` followed by a letter, also inside a longer name such as `FACTORY_PASEO_BIN` |
 | Paseo's port | `6767` |
@@ -201,12 +247,11 @@ stay.
 
 | Entry | Names | Stays, or leaves with |
 | --- | --- | --- |
-| `src/host/paseo-backend.ts` | the CLI's handle, the auth wrapper | stays: the `ExecutionBackend` adapter |
+| `src/host/paseo-backend.ts` | the CLI and its handles, the auth wrapper, the unit, the package | stays: the `ExecutionBackend` adapter |
 | `src/infrastructure/paseo-control-plane.ts` | the port, by `PASEO_PORT` | stays: the operator-side `ControlPlane` adapter |
 | `assets/steps/control-plane/**` | everything: install, config, auth wrapper, unit, pin, and their tests | stays: the backend's shipped assets |
 | `assets/steps/dispatch/dispatch-schedule.sh` and its `tests/test_dispatch_schedule.py` | the CLI, the environment, the auth wrapper | stays: the trigger's Paseo adapter |
-| `src/host/control-plane.ts`, `src/host/execution-backend.ts` | the CLI's handles, the environment, the unit, the package, the auth wrapper | [#140](https://github.com/yaunder/fffactory/issues/140): `HostControlPlane` folds into `ExecutionBackend` |
-| `src/host/dispatch.ts` | `factoryPaseo`; `PASEO_HOME`, `FACTORY_PASEO_BIN`, the auth wrapper | [#140](https://github.com/yaunder/fffactory/issues/140) and [#141](https://github.com/yaunder/fffactory/issues/141): the `DispatchTrigger` seam |
+| `src/host/dispatch.ts` | `PASEO_HOME`, `FACTORY_PASEO_BIN`, the auth wrapper | [#141](https://github.com/yaunder/fffactory/issues/141): the `DispatchTrigger` seam |
 | `assets/steps/dispatch/factory-dispatch` and its `tests/test_factory_dispatch.py` | the CLI, the paths, the environment, the auth wrapper | [#142](https://github.com/yaunder/fffactory/issues/142): the dispatcher in TypeScript |
 | `src/host/work.ts`, `src/domain/work-inspection.ts`, `src/domain/collector-installation.ts` | the paths | [#144](https://github.com/yaunder/fffactory/issues/144): the backend's layout as data |
 
@@ -226,7 +271,7 @@ while they wait to be renamed. The test lists each name's files:
 | Name | What it is |
 | --- | --- |
 | `paseo-password` | the secret's CLI name and its error text |
-| `paseo_password_secret*` | factory.json's per-host reference, its Terraform variable and their checks |
+| `paseo_password_secret*` | factory.json's per-host reference, its Terraform variable and their checks, and the control-plane endpoint's read of it |
 | `paseo-package`, `paseo-configuration` | control-plane change names |
 | `paseo_health` | the dispatch gate |
 | `paseo_changed` | the stale-plan reason |
@@ -250,12 +295,14 @@ its own file and in another, and stale entries.
 | The registration result, its document and reader; the backend's name | domain (pure) | `src/domain/repository-registration.ts` |
 | fffactory's agent states and the busy rule | domain (pure) | `src/domain/control-plane.ts` |
 | Paseo's worktree root, searched by work inspection | domain (pure) | `src/domain/work-inspection.ts` (`WORK_ROOTS`) |
-| The `ExecutionBackend` seam and its one selection point | host | `src/host/execution-backend.ts` |
-| The Paseo adapter: `project ls`, then `project create` for the missing | host | `src/host/paseo-backend.ts` |
-| The agent adapter (`paseoAgents`), the Paseo CLI as `factory` (`PaseoCommand`, `factoryPaseo`) | host | `src/host/control-plane.ts` |
+| The `ExecutionBackend` seam (registration, agents, maintenance) and its one selection point | host | `src/host/execution-backend.ts` |
+| The Paseo adapter: the Paseo CLI as `factory` (`paseoCli`), projects, the agent adapter (`paseoAgents`), setup with the bcrypt hash, reload and the unit's restart | host | `src/host/paseo-backend.ts` |
+| The worker endpoints calling the seam: the control-plane actions and `host agents`, dispatch reconcile's registration | host | `src/host/control-plane.ts`, `src/host/dispatch.ts`, `src/host/endpoint.ts` |
 | The run launch and the duplicate check's listing | release assets | `assets/steps/dispatch/factory-dispatch` |
 | The boundary | check | `tests/execution-backend-boundary.test.ts` |
 
 Introduced by [#139](https://github.com/yaunder/fffactory/issues/139) (epic
-[#136](https://github.com/yaunder/fffactory/issues/136)). The `ExecutionBackend`
+[#136](https://github.com/yaunder/fffactory/issues/136)); one worker-side
+interface, `HostControlPlane` folded into it:
+[#140](https://github.com/yaunder/fffactory/issues/140). The `ExecutionBackend`
 contract: [#133](https://github.com/yaunder/fffactory/issues/133).

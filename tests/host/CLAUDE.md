@@ -39,18 +39,20 @@ temporary directories by `worker-scenarios.ts`, never the real `/`.
 - `credentials.test.ts` runs the `credentials` step over a scripted runner, Secrets Manager
   answered by ARN: it asserts each command, deadline and standard input, and searches every
   argument, environment value and log line for the material it used.
-- `control-plane.test.ts` runs the control-plane endpoint over a scripted runner: for
-  activity and `host agents`, a scripted Paseo (`paseo`) answering its lists and each agent's
-  inspection, as 0.15.0 prints them, after the auth wrapper however it was run; for install,
-  Secrets Manager answering the Paseo password: it checks the hash setup is sent with
-  `bcryptjs`'s `compareSync`, and searches every argument, environment value and setup input
-  for the password.
+- `control-plane.test.ts` runs the control-plane endpoint and `host agents` over a fake
+  `ExecutionBackend` (`support/fake-execution-backend.ts`, which records every call and every
+  budget its selection was given) and, for install, Secrets Manager answering the Paseo
+  password: privilege, the projection, the password read and handed on, the budgets, and the
+  backend's answers passed on. It runs no backend command.
 - `dispatch.test.ts` runs the dispatch endpoint over a scripted runner telling the schedule's
   commands from Paseo's (after the auth wrapper), with a repository manifest and checkouts laid
   out under the temporary root (`placeRepositories`).
-- `paseo-backend.test.ts` runs the Paseo adapter over a fake `PaseoCommand` answering `project
-  ls` and `project create` as Paseo 0.15.0 prints them, and searches every argument and result
-  for the auth wrapper's password.
+- `paseo-backend.test.ts` runs the Paseo adapter over a scripted runner: Paseo's own arguments
+  after the auth wrapper, however it was run (from root by `runuser`, or as `factory`), answered
+  as Paseo 0.15.0 prints them (`project ls` and `project create`, the agent lists and each
+  agent's inspection), and setup and `systemctl`. It asserts each command, environment, budget
+  and setup input; checks the hash setup is sent with `bcryptjs`'s `compareSync`; and searches
+  every argument, environment value, setup input and result for the password.
 - `verify.test.ts` answers every command with a scripted runner; `inspect.test.ts` covers the
   unprivileged read-only inspection.
 - `collect.test.ts` runs the collection run (`docs/specs/collector.md` §Run) over a Claude root

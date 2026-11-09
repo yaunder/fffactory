@@ -1159,9 +1159,10 @@ runs it. The dispatcher runs it on the worker as `factory`, with the active
 release's executable, and not through the activator, so a dispatch tick never
 waits on the host-operation lock and needs no root. It changes nothing.
 
-It lists the agents through the same adapter as
-[control-plane activity](#control-plane-activity) (`paseoAgents`), but runs the
-active release's `paseo-auth.sh` itself, with only `HOME=/home/factory` and
+It lists the agents through the same execution backend as
+[control-plane activity](#control-plane-activity) (its `agents`, the Paseo
+adapter's `paseoAgents`), but the backend runs the active release's
+`paseo-auth.sh` itself, as `factory`, with only `HOME=/home/factory` and
 `factory`'s `PATH` in its environment, every Paseo call within the same
 90-second budget. It prints the [activity document](#the-activity-document),
 indented by two spaces, on standard output: every agent's ID, fffactory state
@@ -1241,7 +1242,8 @@ never elsewhere: it prints no path, no AWS or SDK message and no credential.
 | Worker | `src/host/verify.ts` | `workerVerifier`: the verifiers and enrollment checks. |
 | Worker | `src/host/dispatch.ts` | Dispatch adoption, installation, reconciliation and checked observation, with privilege drop, and registering the placed checkouts through the execution backend after the schedule. |
 | Worker | `src/host/work.ts` | `workerWork`: the work inspection, over the worker's working trees, as `factory`, read-only, and the archive's backlog, from the collector's checkpoint and its discovery (`discoverSources` in `src/host/collect.ts`), as root. |
-| Worker | `src/host/control-plane.ts` | `workerControlPlane`: the Paseo activity, install, reload and restart, and `host agents`; `paseoAgents`, the adapter translating Paseo's agents into fffactory's states. |
+| Worker | `src/host/control-plane.ts` | `workerControlPlane`: the control-plane activity, install, reload and restart, and `host agents`: privilege, the projection and the password read by reference, the rest asked of the execution backend. |
+| Worker | `src/host/execution-backend.ts`, `src/host/paseo-backend.ts` | `ExecutionBackend` and its one selection point; `paseoBackend`, the Paseo adapter, with `paseoAgents` translating Paseo's agents into fffactory's states ([execution backend](execution-backend.md)). |
 | Worker | `src/host/collect.ts` | `collectOnce`: one collection run under the collector's own lock, through an `ArchiveWriter` ([collector §Run](collector.md#run)). |
 | Worker | `src/host/collection.ts` | `workerCollection`: `host collect --once`, its configuration, the run and its heartbeat; `localCollectionSystem`, this worker's, checking open sources in `/proc/self/fd` (`OPEN_FILES`). |
 | Worker | `src/host/s3-archive-writer.ts` | `openInstanceArchive`: the `ArchiveWriter` over S3 with the instance role's IMDSv2 credentials, its incarnation and account from STS. |
@@ -1267,9 +1269,11 @@ and the CLI reads it back without loss, over the transport, into the agents
 the busy rule judges; `host agents`, run as `factory`, produces the same
 fixture from the same Paseo, and the dispatcher's Python test reads it as its
 capacity check's answer. `tests/host/control-plane.test.ts` runs `host agents`
-over a scripted Paseo (the auth wrapper run as itself, in `factory`'s
-environment, the budget, an unreadable list, root refused), and
-`tests/cli/host.test.ts` its exit statuses and refusals, and `host collect`'s
+over a fake backend (root refused, the 90-second budget the selection is given,
+an unknown answer passed on), `tests/host/paseo-backend.test.ts` the Paseo
+backend's agents over a scripted Paseo (the auth wrapper run as itself, in
+`factory`'s environment, the budget each command is given, an unreadable list),
+and `tests/cli/host.test.ts` its exit statuses and refusals, and `host collect`'s
 lines, exit statuses and refusals (root, no `--once`); `tests/host/collection.test.ts`
 runs `host collect --once` itself against a loopback instance metadata service
 and stub STS and S3 ([collector §Credentials and publishing](collector.md#credentials-and-publishing)). The other direction, a document the CLI sends, is

@@ -29,7 +29,6 @@ import { placedCheckouts, type RepositoryRegistration } from "../domain/reposito
 import { WORK_ROOTS } from "../domain/work-inspection";
 import type { ProcessOutcome } from "../infrastructure/local-tool-probe";
 import type { ApplySystem } from "./apply";
-import { factoryPaseo } from "./control-plane";
 import { executionBackend } from "./execution-backend";
 import { FACTORY_HOME } from "./runtime-account";
 
@@ -251,7 +250,7 @@ async function registerRepositories(
   try {
     const checkouts = await presentCheckouts(system.root);
     if (checkouts === undefined) return undefined;
-    const backend = executionBackend(factoryPaseo(system, REGISTRATION_BUDGET_MS));
+    const backend = executionBackend(system, REGISTRATION_BUDGET_MS);
     return await backend.registerRepositories(checkouts);
   } catch {
     return undefined;

@@ -6,7 +6,7 @@ import { type ApplySystem, type HostApplier, workerApplier } from "./apply";
 import { type HostInspector, workerInspector } from "./inspect";
 import { type HostVerifier, workerVerifier } from "./verify";
 import { type HostRepositories, workerRepositories } from "./repositories";
-import { type HostControlPlane, workerControlPlane } from "./control-plane";
+import { type ControlPlaneEndpoint, workerControlPlane } from "./control-plane";
 import { type HostDispatch, workerDispatch } from "./dispatch";
 import { type HostWork, workerWork } from "./work";
 import type { HostCollector } from "./collection";
@@ -16,7 +16,7 @@ export interface WorkerEndpoint
     HostApplier,
     HostVerifier,
     HostRepositories,
-    HostControlPlane,
+    ControlPlaneEndpoint,
     HostDispatch,
     HostWork,
     HostCollector {

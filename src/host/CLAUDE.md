@@ -32,34 +32,39 @@ and `host collect --once`, which the log archive's timer runs as `factory`
   `/var/lib/fffactory`, but runs Git and the shipped repository step as `factory` through
   `runuser` and `env -i`; neither the operator nor `factory` receives broader sudo.
 - `host control-plane` runs only through the activator's fixed `activity`, `install`,
-  `reload` and `restart` actions and shares that lock. Activity and reload drop to
-  `factory`. Activity runs `paseoAgents`, the one place Paseo's agent statuses are known: it
-  translates them into `domain/control-plane.ts`'s `AgentState`, inspects only `running`
-  agents, and answers `unknown` for anything it cannot read, all its calls within one budget
-  (`ACTIVITY_BUDGET_MS`) under the CLI's wait; no Paseo status, field or label
-  reaches its document. It takes a `PaseoCommand`, so another caller can run Paseo its own
-  way; from root that is `factoryPaseo`, within a budget its caller gives. Install reads the
-  host projection from standard input, reads the Paseo password by its reference as root and
-  hashes it (bcryptjs at Paseo's cost), and invokes only the active release's setup program,
-  the reference and the hash on its standard input; the password reaches only the hash
-  function. Restart is the fixed Paseo systemd action.
+  `reload` and `restart` actions and shares that lock. `control-plane.ts` is the endpoint: it
+  keeps the privilege rules (each action only as root), reads the host projection from standard
+  input and checks it is this worker's, and reads the password the projection references by
+  that reference as root (`secret-value.ts`), never judging it; everything else it asks of the
+  execution backend from the one selection point and passes the answer on as it is: the agents
+  within one budget (`ACTIVITY_BUDGET_MS`) under the CLI's wait, each maintenance action within
+  `ACTION_BUDGET_MS`. It names no backend command. It takes the selection point as a parameter
+  only so its tests can give a fake backend (`tests/support/fake-execution-backend.ts`).
 - `host agents --json` is the one subcommand neither the operator's fffactory nor the
   activator runs: the worker's dispatcher runs it as `factory` for its capacity check, so a
-  dispatch tick never waits on the install lock. It refuses root, runs `paseoAgents` through
-  the active release's auth wrapper itself in `factory`'s clean environment
-  (`FACTORY_ENV`), within the activity's budget, prints the activity document, and exits 1
-  when the agents are unknown, so dispatch fails safe.
-- `execution-backend.ts` is the worker-side `ExecutionBackend` seam
-  (`docs/specs/execution-backend.md`), not an `application/` port: one operation,
-  `registerRepositories`, the one with a caller. Run operations join it only when dispatch moves
-  behind it. `executionBackend` is the one place a backend is chosen, hardwired to Paseo until a
-  second adapter exists (its TODO). A backend only adds: it never deletes, renames or archives
-  what the backend holds, and never reloads or restarts it. Its result is
-  `domain/repository-registration.ts`'s, failures in fffactory's words.
-- `paseo-backend.ts`, the Paseo adapter, is the only code naming Paseo's project commands:
-  `project ls --json`, then `project create PATH --json` for each checkout not listed, each
-  through the `PaseoCommand` it is given (the auth wrapper as `factory`), never a `runuser` of
-  its own. A failed list fails every checkout; a failed create fails only its own.
+  dispatch tick never waits on the install lock. It refuses root, asks the backend's `agents`
+  within the activity's budget, prints the activity document, and exits 1 when the agents are
+  unknown, so dispatch fails safe.
+- `execution-backend.ts` is the worker's one execution-backend interface, `ExecutionBackend`
+  (`docs/specs/execution-backend.md`), not an `application/` port: `registerRepositories`,
+  `agents`, and the maintenance group `install(projection, password)`, `reload`, `restart`
+  (`done` for a backend with no daemon). Run operations join it only when dispatch moves behind
+  it. `executionBackend(system, budgetMs)` is the one place a backend is chosen, hardwired to
+  Paseo until a second adapter exists (its TODO); every command the backend runs falls within
+  that budget. Registration only adds: it never deletes, renames or archives what the backend
+  holds, and never reloads or restarts it. Results are in fffactory's states and words.
+- `paseo-backend.ts`, the Paseo adapter, is the only worker code naming Paseo's CLI, its auth
+  wrapper, setup program, unit or bcrypt cost (`tests/execution-backend-boundary.test.ts`). It
+  runs the Paseo CLI only as `factory` through the active release's `paseo-auth.sh`
+  (`paseoCli`): from root by `runuser` and `env -i` with `FACTORY_ENV`, otherwise the wrapper
+  itself with `FACTORY_ENV`. `paseoAgents` is the one place Paseo's agent statuses are known:
+  it translates them into `domain/control-plane.ts`'s `AgentState`, inspects only `running`
+  agents, and answers `unknown` for anything it cannot read; no Paseo status, field or label
+  reaches a result. Registration is `project ls --json`, then `project create PATH --json` for
+  each checkout not listed; a failed list fails every checkout, a failed create only its own.
+  Install hashes the password (bcryptjs at Paseo's cost) and invokes only the active release's
+  setup program, the reference and the hash on its standard input; the password reaches only
+  the hash function. Reload is `daemon reload`; restart is the fixed Paseo systemd action.
 - `secret-value.ts` reads a delivered secret by its ARN with `/usr/bin/aws` as root, for the
   `credentials` step and the control-plane install: a `SecretMaterial`, or why not in
   fffactory's words (the AWS error's name at most).
@@ -69,11 +74,11 @@ and `host collect --once`, which the log archive's timer runs as `factory`
 - `host dispatch` runs only through the activator's fixed `adoption`, `reconcile` and
   `inspect` actions and shares that lock. It installs only the active release's assets,
   persists canonical desired and observed state, and drops to `factory` for FFFlow,
-  repository and Paseo commands. Inspection checks the schedule before reporting active.
+  repository and Paseo schedule commands. Inspection checks the schedule before reporting active.
   After the schedule, every reconcile registers the manifest's placed checkouts present on disk
   as directories, none reached through a link from the repository root down, as sync refuses
-  them, through `executionBackend` over `factoryPaseo` (`control-plane.ts`, the
-  `PaseoCommand` root runs, activity's too), never Paseo directly, and records the result as
+  them, through the backend `executionBackend` chooses, never Paseo directly, and records the
+  result as
   `repository_registration`; it never changes the state, blockers or `changed`. No manifest is
   no checkouts; an unreadable or invalid one, or a registration that throws, records no
   registration, and the schedule's result is still persisted.

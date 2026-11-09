@@ -253,9 +253,8 @@ not yet cloned is left out, and so is one reached through a symbolic link (the
 repository root, the checkout, or any directory between), as the sync program
 refuses it ([repositories](repositories.md)). It hands those to the selected
 [execution backend](execution-backend.md#the-executionbackend-contract), never
-to Paseo directly, the backend's Paseo command being `factoryPaseo`
-(`src/host/control-plane.ts`), the one activity takes, all its calls within one
-two-minute budget. The result is
+to Paseo directly, chosen once from the one selection point
+(`executionBackend`) with all its calls within one two-minute budget. The result is
 the inspection's `repository_registration`
 ([host protocol §The dispatch inspection document](host-protocol.md#the-dispatch-inspection-document)),
 in the result the endpoint persists and in the one it returns.

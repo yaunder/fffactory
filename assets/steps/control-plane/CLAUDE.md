@@ -23,7 +23,7 @@ Spec: [docs/specs/control-plane.md](../../../docs/specs/control-plane.md).
   it as `factory`; its inputs are `FACTORY_PASEO_*` variables, so it runs on a
   laptop. It needs no root and no worker: keep anything that does in setup.
 - The password reaches setup only as its hash, made by the worker executable
-  (`src/host/control-plane.ts`) and read from standard input after the secret
+  (`src/host/paseo-backend.ts`) and read from standard input after the secret
   reference. The hash goes to `paseo-config.sh` in its environment and to `jq` through `$ENV`,
   never as an argument (runuser's command line is world-readable), and is never echoed.
 - `paseo.service` runs `paseo daemon run` directly, never through `paseo-auth.sh`: the daemon

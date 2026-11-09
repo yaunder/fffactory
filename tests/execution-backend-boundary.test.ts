@@ -80,7 +80,7 @@ const CLI = new RegExp(
     String.raw`\b(?:paseo|PASEO)\}?["']?${OPTIONS}\s+(?:${COMMANDS})\b`,
     String.raw`(?:["'](?:[^"'\s]*\/)?paseo["']|\b(?:paseo|PASEO)\b)\s*,\s*\[?\s*${OPTION_ELEMENTS}["'](?:${COMMANDS})["'](?!\s*:)`,
     String.raw`\bpaseo\s*\(\s*\[\s*${OPTION_ELEMENTS}["'](?:${COMMANDS})["']`,
-    String.raw`\b(?:PaseoCommand|factoryPaseo|paseoAgents)\b`,
+    String.raw`\b(?:PaseoCommand|paseoCli|paseoAgents)\b`,
   ].join("|"),
 );
 
@@ -107,10 +107,7 @@ const ALLOW_LIST: readonly string[] = [
   "assets/steps/control-plane/**",
   "assets/steps/dispatch/dispatch-schedule.sh",
   "assets/steps/dispatch/tests/test_dispatch_schedule.py",
-  // Until #140: HostControlPlane folds into ExecutionBackend.
-  "src/host/control-plane.ts",
-  "src/host/execution-backend.ts",
-  // Until #140 (`factoryPaseo`) and #141 (the trigger's environment).
+  // Until #141: the trigger's environment and auth wrapper.
   "src/host/dispatch.ts",
   // Until #142: the dispatcher is ported to TypeScript.
   "assets/steps/dispatch/factory-dispatch",
@@ -158,6 +155,7 @@ const QUARANTINE: readonly Quarantined[] = [
       "src/domain/host-removal.ts",
       "src/domain/instance.ts",
       "src/domain/secrets.ts",
+      "src/host/control-plane.ts",
     ],
   },
   {
@@ -315,6 +313,7 @@ describe("the boundary's rules", () => {
     ["the Paseo CLI", "paseo send agent-1 'carry on'"],
     ["the Paseo CLI", 'spawn("paseo", ["permit", "allow", "agent-1"]);'],
     ["the Paseo CLI", "const agents = await paseoAgents(run);"],
+    ["the Paseo CLI", "const cli = paseoCli(system);"],
     ["the Paseo CLI", "paseo --json ls"],
     ["the Paseo CLI", "paseo -o json ls"],
     ["the Paseo CLI", "paseo --host=worker:6000 -q agent ls"],
