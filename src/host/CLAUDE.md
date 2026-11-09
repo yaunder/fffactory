@@ -53,8 +53,8 @@ and `host collect --once`, which the log archive's timer runs as `factory`
   Paseo until a second adapter exists (its TODO); every command the backend runs falls within
   that budget. Registration only adds: it never deletes, renames or archives what the backend
   holds, and never reloads or restarts it. Results are in fffactory's states and words.
-- `paseo-backend.ts`, the Paseo adapter, is the only worker code naming Paseo's CLI, its auth
-  wrapper, setup program, unit or bcrypt cost (`tests/execution-backend-boundary.test.ts`). It
+- `paseo-backend.ts`, the Paseo adapter, is the only worker code naming Paseo's CLI, setup
+  program, unit or bcrypt cost (`tests/execution-backend-boundary.test.ts`). It
   runs the Paseo CLI only as `factory` through the active release's `paseo-auth.sh`
   (`paseoCli`): from root by `runuser` and `env -i` with `FACTORY_ENV`, otherwise the wrapper
   itself with `FACTORY_ENV`. `paseoAgents` is the one place Paseo's agent statuses are known:
@@ -65,6 +65,19 @@ and `host collect --once`, which the log archive's timer runs as `factory`
   Install hashes the password (bcryptjs at Paseo's cost) and invokes only the active release's
   setup program, the reference and the hash on its standard input; the password reaches only
   the hash function. Reload is `daemon reload`; restart is the fixed Paseo systemd action.
+- `dispatch-trigger.ts` is the worker's `DispatchTrigger` (`docs/specs/dispatch-trigger.md`), a
+  worker-side seam beside `ExecutionBackend`, not an `application/` port: `reconcile(projection)`
+  to the projection the endpoint persisted first, and `inspect()` against it, each answering a
+  `TriggerInspection` (`active`, `absent`, `drift` with the trigger's identity, or `unknown` with
+  fffactory's reason; only `active` and `absent` match). `dispatchTrigger(system, timeoutMs)` is
+  the one place a trigger is chosen, hardwired to Paseo until a second adapter exists (its TODO).
+- `paseo-trigger.ts`, the Paseo trigger, runs the active release's `dispatch-schedule.sh` as
+  `factory` (`runuser`, `env -i`) over the persisted projection, `--apply` or `--check`, and is
+  the only worker code setting `PASEO_HOME` and `FACTORY_PASEO_BIN` (the auth wrapper's path). It
+  believes the reconciler's `{host, status, schedule_id}`, read from the last non-empty line of
+  its stdout, only when its exit agrees with its status, and a reconcile's only when it names the
+  projection's host and declared state; anything else is `unknown`. No other reconciler output
+  reaches an inspection.
 - `secret-value.ts` reads a delivered secret by its ARN with `/usr/bin/aws` as root, for the
   `credentials` step and the control-plane install: a `SecretMaterial`, or why not in
   fffactory's words (the AWS error's name at most).
@@ -73,9 +86,14 @@ and `host collect --once`, which the log archive's timer runs as `factory`
   command ended (`ended`), never its output.
 - `host dispatch` runs only through the activator's fixed `adoption`, `reconcile` and
   `inspect` actions and shares that lock. It installs only the active release's assets,
-  persists canonical desired and observed state, and drops to `factory` for FFFlow,
-  repository and Paseo schedule commands. Inspection checks the schedule before reporting active.
-  After the schedule, every reconcile registers the manifest's placed checkouts present on disk
+  persists canonical desired and observed state, and drops to `factory` for FFFlow and
+  repository commands. It reaches the trigger only through `DispatchTrigger` from the one
+  selection point, naming no trigger command or environment: on a reconcile it inspects the
+  trigger only when the persisted projection is the one received, persists it, then reconciles
+  unless that inspection matched; inspection checks the trigger before reporting active. It
+  takes the selection point as a parameter only so its tests can give a fake trigger
+  (`tests/support/fake-dispatch-trigger.ts`).
+  After the trigger, every reconcile registers the manifest's placed checkouts present on disk
   as directories, none reached through a link from the repository root down, as sync refuses
   them, through the backend `executionBackend` chooses, never Paseo directly, and records the
   result as

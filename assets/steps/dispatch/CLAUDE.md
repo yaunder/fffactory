@@ -23,9 +23,13 @@ launch, and the boundary whose allow-list names these files).
   and busy pair in step with `src/domain/control-plane.ts` until the port. Only
   the duplicate check and the launch call Paseo (`paseo-auth.sh`,
   `FACTORY_PASEO_BIN`).
-- `dispatch-schedule.sh` reconciles the one factory-owned Paseo schedule from the
-  versioned dispatch projection, as the unprivileged `factory` account; it
-  refuses to run as root and uses every declared provider/model/mode/cwd input.
+- `dispatch-schedule.sh`, the Paseo trigger's reconciler, reconciles the one factory-owned
+  Paseo schedule from the versioned dispatch projection, as the unprivileged `factory`
+  account; it refuses to run as root and uses every declared provider/model/mode/cwd input.
+  `src/host/paseo-trigger.ts` runs it with `PASEO_HOME` and `FACTORY_PASEO_BIN` and reads its
+  answer, `{host, status, schedule_id, desired}`, from the last non-empty line of its stdout,
+  ignoring earlier lines: keep that answer last and its shape, and its exit 0
+  for `active` and `absent` and 1 for `drift`, in step with the adapter.
 - `skill/SKILL.md` is the dispatch skill. The host endpoint installs it into the
   `factory` account's canonical `.agents/skills` directory and links Claude's
   discovery path to it. It is no longer a canonical repository skill:

@@ -165,11 +165,14 @@ root-owned release. `adoption` drops to `factory` and runs the active release's
 dispatcher in adoption-only mode against the placed-repository manifest; it
 does not launch work. `reconcile` reads the canonical desired dispatch
 projection from standard input. An active projection installs the stable
-dispatcher and skill; every projection drops to `factory` to reconcile the
-schedule, and persists the desired and observed documents; a not-requested
-projection removes the schedule, which is also how fffactory stops dispatch
-outside apply ([dispatch §Stopping dispatch](dispatch.md#stopping-dispatch)).
-`inspect` reads that result and checks the real schedule, without changing it. Exit 2 means a
+dispatcher and skill; every projection persists the desired and observed
+documents and reconciles the worker's
+[dispatch trigger](dispatch-trigger.md#the-dispatchtrigger-interface), which
+drops to `factory`; a not-requested projection removes the schedule, which is
+also how fffactory stops dispatch outside apply
+([dispatch §Stopping dispatch](dispatch.md#stopping-dispatch)). `inspect` reads
+that result and checks the real schedule through the trigger, without changing
+it. Exit 2 means a
 genuine adoption/readiness pending state; malformed input or reconciliation
 failure exits 1. See [dispatch](dispatch.md).
 
@@ -1240,7 +1243,8 @@ never elsewhere: it prints no path, no AWS or SDK message and no credential.
 | Worker | `src/host/credentials.ts` | `workerCredentials`: the `credentials` install step ([credential delivery](credential-delivery.md)). |
 | Worker | `src/host/collector-step.ts` | `workerCollectorStep`: the `collector` install step ([§The collector step](#the-collector-step)). |
 | Worker | `src/host/verify.ts` | `workerVerifier`: the verifiers and enrollment checks. |
-| Worker | `src/host/dispatch.ts` | Dispatch adoption, installation, reconciliation and checked observation, with privilege drop, and registering the placed checkouts through the execution backend after the schedule. |
+| Worker | `src/host/dispatch.ts` | Dispatch adoption, installation, reconciliation and checked observation through the dispatch trigger, with privilege drop, and registering the placed checkouts through the execution backend after the schedule. |
+| Worker | `src/host/dispatch-trigger.ts`, `src/host/paseo-trigger.ts` | `DispatchTrigger` and its one selection point; `paseoTrigger`, the Paseo adapter running the schedule reconciler as `factory` ([dispatch trigger](dispatch-trigger.md)). |
 | Worker | `src/host/work.ts` | `workerWork`: the work inspection, over the worker's working trees, as `factory`, read-only, and the archive's backlog, from the collector's checkpoint and its discovery (`discoverSources` in `src/host/collect.ts`), as root. |
 | Worker | `src/host/control-plane.ts` | `workerControlPlane`: the control-plane activity, install, reload and restart, and `host agents`: privilege, the projection and the password read by reference, the rest asked of the execution backend. |
 | Worker | `src/host/execution-backend.ts`, `src/host/paseo-backend.ts` | `ExecutionBackend` and its one selection point; `paseoBackend`, the Paseo adapter, with `paseoAgents` translating Paseo's agents into fffactory's states ([execution backend](execution-backend.md)). |

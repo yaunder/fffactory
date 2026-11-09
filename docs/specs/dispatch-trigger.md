@@ -2,7 +2,8 @@
 
 The [trigger](../../CONTEXT.md#trigger) decides when dispatch runs on a worker:
 it starts the dispatch skill on the declared cadence, and changes nothing
-about what may run. Paseo's schedule is its first and only adapter. Design:
+about what may run. Paseo's schedule is its first and only adapter
+([§The Paseo trigger](#the-paseo-trigger)). Design:
 [portable execution §Proposed responsibility split](../designs/portable-execution.md#proposed-responsibility-split).
 
 The trigger is one of Orchestration's three peer parts, beside dispatch policy
@@ -29,17 +30,59 @@ the `WorkflowQueue` ([dispatch §The `WorkflowQueue` connector](dispatch.md#the-
   (`factory-dispatch.lock` in `$PASEO_HOME`) for the whole tick, and a tick that
   finds it held fails (exit 1) before it reads an epic or launches anything.
   Tested in `assets/steps/dispatch/tests/test_factory_dispatch.py`.
+  [#142](https://github.com/yaunder/fffactory/issues/142) moves the lock out
+  of `$PASEO_HOME`.
 
-There is no `DispatchTrigger` interface yet: the root endpoint
-(`workerDispatch`, `src/host/dispatch.ts`) runs the Paseo reconciler itself, as
-`factory`: on a reconcile, `--check` when the persisted projection is the one
-received, then `--apply` unless that check passed; for `dispatch inspect`,
-`--check` alone. It sets `PASEO_HOME` and
-points `FACTORY_PASEO_BIN` at the active release's `paseo-auth.sh`.
-[#141](https://github.com/yaunder/fffactory/issues/141) moves that behind a
-`DispatchTrigger` with a Paseo adapter, and
-[#142](https://github.com/yaunder/fffactory/issues/142) moves the dispatcher's
-lock out of `$PASEO_HOME`.
+### The `DispatchTrigger` interface
+
+The worker reaches its trigger only through `DispatchTrigger`
+(`src/host/dispatch-trigger.ts`), a worker-side seam beside
+[`ExecutionBackend`](execution-backend.md#the-executionbackend-contract), not an
+operator-side port: nothing on the operator side calls it. Its one selection
+point, `dispatchTrigger`, is hardwired to the Paseo trigger until a second
+adapter exists (`TODO(re-evaluate when a second dispatch trigger adapter is
+built)`); each command the trigger runs is within the timeout it is chosen
+with, the endpoint's 15 minutes.
+
+- **`reconcile(projection)`** brings the trigger to the projection, which the
+  endpoint has already persisted as desired state
+  (`DISPATCH_PROJECTION_PATH`): present and matching when it is active, absent
+  otherwise. It answers the trigger as it left it.
+- **`inspect()`** checks the trigger against the persisted projection, changing
+  nothing.
+
+Both answer a `TriggerInspection` in fffactory's states: `active` (present and
+matching an active projection), `absent` (none, for any other), or `drift`
+(differing from it), each with the trigger's identity when one was found; or
+`unknown` with fffactory's reason when it could not be read, never taken as
+matching. No trigger output reaches an answer.
+
+The root endpoint (`workerDispatch`, `src/host/dispatch.ts`) decides when to
+ask: on a reconcile, it inspects the trigger only when the persisted projection
+is the one received, persists the projection, then reconciles unless that
+inspection was `active` or `absent`; a reconcile answering anything else is
+`dispatch schedule did not reconcile`. `dispatch inspect` inspects alone, and
+anything but `active` or `absent` is `dispatch schedule differs from its
+recorded state`. The persisted desired and observed dispatch documents are the
+same whichever trigger answers.
+
+### The Paseo trigger
+
+The Paseo adapter (`paseoTrigger`, `src/host/paseo-trigger.ts`) runs the active
+release's schedule reconciler, `dispatch-schedule.sh`, over the persisted
+projection: `--apply` to reconcile, `--check` to inspect. It runs it as
+`factory` through `runuser` and `env -i` with `factory`'s clean environment
+(`HOME`, `PATH`, `LANG=C.UTF-8`), and is the only worker code that adds
+`PASEO_HOME` (`/home/factory/.paseo`) and points `FACTORY_PASEO_BIN` at the
+active release's `paseo-auth.sh`. It reads the reconciler's answer,
+`{host, status, schedule_id}`, from the last non-empty line of its stdout,
+ignoring any earlier lines, only when its exit agrees with its status
+(`active` and `absent` exit 0, `drift` exits 1); anything else is `unknown`,
+with how the reconciler ended or that its answer was invalid. A reconcile's
+answer must also name the projection's host and the state it declares, or it
+is `unknown`. Tested in `tests/host/paseo-trigger.test.ts`; the endpoint over a
+fake trigger (`tests/support/fake-dispatch-trigger.ts`) in
+`tests/host/dispatch.test.ts`.
 
 ## The Paseo schedule reconciler
 
@@ -73,15 +116,20 @@ edit Paseo's private state to trim it.
 
 Its behavior is held by the Python tests that ship beside it,
 `assets/steps/dispatch/tests/test_dispatch_schedule.py`, run in CI (not by
-`bun test`); the endpoint's use of it by `tests/host/dispatch.test.ts`.
+`bun test`); the Paseo trigger's use of it by `tests/host/paseo-trigger.test.ts`.
 
 ## Layer mapping
 
 | Concern | Layer | Where |
 | --- | --- | --- |
-| Running the reconciler as `factory` with Paseo's environment, on reconcile and inspect | host | `src/host/dispatch.ts`; a `DispatchTrigger` and `src/host/paseo-trigger.ts` with [#141](https://github.com/yaunder/fffactory/issues/141) |
+| The desired and observed dispatch documents the trigger answers to | domain (pure) | `src/domain/dispatch-projection.ts` |
+| The `DispatchTrigger` seam, `TriggerInspection`, and its one selection point | host | `src/host/dispatch-trigger.ts` |
+| When the trigger is inspected and reconciled, and its answer in the persisted observation | host | `src/host/dispatch.ts` |
+| The Paseo trigger: the reconciler run as `factory` with `PASEO_HOME` and `FACTORY_PASEO_BIN`, and its answer read | host (adapter) | `src/host/paseo-trigger.ts` |
 | The Paseo schedule reconciler | release assets | `assets/steps/dispatch/dispatch-schedule.sh` |
 
 Split from [dispatch](dispatch.md) by
 [#139](https://github.com/yaunder/fffactory/issues/139) (epic
-[#136](https://github.com/yaunder/fffactory/issues/136)).
+[#136](https://github.com/yaunder/fffactory/issues/136)); the `DispatchTrigger`
+seam and its Paseo adapter:
+[#141](https://github.com/yaunder/fffactory/issues/141).

@@ -103,12 +103,11 @@ const BEHAVIOR: readonly Token[] = [
 const ALLOW_LIST: readonly string[] = [
   // The adapters and their shipped assets.
   "src/host/paseo-backend.ts",
+  "src/host/paseo-trigger.ts",
   "src/infrastructure/paseo-control-plane.ts",
   "assets/steps/control-plane/**",
   "assets/steps/dispatch/dispatch-schedule.sh",
   "assets/steps/dispatch/tests/test_dispatch_schedule.py",
-  // Until #141: the trigger's environment and auth wrapper.
-  "src/host/dispatch.ts",
   // Until #142: the dispatcher is ported to TypeScript.
   "assets/steps/dispatch/factory-dispatch",
   "assets/steps/dispatch/tests/test_factory_dispatch.py",

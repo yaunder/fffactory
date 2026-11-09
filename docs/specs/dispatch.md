@@ -309,7 +309,7 @@ Tested in `tests/host/dispatch.test.ts`: the placed checkouts present on disk
 are registered for active, pending and not-requested projections, through the
 auth wrapper as `factory`, and stored; one not cloned, not a directory, or
 reached through a symbolic link (the repository root's too) is left out; a
-registration failure leaves the state, the schedule's commands and `changed` as
+registration failure leaves the state, the trigger's calls and `changed` as
 they are, on a first run and a rerun; one that throws records none and the
 schedule's result is still stored; the backend's calls share one budget;
 without a manifest the backend is asked nothing; an invalid or unreadable one
@@ -388,11 +388,11 @@ configuration flag alone.
 | The end-to-end verification stage | application | `src/application/verify-factory.ts` |
 | The FFFlow/GitHub adapter over `HostTransport` | infrastructure | `src/infrastructure/ffflow-github-workflow-queue.ts` |
 | The versioned desired and observed dispatch documents, the not-requested projection that stops dispatch and how stopping ended (`DispatchStop`) | domain (pure) | `src/domain/dispatch-projection.ts` |
-| The root endpoint, asset installation, privilege drop, persisted observation, and registering the placed checkouts present on disk after the schedule | host | `src/host/dispatch.ts` |
+| The root endpoint, asset installation, privilege drop, persisted observation, the trigger reconciled and inspected through `DispatchTrigger`, and registering the placed checkouts present on disk after the schedule | host | `src/host/dispatch.ts` |
 | The dispatch program and skill | release assets | `assets/steps/dispatch/factory-dispatch`, `assets/steps/dispatch/skill/` |
 | The agents the capacity check counts, `host agents` (their translation is the backend's) | host | `src/cli/commands/host.ts` |
 
-The schedule reconciler's layers are in
+The trigger's seam, its Paseo adapter and the schedule reconciler's layers are in
 [dispatch trigger §Layer mapping](dispatch-trigger.md#layer-mapping); the
 `ExecutionBackend` seam's, its adapter's and the registration result's in
 [execution backend §Layer mapping](execution-backend.md#layer-mapping).

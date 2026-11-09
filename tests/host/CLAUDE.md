@@ -44,9 +44,16 @@ temporary directories by `worker-scenarios.ts`, never the real `/`.
   budget its selection was given) and, for install, Secrets Manager answering the Paseo
   password: privilege, the projection, the password read and handed on, the budgets, and the
   backend's answers passed on. It runs no backend command.
-- `dispatch.test.ts` runs the dispatch endpoint over a scripted runner telling the schedule's
-  commands from Paseo's (after the auth wrapper), with a repository manifest and checkouts laid
-  out under the temporary root (`placeRepositories`).
+- `dispatch.test.ts` runs the dispatch endpoint over a fake `DispatchTrigger`
+  (`support/fake-dispatch-trigger.ts`, which keeps one trigger as a reconciler would over the
+  persisted projection, records every call and timeout, and answers as a test sets), and a
+  scripted runner answering Paseo's registration commands (after the auth wrapper), with a
+  repository manifest and checkouts laid out under the temporary root (`placeRepositories`). It
+  runs no trigger command.
+- `paseo-trigger.test.ts` runs the Paseo trigger over a scripted runner: the reconciler's exact
+  command, timeout and environment (`PASEO_HOME` and `FACTORY_PASEO_BIN` set there, and nowhere
+  else: the adoption probe's command in `dispatch.test.ts` carries neither), and its answer, as
+  `dispatch-schedule.sh` prints it, read into the trigger's inspection.
 - `paseo-backend.test.ts` runs the Paseo adapter over a scripted runner: Paseo's own arguments
   after the auth wrapper, however it was run (from root by `runuser`, or as `factory`), answered
   as Paseo 0.15.0 prints them (`project ls` and `project create`, the agent lists and each

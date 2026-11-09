@@ -5,8 +5,10 @@ import { join } from "node:path";
 import {
   DISPATCH_PROJECTION_PATH,
   DISPATCH_RESULT_PATH,
+  type DispatchProjection,
   dispatchProjection,
   dispatchProjectionJson,
+  parseDispatchProjection,
 } from "../../src/domain/dispatch-projection";
 import type { FactoryId, HostKey, Release, Repository } from "../../src/domain/instance";
 import { WORKER_PATHS } from "../../src/domain/host-protocol";
@@ -18,16 +20,18 @@ import {
 import type { ApplySystem } from "../../src/host/apply";
 import { workerDispatch } from "../../src/host/dispatch";
 import type { ProcessOutcome, ProcessRunner } from "../../src/infrastructure/local-tool-probe";
+import { fakeDispatchTrigger } from "../support/fake-dispatch-trigger";
 import { system, WORKER_HOSTNAME } from "./worker-scenarios";
 
 let root: string;
+/** The worker's trigger, kept as a reconciler keeps it over the persisted projection. */
+let trigger: ReturnType<typeof newTrigger>;
 beforeEach(async () => {
   root = await mkdtemp(join(tmpdir(), "fffactory-dispatch-"));
+  trigger = newTrigger();
   const files: [string, string][] = [
     ["steps/dispatch/factory-dispatch", "#!/usr/bin/env python3\n"],
     ["steps/dispatch/skill/SKILL.md", "---\nname: dispatch\n---\n"],
-    ["steps/dispatch/dispatch-schedule.sh", "#!/bin/bash\n"],
-    ["steps/control-plane/paseo-auth.sh", "#!/bin/bash\n"],
   ];
   for (const [relative, contents] of files) {
     const path = join(root, WORKER_PATHS.activeRelease, relative);
@@ -49,12 +53,34 @@ const SETTINGS = {
   cwd: "/home/factory",
 } as const;
 const PROJECTION = dispatchProjectionJson(dispatchProjection(WORKER_HOSTNAME, SETTINGS, true, []));
+/** Each command of the trigger's within the schedule's timeout. */
+const TIMEOUT_MS = 15 * 60_000;
+
+/** Whether the persisted projection is active; undefined when there is none. */
+async function persistedActive(): Promise<boolean | undefined> {
+  try {
+    return JSON.parse(await readFile(join(root, DISPATCH_PROJECTION_PATH), "utf8")).active === true;
+  } catch {
+    return undefined;
+  }
+}
+
+function newTrigger() {
+  return fakeDispatchTrigger(persistedActive);
+}
+
+function parsed(text: string): DispatchProjection {
+  const result = parseDispatchProjection(text);
+  if (!result.ok) throw new Error(result.reason);
+  return result.projection;
+}
 
 function endpoint(
   run: ProcessRunner,
   input = PROJECTION,
   isRoot = true,
   now: () => Date = () => new Date(),
+  using = trigger,
 ) {
   const worker: ApplySystem = {
     ...system(root),
@@ -65,7 +91,7 @@ function endpoint(
     release: "0.3.0" as Release,
     lock: async () => ({ release: () => {} }),
   };
-  return workerDispatch(worker);
+  return workerDispatch(worker, using.select);
 }
 
 /** What a reconcile registers on a worker whose manifest places nothing present on disk. */
@@ -97,22 +123,18 @@ async function placeRepositories(placed: string[], cloned: string[]): Promise<vo
 const AUTH = () => join(root, WORKER_PATHS.activeRelease, "steps/control-plane/paseo-auth.sh");
 
 /**
- * A worker whose schedule commands succeed and whose Paseo, after the auth wrapper, answers
- * `project ls` with `projects` (or `list`, when given) and `project create` with `create`.
+ * A worker whose Paseo, after the auth wrapper, answers `project ls` with `projects` (or `list`,
+ * when given) and `project create` with `create`; it runs nothing else.
  */
 function worker(
   projects: string[],
   list?: ProcessOutcome,
   create: ProcessOutcome = { kind: "exited", exitCode: 0, stdout: "{}", stderr: "" },
 ) {
-  const schedule: string[][] = [];
   const paseo: string[][] = [];
   const run: ProcessRunner = async (argv) => {
     const at = argv.indexOf(AUTH());
-    if (at === -1 || argv[at + 1] !== "project") {
-      schedule.push([...argv]);
-      return { kind: "exited", exitCode: 0, stdout: "{}", stderr: "" };
-    }
+    if (at === -1 || argv[at + 1] !== "project") throw new Error(`unexpected command: ${argv}`);
     paseo.push([...argv]);
     if (argv[at + 2] === "ls")
       return (
@@ -132,7 +154,7 @@ function worker(
       );
     return create;
   };
-  return { run, schedule, paseo };
+  return { run, paseo };
 }
 
 describe("repository registration on dispatch reconcile (dispatch §Repository registration)", () => {
@@ -237,15 +259,29 @@ describe("repository registration on dispatch reconcile (dispatch §Repository r
     const listing = { kind: "exited", exitCode: 1, stdout: "", stderr: "daemon down" } as const;
     const failing = worker([], listing);
     const succeeding = worker([]);
+    const failingTrigger = newTrigger();
+    const succeedingTrigger = newTrigger();
     const strip = (result: object) => {
       const { repository_registration: _, ...dispatch } = result as Record<string, unknown>;
       return dispatch;
     };
 
-    const failed = await endpoint(failing.run).reconcileDispatch();
+    const failed = await endpoint(
+      failing.run,
+      PROJECTION,
+      true,
+      undefined,
+      failingTrigger,
+    ).reconcileDispatch();
     await rm(join(root, DISPATCH_PROJECTION_PATH));
     await rm(join(root, DISPATCH_RESULT_PATH));
-    const registered = await endpoint(succeeding.run).reconcileDispatch();
+    const registered = await endpoint(
+      succeeding.run,
+      PROJECTION,
+      true,
+      undefined,
+      succeedingTrigger,
+    ).reconcileDispatch();
 
     expect(strip(failed)).toEqual(strip(registered));
     expect(strip(failed)).toEqual({
@@ -254,7 +290,7 @@ describe("repository registration on dispatch reconcile (dispatch §Repository r
       blockers: [],
       changed: true,
     });
-    expect(failing.schedule).toEqual(succeeding.schedule);
+    expect(failingTrigger.calls).toEqual(succeedingTrigger.calls);
     expect("repository_registration" in failed && failed.repository_registration).toEqual({
       backend: "paseo",
       changed: false,
@@ -267,7 +303,13 @@ describe("repository registration on dispatch reconcile (dispatch §Repository r
       ],
     });
     // A rerun, the schedule matching, still reports the schedule unchanged.
-    const rerun = await endpoint(failing.run).reconcileDispatch();
+    const rerun = await endpoint(
+      failing.run,
+      PROJECTION,
+      true,
+      undefined,
+      failingTrigger,
+    ).reconcileDispatch();
     expect(strip(rerun)).toEqual({ ...strip(registered), changed: false });
     expect(JSON.stringify(rerun)).not.toContain("daemon down");
   });
@@ -346,21 +388,18 @@ describe("repository registration on dispatch reconcile (dispatch §Repository r
     };
     await mkdir(join(root, "/var/lib/fffactory"), { recursive: true });
     await writeFile(join(root, DISPATCH_RESULT_PATH), `${JSON.stringify(older, null, 2)}\n`);
+    trigger.answers.inspect = { state: "absent", identity: null };
     const { run } = worker([]);
     expect(await endpoint(run).inspectDispatch()).toEqual({ ...older, changed: false } as never);
   });
 
   test("a drifted schedule's inspection keeps the stored registration, and an older result none", async () => {
     await placeRepositories(["alpha"], ["alpha"]);
-    const drifted = (argv: readonly string[]) => argv.includes("--check");
     const { run } = worker([]);
     const dispatch = endpoint(run);
     const reconciled = await dispatch.reconcileDispatch();
-    const failing = endpoint(async (argv, timeout, options) =>
-      drifted(argv)
-        ? { kind: "exited", exitCode: 1, stdout: "", stderr: "" }
-        : run(argv, timeout, options),
-    );
+    trigger.answers.inspect = { state: "drift", identity: "schedule-1" };
+    const failing = endpoint(run);
     const failure = {
       protocol_version: 1,
       state: "failed",
@@ -382,13 +421,14 @@ describe("repository registration on dispatch reconcile (dispatch §Repository r
 });
 
 describe("the worker dispatch endpoint", () => {
-  test("installs the stable entrypoint and skill, reconciles as factory, and persists active", async () => {
-    const calls: readonly string[][] = [];
-    const run: ProcessRunner = async (argv) => {
-      (calls as string[][]).push([...argv]);
-      return { kind: "exited", exitCode: 0, stdout: "{}", stderr: "" };
-    };
-    const result = await endpoint(run).reconcileDispatch();
+  /** A worker that runs no command: no manifest, so registration asks the backend nothing. */
+  const quiet: ProcessRunner = async (argv) => {
+    throw new Error(`unexpected command: ${argv}`);
+  };
+  const ACTIVE = parsed(PROJECTION);
+
+  test("installs the stable entrypoint and skill, reconciles the trigger, and persists active", async () => {
+    const result = await endpoint(quiet).reconcileDispatch();
     expect(result).toEqual({
       protocol_version: 1,
       state: "active",
@@ -396,10 +436,9 @@ describe("the worker dispatch endpoint", () => {
       changed: true,
       repository_registration: NONE_PLACED,
     });
-    expect(calls).toHaveLength(1);
-    expect(calls[0]).toContain("factory");
-    expect(calls[0]).toContain("--apply");
-    expect(calls[0]).toContain(join(root, DISPATCH_PROJECTION_PATH));
+    // Nothing persisted to check against: the trigger is reconciled at once, never inspected.
+    expect(trigger.calls).toEqual([{ method: "reconcile", projection: ACTIVE }]);
+    expect(trigger.timeouts).toEqual([TIMEOUT_MS]);
     expect(await readFile(join(root, "/usr/local/bin/factory-dispatch"), "utf8")).toContain(
       "python3",
     );
@@ -412,15 +451,22 @@ describe("the worker dispatch endpoint", () => {
     expect(await readFile(join(root, DISPATCH_RESULT_PATH), "utf8")).toContain('"state": "active"');
   });
 
-  test("a matching rerun is a checked no-op", async () => {
-    const calls: string[][] = [];
-    const run: ProcessRunner = async (argv) => {
-      calls.push([...argv]);
-      return { kind: "exited", exitCode: 0, stdout: "{}", stderr: "" };
+  test("the trigger reconciles to the projection already persisted", async () => {
+    const persisted: string[] = [];
+    const recording = newTrigger();
+    const reconcile = recording.trigger.reconcile;
+    recording.trigger.reconcile = async (projection) => {
+      persisted.push(await readFile(join(root, DISPATCH_PROJECTION_PATH), "utf8"));
+      return reconcile(projection);
     };
-    const dispatch = endpoint(run);
+    await endpoint(quiet, PENDING, true, undefined, recording).reconcileDispatch();
+    expect(persisted).toEqual([PENDING]);
+  });
+
+  test("a matching rerun is a checked no-op", async () => {
+    const dispatch = endpoint(quiet);
     await dispatch.reconcileDispatch();
-    calls.length = 0;
+    trigger.calls.length = 0;
     expect(await dispatch.reconcileDispatch()).toEqual({
       protocol_version: 1,
       state: "active",
@@ -428,23 +474,50 @@ describe("the worker dispatch endpoint", () => {
       changed: false,
       repository_registration: NONE_PLACED,
     });
-    expect(calls).toHaveLength(1);
-    expect(calls[0]).toContain("--check");
+    expect(trigger.calls).toEqual([{ method: "inspect" }]);
   });
 
-  test("a matching schedule still refreshes changed release-owned assets", async () => {
-    const calls: string[][] = [];
-    const run: ProcessRunner = async (argv) => {
-      calls.push([...argv]);
-      return { kind: "exited", exitCode: 0, stdout: "{}", stderr: "" };
-    };
-    const dispatch = endpoint(run);
+  test("a changed projection reconciles the trigger without inspecting it first", async () => {
+    await endpoint(quiet).reconcileDispatch();
+    trigger.calls.length = 0;
+    const changed = dispatchProjectionJson(
+      dispatchProjection(WORKER_HOSTNAME, { ...SETTINGS, cron: "*/5 * * * *" }, true, []),
+    );
+    expect((await endpoint(quiet, changed).reconcileDispatch()).state).toBe("active");
+    expect(trigger.calls).toEqual([{ method: "reconcile", projection: parsed(changed) }]);
+  });
+
+  test.each([
+    ["drifted", { state: "drift", identity: "schedule-1" }],
+    ["unreadable", { state: "unknown", reason: "the dispatch schedule's check timed out" }],
+  ] as const)(
+    "a persisted projection whose trigger is %s is reconciled again",
+    async (_name, inspection) => {
+      await endpoint(quiet).reconcileDispatch();
+      trigger.calls.length = 0;
+      trigger.answers.inspect = inspection;
+      expect(await endpoint(quiet).reconcileDispatch()).toEqual({
+        protocol_version: 1,
+        state: "active",
+        blockers: [],
+        changed: true,
+        repository_registration: NONE_PLACED,
+      });
+      expect(trigger.calls).toEqual([
+        { method: "inspect" },
+        { method: "reconcile", projection: ACTIVE },
+      ]);
+    },
+  );
+
+  test("a matching trigger still refreshes changed release-owned assets", async () => {
+    const dispatch = endpoint(quiet);
     await dispatch.reconcileDispatch();
     await writeFile(
       join(root, WORKER_PATHS.activeRelease, "steps/dispatch/factory-dispatch"),
       "#!/usr/bin/env python3\n# new release\n",
     );
-    calls.length = 0;
+    trigger.calls.length = 0;
 
     expect(await dispatch.reconcileDispatch()).toEqual({
       protocol_version: 1,
@@ -453,44 +526,50 @@ describe("the worker dispatch endpoint", () => {
       changed: true,
       repository_registration: NONE_PLACED,
     });
-    expect(calls).toHaveLength(1);
-    expect(calls[0]).toContain("--check");
+    expect(trigger.calls).toEqual([{ method: "inspect" }]);
     expect(await readFile(join(root, "/usr/local/bin/factory-dispatch"), "utf8")).toContain(
       "new release",
     );
   });
 
-  test("inspection reports failure when the real schedule drifts from recorded active state", async () => {
-    let checking = false;
-    const dispatch = endpoint(async (argv) => {
-      const check = argv.includes("--check");
-      return {
-        kind: "exited",
-        exitCode: check && checking ? 1 : 0,
-        stdout: "{}",
-        stderr: "",
-      };
-    });
-    await dispatch.reconcileDispatch();
-    checking = true;
+  test.each([
+    ["drifts from", { state: "drift", identity: "schedule-1" }],
+    [
+      "cannot be read against",
+      { state: "unknown", reason: "the dispatch schedule's check timed out" },
+    ],
+  ] as const)(
+    "inspection reports failure when the real trigger %s recorded active state",
+    async (_name, inspection) => {
+      const dispatch = endpoint(quiet);
+      await dispatch.reconcileDispatch();
+      trigger.answers.inspect = inspection;
 
-    expect(await dispatch.inspectDispatch()).toEqual({
-      protocol_version: 1,
-      state: "failed",
-      blockers: [],
-      reason: "dispatch schedule differs from its recorded state",
-      repository_registration: NONE_PLACED,
-    });
+      expect(await dispatch.inspectDispatch()).toEqual({
+        protocol_version: 1,
+        state: "failed",
+        blockers: [],
+        reason: "dispatch schedule differs from its recorded state",
+        repository_registration: NONE_PLACED,
+      });
+    },
+  );
+
+  test.each([
+    ["none", undefined],
+    ["unreadable", "{"],
+  ])("inspection with %s recorded asks the trigger nothing", async (_name, stored) => {
+    if (stored !== undefined) {
+      await mkdir(join(root, "/var/lib/fffactory"), { recursive: true });
+      await writeFile(join(root, DISPATCH_RESULT_PATH), stored);
+    }
+    const inspected = await endpoint(quiet).inspectDispatch();
+    expect(inspected.state).toBe(stored === undefined ? "none" : "unreadable");
+    expect(trigger.calls).toEqual([]);
   });
 
-  test("pending dispatch deactivates its schedule without installing invocable assets", async () => {
-    const pending = dispatchProjectionJson(
-      dispatchProjection(WORKER_HOSTNAME, SETTINGS, false, ["ffflow_adoption"]),
-    );
-    const result = await endpoint(
-      async () => ({ kind: "exited", exitCode: 0, stdout: "{}", stderr: "" }),
-      pending,
-    ).reconcileDispatch();
+  test("pending dispatch deactivates its trigger without installing invocable assets", async () => {
+    const result = await endpoint(quiet, PENDING).reconcileDispatch();
     expect(result).toEqual({
       protocol_version: 1,
       state: "pending",
@@ -498,42 +577,28 @@ describe("the worker dispatch endpoint", () => {
       changed: true,
       repository_registration: NONE_PLACED,
     });
+    expect(trigger.calls).toEqual([{ method: "reconcile", projection: parsed(PENDING) }]);
+    expect(trigger.world.present).toBe(false);
     await expect(readFile(join(root, "/usr/local/bin/factory-dispatch"))).rejects.toThrow();
   });
 
   test("the not-requested projection stops dispatch, a rerun changes nothing, and apply restarts it", async () => {
-    // A schedule as the reconciler keeps it: `--apply` makes it what the persisted projection
-    // says, and `--check` passes only when it already is.
-    const schedule = { exists: false };
-    const calls: string[][] = [];
-    const run: ProcessRunner = async (argv) => {
-      calls.push([...argv]);
-      const projection = JSON.parse(await readFile(join(root, DISPATCH_PROJECTION_PATH), "utf8"));
-      const wanted = projection.active === true;
-      if (argv.includes("--apply")) schedule.exists = wanted;
-      const matches = schedule.exists === wanted;
-      return { kind: "exited", exitCode: matches ? 0 : 1, stdout: "{}", stderr: "" };
-    };
-    const stop = await readFile(
-      join(import.meta.dir, "fixtures/dispatch-not-requested.json"),
-      "utf8",
-    );
-    await endpoint(run).reconcileDispatch();
-    expect(schedule.exists).toBe(true);
-    calls.length = 0;
+    const stop = await STOP();
+    await endpoint(quiet).reconcileDispatch();
+    expect(trigger.world.present).toBe(true);
+    trigger.calls.length = 0;
 
-    expect(await endpoint(run, stop).reconcileDispatch()).toEqual({
+    expect(await endpoint(quiet, stop).reconcileDispatch()).toEqual({
       protocol_version: 1,
       state: "not_requested",
       blockers: [],
       changed: true,
       repository_registration: NONE_PLACED,
     });
-    expect(schedule.exists).toBe(false);
-    expect(calls).toHaveLength(1);
-    expect(calls[0]).toContain("--apply");
+    expect(trigger.world.present).toBe(false);
+    expect(trigger.calls).toEqual([{ method: "reconcile", projection: parsed(stop) }]);
     expect(await readFile(join(root, DISPATCH_PROJECTION_PATH), "utf8")).toBe(stop);
-    expect(await endpoint(run, stop).inspectDispatch()).toEqual({
+    expect(await endpoint(quiet, stop).inspectDispatch()).toEqual({
       protocol_version: 1,
       state: "not_requested",
       blockers: [],
@@ -541,58 +606,109 @@ describe("the worker dispatch endpoint", () => {
       repository_registration: NONE_PLACED,
     });
 
-    calls.length = 0;
-    expect(await endpoint(run, stop).reconcileDispatch()).toEqual({
+    trigger.calls.length = 0;
+    expect(await endpoint(quiet, stop).reconcileDispatch()).toEqual({
       protocol_version: 1,
       state: "not_requested",
       blockers: [],
       changed: false,
       repository_registration: NONE_PLACED,
     });
-    expect(calls).toHaveLength(1);
-    expect(calls[0]).toContain("--check");
+    expect(trigger.calls).toEqual([{ method: "inspect" }]);
 
-    expect(await endpoint(run).reconcileDispatch()).toEqual({
+    expect(await endpoint(quiet).reconcileDispatch()).toEqual({
       protocol_version: 1,
       state: "active",
       blockers: [],
       changed: true,
       repository_registration: NONE_PLACED,
     });
-    expect(schedule.exists).toBe(true);
+    expect(trigger.world.present).toBe(true);
   });
 
-  test("a missing Paseo credential is a failed reconciliation, never pending or active", async () => {
-    const result = await endpoint(async () => ({
-      kind: "exited",
-      exitCode: 1,
-      stdout: "",
-      stderr: "missing credential",
-    })).reconcileDispatch();
-    expect(result).toEqual({
-      protocol_version: 1,
-      state: "failed",
-      blockers: [],
-      reason: "dispatch schedule did not reconcile",
-      repository_registration: NONE_PLACED,
-    });
-  });
+  test.each([
+    ["is left drifted", { state: "drift", identity: null }],
+    [
+      "cannot be read",
+      { state: "unknown", reason: "the dispatch schedule's reconcile exited with status 1" },
+    ],
+  ] as const)(
+    "a trigger that %s is a failed reconciliation, never pending or active",
+    async (_name, inspection) => {
+      trigger.answers.reconcile = inspection;
+      expect(await endpoint(quiet).reconcileDispatch()).toEqual({
+        protocol_version: 1,
+        state: "failed",
+        blockers: [],
+        reason: "dispatch schedule did not reconcile",
+        repository_registration: NONE_PLACED,
+      });
+    },
+  );
 
-  test("adoption probes through the active release without launching Paseo", async () => {
-    const calls: string[][] = [];
-    const result = await endpoint(async (argv) => {
-      calls.push([...argv]);
+  test("adoption probes through the active release as factory, with no trigger or backend environment", async () => {
+    const calls: { argv: string[]; timeout: number; options: unknown }[] = [];
+    const result = await endpoint(async (argv, timeout, options) => {
+      calls.push({ argv: [...argv], timeout, options });
       return { kind: "exited", exitCode: 2, stdout: "{}", stderr: "" };
     }).adoption();
     expect(result.state).toBe("failed");
-    expect(calls[0]).toContain("--adoption-only");
-    expect(calls[0]?.some((item) => item.includes("factory-paseo"))).toBe(false);
+    expect(calls).toEqual([
+      {
+        argv: [
+          "/usr/sbin/runuser",
+          "-u",
+          "factory",
+          "--",
+          "/usr/bin/env",
+          "-i",
+          "HOME=/home/factory",
+          "PATH=/home/factory/.local/bin:/usr/local/bin:/usr/bin:/bin",
+          "LANG=C.UTF-8",
+          join(root, WORKER_PATHS.activeRelease, "steps/dispatch/factory-dispatch"),
+          "--adoption-only",
+          "--manifest",
+          join(root, REPOSITORY_MANIFEST_PATH),
+          "--host",
+          WORKER_HOSTNAME,
+        ],
+        timeout: TIMEOUT_MS,
+        options: { cwd: "/", env: { PATH: "/usr/sbin:/usr/bin:/sbin:/bin", LANG: "C" } },
+      },
+    ]);
+    expect(trigger.calls).toEqual([]);
   });
+
+  test.each([
+    ["an invalid projection", "{}", [], "invalid dispatch projection"],
+    [
+      "another worker's projection",
+      dispatchProjectionJson(
+        dispatchProjection("fff-aaaa1111-builder-2", SETTINGS, false, ["ffflow_adoption"]),
+      ),
+      ["ffflow_adoption"],
+      "dispatch projection is for another worker",
+    ],
+  ])(
+    "%s fails, persisting nothing and asking the trigger nothing",
+    async (_name, input, blockers, reason) => {
+      expect(await endpoint(quiet, input).reconcileDispatch()).toEqual({
+        protocol_version: 1,
+        state: "failed",
+        blockers,
+        reason,
+      } as never);
+      expect(trigger.calls).toEqual([]);
+      await expect(readFile(join(root, DISPATCH_PROJECTION_PATH))).rejects.toThrow();
+      await expect(readFile(join(root, DISPATCH_RESULT_PATH))).rejects.toThrow();
+    },
+  );
 
   test("refuses every dispatch operation outside the fixed root activator", async () => {
     const dispatch = endpoint(async () => ({ kind: "not_found" }), PROJECTION, false);
     expect(dispatch.adoption()).rejects.toThrow("through the activator");
     expect(dispatch.reconcileDispatch()).rejects.toThrow("through the activator");
     expect(dispatch.inspectDispatch()).rejects.toThrow("through the activator");
+    expect(trigger.calls).toEqual([]);
   });
 });

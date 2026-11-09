@@ -45,7 +45,7 @@ holds its behavior:
 | R2 | List and observe runs: agent states for capacity, maintenance deferral and removal; the launch history the duplicate check reads | backend | `ExecutionBackend.agents` through `host agents` and `host control-plane activity`; `factory-dispatch`'s labelled `paseo ls` | [§Inspect](#inspect) |
 | R3 | Isolate workspaces: create worktrees and own their paths | backend | Paseo creates them under `/home/factory/.paseo/worktrees`, which work inspection searches (`WORK_ROOTS`); the collector never reads Paseo's `config.json` | [host protocol §work inspect](host-protocol.md#work-inspect), [collector](collector.md) |
 | R4 | Supervise: a human reconnects to a run, inspects it and intervenes | backend | Paseo's clients over Tailscale | [§Connect](#connect) |
-| R5 | Trigger dispatch on a cadence | trigger | `dispatch-schedule.sh` over `paseo schedule` | [dispatch trigger](dispatch-trigger.md) |
+| R5 | Trigger dispatch on a cadence | trigger | `DispatchTrigger`, its Paseo adapter running `dispatch-schedule.sh` over `paseo schedule` | [dispatch trigger](dispatch-trigger.md) |
 | R6 | Register the placed repositories for supervision | backend | `ExecutionBackend.registerRepositories`, Paseo projects | [§The `ExecutionBackend` contract](#the-executionbackend-contract) |
 | R7 | Keep the backend's software healthy: install, configure, authenticate, run the unit, probe health, reload, restart, classify changes, defer maintenance | maintenance | the `ControlPlane` port and its activator actions, which the worker answers through `ExecutionBackend`'s maintenance group; `assets/steps/control-plane/` | [control plane](control-plane.md) |
 
@@ -173,7 +173,9 @@ invalidates the document carrying it.
 ### The Paseo adapter
 
 `src/host/paseo-backend.ts` is the only worker code that names Paseo's CLI,
-its auth wrapper, its setup program, its unit or its password's bcrypt cost.
+its setup program, its unit or its password's bcrypt cost; the auth wrapper it
+shares with the Paseo trigger
+([dispatch trigger §The Paseo trigger](dispatch-trigger.md#the-paseo-trigger)).
 It runs the Paseo CLI only as `factory`, authenticated by the active release's
 `paseo-auth.sh`: from root, through `runuser -u factory` and `env -i` with
 `factory`'s `HOME` and `PATH` alone; run as `factory` (`host agents`), the
@@ -248,10 +250,10 @@ stay.
 | Entry | Names | Stays, or leaves with |
 | --- | --- | --- |
 | `src/host/paseo-backend.ts` | the CLI and its handles, the auth wrapper, the unit, the package | stays: the `ExecutionBackend` adapter |
+| `src/host/paseo-trigger.ts` | the environment (`PASEO_HOME`, `FACTORY_PASEO_BIN`), the auth wrapper | stays: the `DispatchTrigger` adapter |
 | `src/infrastructure/paseo-control-plane.ts` | the port, by `PASEO_PORT` | stays: the operator-side `ControlPlane` adapter |
 | `assets/steps/control-plane/**` | everything: install, config, auth wrapper, unit, pin, and their tests | stays: the backend's shipped assets |
-| `assets/steps/dispatch/dispatch-schedule.sh` and its `tests/test_dispatch_schedule.py` | the CLI, the environment, the auth wrapper | stays: the trigger's Paseo adapter |
-| `src/host/dispatch.ts` | `PASEO_HOME`, `FACTORY_PASEO_BIN`, the auth wrapper | [#141](https://github.com/yaunder/fffactory/issues/141): the `DispatchTrigger` seam |
+| `assets/steps/dispatch/dispatch-schedule.sh` and its `tests/test_dispatch_schedule.py` | the CLI, the environment, the auth wrapper | stays: the Paseo trigger's shipped reconciler |
 | `assets/steps/dispatch/factory-dispatch` and its `tests/test_factory_dispatch.py` | the CLI, the paths, the environment, the auth wrapper | [#142](https://github.com/yaunder/fffactory/issues/142): the dispatcher in TypeScript |
 | `src/host/work.ts`, `src/domain/work-inspection.ts`, `src/domain/collector-installation.ts` | the paths | [#144](https://github.com/yaunder/fffactory/issues/144): the backend's layout as data |
 
@@ -300,6 +302,10 @@ its own file and in another, and stale entries.
 | The worker endpoints calling the seam: the control-plane actions and `host agents`, dispatch reconcile's registration | host | `src/host/control-plane.ts`, `src/host/dispatch.ts`, `src/host/endpoint.ts` |
 | The run launch and the duplicate check's listing | release assets | `assets/steps/dispatch/factory-dispatch` |
 | The boundary | check | `tests/execution-backend-boundary.test.ts` |
+
+The trigger's seam and its Paseo adapter (`src/host/dispatch-trigger.ts`,
+`src/host/paseo-trigger.ts`) are in
+[dispatch trigger §Layer mapping](dispatch-trigger.md#layer-mapping).
 
 Introduced by [#139](https://github.com/yaunder/fffactory/issues/139) (epic
 [#136](https://github.com/yaunder/fffactory/issues/136)); one worker-side
