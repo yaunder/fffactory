@@ -549,7 +549,6 @@ describe("dispatch reconcile with its repository registration, both sides", () =
       branch: "main",
     }));
     const files: [string, string][] = [
-      [`${WORKER_PATHS.activeRelease}/steps/dispatch/factory-dispatch`, "#!/usr/bin/env python3\n"],
       [`${WORKER_PATHS.activeRelease}/steps/dispatch/skill/SKILL.md`, "---\nname: dispatch\n---\n"],
       [
         REPOSITORY_MANIFEST_PATH,

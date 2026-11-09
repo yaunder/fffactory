@@ -26,12 +26,18 @@ the `WorkflowQueue` ([dispatch §The `WorkflowQueue` connector](dispatch.md#the-
 - **Inspect.** Check the actual trigger against the projection without
   changing it, so `dispatch inspect` reports drift rather than repairing it.
 - **Overlapping ticks must be safe.** A tick may start while the last one still
-  runs. The dispatcher serializes them: it holds an exclusive lock
-  (`factory-dispatch.lock` in `$PASEO_HOME`) for the whole tick, and a tick that
-  finds it held fails (exit 1) before it reads an epic or launches anything.
-  Tested in `assets/steps/dispatch/tests/test_factory_dispatch.py`.
-  [#142](https://github.com/yaunder/fffactory/issues/142) moves the lock out
-  of `$PASEO_HOME`.
+  runs. The dispatcher serializes them: it holds an exclusive lock for the whole
+  tick, `/home/factory/.local/state/fffactory/dispatch.lock` in the `factory`
+  account's own state directory, whichever trigger and backend run
+  ([dispatch §The dispatcher](dispatch.md#the-dispatcher)), and a tick that
+  finds it held fails (exit 1) before it reads an agent or an epic, runs a
+  sync or launches anything. While `/home/factory/.paseo` is there it also
+  holds the lock the Python dispatcher of a release before #142 holds,
+  `/home/factory/.paseo/factory-dispatch.lock`, so a Python tick still running
+  when an upgrade swaps the skill excludes the next tick the same way
+  (`TODO(re-evaluate when no worker runs a release from before #142)`). Tested
+  in `tests/host/dispatcher.test.ts` (a tick overlapping a running one, or a
+  Python tick still holding its lock, fails before anything runs).
 
 ### The `DispatchTrigger` interface
 
@@ -87,7 +93,7 @@ fake trigger (`tests/support/fake-dispatch-trigger.ts`) in
 ## The Paseo schedule reconciler
 
 The schedule reconciler (`dispatch-schedule.sh`) ships in the release assets
-(`assets/steps/dispatch/`) beside the dispatch program and skill. It reconciles
+(`assets/steps/dispatch/`) beside the dispatch skill. It reconciles
 the one factory-owned schedule from the projection, as the unprivileged
 `factory` account, refusing to run as root. The projection contains every
 schedule input: cron, timezone, provider, model, mode and absolute working
@@ -132,4 +138,5 @@ Split from [dispatch](dispatch.md) by
 [#139](https://github.com/yaunder/fffactory/issues/139) (epic
 [#136](https://github.com/yaunder/fffactory/issues/136)); the `DispatchTrigger`
 seam and its Paseo adapter:
-[#141](https://github.com/yaunder/fffactory/issues/141).
+[#141](https://github.com/yaunder/fffactory/issues/141); the dispatch lock out
+of `$PASEO_HOME`: [#142](https://github.com/yaunder/fffactory/issues/142).

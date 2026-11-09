@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Proves, against the pinned Paseo, that the daemon a worker runs authenticates with only the
 # bcrypt hash fffactory writes, that nothing it launches sees PASEO_PASSWORD, that it downloads
-# no speech model with the merged config, that it accepts factory-dispatch's launch and list
+# no speech model with the merged config, that it accepts the dispatcher's launch and list
 # flags, that it answers the agent list and inspection the worker's agent adapter reads, and that
 # its project commands register a checkout once and refuse a missing directory
 # (docs/specs/control-plane.md §The Paseo pin, §Agent states):
@@ -169,7 +169,7 @@ ${projects}"
     fail "a refused project create changed the projects: $(list_projects)"
   pass 'project create refuses a missing directory (PROJECT_CREATE_FAILED) and registers nothing'
 
-  # Launched and listed with the flags factory-dispatch uses; like it, read only standard output
+  # Launched and listed with the flags the dispatcher uses; like it, read only standard output
   # (0.12+ notes a created workspace on standard error).
   out="$(as_factory aws-right run --provider claude --cwd "${home}" --no-wait --json \
     --label factory-dispatch=true 'Report your environment.' 2>"${work}/run.err")" ||

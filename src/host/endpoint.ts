@@ -8,6 +8,7 @@ import { type HostVerifier, workerVerifier } from "./verify";
 import { type HostRepositories, workerRepositories } from "./repositories";
 import { type ControlPlaneEndpoint, workerControlPlane } from "./control-plane";
 import { type HostDispatch, workerDispatch } from "./dispatch";
+import { type DispatchCaller, type HostDispatcher, workerDispatcher } from "./dispatcher";
 import { type HostWork, workerWork } from "./work";
 import type { HostCollector } from "./collection";
 
@@ -18,20 +19,29 @@ export interface WorkerEndpoint
     HostRepositories,
     ControlPlaneEndpoint,
     HostDispatch,
+    HostDispatcher,
     HostWork,
     HostCollector {
   /** Whether this process runs as root, as `host apply` and `host verify` need. */
   isRoot(): boolean;
 }
 
-/** `collector` is the log archive's (`collection.ts`), over a system of its own. */
-export function workerEndpoint(system: ApplySystem, collector: HostCollector): WorkerEndpoint {
+/**
+ * `collector` is the log archive's (`collection.ts`), over a system of its own; `caller` is the
+ * process the dispatcher runs in, whose environment and directory its commands get.
+ */
+export function workerEndpoint(
+  system: ApplySystem,
+  collector: HostCollector,
+  caller: DispatchCaller,
+): WorkerEndpoint {
   const inspector = workerInspector(system);
   const verifier = workerVerifier(system);
   const applier = workerApplier(system, verifier);
   const repositories = workerRepositories(system);
   const controlPlane = workerControlPlane(system);
   const dispatch = workerDispatch(system);
+  const dispatcher = workerDispatcher(system, caller);
   const work = workerWork(system);
   return {
     inspect: () => inspector.inspect(),
@@ -47,6 +57,7 @@ export function workerEndpoint(system: ApplySystem, collector: HostCollector): W
     adoption: () => dispatch.adoption(),
     reconcileDispatch: () => dispatch.reconcileDispatch(),
     inspectDispatch: () => dispatch.inspectDispatch(),
+    runDispatch: (adoptionOnly) => dispatcher.runDispatch(adoptionOnly),
     inspectWork: () => work.inspectWork(),
     collect: () => collector.collect(),
     isRoot: system.isRoot,

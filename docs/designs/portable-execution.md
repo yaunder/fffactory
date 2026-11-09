@@ -38,7 +38,7 @@ and what a replacement would need to provide.
 | --- | --- | --- |
 | Prepare workers | Provision AWS machines, establish access, install pinned runtimes and coding agents, and synchronize placed repositories | `fffactory` apply stages; [v2 design](fffactory-v2.md) |
 | Define the workflow | Resolve captured tasks, implement and test them, run reviews and gates, and hand off a PR | FFFlow's `work-epic` skill inside Claude Code; [SDLC](../../SDLC.md) |
-| Select eligible work | Read ready GitHub epics, check dependencies and existing branches/PRs, and enforce the per-worker capacity of one | [factory-dispatch](../../assets/steps/dispatch/factory-dispatch) |
+| Select eligible work | Read ready GitHub epics, check dependencies and existing branches/PRs, and enforce the per-worker capacity of one | [dispatcher.ts](../../src/host/dispatcher.ts) |
 | Trigger selection | Start a fresh dispatch agent periodically through a reconciled schedule | Paseo schedule; [dispatch-schedule.sh](../../assets/steps/dispatch/dispatch-schedule.sh) |
 | Host execution | Launch an agent with a prompt, provider, model and mode in a new worktree | Dispatcher calls to Paseo `run` |
 | Track launches | Count labeled active agents and look for an existing labeled agent for the same repository and epic | Dispatcher calls to Paseo `ls` |

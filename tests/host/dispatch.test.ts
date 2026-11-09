@@ -30,7 +30,6 @@ beforeEach(async () => {
   root = await mkdtemp(join(tmpdir(), "fffactory-dispatch-"));
   trigger = newTrigger();
   const files: [string, string][] = [
-    ["steps/dispatch/factory-dispatch", "#!/usr/bin/env python3\n"],
     ["steps/dispatch/skill/SKILL.md", "---\nname: dispatch\n---\n"],
   ];
   for (const [relative, contents] of files) {
@@ -427,7 +426,7 @@ describe("the worker dispatch endpoint", () => {
   };
   const ACTIVE = parsed(PROJECTION);
 
-  test("installs the stable entrypoint and skill, reconciles the trigger, and persists active", async () => {
+  test("installs the skill, reconciles the trigger, and persists active", async () => {
     const result = await endpoint(quiet).reconcileDispatch();
     expect(result).toEqual({
       protocol_version: 1,
@@ -439,9 +438,6 @@ describe("the worker dispatch endpoint", () => {
     // Nothing persisted to check against: the trigger is reconciled at once, never inspected.
     expect(trigger.calls).toEqual([{ method: "reconcile", projection: ACTIVE }]);
     expect(trigger.timeouts).toEqual([TIMEOUT_MS]);
-    expect(await readFile(join(root, "/usr/local/bin/factory-dispatch"), "utf8")).toContain(
-      "python3",
-    );
     expect(
       await readFile(join(root, "/home/factory/.agents/skills/dispatch/SKILL.md"), "utf8"),
     ).toContain("name: dispatch");
@@ -514,8 +510,8 @@ describe("the worker dispatch endpoint", () => {
     const dispatch = endpoint(quiet);
     await dispatch.reconcileDispatch();
     await writeFile(
-      join(root, WORKER_PATHS.activeRelease, "steps/dispatch/factory-dispatch"),
-      "#!/usr/bin/env python3\n# new release\n",
+      join(root, WORKER_PATHS.activeRelease, "steps/dispatch/skill/SKILL.md"),
+      "---\nname: dispatch\n---\n# new release\n",
     );
     trigger.calls.length = 0;
 
@@ -527,9 +523,22 @@ describe("the worker dispatch endpoint", () => {
       repository_registration: NONE_PLACED,
     });
     expect(trigger.calls).toEqual([{ method: "inspect" }]);
-    expect(await readFile(join(root, "/usr/local/bin/factory-dispatch"), "utf8")).toContain(
-      "new release",
-    );
+    expect(
+      await readFile(join(root, "/home/factory/.agents/skills/dispatch/SKILL.md"), "utf8"),
+    ).toContain("new release");
+  });
+
+  test("an earlier release's Python dispatcher is removed once the skill no longer runs it", async () => {
+    const dispatch = endpoint(quiet);
+    await dispatch.reconcileDispatch();
+    const retired = join(root, "/usr/local/bin/factory-dispatch");
+    await mkdir(join(retired, ".."), { recursive: true });
+    await writeFile(retired, "#!/usr/bin/env python3\n", { mode: 0o755 });
+    trigger.calls.length = 0;
+
+    expect((await dispatch.reconcileDispatch()) as unknown).toMatchObject({ changed: true });
+    await expect(readFile(retired)).rejects.toThrow();
+    expect((await dispatch.reconcileDispatch()) as unknown).toMatchObject({ changed: false });
   });
 
   test.each([
@@ -579,7 +588,9 @@ describe("the worker dispatch endpoint", () => {
     });
     expect(trigger.calls).toEqual([{ method: "reconcile", projection: parsed(PENDING) }]);
     expect(trigger.world.present).toBe(false);
-    await expect(readFile(join(root, "/usr/local/bin/factory-dispatch"))).rejects.toThrow();
+    await expect(
+      readFile(join(root, "/home/factory/.agents/skills/dispatch/SKILL.md")),
+    ).rejects.toThrow();
   });
 
   test("the not-requested projection stops dispatch, a rerun changes nothing, and apply restarts it", async () => {
@@ -646,37 +657,97 @@ describe("the worker dispatch endpoint", () => {
     },
   );
 
-  test("adoption probes through the active release as factory, with no trigger or backend environment", async () => {
+  test("adoption checks every placed repository through the active release as factory, with no trigger or backend environment", async () => {
+    await placeRepositories(["beta", "alpha"], []);
     const calls: { argv: string[]; timeout: number; options: unknown }[] = [];
-    const result = await endpoint(async (argv, timeout, options) => {
-      calls.push({ argv: [...argv], timeout, options });
-      return { kind: "exited", exitCode: 2, stdout: "{}", stderr: "" };
-    }).adoption();
-    expect(result.state).toBe("failed");
+    const result = await endpoint(
+      async (argv, timeout, options) => {
+        calls.push({ argv: [...argv], timeout, options });
+        return argv.includes("https://github.com/yaunder/beta")
+          ? { kind: "exited", exitCode: 1, stdout: "", stderr: "no FFFlow" }
+          : { kind: "exited", exitCode: 0, stdout: "", stderr: "" };
+      },
+      PROJECTION,
+      true,
+      () => new Date(0),
+    ).adoption();
+    expect(result).toEqual({ protocol_version: 1, state: "failed" });
+    const check = join(
+      root,
+      WORKER_PATHS.activeRelease,
+      "steps/repositories/check-ffflow-adoption.sh",
+    );
+    const asFactory = [
+      "/usr/sbin/runuser",
+      "-u",
+      "factory",
+      "--",
+      "/usr/bin/env",
+      "-i",
+      "HOME=/home/factory",
+      "PATH=/home/factory/.local/bin:/usr/local/bin:/usr/bin:/bin",
+      "LANG=C.UTF-8",
+      check,
+    ];
+    const options = {
+      cwd: "/",
+      env: { PATH: "/usr/sbin:/usr/bin:/sbin:/bin", LANG: "C" },
+    };
+    // Sorted by alias, each within what is left of the adoption's one timeout.
     expect(calls).toEqual([
       {
-        argv: [
-          "/usr/sbin/runuser",
-          "-u",
-          "factory",
-          "--",
-          "/usr/bin/env",
-          "-i",
-          "HOME=/home/factory",
-          "PATH=/home/factory/.local/bin:/usr/local/bin:/usr/bin:/bin",
-          "LANG=C.UTF-8",
-          join(root, WORKER_PATHS.activeRelease, "steps/dispatch/factory-dispatch"),
-          "--adoption-only",
-          "--manifest",
-          join(root, REPOSITORY_MANIFEST_PATH),
-          "--host",
-          WORKER_HOSTNAME,
-        ],
+        argv: [...asFactory, "https://github.com/yaunder/alpha", "main"],
         timeout: TIMEOUT_MS,
-        options: { cwd: "/", env: { PATH: "/usr/sbin:/usr/bin:/sbin:/bin", LANG: "C" } },
+        options,
+      },
+      {
+        argv: [...asFactory, "https://github.com/yaunder/beta", "main"],
+        timeout: TIMEOUT_MS,
+        options,
       },
     ]);
     expect(trigger.calls).toEqual([]);
+  });
+
+  test("adoption passes only when every placed repository passes", async () => {
+    await placeRepositories(["alpha"], []);
+    const passing = await endpoint(async () => ({
+      kind: "exited",
+      exitCode: 0,
+      stdout: "",
+      stderr: "",
+    })).adoption();
+    expect(passing).toEqual({ protocol_version: 1, state: "passed" });
+  });
+
+  test.each([
+    ["no manifest", undefined, { kind: "exited", exitCode: 0, stdout: "", stderr: "" }],
+    ["a check that cannot start", ["alpha"], { kind: "not_found" }],
+    ["a check that times out", ["alpha"], { kind: "timed_out" }],
+  ] as const)("adoption with %s is failed", async (_name, placed, outcome) => {
+    if (placed !== undefined) await placeRepositories([...placed], []);
+    expect(await endpoint(async () => outcome).adoption()).toEqual({
+      protocol_version: 1,
+      state: "failed",
+    });
+  });
+
+  test("adoption's checks share its one timeout", async () => {
+    await placeRepositories(["alpha", "beta"], []);
+    let now = 0;
+    const timeouts: number[] = [];
+    const result = await endpoint(
+      async (_argv, timeout) => {
+        timeouts.push(timeout);
+        now += TIMEOUT_MS;
+        return { kind: "exited", exitCode: 0, stdout: "", stderr: "" };
+      },
+      PROJECTION,
+      true,
+      () => new Date(now),
+    ).adoption();
+    expect(timeouts).toEqual([TIMEOUT_MS]);
+    expect(result.state).toBe("failed");
   });
 
   test.each([

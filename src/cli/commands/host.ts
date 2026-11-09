@@ -4,6 +4,7 @@ import { hostApplyJson } from "../../domain/installation";
 import { verificationJson } from "../../domain/readiness";
 import { repositoryInspectionJson } from "../../domain/repository-placement";
 import { activityJson, controlPlaneActionJson } from "../../domain/control-plane";
+import { adoptionReportJson, dispatchSummaryJson } from "../../domain/dispatch-policy";
 import {
   dispatchAdoptionExitCode,
   dispatchAdoptionJson,
@@ -21,13 +22,14 @@ const USAGE = [
   "       fffactory host repositories (--json | --apply)",
   "       fffactory host control-plane (activity | install | reload | restart)",
   "       fffactory host dispatch (adoption | reconcile | inspect)",
+  "       fffactory host dispatch run [--adoption-only]",
   "       fffactory host work inspect",
   "       fffactory host agents --json",
   "       fffactory host collect --once",
   "",
   "The worker side of the host protocol. The operator's fffactory runs these on a",
-  "worker over SSH as fffactory-admin, and the dispatcher runs agents as factory;",
-  "there is no need to run them yourself.",
+  "worker over SSH as fffactory-admin, and the dispatch skill runs dispatch run as",
+  "factory; there is no need to run them yourself.",
   "",
   "  inspect --json  Print the worker's active release, configuration digest, last",
   "                  install, service states and readiness evidence as one",
@@ -43,10 +45,13 @@ const USAGE = [
   "  work inspect    As root, run by the activator: report, as the factory account,",
   "                  the uncommitted, unpushed and stashed work in every checkout",
   "                  and worktree. Reads only; changes nothing.",
-  "  agents --json   As factory, run by the dispatcher: print the worker's agents in",
-  "                  fffactory's states as the activity document; exits 1 when they",
-  "                  cannot be read, the reason on standard error. Reads only;",
-  "                  changes nothing.",
+  "  dispatch run    As factory, run by the dispatch skill from the declared dispatch",
+  "                  directory: launch the ready FFFlow epics this worker has room",
+  "                  for and print the tick's JSON summary; with --adoption-only,",
+  "                  only check the placed repositories' FFFlow adoption.",
+  "  agents --json   As factory: print the worker's agents in fffactory's states as",
+  "                  the activity document; exits 1 when they cannot be read, the",
+  "                  reason on standard error. Reads only; changes nothing.",
   "  collect --once  As factory, run by the log archive's timer: copy Claude Code's",
   "                  session evidence into the log archive once, as the instance",
   "                  role, and write a heartbeat; one line for the journal. Does",
@@ -156,8 +161,40 @@ async function dispatchStateAction(
   return dispatchInspectionExitCode(result);
 }
 
+/**
+ * One dispatch tick as `factory`, which the dispatch skill runs: the summary on standard output,
+ * exit 0; with `--adoption-only` the adoption report, exit 2 when any repository failed it; a
+ * failed tick's reason on one line on standard error, nothing on standard output, exit 1.
+ */
+async function dispatchRun(args: readonly string[], context: CliContext): Promise<number> {
+  const { values } = parseArgs({
+    args: [...args],
+    options: { "adoption-only": { type: "boolean", default: false } },
+    strict: true,
+    allowPositionals: false,
+  });
+  if (context.worker.isRoot()) {
+    context.err(
+      "fffactory host dispatch run: run it as factory, never root; the dispatch skill runs it",
+    );
+    return 1;
+  }
+  const tick = await context.worker.runDispatch(values["adoption-only"]);
+  if (tick.kind === "failed") {
+    context.err(`factory dispatch: ${tick.reason}`);
+    return 1;
+  }
+  if (tick.kind === "dispatched") {
+    context.out(dispatchSummaryJson(tick.summary));
+    return 0;
+  }
+  context.out(adoptionReportJson(tick.report));
+  return tick.report.adoption === "passed" ? 0 : 2;
+}
+
 async function dispatch(args: readonly string[], context: CliContext): Promise<number> {
   const [action, ...rest] = args;
+  if (action === "run") return dispatchRun(rest, context);
   parseArgs({ args: rest, options: {}, strict: true, allowPositionals: false });
   if (!context.worker.isRoot()) throw new Error("host dispatch runs only through the activator");
   return action === "adoption" ? adoption(context) : dispatchStateAction(action, context);
@@ -174,11 +211,14 @@ async function work(args: readonly string[], context: CliContext): Promise<numbe
 }
 
 /**
- * The worker's agents for its dispatcher, which runs this as `factory`: never through the
- * activator, so a dispatch tick never waits on its lock. Unreadable agents exit 1, so
- * dispatch fails safe rather than reading no agents, with their reason on one line on standard
- * error for the tick's error; standard output keeps the document.
+ * The worker's agents as `factory`: never through the activator, so it never waits on its lock.
+ * The Python dispatcher of releases before #142 runs it for its capacity check, until the
+ * upgraded release's dispatch reconcile replaces it; `host dispatch run` asks the backend
+ * in-process. Unreadable agents exit 1, so that dispatcher fails safe rather than reading no
+ * agents, with their reason on one line on standard error for the tick's error; standard
+ * output keeps the document.
  */
+// TODO(re-evaluate when no worker runs a release from before #142): keep host agents only if another caller needs it
 async function agents(args: readonly string[], context: CliContext): Promise<number> {
   if (!jsonOnly(args)) {
     context.err("fffactory host agents: the host protocol is JSON; pass --json");

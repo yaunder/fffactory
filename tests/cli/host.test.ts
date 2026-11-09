@@ -11,6 +11,12 @@ import { verificationJson } from "../../src/domain/readiness";
 import { repositoryInspectionJson } from "../../src/domain/repository-placement";
 import { type Agent, activityJson, controlPlaneActionJson } from "../../src/domain/control-plane";
 import { dispatchAdoptionJson, dispatchInspectionJson } from "../../src/domain/dispatch-projection";
+import {
+  adoptionReportJson,
+  type DispatchSummary,
+  dispatchSummaryJson,
+} from "../../src/domain/dispatch-policy";
+import type { DispatchTick } from "../../src/host/dispatcher";
 import { type WorkInspection, workInspectionJson } from "../../src/domain/work-inspection";
 import type { CollectionReport } from "../../src/host/collect";
 import type { HostCollection } from "../../src/host/collection";
@@ -72,6 +78,7 @@ describe("fffactory host inspect", () => {
       "       fffactory host control-plane (activity | install | reload | restart)",
     );
     expect(out).toContain("       fffactory host dispatch (adoption | reconcile | inspect)");
+    expect(out).toContain("       fffactory host dispatch run [--adoption-only]");
     expect(out).toContain("       fffactory host work inspect");
     expect(out).toContain("       fffactory host agents --json");
     expect(out).toContain("       fffactory host collect --once");
@@ -145,6 +152,80 @@ describe("fffactory host dispatch", () => {
     const { context, out } = harness(new MemoryInstanceStore());
     expect(await run(["host", "dispatch", "inspect"], context)).toBe(1);
     expect(out).toEqual([]);
+  });
+});
+
+describe("fffactory host dispatch run (dispatch §The dispatcher)", () => {
+  const SUMMARY: DispatchSummary = {
+    host: "test-host",
+    cap: 1,
+    running: 0,
+    considered: [{ repository: "product", epic: 101 }],
+    skipped: [],
+    started: [{ repository: "product", epic: 101, agent_id: "agent-1" }],
+    running_after: 1,
+  };
+
+  function dispatching(tick: DispatchTick, isRoot = false) {
+    const calls: boolean[] = [];
+    const worker = fakeWorker(inspection(HOST), {
+      isRoot: () => isRoot,
+      runDispatch: async (adoptionOnly) => {
+        calls.push(adoptionOnly);
+        return tick;
+      },
+    });
+    return { ...harness(new MemoryInstanceStore(), {}, { worker }), calls };
+  }
+
+  test("prints the tick's summary as the Python dispatcher did, exit 0", async () => {
+    const cli = dispatching({ kind: "dispatched", summary: SUMMARY });
+    expect(await run(["host", "dispatch", "run"], cli.context)).toBe(0);
+    expect(cli.out).toEqual([dispatchSummaryJson(SUMMARY)]);
+    expect(cli.err).toEqual([]);
+    expect(cli.calls).toEqual([false]);
+  });
+
+  test.each([
+    ["passed", 0],
+    ["failed", 2],
+  ] as const)(
+    "--adoption-only prints the adoption report, %s exiting %i",
+    async (adoption, code) => {
+      const report = { adoption, failed_repositories: adoption === "failed" ? ["product"] : [] };
+      const cli = dispatching({ kind: "adoption", report });
+      expect(await run(["host", "dispatch", "run", "--adoption-only"], cli.context)).toBe(code);
+      expect(cli.out).toEqual([adoptionReportJson(report)]);
+      expect(cli.calls).toEqual([true]);
+    },
+  );
+
+  test("a failed tick prints nothing on standard output and its reason on one line, exit 1", async () => {
+    const cli = dispatching({ kind: "failed", reason: "another dispatch tick holds its lock" });
+    expect(await run(["host", "dispatch", "run"], cli.context)).toBe(1);
+    expect(cli.out).toEqual([]);
+    expect(cli.err).toEqual(["factory dispatch: another dispatch tick holds its lock"]);
+  });
+
+  test("refuses root, before anything is read", async () => {
+    const cli = dispatching({ kind: "dispatched", summary: SUMMARY }, true);
+    expect(await run(["host", "dispatch", "run"], cli.context)).toBe(1);
+    expect(cli.out).toEqual([]);
+    expect(cli.calls).toEqual([]);
+    expect(cli.err).toEqual([
+      "fffactory host dispatch run: run it as factory, never root; the dispatch skill runs it",
+    ]);
+  });
+
+  test("takes no other argument", async () => {
+    for (const args of [
+      ["host", "dispatch", "run", "extra"],
+      ["host", "dispatch", "run", "--manifest", "x"],
+    ]) {
+      const cli = dispatching({ kind: "dispatched", summary: SUMMARY });
+      expect(await run(args, cli.context)).toBe(1);
+      expect({ out: cli.out, calls: cli.calls }).toEqual({ out: [], calls: [] });
+    }
   });
 });
 

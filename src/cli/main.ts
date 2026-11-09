@@ -153,6 +153,14 @@ await interrupts.run(
           lock: flockExclusive,
         },
         workerCollection(localCollectionSystem(RELEASE)),
+        {
+          environment: Object.fromEntries(
+            Object.entries(process.env).filter(
+              (entry): entry is [string, string] => entry[1] !== undefined,
+            ),
+          ),
+          cwd: () => process.cwd(),
+        },
       ),
       interrupted: interrupts.interrupted,
       hostname: hostname(),

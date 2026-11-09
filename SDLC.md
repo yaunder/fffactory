@@ -115,7 +115,8 @@ for a human to type a command. It is deliberately small:
 - That agent runs a factory-owned dispatch skill. The skill lists `ready`
   issues across the repositories placed on that host, applies the readiness
   checks, counts the agents it started that are still working or waiting on
-  a person (asking the worker's own `fffactory host agents`, never Paseo), and
+  a person (asking the worker's own `fffactory`, whose execution backend
+  translates the agents, never reading a Paseo status itself), and
   starts at most `cap - running` new agents.
 - Each new agent is created in a Paseo worktree off the repository's declared
   branch with an initial prompt of `/fff:work-epic <id>`. Dispatching
@@ -136,13 +137,14 @@ those stops rare, and when one happens it surfaces as a Paseo permission or
 question that any enrolled client can answer.
 
 The factory repository is outside the managed work inventory (#59). The
-dispatch skill and program therefore ship in the release
-(`assets/steps/dispatch/`), and apply's dispatch stage installs them into the
-`factory` user's environment once every readiness gate passes
+dispatch skill therefore ships in the release (`assets/steps/dispatch/`), and
+its dispatcher is the release's own `fffactory host dispatch run`; apply's
+dispatch stage installs the skill into the `factory` user's environment once
+every readiness gate passes
 ([docs/specs/dispatch.md](docs/specs/dispatch.md)). The schedule is declared
 per host in factory.json's `hosts[].dispatch`, with its working directory,
-and is off unless `enabled` is true. The program rechecks FFFlow adoption with
-the release's checker before considering each repository.
+and is off unless `enabled` is true. The dispatcher rechecks FFFlow adoption
+with the release's checker before considering each repository.
 
 ## Fleet conformance
 

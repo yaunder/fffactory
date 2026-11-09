@@ -43,6 +43,16 @@ const FACTORY_ENV = {
 
 /** Runs the Paseo CLI with `args`, as `factory` and authenticated. */
 type PaseoCommand = (args: readonly string[]) => Promise<ProcessOutcome>;
+/** Where, and in what environment, a caller already running as `factory` runs the Paseo CLI. */
+export interface PaseoCaller {
+  readonly cwd?: string;
+  readonly env: Readonly<Record<string, string>>;
+}
+/** Runs the Paseo CLI with `args`, authenticated, from where and in the environment `caller` says. */
+export type CallerPaseoCommand = (
+  args: readonly string[],
+  caller: PaseoCaller,
+) => Promise<ProcessOutcome>;
 /** Runs `argv` as the caller, with root's environment and `stdin` when given. */
 type Command = (argv: readonly string[], stdin?: string) => Promise<ProcessOutcome>;
 
@@ -104,6 +114,29 @@ function failure(outcome: ProcessOutcome, what: string): ControlPlaneAction {
       : { kind: "failed", reason: `${what} exited ${outcome.exitCode}` };
   return { kind: "failed", reason: `${what} ${outcome.kind}` };
 }
+
+// TODO(re-evaluate when task 5 lands): through startRun/runs
+/**
+ * The Paseo CLI for the dispatcher's launch and duplicate check (`src/host/dispatcher.ts`), which
+ * already runs as `factory`: the active release's auth wrapper itself, from the directory and in
+ * the environment the dispatcher gives, as the Python dispatcher ran it, each run within
+ * `timeoutMs`.
+ */
+export function callerPaseo(system: ApplySystem, timeoutMs: number): CallerPaseoCommand {
+  return (args, caller) =>
+    system.run([authWrapper(system), ...args], timeoutMs, {
+      ...(caller.cwd === undefined ? {} : { cwd: caller.cwd }),
+      env: caller.env,
+    });
+}
+
+// TODO(re-evaluate when no worker runs a release from before #142): stop taking RETIRED_DISPATCH_LOCK
+/**
+ * The lock the Python dispatcher of releases before #142 holds for its tick, in Paseo's home. A
+ * tick still running under it when an upgrade's dispatch reconcile swaps the skill must exclude
+ * the next one, so the dispatcher takes it too while its directory is there.
+ */
+export const RETIRED_DISPATCH_LOCK = `${FACTORY_ENV.HOME}/.paseo/factory-dispatch.lock`;
 
 /**
  * fffactory's state for each Paseo status but `running`, which is `working` or `needs_input`

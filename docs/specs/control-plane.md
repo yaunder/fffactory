@@ -144,8 +144,9 @@ concept ([#98](https://github.com/yaunder/fffactory/issues/98)):
 They are `AgentState` in `src/domain/control-plane.ts`. Only the worker's
 Paseo adapter (`paseoAgents`, `src/host/paseo-backend.ts`), the execution
 backend's `agents` ([execution backend §The `ExecutionBackend` contract](execution-backend.md#the-executionbackend-contract)),
-which `host control-plane activity` and the dispatcher's `host agents`
-([host protocol §agents](host-protocol.md#agents)) ask, knows Paseo's statuses;
+which `host control-plane activity`, `host agents`
+([host protocol §agents](host-protocol.md#agents)) and the dispatcher's capacity
+check ask, knows Paseo's statuses;
 no dispatcher code reads one ([dispatch §Capacity](dispatch.md#capacity)). It lists every agent
 with `paseo ls --global --background --json`, then those dispatch launched
 with the same list and `--label factory-dispatch=true`, and translates each

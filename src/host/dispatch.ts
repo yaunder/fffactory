@@ -27,7 +27,6 @@ import { HOST_PROTOCOL_VERSION, WORKER_PATHS } from "../domain/host-protocol";
 import { REPOSITORY_MANIFEST_PATH } from "../domain/repository-placement";
 import { placedCheckouts, type RepositoryRegistration } from "../domain/repository-registration";
 import { WORK_ROOTS } from "../domain/work-inspection";
-import type { ProcessOutcome } from "../infrastructure/local-tool-probe";
 import type { ApplySystem } from "./apply";
 import {
   type DispatchTrigger,
@@ -36,10 +35,11 @@ import {
   type TriggerInspection,
   type TriggerSelection,
 } from "./dispatch-trigger";
+import { rootAdoption } from "./dispatcher";
 import { executionBackend } from "./execution-backend";
 import { FACTORY_HOME } from "./runtime-account";
 
-/** Each command's timeout: the adoption probe's, and each of the trigger's. */
+/** Each of the trigger's commands' timeout. */
 const TIMEOUT_MS = 15 * 60_000;
 // TODO(re-evaluate when a dispatch reconcile is seen outlasting the CLI's WORKFLOW_TIMEOUT_MS,
 // or TIMEOUT_MS changes): give reconcileDispatch one deadline under WORKFLOW_TIMEOUT_MS that
@@ -47,7 +47,11 @@ const TIMEOUT_MS = 15 * 60_000;
 // sits under its CLI wait.
 /** Every execution backend call of one repository registration together. */
 const REGISTRATION_BUDGET_MS = 2 * 60_000;
-const STABLE_DISPATCHER = "/usr/local/bin/factory-dispatch";
+/**
+ * Where releases before the dispatcher's port installed the Python dispatcher, which the skill
+ * they installed ran. The skill now runs `fffactory host dispatch run`.
+ */
+const RETIRED_DISPATCHER = "/usr/local/bin/factory-dispatch";
 const INSTALLED_SKILL = `${FACTORY_HOME}/.agents/skills/dispatch/SKILL.md`;
 const CLAUDE_SKILL = `${FACTORY_HOME}/.claude/skills/dispatch`;
 
@@ -74,26 +78,6 @@ async function atomically(path: string, text: string): Promise<void> {
   } finally {
     await rm(temporary, { force: true });
   }
-}
-
-/** `argv` as `factory`, in its clean environment. */
-function factoryCommand(argv: readonly string[]): readonly string[] {
-  return [
-    "/usr/sbin/runuser",
-    "-u",
-    "factory",
-    "--",
-    "/usr/bin/env",
-    "-i",
-    `HOME=${FACTORY_HOME}`,
-    "PATH=/home/factory/.local/bin:/usr/local/bin:/usr/bin:/bin",
-    "LANG=C.UTF-8",
-    ...argv,
-  ];
-}
-
-function exited(outcome: ProcessOutcome, expected: readonly number[]): boolean {
-  return outcome.kind === "exited" && expected.includes(outcome.exitCode);
 }
 
 async function sameFile(source: string, destination: string, mode: number): Promise<boolean> {
@@ -136,16 +120,26 @@ async function installLink(destination: string, target: string): Promise<boolean
   return true;
 }
 
+// TODO(re-evaluate when no worker runs a release from before the dispatcher's port, #142): stop removing RETIRED_DISPATCHER
+/** Removes the Python dispatcher an earlier release installed; whether there was one. */
+async function removeRetired(path: string): Promise<boolean> {
+  try {
+    await lstat(path);
+  } catch {
+    return false;
+  }
+  await rm(path, { recursive: true, force: true });
+  return true;
+}
+
 async function installAssets(root: string): Promise<boolean> {
-  const dispatcher = active(root, "dispatch/factory-dispatch");
   const skill = active(root, "dispatch/skill/SKILL.md");
-  const destination = pathAt(root, STABLE_DISPATCHER);
   const installedSkill = pathAt(root, INSTALLED_SKILL);
   const claudeSkill = pathAt(root, CLAUDE_SKILL);
   const changes = await Promise.all([
-    installFile(dispatcher, destination, 0o755),
     installFile(skill, installedSkill, 0o644),
     installLink(claudeSkill, "../../.agents/skills/dispatch"),
+    removeRetired(pathAt(root, RETIRED_DISPATCHER)),
   ]);
   return changes.some(Boolean);
 }
@@ -303,22 +297,9 @@ export function workerDispatch(
     async adoption() {
       if (!system.isRoot())
         throw new Error("host dispatch adoption must run through the activator");
-      const dispatcher = active(system.root, "dispatch/factory-dispatch");
-      const outcome = await system.run(
-        factoryCommand([
-          dispatcher,
-          "--adoption-only",
-          "--manifest",
-          pathAt(system.root, REPOSITORY_MANIFEST_PATH),
-          "--host",
-          system.hostname(),
-        ]),
-        TIMEOUT_MS,
-        { cwd: "/", env: { PATH: "/usr/sbin:/usr/bin:/sbin:/bin", LANG: "C" } },
-      );
       return {
         protocol_version: HOST_PROTOCOL_VERSION,
-        state: exited(outcome, [0]) ? "passed" : "failed",
+        state: (await rootAdoption(system)) ? "passed" : "failed",
       };
     },
     async reconcileDispatch() {

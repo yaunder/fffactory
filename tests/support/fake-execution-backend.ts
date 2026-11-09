@@ -22,7 +22,8 @@ export type BackendCall =
   | { readonly method: "restart" };
 
 export interface BackendAnswers {
-  readonly agents?: WorkerAgents;
+  /** The agents, or how to read them afresh at each call. */
+  readonly agents?: WorkerAgents | (() => Promise<WorkerAgents>);
   readonly install?: ControlPlaneAction;
   readonly reload?: ControlPlaneAction;
   readonly restart?: ControlPlaneAction;
@@ -41,7 +42,8 @@ export function fakeExecutionBackend(answers: BackendAnswers = {}) {
     },
     async agents() {
       calls.push({ method: "agents" });
-      return answers.agents ?? { kind: "listed", agents: [] };
+      const agents = answers.agents ?? { kind: "listed", agents: [] };
+      return typeof agents === "function" ? agents() : agents;
     },
     async install(projection, password) {
       calls.push({ method: "install", projection, password });

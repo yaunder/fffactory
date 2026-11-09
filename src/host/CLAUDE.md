@@ -1,9 +1,10 @@
 # src/host: the worker side of the host protocol
 
 What `fffactory host <subcommand>` does on a worker, where the operator's fffactory runs it
-over SSH as `fffactory-admin`, all but `host agents`, which the dispatcher runs as `factory`,
-and `host collect --once`, which the log archive's timer runs as `factory`
-(`docs/specs/host-protocol.md`). Rules:
+over SSH as `fffactory-admin`, all but those run as `factory`: `host dispatch run`, which the
+dispatch skill runs, `host agents`, which a release's Python dispatcher before #142 runs, and
+`host collect --once`, which the log archive's timer runs (`docs/specs/host-protocol.md`).
+Rules:
 
 - Read the worker through a `WorkerSystem`, never fixed paths or `process`: its `root`
   (`/` on a worker) prefixes every path in `WORKER_PATHS`, so tests lay out a worker in a
@@ -15,7 +16,10 @@ and `host collect --once`, which the log archive's timer runs as `factory`
   A change to a document changes `tests/host/fixtures/` and the CLI-side parser together
   (`tests/host/protocol-contract.test.ts`), and follows the protocol's versioning rule.
 - Run systems tools through the injected `ProcessRunner` with a fixed environment and a
-  timeout, by absolute path where a worker has one.
+  timeout, by absolute path where a worker has one. The one exception is the dispatcher
+  (`dispatcher.ts`), which runs `gh`, `git`, the release's repository programs and Paseo's
+  auth wrapper in the environment and directory it was started with (`DispatchCaller`), as the
+  Python dispatcher did, and its skip reasons carry a command's error, as that one's did.
 - `apply`, repository reconciliation, and `verify` run as root. `host apply` runs only
   through the activator, which gives it
   no arguments and the host projection on standard input. It holds the install lock
@@ -40,11 +44,27 @@ and `host collect --once`, which the log archive's timer runs as `factory`
   within one budget (`ACTIVITY_BUDGET_MS`) under the CLI's wait, each maintenance action within
   `ACTION_BUDGET_MS`. It names no backend command. It takes the selection point as a parameter
   only so its tests can give a fake backend (`tests/support/fake-execution-backend.ts`).
-- `host agents --json` is the one subcommand neither the operator's fffactory nor the
-  activator runs: the worker's dispatcher runs it as `factory` for its capacity check, so a
-  dispatch tick never waits on the install lock. It refuses root, asks the backend's `agents`
-  within the activity's budget, prints the activity document, and exits 1 when the agents are
-  unknown, so dispatch fails safe.
+- `host agents --json` is run by neither the operator's fffactory nor the activator: a
+  release's Python dispatcher before #142 runs it as `factory` for its capacity check, until the
+  upgraded release's dispatch reconcile replaces it (its TODO). It refuses root, asks the
+  backend's `agents` within the activity's budget, prints the activity document, and exits 1
+  when the agents are unknown, so that dispatcher fails safe.
+- `dispatcher.ts` is the dispatcher (`docs/specs/dispatch.md` §The dispatcher), `host dispatch run
+  [--adoption-only]`, run as `factory` by the dispatch skill, never through the activator, so a
+  tick never waits on the install lock; it refuses root, as `host agents` does, in both the
+  command and here (so nothing it creates in `factory`'s files becomes root's). It is the Python `factory-dispatch`, ported faithfully: keep its
+  commands, their arguments, environment and order, its skip reasons, summary and exit codes as
+  they are unless the spec changes them. Its rules are `domain/dispatch-policy.ts`'s; it reads
+  commands' output as the shared `ProcessRunner` decodes it, stripped (`toolText`), and tells a
+  skippable refusal (`DispatchError`) from what fails the tick. It holds `DISPATCH_LOCK`, in
+  `factory`'s own state directory, from before it reads the agents to its end, and, while Paseo's
+  home is there, the Python dispatcher's lock the adapter names (`RETIRED_DISPATCH_LOCK`, its
+  TODO), so a Python tick an upgrade overtook still excludes it; it reads the agents from the
+  backend's `agents` (`executionBackend`, within `AGENTS_BUDGET_MS`), never a Paseo status. Its
+  launch and labelled duplicate check still call Paseo through the adapter's `callerPaseo`,
+  allow-listed until #143 moves them behind the seam. `rootAdoption` is the same adoption check,
+  in process for the activator's `dispatch adoption`, as root, each check dropped to `factory`. It
+  takes the backend and Paseo selections as parameters only so its tests can give fakes.
 - `execution-backend.ts` is the worker's one execution-backend interface, `ExecutionBackend`
   (`docs/specs/execution-backend.md`), not an `application/` port: `registerRepositories`,
   `agents`, and the maintenance group `install(projection, password)`, `reload`, `restart`
@@ -54,11 +74,14 @@ and `host collect --once`, which the log archive's timer runs as `factory`
   that budget. Registration only adds: it never deletes, renames or archives what the backend
   holds, and never reloads or restarts it. Results are in fffactory's states and words.
 - `paseo-backend.ts`, the Paseo adapter, is the only worker code naming Paseo's CLI, setup
-  program, unit or bcrypt cost (`tests/execution-backend-boundary.test.ts`). It
-  runs the Paseo CLI only as `factory` through the active release's `paseo-auth.sh`
-  (`paseoCli`): from root by `runuser` and `env -i` with `FACTORY_ENV`, otherwise the wrapper
-  itself with `FACTORY_ENV`. `paseoAgents` is the one place Paseo's agent statuses are known:
-  it translates them into `domain/control-plane.ts`'s `AgentState`, inspects only `running`
+  program, unit or bcrypt cost (`tests/execution-backend-boundary.test.ts`). It runs the Paseo CLI
+  only as `factory` through the active release's `paseo-auth.sh` (`paseoCli`): from root by
+  `runuser` and `env -i` with `FACTORY_ENV`, otherwise the wrapper itself with `FACTORY_ENV`;
+  `callerPaseo` runs the wrapper itself in the dispatcher's own environment and directory
+  (`CallerPaseoCommand`), for its launch and duplicate check alone (its TODO);
+  `RETIRED_DISPATCH_LOCK` names the Python dispatcher's lock in Paseo's home, which the dispatcher
+  also takes until no worker runs a release from before #142.
+  `paseoAgents` is the one place Paseo's agent statuses are known: it translates them into `domain/control-plane.ts`'s `AgentState`, inspects only `running`
   agents, and answers `unknown` for anything it cannot read; no Paseo status, field or label
   reaches a result. Registration is `project ls --json`, then `project create PATH --json` for
   each checkout not listed; a failed list fails every checkout, a failed create only its own.
@@ -85,7 +108,9 @@ and `host collect --once`, which the log archive's timer runs as `factory`
   system error's code at most (`systemCode`, `errorCode`, else `unexpected error`), and how a
   command ended (`ended`), never its output.
 - `host dispatch` runs only through the activator's fixed `adoption`, `reconcile` and
-  `inspect` actions and shares that lock. It installs only the active release's assets,
+  `inspect` actions and shares that lock. Adoption is `dispatcher.ts`'s `rootAdoption`. It
+  installs only the active release's assets (the skill; it removes the Python dispatcher an
+  earlier release left at `/usr/local/bin/factory-dispatch`, its TODO),
   persists canonical desired and observed state, and drops to `factory` for FFFlow and
   repository commands. It reaches the trigger only through `DispatchTrigger` from the one
   selection point, naming no trigger command or environment: on a reconcile it inspects the

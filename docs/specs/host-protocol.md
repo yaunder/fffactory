@@ -161,11 +161,14 @@ sudo -n /usr/local/libexec/fffactory-activate dispatch inspect
 ```
 
 The activator accepts no other dispatch action and always invokes the active
-root-owned release. `adoption` drops to `factory` and runs the active release's
-dispatcher in adoption-only mode against the placed-repository manifest; it
-does not launch work. `reconcile` reads the canonical desired dispatch
-projection from standard input. An active projection installs the stable
-dispatcher and skill; every projection persists the desired and observed
+root-owned release. `adoption` runs the dispatcher's adoption check in process
+([dispatch §The dispatcher](dispatch.md#the-dispatcher)): for each repository
+the placed-repository manifest places on the worker, the active release's FFFlow
+checker, dropped to `factory`; it does not launch work. `reconcile` reads the
+canonical desired dispatch projection from standard input. An active projection
+installs the skill, and removes the Python dispatcher a release before
+[#142](https://github.com/yaunder/fffactory/issues/142) installed at
+`/usr/local/bin/factory-dispatch`; every projection persists the desired and observed
 documents and reconciles the worker's
 [dispatch trigger](dispatch-trigger.md#the-dispatchtrigger-interface), which
 drops to `factory`; a not-requested projection removes the schedule, which is
@@ -226,9 +229,11 @@ operation of that activator and lock
 sudo -n /usr/local/libexec/fffactory-activate work inspect
 ```
 
-Two subcommands go neither over SSH nor through the activator: the worker's
-own dispatcher runs `host agents` as `factory` ([agents](#agents)), and the log
-archive's timer runs `host collect --once` as `factory` ([collect](#collect)).
+Three subcommands go neither over SSH nor through the activator, each run as
+`factory`: the dispatch skill runs `host dispatch run`, the worker's dispatcher
+([dispatch run](#dispatch-run)); the Python dispatcher of a release before it
+runs `host agents` ([agents](#agents)); and the log archive's timer runs `host
+collect --once` ([collect](#collect)).
 
 ## Versioning
 
@@ -1150,17 +1155,43 @@ activity unknown and the worker to be replaced
 
 Unknown fails safe as busy does ([control plane §Pre-activation deferral](control-plane.md#pre-activation-deferral)).
 
+## dispatch run
+
+```text
+/opt/fffactory/current/bin/fffactory host dispatch run [--adoption-only]
+```
+
+The worker's dispatcher ([dispatch §The dispatcher](dispatch.md#the-dispatcher)):
+the dispatch skill runs it on the worker as `factory`, from the declared
+dispatch directory, with the active release's executable, and not through the
+activator, so a tick never waits on the host-operation lock and needs no root;
+the operator's fffactory never runs it. Its output is the dispatcher's, not a
+versioned protocol document: the agent running the skill prints it to its
+timeline.
+
+| Run | Exit and output |
+| --- | --- |
+| As `factory`, the tick ran | 0, its JSON summary on standard output |
+| As `factory`, `--adoption-only` | 0 when every placed repository passed the adoption check, 2 when any failed, the adoption report on standard output |
+| As `factory`, the tick failed | 1, nothing on standard output; `factory dispatch: <reason>` on one line on standard error |
+| As root | 1, nothing: `fffactory host dispatch run: run it as factory, never root; the dispatch skill runs it` on standard error |
+| With anything else | 1, nothing |
+
 ## agents
 
 ```text
 /opt/fffactory/current/bin/fffactory host agents --json
 ```
 
-The worker's dispatcher reads its agents here for its capacity check
-([dispatch §Capacity](dispatch.md#capacity)); the operator's fffactory never
-runs it. The dispatcher runs it on the worker as `factory`, with the active
-release's executable, and not through the activator, so a dispatch tick never
-waits on the host-operation lock and needs no root. It changes nothing.
+The Python dispatcher of a release before
+[#142](https://github.com/yaunder/fffactory/issues/142) read its agents here
+for its capacity check; until an upgraded worker's dispatch reconcile replaces
+it, it runs this on the new release (`TODO(re-evaluate when no worker runs a
+release from before #142)`). `host dispatch run` asks the execution backend in
+process instead ([dispatch §Capacity](dispatch.md#capacity)). The operator's
+fffactory never runs it. It runs on the worker as `factory`, with the active
+release's executable, and not through the activator, so it never waits on the
+host-operation lock and needs no root. It changes nothing.
 
 It lists the agents through the same execution backend as
 [control-plane activity](#control-plane-activity) (its `agents`, the Paseo
@@ -1174,12 +1205,12 @@ and `dispatched` flag, and no Paseo status, field or label.
 | Run | Exit and standard output |
 | --- | --- |
 | As `factory`, the agents read | 0, the document with its `agents`; nothing on standard error |
-| As `factory`, the agents not read | 1, the document with `agents` `null` and `activity` unknown, for its reason; that reason on one line on standard error, `fffactory host agents: <reason>`, so the dispatcher's error names it rather than the document |
+| As `factory`, the agents not read | 1, the document with `agents` `null` and `activity` unknown, for its reason; that reason on one line on standard error, `fffactory host agents: <reason>`, so that dispatcher's error names it rather than the document |
 | As root | 1, nothing: `run it as factory, never root; the dispatcher runs it` on standard error. Paseo's state is `factory`'s, and its CLI run as root would leave root-owned files there. |
 | Without `--json`, or with anything else | 1, nothing |
 
 Another account cannot read `factory`'s Paseo password reference, so its
-agents are unknown. Exiting 1 for unknown agents makes the dispatcher fail its
+agents are unknown. Exiting 1 for unknown agents makes that dispatcher fail its
 tick before it launches anything: an unreadable worker never reads as one
 without agents.
 
@@ -1244,6 +1275,7 @@ never elsewhere: it prints no path, no AWS or SDK message and no credential.
 | Worker | `src/host/collector-step.ts` | `workerCollectorStep`: the `collector` install step ([§The collector step](#the-collector-step)). |
 | Worker | `src/host/verify.ts` | `workerVerifier`: the verifiers and enrollment checks. |
 | Worker | `src/host/dispatch.ts` | Dispatch adoption, installation, reconciliation and checked observation through the dispatch trigger, with privilege drop, and registering the placed checkouts through the execution backend after the schedule. |
+| Worker | `src/host/dispatcher.ts` | `workerDispatcher`: `host dispatch run`, the dispatcher, and `rootAdoption`, the adoption check the activator's `dispatch adoption` runs ([dispatch §The dispatcher](dispatch.md#the-dispatcher)). |
 | Worker | `src/host/dispatch-trigger.ts`, `src/host/paseo-trigger.ts` | `DispatchTrigger` and its one selection point; `paseoTrigger`, the Paseo adapter running the schedule reconciler as `factory` ([dispatch trigger](dispatch-trigger.md)). |
 | Worker | `src/host/work.ts` | `workerWork`: the work inspection, over the worker's working trees, as `factory`, read-only, and the archive's backlog, from the collector's checkpoint and its discovery (`discoverSources` in `src/host/collect.ts`), as root. |
 | Worker | `src/host/control-plane.ts` | `workerControlPlane`: the control-plane activity, install, reload and restart, and `host agents`: privilege, the projection and the password read by reference, the rest asked of the execution backend. |
@@ -1253,7 +1285,7 @@ never elsewhere: it prints no path, no AWS or SDK message and no credential.
 | Worker | `src/host/s3-archive-writer.ts` | `openInstanceArchive`: the `ArchiveWriter` over S3 with the instance role's IMDSv2 credentials, its incarnation and account from STS. |
 | Worker | `src/host/endpoint.ts` | `workerEndpoint`: all worker endpoints together. |
 | Worker | `assets/steps/` | The wrapped install steps, the pins and the plugin manifest. |
-| CLI adapter | `src/cli/commands/host.ts` | The fixed `fffactory host` inspect, apply, verify, repository, control-plane, dispatch, work, agents and collect operations. |
+| CLI adapter | `src/cli/commands/host.ts` | The fixed `fffactory host` inspect, apply, verify, repository, control-plane, dispatch, dispatch run, work, agents and collect operations. |
 
 Tests: `tests/host/protocol-contract.test.ts` is the contract: four worker
 filesystems (`tests/host/worker-scenarios.ts`: installed with enrollment
@@ -1271,13 +1303,16 @@ outcome. `tests/host/fixtures/activity-agents.json` likewise: the worker's
 `host control-plane activity` produces it byte for byte from a scripted Paseo,
 and the CLI reads it back without loss, over the transport, into the agents
 the busy rule judges; `host agents`, run as `factory`, produces the same
-fixture from the same Paseo, and the dispatcher's Python test reads it as its
-capacity check's answer. `tests/host/control-plane.test.ts` runs `host agents`
+fixture from the same Paseo, and the dispatcher's tests
+(`tests/host/dispatcher.test.ts`) count its agents as the capacity check's
+answer. `tests/host/control-plane.test.ts` runs `host agents`
 over a fake backend (root refused, the 90-second budget the selection is given,
 an unknown answer passed on), `tests/host/paseo-backend.test.ts` the Paseo
 backend's agents over a scripted Paseo (the auth wrapper run as itself, in
 `factory`'s environment, the budget each command is given, an unreadable list),
-and `tests/cli/host.test.ts` its exit statuses and refusals, and `host collect`'s
+and `tests/cli/host.test.ts` its exit statuses and refusals, `host dispatch
+run`'s (its summary, its adoption report and exit 2, a failed tick's one line,
+root refused), and `host collect`'s
 lines, exit statuses and refusals (root, no `--once`); `tests/host/collection.test.ts`
 runs `host collect --once` itself against a loopback instance metadata service
 and stub STS and S3 ([collector §Credentials and publishing](collector.md#credentials-and-publishing)). The other direction, a document the CLI sends, is
@@ -1369,6 +1404,7 @@ Claude Code 2.1.302 pins and Codex's requirements by
 credential references and the control-plane part's digest by
 [#68](https://github.com/yaunder/fffactory/issues/68); the `credentials` step by
 [#69](https://github.com/yaunder/fffactory/issues/69); `host agents` by
-[#100](https://github.com/yaunder/fffactory/issues/100); the projection's
+[#100](https://github.com/yaunder/fffactory/issues/100); `host dispatch run` by
+[#142](https://github.com/yaunder/fffactory/issues/142); the projection's
 `log_archive` by [#118](https://github.com/yaunder/fffactory/issues/118); `host
 collect` by [#121](https://github.com/yaunder/fffactory/issues/121).

@@ -80,7 +80,7 @@ const CLI = new RegExp(
     String.raw`\b(?:paseo|PASEO)\}?["']?${OPTIONS}\s+(?:${COMMANDS})\b`,
     String.raw`(?:["'](?:[^"'\s]*\/)?paseo["']|\b(?:paseo|PASEO)\b)\s*,\s*\[?\s*${OPTION_ELEMENTS}["'](?:${COMMANDS})["'](?!\s*:)`,
     String.raw`\bpaseo\s*\(\s*\[\s*${OPTION_ELEMENTS}["'](?:${COMMANDS})["']`,
-    String.raw`\b(?:PaseoCommand|paseoCli|paseoAgents)\b`,
+    String.raw`\b(?:PaseoCommand|CallerPaseoCommand|paseoCli|paseoAgents)\b`,
   ].join("|"),
 );
 
@@ -108,9 +108,8 @@ const ALLOW_LIST: readonly string[] = [
   "assets/steps/control-plane/**",
   "assets/steps/dispatch/dispatch-schedule.sh",
   "assets/steps/dispatch/tests/test_dispatch_schedule.py",
-  // Until #142: the dispatcher is ported to TypeScript.
-  "assets/steps/dispatch/factory-dispatch",
-  "assets/steps/dispatch/tests/test_factory_dispatch.py",
+  // Until #143: the dispatcher's launch and duplicate check move behind startRun and runs.
+  "src/host/dispatcher.ts",
   // Until #144: the backend's layout as data.
   "src/host/work.ts",
   "src/domain/work-inspection.ts",
@@ -305,6 +304,7 @@ describe("the boundary's rules", () => {
     ["the Paseo CLI", '"$paseo" schedule ls --json'],
     ["the Paseo CLI", "ExecStart=/home/factory/.local/bin/paseo daemon run"],
     ["the Paseo CLI", 'import type { PaseoCommand } from "./control-plane";'],
+    ["the Paseo CLI", "readonly paseo: CallerPaseoCommand;"],
     ["the Paseo CLI", 'const argv = ["paseo", "run", "--no-wait"];'],
     ["the Paseo CLI", 'execFile("paseo", ["ls"]);'],
     ["the Paseo CLI", 'spawn(["/home/factory/.local/bin/paseo", "ls"]);'],

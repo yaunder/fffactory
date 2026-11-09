@@ -19,9 +19,9 @@ temporary directories by `worker-scenarios.ts`, never the real `/`.
   `dispatch reconcile` produces it from a scripted schedule and Paseo, and the CLI reads it,
   also through the `WorkflowQueue`; `dispatch-before-registration.json`, an older worker's
   without it, is read by the CLI side only.
-  `activity-agents.json` is also what `host agents` prints, and the dispatcher's Python test
-  (`assets/steps/dispatch/tests/test_factory_dispatch.py`) reads it as its capacity check's
-  answer. Change a document, its fixture and the CLI-side parser together.
+  `activity-agents.json` is also what `host agents` prints, and the dispatcher's test
+  (`dispatcher.test.ts`) gives its agents as the backend's answer to the capacity check.
+  Change a document, its fixture and the CLI-side parser together.
 - Biome leaves `**/fixtures/**/*.json` alone: the fixtures are `JSON.stringify`'s output.
 - `apply.test.ts` runs `host apply` over fake steps: real bash scripts written into the
   temporary release and run by the real process runner, or a scripted runner. It holds the
@@ -50,6 +50,19 @@ temporary directories by `worker-scenarios.ts`, never the real `/`.
   scripted runner answering Paseo's registration commands (after the auth wrapper), with a
   repository manifest and checkouts laid out under the temporary root (`placeRepositories`). It
   runs no trigger command.
+- `dispatcher.test.ts` runs the dispatcher (`host dispatch run`) in process, as the Python
+  dispatcher's tests ran it, one case for each of theirs: a worker laid out in the temporary
+  root, a real bare Git remote that `GIT_CONFIG_GLOBAL`'s `insteadOf` puts in GitHub's place,
+  the release's real FFFlow adoption check and repository program (the latter behind a wrapper
+  recording each mode), a stand-in `gh` on the caller's `PATH` answering by `MOCK_READINESS`,
+  and a stand-in for the auth wrapper that answers the duplicate check and the launch from the
+  test's agents, records how it was run, and answers the Paseo adapter's own lists where a case
+  is the adapter's (the real backend selected). Stand-ins are Bun scripts behind a shell
+  wrapper with their paths written in, since the adapter's own calls get a clean environment.
+  The agents come from `support/fake-execution-backend.ts` otherwise, read afresh from the
+  test's world so a launch takes the slot. It holds the real dispatch lock (`flockExclusive`),
+  and the Python dispatcher's under the temporary root's Paseo home where a case needs it.
+  `dispatch.test.ts` covers the activator's adoption over a scripted runner.
 - `paseo-trigger.test.ts` runs the Paseo trigger over a scripted runner: the reconciler's exact
   command, timeout and environment (`PASEO_HOME` and `FACTORY_PASEO_BIN` set there, and nowhere
   else: the adoption probe's command in `dispatch.test.ts` carries neither), and its answer, as
