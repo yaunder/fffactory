@@ -1,6 +1,6 @@
 # Plan: fffactory-v2-roadmap
 
-Level: L1 · Source: docs/designs/fffactory-v2.md @ d813dee (main) · Tracker: #80
+Level: L1 · Source: docs/designs/fffactory-v2.md @ d813dee (main) · Tracker: yaunder/factory#80
 
 ## Phase 1 — Understanding (confirmed 2026-09-29)
 
@@ -130,3 +130,9 @@ External prerequisites:
 
 Issue actions at capture (D6): close #68 #72 #62 #45 #46 #50 #79, fold #17 into E2,
 make #80 the tracker.
+
+## Captured tasks
+
+Epics captured in this repository after the move (phases 1–3 are in their phase files):
+
+Epic: #5 — Worker power lifecycle: `fffactory worker start|stop|terminate` (M3 host retirement, reduced form)
