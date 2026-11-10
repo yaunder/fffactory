@@ -22,3 +22,6 @@ crash.*.log
 node_modules/
 coverage/
 dist/
+
+# Machine-local Paseo workspace settings
+paseo.json
