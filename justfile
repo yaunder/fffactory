@@ -66,8 +66,16 @@ paseo-check:
     ./tests/paseo/hash-only-daemon.sh
 
 # Run all quality checks (format, lint, typecheck, coverage - fastest first)
-check-all: format-check lint-check typecheck coverage repository-skills
+check-all: format-check lint-check typecheck coverage repository-skills docs-build
     @echo "All checks passed"
+
+# Build the static documentation site and check its links
+docs-build:
+    bun run docs:build
+
+# Build and preview documentation on localhost:4321
+docs-serve:
+    bun run docs:serve
 
 # Remove generated files and artifacts
 clean:

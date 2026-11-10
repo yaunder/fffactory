@@ -321,6 +321,9 @@ state, release or AWS account invalidates it: plan again. See [plan and apply](d
   including multiple workers and guided replacement.
 - [Portable execution and supervision](docs/designs/portable-execution.md) —
   a discussion draft for future execution backends.
+- [Worker log archive and local reader](docs/designs/worker-log-archive.md) —
+  approved scope for collecting Claude Code logs and inspecting runs locally;
+  implementation pending.
 
 v1 is frozen and its tooling has been removed. These instructions cover v2
 only; [decision 0002](docs/decisions/0002-fffactory-v2.md) records the transition.
@@ -337,5 +340,10 @@ just check-all
 
 The checks exercise repository code without AWS credentials or factory state.
 Maintainers: [prepare and protect a fresh public repository](docs/public-repository.md).
+
+To preview the documentation website, run `just docs-serve` and open
+`http://127.0.0.1:4321`. `just docs-build` generates static HTML in `dist/docs/`
+and checks links. The site uses the existing Markdown with Bun's built-in
+converter; see [documentation site maintenance](docs/specs/documentation-site.md).
 
 Licensed under the [MIT License](LICENSE), copyright Yaunder.

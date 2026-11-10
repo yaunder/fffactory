@@ -188,7 +188,9 @@ Each operator's factory.json owns its inventory; this repository holds none.
   pull requests. There is no Yaunder fork.
 - **The compound engineering loop (#21) is deferred** until a consolidated
   end-to-end flow exists. It then feeds `audit --plan` with session-derived
-  findings.
+  findings. The approved [worker log archive design](docs/designs/worker-log-archive.md)
+  defines the collection and local inspection milestone; implementation and
+  downstream evals remain pending.
 
 ## Relationship to upstream FFFlow
 

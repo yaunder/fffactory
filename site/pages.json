@@ -1,0 +1,82 @@
+[
+  {
+    "source": "README.md",
+    "slug": "index",
+    "title": "Overview & quickstart",
+    "group": "Start here"
+  },
+  { "source": "SDLC.md", "slug": "workflow", "title": "How work moves", "group": "Start here" },
+  {
+    "source": "MACHINE_ONBOARDING.md",
+    "slug": "onboarding",
+    "title": "Runbook introduction",
+    "group": "Set up your factory",
+    "split": true
+  },
+  {
+    "source": "docs/specs/instance-configuration.md",
+    "slug": "configuration",
+    "title": "Configuration",
+    "group": "Reference"
+  },
+  {
+    "source": "docs/specs/doctor.md",
+    "slug": "doctor",
+    "title": "Workstation checks",
+    "group": "Reference"
+  },
+  {
+    "source": "docs/specs/plan-apply.md",
+    "slug": "plan-apply",
+    "title": "Plan, apply & upgrade",
+    "group": "Reference"
+  },
+  {
+    "source": "docs/specs/status.md",
+    "slug": "status",
+    "title": "Status & readiness",
+    "group": "Reference"
+  },
+  {
+    "source": "docs/specs/worker-lifecycle.md",
+    "slug": "workers",
+    "title": "Manage workers",
+    "group": "Reference"
+  },
+  {
+    "source": "docs/specs/secrets.md",
+    "slug": "secrets",
+    "title": "Secrets",
+    "group": "Reference"
+  },
+  {
+    "source": "docs/specs/credential-delivery.md",
+    "slug": "credentials",
+    "title": "API credentials",
+    "group": "Reference"
+  },
+  {
+    "source": "docs/specs/repositories.md",
+    "slug": "repositories",
+    "title": "Repositories",
+    "group": "Reference"
+  },
+  {
+    "source": "docs/specs/dispatch.md",
+    "slug": "dispatch",
+    "title": "Dispatch",
+    "group": "Reference"
+  },
+  {
+    "source": "docs/specs/teardown.md",
+    "slug": "teardown",
+    "title": "Remove a factory",
+    "group": "Reference"
+  },
+  {
+    "source": "docs/specs/release.md",
+    "slug": "releases",
+    "title": "Releases & installation",
+    "group": "Reference"
+  }
+]
