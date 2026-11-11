@@ -30,6 +30,7 @@ import { MATERIALIZED_MARKER } from "../domain/release-assets";
 import type { ProcessOutcome } from "../infrastructure/local-tool-probe";
 import { sha256Text } from "../infrastructure/release-tarball";
 import { workerCollectorStep } from "./collector-step";
+import { executionBackend } from "./execution-backend";
 import { workerCredentials } from "./credentials";
 import { errorCode } from "./failures";
 import { exists, markerRecords, operatingSystem, tokenOr, type WorkerSystem } from "./inspect";
@@ -255,8 +256,14 @@ async function runImplementation(
         : "plugin installation or verification failed";
     case "credentials":
       return workerCredentials(system, projection, step.timeoutMs, note);
-    case "collector":
-      return workerCollectorStep(system, projection, step.timeoutMs, { output: log.fd, note });
+    case "collector": {
+      // The backend's layout runs nothing, so it takes nothing of the step's budget.
+      const { privateFiles } = executionBackend(system, step.timeoutMs).layout();
+      return workerCollectorStep(system, projection, privateFiles, step.timeoutMs, {
+        output: log.fd,
+        note,
+      });
+    }
     case undefined: {
       const script = join(env.FFFACTORY_STEPS, `${step.name}.sh`);
       const outcome = await system.run(["/bin/bash", script], step.timeoutMs, {

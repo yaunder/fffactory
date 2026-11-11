@@ -7,9 +7,9 @@
  * (`domain/dispatch-readiness.ts`) decide. It activates dispatch only when every gate passes and
  * keeps it inactive otherwise, so a later apply activates it automatically once the gates pass.
  *
- * Activating dispatch reconciles the Paseo schedule, a live change: the stage holds no
- * control-plane port and never restarts the daemon, so rerunning it over an active agent
- * disturbs nothing. One worker's failure never stops the others.
+ * Activating dispatch reconciles the worker's dispatch trigger, a live change: the stage holds
+ * no control-plane port and never restarts the execution backend, so rerunning it over an
+ * active agent disturbs nothing. One worker's failure never stops the others.
  *
  * A worker an earlier stage skipped (its maintenance deferred, the workers stage skipping it,
  * the tailnet no longer locating it) is skipped here too, before any gate: it is sent nothing,

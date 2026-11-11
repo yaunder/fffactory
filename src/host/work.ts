@@ -1,14 +1,15 @@
 /**
  * The worker side of `host work inspect` (`docs/specs/host-protocol.md` §work inspect): the
- * current state of every checkout under the repository root, every Paseo worktree, and every
- * worktree Git lists for their repositories, read fresh as the runtime account. It changes
- * nothing: Git runs with optional locks off, so no index is refreshed and no lock file is
- * taken, with no fsmonitor hook and no LFS filter (which would clean a stat-stale file into
- * `.git/lfs/objects`), never fetches, and no file's content or name reaches the document. A
- * clean filter a repository defines under another name still runs, as the runtime account, the
- * account whose repository defines it. A populated submodule is inspected as a repository of its
- * own. What it cannot search to the end, it reports incomplete; what Git cannot fully report on
- * (a file it is told to assume unchanged, a directory it warns it cannot open), unreadable.
+ * current state of every checkout under the repository root, every workspace under the execution
+ * backend's workspace roots (its layout), and every worktree Git lists for their repositories,
+ * read fresh as the runtime account. It changes nothing: Git runs with optional locks off, so no
+ * index is refreshed and no lock file is taken, with no fsmonitor hook and no LFS filter (which
+ * would clean a stat-stale file into `.git/lfs/objects`), never fetches, and no file's content
+ * or name reaches the document. A clean filter a repository defines under another name still
+ * runs, as the runtime account, the account whose repository defines it. A populated submodule
+ * is inspected as a repository of its own. What it cannot search to the end, it reports
+ * incomplete; what Git cannot fully report on (a file it is told to assume unchanged, a
+ * directory it warns it cannot open), unreadable.
  */
 import { constants, type Dirent } from "node:fs";
 import { lstat, open, readdir, realpath } from "node:fs/promises";
@@ -29,12 +30,14 @@ import {
   type RepositoryWork,
   type WorkArchive,
   WORK_LIMITS,
-  WORK_ROOTS,
   type WorkInspection,
+  type WorkRoot,
   type WorktreeWork,
+  workRoots,
 } from "../domain/work-inspection";
 import type { ApplySystem } from "./apply";
 import { CHECKPOINT, discoverSources } from "./collect";
+import { type BackendSelection, executionBackend } from "./execution-backend";
 
 /** Each Git command's bound. */
 export const WORK_GIT_TIMEOUT_MS = 20_000;
@@ -57,8 +60,6 @@ export const ARCHIVE_ENTRY_LIMIT = 200_000;
 /** The largest checkpoint read; a larger one is read as none, which overstates the backlog. */
 const CHECKPOINT_LIMIT_BYTES = 64 * 1024 * 1024;
 
-/** How deep below each root a checkout or worktree is looked for. */
-const SEARCH_DEPTH = { repositories: 4, paseoWorktrees: 3 } as const;
 /** How deep below a Git directory's `modules/` a submodule's Git directory is looked for. */
 const MODULES_DEPTH = 4;
 /** A submodule's mode in the index (a gitlink). */
@@ -399,9 +400,9 @@ async function worktreeWork(
     owned: false,
   });
   if (unpushed === undefined) return unreadable();
-  // TODO(re-evaluate when a worker's agents initialise submodules in Paseo worktrees): a missing
-  // worktree's own `.git/worktrees/<id>/modules/` can still hold submodule commits pushed
-  // nowhere; report each Git directory there as unreadable, as `unusedModules` does.
+  // TODO(re-evaluate when a worker's agents initialise submodules in backend workspaces): a
+  // missing worktree's own `.git/worktrees/<id>/modules/` can still hold submodule commits
+  // pushed nowhere; report each Git directory there as unreadable, as `unusedModules` does.
   if (listed.prunable || !(await exists(listed.path)))
     return {
       work: {
@@ -549,20 +550,26 @@ async function unlinked(system: ApplySystem, root: string): Promise<boolean> {
 async function searched(
   system: ApplySystem,
   inspection: Inspection,
-  root: string,
-  depth: number,
+  { path, depth }: WorkRoot,
 ): Promise<string[]> {
-  if (await unlinked(system, root)) return workingTrees(join(system.root, root), depth, inspection);
+  if (await unlinked(system, path)) return workingTrees(join(system.root, path), depth, inspection);
   inspection.complete = false;
   return [];
 }
 
-/** Every checkout under the repository root, then every Paseo worktree, in path order. */
-async function discovered(system: ApplySystem, inspection: Inspection): Promise<string[]> {
-  return [
-    ...(await searched(system, inspection, WORK_ROOTS.repositories, SEARCH_DEPTH.repositories)),
-    ...(await searched(system, inspection, WORK_ROOTS.paseoWorktrees, SEARCH_DEPTH.paseoWorktrees)),
-  ];
+/**
+ * Every working tree under each root (`workRoots`: the repository root, then the backend's
+ * `workspaceRoots`), root by root, each in path order.
+ */
+async function discovered(
+  system: ApplySystem,
+  inspection: Inspection,
+  workspaceRoots: readonly WorkRoot[],
+): Promise<string[]> {
+  const trees: string[] = [];
+  for (const root of workRoots(workspaceRoots))
+    trees.push(...(await searched(system, inspection, root)));
+  return trees;
 }
 
 /** The worktrees the repository at `tree` lists, with their real paths, or undefined. */
@@ -861,14 +868,17 @@ async function archiveBacklog(system: ApplySystem): Promise<WorkArchive> {
   };
 }
 
-async function inspectWork(system: ApplySystem): Promise<WorkInspection> {
+async function inspectWork(
+  system: ApplySystem,
+  workspaceRoots: readonly WorkRoot[],
+): Promise<WorkInspection> {
   // The budget starts before the archive's count, so its time comes out of the same total.
   const inspection = new Inspection(system);
   const archive = await archiveBacklog(system);
   const roots = [...new Set([system.root, await realOrSelf(system.root)])];
   const covered = new Set<string>();
   const repositories: RepositoryWork[] = [];
-  for (const tree of await discovered(system, inspection)) {
+  for (const tree of await discovered(system, inspection, workspaceRoots)) {
     if (covered.has(await realOrSelf(tree))) continue;
     if (inspection.outOfTime || !inspection.admit()) break;
     repositories.push(...(await repositoryAt(inspection, tree, roots, covered)));
@@ -883,11 +893,18 @@ async function inspectWork(system: ApplySystem): Promise<WorkInspection> {
   };
 }
 
-export function workerWork(system: ApplySystem): HostWork {
+/**
+ * `select` is the worker's backend selection point, whose layout names the workspace roots
+ * searched; tests give a fake backend's.
+ */
+export function workerWork(
+  system: ApplySystem,
+  select: BackendSelection = executionBackend,
+): HostWork {
   return {
     async inspectWork() {
       if (!system.isRoot()) throw new Error("host work runs only through the activator");
-      return inspectWork(system);
+      return inspectWork(system, select(system, WORK_BUDGET_MS).layout().workspaceRoots);
     },
   };
 }

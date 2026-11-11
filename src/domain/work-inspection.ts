@@ -21,13 +21,30 @@ import {
   TOKEN,
 } from "./protocol-fields";
 
-/** Where the worker looks for checkouts and worktrees, as the runtime account keeps them. */
+/** Where the worker keeps its checkouts, as the runtime account keeps them. */
 export const WORK_ROOTS = {
   /** The placed checkouts (`docs/specs/repositories.md`), and any other clone beside them. */
   repositories: "/workspace/repos",
-  /** Paseo's worktrees (`SDLC.md` §Worktree ownership), found even when Git no longer lists them. */
-  paseoWorktrees: "/home/factory/.paseo/worktrees",
 } as const;
+
+/** A directory the inspection searches for working trees, and how many levels below it. */
+export interface WorkRoot {
+  /** An absolute path on the worker. */
+  readonly path: string;
+  readonly depth: number;
+}
+
+/** The repository root, searched 4 levels down: factory.json places checkouts at any depth. */
+const REPOSITORY_ROOT: WorkRoot = { path: WORK_ROOTS.repositories, depth: 4 };
+
+/**
+ * Every root the inspection searches, in order: the repository root, then the execution
+ * backend's workspace roots in its order (`docs/specs/execution-backend.md` §Layout), where its
+ * workspaces are found even when Git no longer lists them.
+ */
+export function workRoots(workspaceRoots: readonly WorkRoot[]): readonly WorkRoot[] {
+  return [REPOSITORY_ROOT, ...workspaceRoots];
+}
 
 /**
  * What one document reports at most: more repositories or worktrees leave the inspection

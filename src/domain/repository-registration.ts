@@ -1,5 +1,6 @@
 /**
- * Repository registration (pure; `docs/specs/dispatch.md` §Repository registration): the
+ * Repository registration (pure; `docs/specs/execution-backend.md` §The `ExecutionBackend`
+ * contract, run by `docs/specs/dispatch.md` §Repository registration): the
  * absolute paths of the checkouts a host's repository manifest places, and the backend-neutral
  * result of making them available through the worker's execution backend, with its document
  * and a tolerant reader. The domain never asks a backend anything; `host/execution-backend.ts`

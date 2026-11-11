@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Proves, against the pinned Paseo, that the daemon a worker runs authenticates with only the
 # bcrypt hash fffactory writes, that nothing it launches sees PASEO_PASSWORD, that it downloads
-# no speech model with the merged config, that it accepts factory-dispatch's launch and list
-# flags, that it answers the agent list and inspection the worker's agent adapter reads, and that
+# no speech model with the merged config, that it accepts the launch and list flags of the Paseo
+# adapter's startRun and runs, that it answers the agent list and inspection they read, and that
 # its project commands register a checkout once and refuse a missing directory
 # (docs/specs/control-plane.md §The Paseo pin, §Agent states):
 #
@@ -169,19 +169,19 @@ ${projects}"
     fail "a refused project create changed the projects: $(list_projects)"
   pass 'project create refuses a missing directory (PROJECT_CREATE_FAILED) and registers nothing'
 
-  # Launched and listed with the flags factory-dispatch uses; like it, read only standard output
-  # (0.12+ notes a created workspace on standard error).
+  # Launched and listed with the flags the Paseo adapter's startRun and runs use; like them, read
+  # only standard output (0.12+ notes a created workspace on standard error).
   out="$(as_factory aws-right run --provider claude --cwd "${home}" --no-wait --json \
     --label factory-dispatch=true 'Report your environment.' 2>"${work}/run.err")" ||
     fail "the agent could not be started: $(<"${work}/run.err")"
   local agent_id
   agent_id="$(jq -er '.agentId' <<<"${out}")" || fail "the agent's launch printed no agentId: ${out}"
   out="$(as_factory aws-right ls --global --background --label factory-dispatch=true --json 2>&1)" ||
-    fail "the dispatcher's agent list failed: ${out}"
+    fail "the adapter's labelled agent list failed: ${out}"
   [[ $(jq -r '[.[].id] | join(" ")' <<<"${out}") == "${agent_id}" ]] ||
-    fail "the dispatcher's agent list does not show exactly the launched agent: ${out}"
+    fail "the adapter's labelled agent list does not show exactly the launched agent: ${out}"
   pass "an agent launched with --no-wait is listed with ls --global --background"
-  # What the worker's agent adapter reads (control-plane.md §Agent states): each listed agent's
+  # What the adapter's runs read (control-plane.md §Agent states): each listed agent's
   # id, a token its AGENT_ID rule accepts, and status, and an inspected agent's pending permissions.
   out="$(as_factory aws-right ls --global --background --json 2>&1)" ||
     fail "the adapter's agent list failed: ${out}"

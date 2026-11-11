@@ -210,6 +210,14 @@ describe("bunProcessRunner", () => {
     });
   });
 
+  test("reads text that is not UTF-8 leniently, a leading BOM dropped", async () => {
+    const script = "process.stdout.write(new Uint8Array([0xef, 0xbb, 0xbf, 0x61, 0xff]))";
+    expect(await bunProcessRunner([bun, "-e", script], 5000)).toMatchObject({
+      kind: "exited",
+      stdout: "a\uFFFD",
+    });
+  });
+
   test("runs in the given working directory with exactly the given environment", async () => {
     const script = "console.log(JSON.stringify({ cwd: process.cwd(), env: process.env }))";
     const outcome = await bunProcessRunner([bun, "-e", script], 5000, {

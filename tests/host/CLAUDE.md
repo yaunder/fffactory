@@ -19,38 +19,71 @@ temporary directories by `worker-scenarios.ts`, never the real `/`.
   `dispatch reconcile` produces it from a scripted schedule and Paseo, and the CLI reads it,
   also through the `WorkflowQueue`; `dispatch-before-registration.json`, an older worker's
   without it, is read by the CLI side only.
-  `activity-agents.json` is also what `host agents` prints, and the dispatcher's Python test
-  (`assets/steps/dispatch/tests/test_factory_dispatch.py`) reads it as its capacity check's
-  answer. Change a document, its fixture and the CLI-side parser together.
+  `activity-agents.json` is also what `host agents` prints, and the dispatcher's test
+  (`dispatcher.test.ts`) gives its agents as the backend's answer to the capacity check.
+  Change a document, its fixture and the CLI-side parser together.
 - Biome leaves `**/fixtures/**/*.json` alone: the fixtures are `JSON.stringify`'s output.
 - `apply.test.ts` runs `host apply` over fake steps: real bash scripts written into the
   temporary release and run by the real process runner, or a scripted runner. It holds the
   real install lock (`install-lock.test.ts`) under the temporary root's `/run`.
 - `work.test.ts` runs `host work inspect` over real Git repositories that `work-scenarios.ts`
   lays out in a temporary worker root, with a remote outside it; its runner checks each command
-  drops to `factory`, then runs the rest as the test's user. `protocol-contract.test.ts` builds
-  `fixtures/work-unresolved.json` from the same real Git, and `work-archive-backlog.json` from
+  drops to `factory`, then runs the rest as the test's user. It searches the workspace roots of
+  a fake backend (`support/fake-execution-backend.ts`), whose layout is Paseo's unless a test
+  gives another, so its paths are a Paseo worker's. `protocol-contract.test.ts` builds
+  `fixtures/work-unresolved.json` from the same real Git and `work-archive-backlog.json` from
   `work-scenarios.ts`'s `archivingWorker`. `work-archive.test.ts` runs its archive section over a
   Claude root, the collector's configuration and a checkpoint laid out there
   (`configureCollector`, `saveCheckpoint`, `captured`), each write a later modification time.
+  Both inspect over the real selection, Paseo's, so a fixture and a backlog are a Paseo worker's
+  as the backend itself lays it out.
 - `plugins.test.ts` exercises native plugin installation and verification with local
   metadata and a scripted process runner, including unversioned marketplace entries,
   exact commit/version/content checks, drift repair and undeclared plugin removal.
 - `credentials.test.ts` runs the `credentials` step over a scripted runner, Secrets Manager
   answered by ARN: it asserts each command, deadline and standard input, and searches every
   argument, environment value and log line for the material it used.
-- `control-plane.test.ts` runs the control-plane endpoint over a scripted runner: for
-  activity and `host agents`, a scripted Paseo (`paseo`) answering its lists and each agent's
-  inspection, as 0.15.0 prints them, after the auth wrapper however it was run; for install,
-  Secrets Manager answering the Paseo password: it checks the hash setup is sent with
-  `bcryptjs`'s `compareSync`, and searches every argument, environment value and setup input
-  for the password.
-- `dispatch.test.ts` runs the dispatch endpoint over a scripted runner telling the schedule's
-  commands from Paseo's (after the auth wrapper), with a repository manifest and checkouts laid
-  out under the temporary root (`placeRepositories`).
-- `paseo-backend.test.ts` runs the Paseo adapter over a fake `PaseoCommand` answering `project
-  ls` and `project create` as Paseo 0.15.0 prints them, and searches every argument and result
-  for the auth wrapper's password.
+- `control-plane.test.ts` runs the control-plane endpoint and `host agents` over a fake
+  `ExecutionBackend` (`support/fake-execution-backend.ts`, which records every call and every
+  budget and environment its selection was given, keeps to the run contract: asked for a
+  work's runs, only those `launchedFor` it, and answers Paseo's layout, `PASEO_LAYOUT`, unless
+  given another) and, for install, Secrets Manager answering the
+  Paseo password: privilege, the projection, the password read and handed on, the budgets, and
+  the backend's answers passed on, its runs read as agents. It runs no backend command.
+- `dispatch.test.ts` runs the dispatch endpoint over a fake `DispatchTrigger`
+  (`support/fake-dispatch-trigger.ts`, which keeps one trigger as a reconciler would over the
+  persisted projection, records every call and timeout, and answers as a test sets), and a
+  scripted runner answering Paseo's registration commands (after the auth wrapper), with a
+  repository manifest and checkouts laid out under the temporary root (`placeRepositories`). It
+  runs no trigger command.
+- `dispatcher.test.ts` runs the dispatcher (`host dispatch run`) in process, as the Python
+  dispatcher's tests ran it, one case for each of theirs: a worker laid out in the temporary
+  root, a real bare Git remote that `GIT_CONFIG_GLOBAL`'s `insteadOf` puts in GitHub's place,
+  the release's real FFFlow adoption check and repository program (the latter behind a wrapper
+  recording each mode), a stand-in `gh` on the caller's `PATH` answering by `MOCK_READINESS`,
+  and the runs from `support/fake-execution-backend.ts`, read afresh from the test's world
+  (each dispatched run with the repository and epic it was launched for), whose `startRun`
+  records the request and takes the slot. Where a case goes through the real Paseo backend end
+  to end (the real selection), a stand-in for the auth wrapper answers a work's labelled list
+  (by repository and epic) and the launch from the test's runs, records how it was run, and
+  answers the adapter's own lists from rows the test writes. Stand-ins are Bun scripts behind a
+  shell wrapper with their paths written in, since the adapter's own calls may get a clean
+  environment. The exact Paseo commands are
+  `paseo-backend.test.ts`'s. It holds the real dispatch lock (`flockExclusive`),
+  and the Python dispatcher's under the temporary root's Paseo home where a case needs it.
+  `dispatch.test.ts` covers the activator's adoption over a scripted runner.
+- `paseo-trigger.test.ts` runs the Paseo trigger over a scripted runner: the reconciler's exact
+  command, timeout and environment (`PASEO_HOME` and `FACTORY_PASEO_BIN` set there, and nowhere
+  else: the adoption probe's command in `dispatch.test.ts` carries neither), and its answer, as
+  `dispatch-schedule.sh` prints it, read into the trigger's inspection.
+- `paseo-backend.test.ts` runs the Paseo adapter over a scripted runner: Paseo's own arguments
+  after the auth wrapper, however it was run (from root by `runuser`, or as `factory`), answered
+  as Paseo 0.15.0 prints them (`project ls` and `project create`, the agent lists, a work's
+  labelled list and each agent's inspection, and `run`'s `agentId`), and setup and `systemctl`.
+  It asserts each command, environment (the caller's as given, the launch's without
+  `PASEO_AGENT_ID` and `PASEO_WORKSPACE_ID`), directory, budget and setup input; checks the hash
+  setup is sent with `bcryptjs`'s `compareSync`; and searches every argument, environment value,
+  setup input and result for the password.
 - `verify.test.ts` answers every command with a scripted runner; `inspect.test.ts` covers the
   unprivileged read-only inspection.
 - `collect.test.ts` runs the collection run (`docs/specs/collector.md` §Run) over a Claude root
@@ -63,13 +96,14 @@ temporary directories by `worker-scenarios.ts`, never the real `/`.
   `collect.test.ts` gives the run no `incarnation.json` unless a test does, so put indices
   count only the run's own objects.
 - `collector-step.test.ts` runs the `collector` install step over a scripted `systemctl` that
-  writes to the step's log as the real one does. It also spawns
-  `support/aws-endpoint-probe-main.ts` under the service's environment, assembled from the unit
-  text by systemd's rules (the manager's variables, then `Environment=`, then
-  `UnsetEnvironment=`), with a `~/.aws` and inherited settings pointing at closed local ports, and
-  without that environment as the baseline. The probe resolves where instance metadata, STS and S3
-  would be asked and stops each request once built, sending nothing; it is not `fffactory`, so it
-  gets that environment rather than `isolatedAwsEnvironment`, whose settings it exists to test.
+  writes to the step's log as the real one does, given Paseo's private files (`PASEO_LAYOUT`)
+  unless a test gives a backend's own. It also spawns `support/aws-endpoint-probe-main.ts` under
+  the service's environment, assembled from the unit text by systemd's rules (the manager's
+  variables, then `Environment=`, then `UnsetEnvironment=`), with a `~/.aws` and inherited
+  settings pointing at closed local ports, and without that environment as the baseline. The
+  probe resolves where instance metadata, STS and S3 would be asked and stops each request once
+  built, sending nothing; it is not `fffactory`, so it gets that environment rather than
+  `isolatedAwsEnvironment`, whose settings it exists to test.
 - `s3-archive-writer.test.ts` and `collection.test.ts` run the S3 archive writer and `host
   collect --once` on the real AWS SDK against `support/loopback-imds.ts`, `support/stub-sts.ts`
   and `support/stub-s3.ts` (with `requireIfNoneMatch`), the metadata endpoint set only around

@@ -31,6 +31,7 @@ import {
   WORK_GIT_TIMEOUT_MS,
   workerWork,
 } from "../../src/host/work";
+import { type BackendAnswers, fakeExecutionBackend } from "../support/fake-execution-backend";
 import {
   AS_FACTORY,
   addSubmodule,
@@ -80,8 +81,9 @@ function repository(overrides: Partial<RepositoryWork> = {}): RepositoryWork {
   };
 }
 
-async function inspect(overrides: Partial<ApplySystem> = {}) {
-  return workerWork(workSystem(overrides)).inspectWork();
+/** The inspection over a fake backend, with Paseo's layout unless `answers` gives another. */
+async function inspect(overrides: Partial<ApplySystem> = {}, answers: BackendAnswers = {}) {
+  return workerWork(workSystem(overrides), fakeExecutionBackend(answers).select).inspectWork();
 }
 
 beforeEach(async () => {
@@ -250,6 +252,35 @@ describe("host work inspect (host-protocol §work inspect)", () => {
     expect(found?.worktrees).toContainEqual(
       clean(`${PASEO}/def456/other`, { branch: "spike", untracked_files: 1 }),
     );
+  });
+
+  test("searches the backend's workspace roots, at their depth, after the repository root", async () => {
+    const layout = { workspaceRoots: [{ path: "/srv/workspaces", depth: 2 }], privateFiles: [] };
+    const backend = fakeExecutionBackend({ layout });
+    await checkout();
+    for (const [clone, worktree] of [
+      ["one", "/srv/workspaces/run-1/task"],
+      ["two", `${PASEO}/abc123/serious-goose`],
+    ] as const) {
+      const elsewhere = join(outside, clone);
+      git(outside, "clone", "--quiet", origin, elsewhere);
+      await mkdir(join(at(worktree), ".."), { recursive: true });
+      git(elsewhere, "worktree", "add", "--quiet", "-b", clone, at(worktree), "origin/main");
+    }
+    const result = await workerWork(workSystem(), backend.select).inspectWork();
+    // Paseo's worktrees are not this backend's: only its own root is searched.
+    expect(result.complete).toBe(true);
+    expect(result.repositories.map((found) => found.path)).toEqual([
+      CHECKOUT,
+      "/srv/workspaces/run-1/task",
+    ]);
+    expect(backend.calls).toEqual([{ method: "layout" }]);
+    expect(backend.budgets).toEqual([WORK_BUDGET_MS]);
+    // Below its depth, the inspection is incomplete.
+    await world.remove();
+    world = await gitWorld();
+    await checkout("/srv/workspaces/a/b/c");
+    expect((await inspect({}, { layout })).complete).toBe(false);
   });
 
   /**

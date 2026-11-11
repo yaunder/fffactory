@@ -2,10 +2,10 @@
  * Stopping dispatch on one running worker outside apply (`docs/specs/dispatch.md` §Stopping
  * dispatch): teardown stops it on every running worker before it destroys anything (epic #56,
  * D3). It reconciles the host's not-requested projection through the `WorkflowQueue`, which
- * removes the factory's Paseo schedule as apply does for a host factory.json requests no
- * dispatch on: a live change that never restarts Paseo or interrupts an agent. Nothing else
- * is asked of the worker, and factory.json is not read: the next `fffactory apply` reconciles
- * dispatch from it again, and so restarts it.
+ * removes the factory-owned dispatch trigger as apply does for a host factory.json requests no
+ * dispatch on: a live change that never restarts the execution backend or interrupts an agent.
+ * Nothing else is asked of the worker, and factory.json is not read: the next `fffactory apply`
+ * reconciles dispatch from it again, and so restarts it.
  */
 import { type DispatchStop, notRequestedDispatchProjection } from "../domain/dispatch-projection";
 import type { WorkerAddress } from "../domain/tailnet";

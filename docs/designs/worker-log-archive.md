@@ -100,7 +100,7 @@ factory
           subagent records and associated files
 ```
 
-The [dispatcher](../../assets/steps/dispatch/factory-dispatch) labels launched
+The [dispatcher](../../src/host/dispatcher.ts) labels launched
 agents with repository alias, epic number, and dispatch timestamp, and returns
 their Paseo agent IDs. The examined Paseo `0.11.4` package persists agent labels,
 working directory, workspace ID, and `persistence.sessionId`; its Claude

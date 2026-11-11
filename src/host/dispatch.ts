@@ -27,20 +27,31 @@ import { HOST_PROTOCOL_VERSION, WORKER_PATHS } from "../domain/host-protocol";
 import { REPOSITORY_MANIFEST_PATH } from "../domain/repository-placement";
 import { placedCheckouts, type RepositoryRegistration } from "../domain/repository-registration";
 import { WORK_ROOTS } from "../domain/work-inspection";
-import type { ProcessOutcome } from "../infrastructure/local-tool-probe";
 import type { ApplySystem } from "./apply";
-import { factoryPaseo } from "./control-plane";
+import {
+  type DispatchTrigger,
+  dispatchTrigger,
+  matching,
+  type TriggerInspection,
+  type TriggerSelection,
+} from "./dispatch-trigger";
+import { rootAdoption } from "./dispatcher";
 import { executionBackend } from "./execution-backend";
 import { FACTORY_HOME } from "./runtime-account";
 
+/** Each of the trigger's commands' timeout. */
 const TIMEOUT_MS = 15 * 60_000;
 // TODO(re-evaluate when a dispatch reconcile is seen outlasting the CLI's WORKFLOW_TIMEOUT_MS,
-// or the schedule's TIMEOUT_MS changes): give reconcileDispatch one deadline under
-// WORKFLOW_TIMEOUT_MS that the schedule's --check, --apply and the registration share, as
-// activity's budget sits under its CLI wait.
+// or TIMEOUT_MS changes): give reconcileDispatch one deadline under WORKFLOW_TIMEOUT_MS that
+// the trigger's inspection, its reconcile and the registration share, as activity's budget
+// sits under its CLI wait.
 /** Every execution backend call of one repository registration together. */
 const REGISTRATION_BUDGET_MS = 2 * 60_000;
-const STABLE_DISPATCHER = "/usr/local/bin/factory-dispatch";
+/**
+ * Where releases before the dispatcher's port installed the Python dispatcher, which the skill
+ * they installed ran. The skill now runs `fffactory host dispatch run`.
+ */
+const RETIRED_DISPATCHER = "/usr/local/bin/factory-dispatch";
 const INSTALLED_SKILL = `${FACTORY_HOME}/.agents/skills/dispatch/SKILL.md`;
 const CLAUDE_SKILL = `${FACTORY_HOME}/.claude/skills/dispatch`;
 
@@ -67,26 +78,6 @@ async function atomically(path: string, text: string): Promise<void> {
   } finally {
     await rm(temporary, { force: true });
   }
-}
-
-function factoryCommand(_root: string, argv: readonly string[]): readonly string[] {
-  return [
-    "/usr/sbin/runuser",
-    "-u",
-    "factory",
-    "--",
-    "/usr/bin/env",
-    "-i",
-    `HOME=${FACTORY_HOME}`,
-    `PASEO_HOME=${FACTORY_HOME}/.paseo`,
-    "PATH=/home/factory/.local/bin:/usr/local/bin:/usr/bin:/bin",
-    "LANG=C.UTF-8",
-    ...argv,
-  ];
-}
-
-function exited(outcome: ProcessOutcome, expected: readonly number[]): boolean {
-  return outcome.kind === "exited" && expected.includes(outcome.exitCode);
 }
 
 async function sameFile(source: string, destination: string, mode: number): Promise<boolean> {
@@ -129,16 +120,26 @@ async function installLink(destination: string, target: string): Promise<boolean
   return true;
 }
 
+// TODO(re-evaluate when no worker runs a release from before the dispatcher's port, #142): stop removing RETIRED_DISPATCHER
+/** Removes the Python dispatcher an earlier release installed; whether there was one. */
+async function removeRetired(path: string): Promise<boolean> {
+  try {
+    await lstat(path);
+  } catch {
+    return false;
+  }
+  await rm(path, { recursive: true, force: true });
+  return true;
+}
+
 async function installAssets(root: string): Promise<boolean> {
-  const dispatcher = active(root, "dispatch/factory-dispatch");
   const skill = active(root, "dispatch/skill/SKILL.md");
-  const destination = pathAt(root, STABLE_DISPATCHER);
   const installedSkill = pathAt(root, INSTALLED_SKILL);
   const claudeSkill = pathAt(root, CLAUDE_SKILL);
   const changes = await Promise.all([
-    installFile(dispatcher, destination, 0o755),
     installFile(skill, installedSkill, 0o644),
     installLink(claudeSkill, "../../.agents/skills/dispatch"),
+    removeRetired(pathAt(root, RETIRED_DISPATCHER)),
   ]);
   return changes.some(Boolean);
 }
@@ -178,13 +179,14 @@ function projectionForHost(
   return { projection: parsed.projection };
 }
 
-async function scheduleMatches(
+/** Whether `input` is the persisted projection and the trigger already matches it. */
+async function triggerMatches(
   projectionPath: string,
   input: string,
-  check: () => Promise<ProcessOutcome>,
+  trigger: DispatchTrigger,
 ): Promise<boolean> {
   try {
-    return (await readFile(projectionPath, "utf8")) === input && exited(await check(), [0]);
+    return (await readFile(projectionPath, "utf8")) === input && matching(await trigger.inspect());
   } catch {
     return false;
   }
@@ -193,11 +195,11 @@ async function scheduleMatches(
 function reconcileResult(
   projection: DispatchProjection,
   matches: boolean,
-  applied: ProcessOutcome | undefined,
+  reconciled: TriggerInspection | undefined,
   assetsChanged: boolean,
 ): RecordedInspection {
   if (matches) return stateFor(projection, assetsChanged);
-  return applied !== undefined && exited(applied, [0])
+  return reconciled !== undefined && matching(reconciled)
     ? stateFor(projection, true)
     : failed(projection.blockers, "dispatch schedule did not reconcile");
 }
@@ -242,8 +244,8 @@ async function presentCheckouts(root: string): Promise<readonly string[] | undef
 
 /**
  * Makes the placed checkouts present on disk available through the worker's execution backend
- * (`docs/specs/dispatch.md` §Repository registration), never Paseo directly; or none when the
- * manifest cannot be read, or anything throws: the schedule's result is persisted regardless.
+ * (`docs/specs/dispatch.md` §Repository registration), never a backend's commands; or none when
+ * the manifest cannot be read, or anything throws: the trigger's result is persisted regardless.
  */
 async function registerRepositories(
   system: ApplySystem,
@@ -251,7 +253,7 @@ async function registerRepositories(
   try {
     const checkouts = await presentCheckouts(system.root);
     if (checkouts === undefined) return undefined;
-    const backend = executionBackend(factoryPaseo(system, REGISTRATION_BUDGET_MS));
+    const backend = executionBackend(system, REGISTRATION_BUDGET_MS);
     return await backend.registerRepositories(checkouts);
   } catch {
     return undefined;
@@ -280,43 +282,24 @@ async function readResult(root: string): Promise<DispatchInspection> {
   }
 }
 
-export function workerDispatch(system: ApplySystem): HostDispatch {
+/**
+ * The dispatch endpoint on `system`. `selectTrigger` is the worker's trigger selection point;
+ * tests give a fake trigger's.
+ */
+export function workerDispatch(
+  system: ApplySystem,
+  selectTrigger: TriggerSelection = dispatchTrigger,
+): HostDispatch {
   const projectionPath = pathAt(system.root, DISPATCH_PROJECTION_PATH);
   const resultPath = pathAt(system.root, DISPATCH_RESULT_PATH);
-  const schedule = active(system.root, "dispatch/dispatch-schedule.sh");
-  const auth = active(system.root, "control-plane/paseo-auth.sh");
-  const runSchedule = (mode: "--apply" | "--check") =>
-    system.run(
-      factoryCommand(system.root, [
-        `FACTORY_PASEO_BIN=${auth}`,
-        schedule,
-        mode,
-        "--projection",
-        projectionPath,
-      ]),
-      TIMEOUT_MS,
-      { cwd: "/", env: { PATH: "/usr/sbin:/usr/bin:/sbin:/bin", LANG: "C" } },
-    );
+  const trigger = () => selectTrigger(system, TIMEOUT_MS);
   return {
     async adoption() {
       if (!system.isRoot())
         throw new Error("host dispatch adoption must run through the activator");
-      const dispatcher = active(system.root, "dispatch/factory-dispatch");
-      const outcome = await system.run(
-        factoryCommand(system.root, [
-          dispatcher,
-          "--adoption-only",
-          "--manifest",
-          pathAt(system.root, REPOSITORY_MANIFEST_PATH),
-          "--host",
-          system.hostname(),
-        ]),
-        TIMEOUT_MS,
-        { cwd: "/", env: { PATH: "/usr/sbin:/usr/bin:/sbin:/bin", LANG: "C" } },
-      );
       return {
         protocol_version: HOST_PROTOCOL_VERSION,
-        state: exited(outcome, [0]) ? "passed" : "failed",
+        state: (await rootAdoption(system)) ? "passed" : "failed",
       };
     },
     async reconcileDispatch() {
@@ -326,16 +309,18 @@ export function workerDispatch(system: ApplySystem): HostDispatch {
       const parsed = projectionForHost(input, system.hostname());
       if ("failure" in parsed) return parsed.failure;
       const assetsChanged = parsed.projection.active ? await installAssets(system.root) : false;
-      const matches = await scheduleMatches(projectionPath, input, () => runSchedule("--check"));
+      const chosen = trigger();
+      const matches = await triggerMatches(projectionPath, input, chosen);
       await atomically(projectionPath, input);
-      const reconciled = matches ? undefined : await runSchedule("--apply");
-      const schedule = reconcileResult(parsed.projection, matches, reconciled, assetsChanged);
-      // After the schedule, whatever the projection; it never changes the schedule's result.
+      // The trigger reconciles to the projection persisted as desired state.
+      const reconciled = matches ? undefined : await chosen.reconcile(parsed.projection);
+      const outcome = reconcileResult(parsed.projection, matches, reconciled, assetsChanged);
+      // After the trigger, whatever the projection; it never changes the trigger's result.
       const registration = await registerRepositories(system);
       const result: RecordedInspection =
         registration === undefined
-          ? schedule
-          : { ...schedule, repository_registration: registration };
+          ? outcome
+          : { ...outcome, repository_registration: registration };
       await atomically(resultPath, `${dispatchInspectionJson(result)}\n`);
       return result;
     },
@@ -344,8 +329,7 @@ export function workerDispatch(system: ApplySystem): HostDispatch {
       const saved = await readResult(system.root);
       if (saved.state === "none" || saved.state === "unreadable" || saved.state === "failed")
         return saved;
-      const checked = await runSchedule("--check");
-      if (exited(checked, [0])) return { ...saved, changed: false };
+      if (matching(await trigger().inspect())) return { ...saved, changed: false };
       return {
         protocol_version: HOST_PROTOCOL_VERSION,
         state: "failed",

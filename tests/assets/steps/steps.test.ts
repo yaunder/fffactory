@@ -15,7 +15,7 @@ const SCRIPTS = (await readdir(STEPS)).filter((name) => name.endsWith(".sh")).so
 const CONTROL_PLANE = join(STEPS, "control-plane");
 const CONTROL_PLANE_SCRIPTS = ["paseo-auth.sh", "paseo-config.sh", "setup-host.sh"];
 const DISPATCH_RUNTIME = [
-  "assets/steps/dispatch/factory-dispatch",
+  "src/host/dispatcher.ts",
   "assets/steps/dispatch/dispatch-schedule.sh",
   "assets/steps/repositories/sync-repositories.sh",
 ];
@@ -254,7 +254,7 @@ describe("the release-owned dispatch path", () => {
       expect(text).not.toMatch(/\/usr\/local\/share\/software-factory|\/var\/lib\/factory\b/);
       expect(text).not.toMatch(/\b(check-factory-ffflow-adoption|factory-paseo)\b/);
     }
-    const dispatcher = await readFile(join(ROOT, "assets/steps/dispatch/factory-dispatch"), "utf8");
+    const dispatcher = await readFile(join(ROOT, "src/host/dispatcher.ts"), "utf8");
     expect(dispatcher).not.toMatch(/\bsync-factory-repositories\b/);
     expect(dispatcher).not.toContain("origin/main");
   });

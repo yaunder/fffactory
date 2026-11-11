@@ -549,7 +549,6 @@ describe("dispatch reconcile with its repository registration, both sides", () =
       branch: "main",
     }));
     const files: [string, string][] = [
-      [`${WORKER_PATHS.activeRelease}/steps/dispatch/factory-dispatch`, "#!/usr/bin/env python3\n"],
       [`${WORKER_PATHS.activeRelease}/steps/dispatch/skill/SKILL.md`, "---\nname: dispatch\n---\n"],
       [
         REPOSITORY_MANIFEST_PATH,
@@ -574,9 +573,18 @@ describe("dispatch reconcile with its repository registration, both sides", () =
       stdout,
       stderr: "",
     });
+    // The schedule reconciler's last line, as it prints it for a schedule matching the projection.
+    const reconciled = JSON.stringify({
+      host: WORKER_HOSTNAME,
+      status: "active",
+      schedule_id: "schedule-1",
+      desired: { enabled: true, name: "factory-dispatch" },
+    });
+    const schedule = (argv: readonly string[]) =>
+      argv.some((item) => item.endsWith("/steps/dispatch/dispatch-schedule.sh"));
     return async (argv) => {
+      if (schedule(argv)) return exited(0, `${reconciled}\n`);
       const project = argv.indexOf("project");
-      if (project === -1) return exited(0, "{}");
       if (argv[project + 1] === "ls")
         return exited(
           0,

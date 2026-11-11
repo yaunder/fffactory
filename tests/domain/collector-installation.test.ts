@@ -6,18 +6,18 @@ import { describe, expect, test } from "bun:test";
 import { join } from "node:path";
 import {
   COLLECTOR_COMMAND_TIMEOUT_MS,
-  COLLECTOR_INACCESSIBLE,
   COLLECTOR_LIMITS,
   COLLECTOR_SERVICE,
-  COLLECTOR_SERVICE_UNIT,
   COLLECTOR_STATE,
   COLLECTOR_STOP_TIMEOUT,
   COLLECTOR_STATE_DIRECTORY,
   COLLECTOR_TIMER,
   COLLECTOR_TIMER_UNIT,
-  COLLECTOR_UNITS,
   collectorConfigurationOf,
   collectorConfigurationText,
+  collectorInaccessible,
+  collectorServiceUnit,
+  collectorUnits,
   INHERITED_AWS_SETTINGS,
 } from "../../src/domain/collector-installation";
 import {
@@ -56,9 +56,12 @@ function values(unit: string, section: string, key: string): string[] {
     .map(([, value]) => value);
 }
 
+/** An execution backend's private files, as its layout declares them. */
+const PRIVATE_FILES = ["/home/factory/.backend/secret.json", "/home/factory/.backend/token"];
 const UNSET: readonly string[] = INHERITED_AWS_SETTINGS;
-const INACCESSIBLE: readonly string[] = COLLECTOR_INACCESSIBLE;
-const SERVICE = (key: string) => values(COLLECTOR_SERVICE_UNIT, "Service", key);
+const INACCESSIBLE = collectorInaccessible(PRIVATE_FILES);
+const SERVICE_UNIT = collectorServiceUnit(PRIVATE_FILES);
+const SERVICE = (key: string) => values(SERVICE_UNIT, "Service", key);
 const TIMER = (key: string) => values(COLLECTOR_TIMER_UNIT, "Timer", key);
 
 describe("the collector's service unit", () => {
@@ -86,24 +89,24 @@ describe("the collector's service unit", () => {
     expect(SERVICE("PrivateTmp")).toEqual(["true"]);
   });
 
-  test("cannot reach the credential stores, each optional", () => {
-    expect(SERVICE("InaccessiblePaths")).toEqual(COLLECTOR_INACCESSIBLE.map((path) => `-${path}`));
-    for (const store of [
-      `${CLAUDE_ROOT}/.credentials.json`,
-      `${CLAUDE_ROOT}/.session_ingress_token`,
-      "/home/factory/.claude.json",
-      "/home/factory/.claude.json.backup",
-      "/home/factory/.config/fffactory",
-      "/home/factory/.config/gh",
-      "/home/factory/.codex",
-      "/home/factory/.aws",
-      "/home/factory/.ssh",
-      "/home/factory/.git-credentials",
-      "/home/factory/.paseo/config.json",
-    ])
-      expect(INACCESSIBLE).toContain(store);
+  test("cannot reach the credential stores, then the backend's private files, each optional", () => {
+    expect(SERVICE("InaccessiblePaths")).toEqual([
+      `-${CLAUDE_ROOT}/.credentials.json`,
+      `-${CLAUDE_ROOT}/.session_ingress_token`,
+      "-/home/factory/.claude.json",
+      "-/home/factory/.claude.json.backup",
+      "-/home/factory/.config/fffactory",
+      "-/home/factory/.config/gh",
+      "-/home/factory/.codex",
+      "-/home/factory/.aws",
+      "-/home/factory/.ssh",
+      "-/home/factory/.git-credentials",
+      "-/home/factory/.backend/secret.json",
+      "-/home/factory/.backend/token",
+    ]);
+    expect(SERVICE("InaccessiblePaths")).toEqual(INACCESSIBLE.map((path) => `-${path}`));
     const hidden = (path: string) =>
-      COLLECTOR_INACCESSIBLE.some((store) => path === store || path.startsWith(`${store}/`));
+      INACCESSIBLE.some((store) => path === store || path.startsWith(`${store}/`));
     expect(hidden(ANTHROPIC_KEY_FILE)).toBe(true);
     // Nothing host collect --once reads or writes is hidden.
     for (const needed of [
@@ -118,6 +121,11 @@ describe("the collector's service unit", () => {
     ]) {
       expect({ needed, hidden: hidden(needed) }).toEqual({ needed, hidden: false });
     }
+  });
+
+  test("a backend with no private files hides factory's credential stores alone", () => {
+    expect(collectorInaccessible([])).toEqual(INACCESSIBLE.slice(0, -PRIVATE_FILES.length));
+    expect(values(collectorServiceUnit([]), "Service", "InaccessiblePaths")).toHaveLength(10);
   });
 
   test("stops within the step's command deadline", () => {
@@ -148,7 +156,7 @@ describe("the collector's service unit", () => {
   });
 
   test("has no tie to paseo.service, or to any other unit", () => {
-    for (const unit of [COLLECTOR_SERVICE_UNIT, COLLECTOR_TIMER_UNIT]) {
+    for (const unit of [SERVICE_UNIT, COLLECTOR_TIMER_UNIT]) {
       expect(unit).not.toContain("paseo.service");
       for (const section of ["Unit", "Service", "Timer"])
         for (const key of ["Requires", "Requisite", "BindsTo", "PartOf", "After", "Wants"])
@@ -158,7 +166,7 @@ describe("the collector's service unit", () => {
             values: [],
           });
     }
-    expect(directives(COLLECTOR_SERVICE_UNIT, "Install")).toEqual([]);
+    expect(directives(SERVICE_UNIT, "Install")).toEqual([]);
   });
 
   test("keeps factory's AWS configuration, and any endpoint the manager passes, from the SDK", () => {
@@ -188,7 +196,7 @@ describe("the collector's service unit", () => {
   });
 
   test("is one final newline long, with no carriage return", () => {
-    for (const unit of [COLLECTOR_SERVICE_UNIT, COLLECTOR_TIMER_UNIT]) {
+    for (const unit of [SERVICE_UNIT, COLLECTOR_TIMER_UNIT]) {
       expect(unit.endsWith("\n")).toBe(true);
       expect(unit.endsWith("\n\n")).toBe(false);
       expect(unit).not.toContain("\r");
@@ -207,8 +215,8 @@ describe("the collector's timer", () => {
   });
 
   test("is installed beside the service in systemd's administrator directory", () => {
-    expect(COLLECTOR_UNITS).toEqual([
-      { path: "/etc/systemd/system/fffactory-collector.service", text: COLLECTOR_SERVICE_UNIT },
+    expect(collectorUnits(PRIVATE_FILES)).toEqual([
+      { path: "/etc/systemd/system/fffactory-collector.service", text: SERVICE_UNIT },
       { path: "/etc/systemd/system/fffactory-collector.timer", text: COLLECTOR_TIMER_UNIT },
     ]);
     expect(COLLECTOR_COMMAND_TIMEOUT_MS).toBe(60_000);
