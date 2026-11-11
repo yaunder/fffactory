@@ -1,6 +1,6 @@
 # Phase 2: Collector
 
-**Status:** not-started
+**Status:** captured
 **Roadmap:** docs/roadmap/worker-log-archive/roadmap.md
 
 **Kind:** design-slice
@@ -15,3 +15,14 @@ When ready to execute this phase:
   /plan-chat
 
 The handoff skill will read this file as its starting point.
+
+## Captured tasks
+Epic: #117
+
+- #118 — T1 Worker settings carry the archive, and Claude keeps its history
+- #119 — T2 Archive format v1 and collector rules
+- #120 — T3 The collection run, against an archive writer port
+- #121 — T4 The S3 archive writer, and `host collect --once`
+- #122 — T5 The `collector` install step
+- #123 — T6 Unarchived evidence at removal
+- #124 — T7 Acceptance on the Acceptance factory, and limits

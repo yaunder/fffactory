@@ -1,5 +1,8 @@
-# Phase 3 — E3 Repository, dispatch and the switch (milestone M2: one completed epic)
+# Phase 3 — E3 Repository, dispatch and the switch
 
+Status: complete
+Tracked in: yaunder/factory, the private tracker this repository was snapshotted from (docs/public-repository.md). The epic and task numbers below are that tracker's.
+Milestone: M2 (one completed epic)
 Kind: plan-chat (tasks broken down in phases/phase-3/tasks/)
 Scope: Repository placement and sync (wrapped v1), Paseo installed and classified by change type with busy-agent
 deferral, dispatch readiness gates with requested vs active dispatch (wrapped v1 dispatch), end-to-end verification,
@@ -12,9 +15,9 @@ Estimated tasks: 4
 Decisions: D3, D6, D7, D8, D9
 
 ## Captured tasks
-Epic: #87
+Epic: yaunder/factory#87
 
-- #103 — Repository placement and synchronization
-- #104 — Paseo installation and change classification
-- #105 — Dispatch readiness gates and end-to-end verification
-- #106 — M2 acceptance and the switch to v2
+- yaunder/factory#103 — Repository placement and synchronization
+- yaunder/factory#104 — Paseo installation and change classification
+- yaunder/factory#105 — Dispatch readiness gates and end-to-end verification
+- yaunder/factory#106 — M2 acceptance and the switch to v2
