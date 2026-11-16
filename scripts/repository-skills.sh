@@ -16,7 +16,8 @@ assert_contains() {
     || fail "expected '${expected}' in ${file}"
 }
 
-# The dispatch skill, program and schedule reconciler, shipped in the release assets.
+# The dispatch skill and schedule reconciler, shipped in the release assets. The dispatcher
+# itself is the release's fffactory (`fffactory host dispatch run`).
 dispatch_assets="${repository_root}/assets/steps/dispatch"
 dispatch_skill="${dispatch_assets}/skill/SKILL.md"
 
@@ -43,16 +44,16 @@ tracked_checkout_skill_files="$(
   || fail "unexpected checkout-local skill files tracked in git: ${tracked_checkout_skill_files}"
 
 # The dispatch skill ships in the release assets, not as a canonical repo skill. Verify it
-# and its programs where they now live, so the gate still proves they are present and sound.
+# and its reconciler where they now live, so the gate still proves they are present and sound.
 [[ -f ${dispatch_skill} ]] || fail "shipped dispatch skill is missing: ${dispatch_skill}"
 [[ $(sed -n '1p' "${dispatch_skill}") == '---' ]] \
   || fail 'shipped dispatch skill frontmatter does not start on line 1'
 [[ $(sed -n '2p' "${dispatch_skill}") == 'name: dispatch' ]] \
   || fail 'shipped dispatch skill must be named dispatch'
 assert_contains "${dispatch_skill}" 'never merges, force-pushes'
-assert_contains "${dispatch_skill}" '/usr/local/bin/factory-dispatch'
-[[ -x ${dispatch_assets}/factory-dispatch ]] \
-  || fail 'shipped dispatch program is missing or not executable'
+assert_contains "${dispatch_skill}" '/opt/fffactory/current/bin/fffactory host dispatch run'
+[[ ! -e ${dispatch_assets}/factory-dispatch ]] \
+  || fail 'the Python dispatch program is back; the dispatcher is fffactory host dispatch run'
 [[ -x ${dispatch_assets}/dispatch-schedule.sh ]] \
   || fail 'shipped dispatch schedule reconciler is missing or not executable'
 # AGENTS.md must not leave a dangling link to the relocated dispatch skill.

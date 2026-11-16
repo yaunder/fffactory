@@ -32,6 +32,13 @@ changed for another reason.
   (host-protocol.md §Agent pins); `tests/bootstrap/harness.test.sh` runs the real step.
 - `repositories/` holds the repository-sync program the repository stage runs over SSH, not an
   install step; its own CLAUDE.md has the rules.
-- `control-plane/` holds the Paseo control-plane step (install, verify, the config merge, the
-  auth wrapper, the service unit and the Paseo pin), driven by the control-plane stage, not an
-  install step; its own CLAUDE.md has the rules.
+- `control-plane/` holds the Paseo execution backend's shipped programs (install, verify, the
+  config merge, the auth wrapper, the service unit and the Paseo pin), run by its adapter
+  (`src/host/paseo-backend.ts`) for the control-plane stage, not an install step; its own
+  CLAUDE.md has the rules.
+- `dispatch/` holds the dispatch skill and the Paseo trigger's schedule reconciler, run by its
+  adapter (`src/host/paseo-trigger.ts`) for the dispatch stage, not an install step; its own
+  CLAUDE.md has the rules.
+- Only `control-plane/` and `dispatch/dispatch-schedule.sh`, with its test, name Paseo's
+  behavior (`docs/specs/execution-backend.md` §The allow-list); everything else here stays
+  backend-neutral.

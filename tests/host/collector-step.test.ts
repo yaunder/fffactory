@@ -21,9 +21,9 @@ import { join } from "node:path";
 import { COLLECTOR_CONFIGURATION } from "../../src/domain/collector";
 import {
   COLLECTOR_COMMAND_TIMEOUT_MS,
-  COLLECTOR_SERVICE_UNIT,
   COLLECTOR_STATE,
   COLLECTOR_TIMER_UNIT,
+  collectorServiceUnit,
 } from "../../src/domain/collector-installation";
 import type { HostLogArchive } from "../../src/domain/host-projection";
 import type { FactoryId, HostKey } from "../../src/domain/instance";
@@ -33,6 +33,7 @@ import type {
   ProcessOutcome,
   ProcessRunner,
 } from "../../src/infrastructure/local-tool-probe";
+import { PASEO_LAYOUT } from "../support/fake-execution-backend";
 import { system } from "./worker-scenarios";
 
 const SERVICE = "/etc/systemd/system/fffactory-collector.service";
@@ -53,6 +54,8 @@ const DISABLED: CollectorInput = {
 const BUDGET_MS = 2 * 60_000;
 const SYSTEMCTL_ENV = { PATH: "/usr/sbin:/usr/bin:/sbin:/bin", LANG: "C.UTF-8" };
 const FIXTURES = join(import.meta.dir, "..", "domain", "fixtures", "archive");
+/** The service unit as the step writes it on a Paseo worker. */
+const PASEO_SERVICE_UNIT = collectorServiceUnit(PASEO_LAYOUT.privateFiles);
 
 let root: string;
 let log: FileHandle;
@@ -99,8 +102,9 @@ async function step(
   run: ProcessRunner,
   input: CollectorInput = ENABLED,
   budgetMs = BUDGET_MS,
+  privateFiles: readonly string[] = PASEO_LAYOUT.privateFiles,
 ): Promise<string | undefined> {
-  return workerCollectorStep(system(root, { run }), input, budgetMs, {
+  return workerCollectorStep(system(root, { run }), input, privateFiles, budgetMs, {
     output: log.fd,
     note: async (line) => {
       await log.write(`${line}\n`);
@@ -125,7 +129,7 @@ describe("the collector step with the log archive (host protocol §The collector
     );
     expect(await mode(COLLECTOR_CONFIGURATION)).toBe(0o644);
     expect(await mode("/etc/fffactory")).toBe(0o755);
-    expect(await readFile(at(SERVICE), "utf8")).toBe(COLLECTOR_SERVICE_UNIT);
+    expect(await readFile(at(SERVICE), "utf8")).toBe(PASEO_SERVICE_UNIT);
     expect(await readFile(at(TIMER), "utf8")).toBe(COLLECTOR_TIMER_UNIT);
     expect(await mode(SERVICE)).toBe(0o644);
     expect(await mode(TIMER)).toBe(0o644);
@@ -145,6 +149,22 @@ describe("the collector step with the log archive (host protocol §The collector
         "systemctl said: enable --now fffactory-collector.timer\n" +
         "log_archive: fffactory-collector.timer enabled; collection is not waited for\n",
     );
+  });
+
+  test("hides the execution backend's private files it is given, after factory's stores", async () => {
+    const hidden = async () =>
+      (await readFile(at(SERVICE), "utf8"))
+        .split("\n")
+        .filter((line) => line.startsWith("InaccessiblePaths="));
+    expect(await step(systemctl().run)).toBeUndefined();
+    expect((await hidden()).at(-1)).toBe("InaccessiblePaths=-/home/factory/.paseo/config.json");
+    expect(await step(systemctl().run, ENABLED, BUDGET_MS, ["/home/factory/.backend/key"])).toBe(
+      undefined,
+    );
+    const lines = await hidden();
+    expect(lines).toHaveLength(11);
+    expect(lines.at(-1)).toBe("InaccessiblePaths=-/home/factory/.backend/key");
+    expect(lines.join("\n")).not.toContain(".paseo");
   });
 
   test("never starts, checks or waits for a collection", async () => {
@@ -338,7 +358,7 @@ describe("the collector unit's environment, against factory's own AWS settings",
    * manager's variables, then the unit's `Environment=`, then `UnsetEnvironment=` removing names.
    */
   function unitEnvironment(manager: Record<string, string>): Record<string, string> {
-    const lines = COLLECTOR_SERVICE_UNIT.split("\n");
+    const lines = PASEO_SERVICE_UNIT.split("\n");
     const env: Record<string, string> = { ...manager };
     for (const line of lines.filter((text) => text.startsWith("Environment="))) {
       const assignment = line.slice("Environment=".length);

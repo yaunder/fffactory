@@ -5,22 +5,23 @@ import type { DispatchInspection, DispatchProjection } from "../domain/dispatch-
  * Port: the FFFlow/GitHub workflow queue on a worker. FFFactory owns FFFlow/GitHub readiness for
  * now, isolated behind this connector (`infrastructure/ffflow-github-workflow-queue.ts`,
  * `docs/specs/dispatch.md`). The dispatch stage reads FFFlow adoption through it and reconciles
- * dispatch activation through it. Reconciling the schedule is a live change: it never restarts
- * Paseo or interrupts an active agent, and the adapter never prints Paseo's output or a password.
+ * dispatch activation through it. Reconciling the worker's dispatch trigger is a live change: it
+ * never restarts the worker's execution backend or interrupts an active agent, and the adapter
+ * never prints the trigger's output or a password.
  */
 export interface WorkflowQueue {
   /** Whether FFFlow adoption passes for the worker's placed repositories. */
   adoption(worker: WorkerAddress): Promise<WorkflowAdoption>;
   /**
-   * Reconcile dispatch on the worker to `active`: ensure its Paseo schedule exists when active
-   * and is absent otherwise. Idempotent and live; `changed` is false when the schedule was
-   * already in the requested state, so a rerun over an active agent restarts nothing.
+   * Reconcile dispatch on the worker to `active`: ensure its trigger exists when active and is
+   * absent otherwise. Idempotent and live; `changed` is false when the trigger was already in
+   * the requested state, so a rerun over an active agent restarts nothing.
    */
   reconcileDispatch(
     worker: WorkerAddress,
     projection: DispatchProjection,
   ): Promise<WorkflowReconcile>;
-  /** Observe the persisted state and verify that the actual schedule still matches it. */
+  /** Observe the persisted state and verify that the actual trigger still matches it. */
   inspectDispatch(worker: WorkerAddress): Promise<DispatchInspection>;
 }
 

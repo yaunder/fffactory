@@ -24,7 +24,7 @@ function manifestText(placement: string[], inventory: Repository[]): string {
   );
 }
 
-describe("placed checkouts (docs/specs/dispatch.md §Repository registration)", () => {
+describe("placed checkouts (docs/specs/execution-backend.md §The ExecutionBackend contract)", () => {
   test("are the absolute paths under the repository root the manifest places, in placement order", () => {
     const text = manifestText(
       ["gamma", "alpha"],

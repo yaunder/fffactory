@@ -61,7 +61,8 @@ For each declared worker, in factory.json's order, the stage:
 
 Every command is a fixed `RemoteCommand` of shell-safe tokens. The stage issues
 no destructive command: it never resets, force-updates, moves or deletes a
-checkout, and never creates a Paseo worktree. Nothing on this path uses SSM.
+checkout, and never creates a worktree: those are the execution backend's.
+Nothing on this path uses SSM.
 
 The endpoint persists a versioned result containing `synchronized` or
 `unresolved` and the unmanaged checkout paths. Each worker's outcome is one of:
@@ -87,7 +88,7 @@ against clones under the repository root, the script:
 - refuses, reports and leaves untouched a wrong remote, a dirty tree, another
   or detached branch, a locally-ahead or diverged history, and a branch whose
   `.ffflow/config.yaml` is missing or not a valid FFFlow adoption;
-- keeps Paseo-owned worktrees separate, never touching them;
+- keeps the execution backend's worktrees separate, never touching them;
 - exits non-zero when any declared entry remains unresolved.
 
 Its behavior is held by the shell test that ships beside it,
@@ -121,8 +122,8 @@ missing result keeps the worker not ready; an unreadable result is an error.
 The persisted result is the last completed synchronization's: a checkout
 dirtied, or a commit made, after it is not in it. Status reports it as such.
 Terminate, which destroys the checkouts with the machine, also reads their
-current state, and that of every Paseo worktree, through the read-only
-[work inspection](host-protocol.md#work-inspect)
+current state, and that of every worktree the execution backend holds, through
+the read-only [work inspection](host-protocol.md#work-inspect)
 ([worker lifecycle §Gates (terminate)](worker-lifecycle.md#gates-terminate)).
 
 ## Layer mapping

@@ -1,11 +1,12 @@
 /**
  * The `collector` install step (`docs/specs/host-protocol.md` §The collector step): with the log
  * archive in the host projection, the collector's configuration and its systemd service and
- * timer, written as root, then systemd reloaded and the timer enabled and started. It never
- * starts a collection, asks how one went or waits for one: the collector's health is not the
- * install's. Without the archive, it disables and stops the timer, stops a run under way, and
- * removes the units and the configuration, keeping the collector's state directory; on a worker
- * that never had the collector it does nothing. Runs only inside locked `host apply`.
+ * timer, the service never reading the execution backend's private files, written as root, then
+ * systemd reloaded and the timer enabled and started. It never starts a collection, asks how one
+ * went or waits for one: the collector's health is not the install's. Without the archive, it
+ * disables and stops the timer, stops a run under way, and removes the units and the
+ * configuration, keeping the collector's state directory; on a worker that never had the
+ * collector it does nothing. Runs only inside locked `host apply`.
  */
 import { lstat, rm } from "node:fs/promises";
 import { join } from "node:path";
@@ -14,9 +15,10 @@ import {
   COLLECTOR_COMMAND_TIMEOUT_MS,
   COLLECTOR_SERVICE,
   COLLECTOR_TIMER,
-  COLLECTOR_UNITS,
+  type CollectorUnits,
   collectorConfigurationOf,
   collectorConfigurationText,
+  collectorUnits,
 } from "../domain/collector-installation";
 import type { HostProjection } from "../domain/host-projection";
 import type { ProcessOutcome } from "../infrastructure/local-tool-probe";
@@ -27,7 +29,6 @@ import { writeRootFile } from "./root-files";
 const SYSTEMCTL = "/usr/bin/systemctl";
 /** systemctl's whole environment: no pager, no colors, nothing of root's. */
 const SYSTEMCTL_ENV = { PATH: "/usr/sbin:/usr/bin:/sbin:/bin", LANG: "C.UTF-8" } as const;
-const [SERVICE_UNIT, TIMER_UNIT] = COLLECTOR_UNITS;
 
 /** What of the host projection the step reads: the worker's identity and the log archive. */
 export type CollectorInput = Pick<HostProjection, "factory_id" | "host_key" | "log_archive">;
@@ -93,11 +94,12 @@ async function install(
   system: WorkerSystem,
   run: Systemctl,
   text: string,
+  units: CollectorUnits,
   note: StepLog["note"],
 ): Promise<void> {
   await write(system.root, COLLECTOR_CONFIGURATION, text);
   await note("log_archive: collector.json written");
-  for (const unit of COLLECTOR_UNITS) await write(system.root, unit.path, unit.text);
+  for (const unit of units) await write(system.root, unit.path, unit.text);
   await note(`log_archive: ${COLLECTOR_SERVICE} and ${COLLECTOR_TIMER} written`);
   await run("daemon-reload");
   await run("enable", "--now", COLLECTOR_TIMER);
@@ -109,10 +111,16 @@ async function install(
  * while its unit file is there, then the configuration and the units removed and systemd
  * reloaded. The state directory stays. Nothing there, nothing is done.
  */
-async function uninstall(system: WorkerSystem, run: Systemctl, note: StepLog["note"]) {
+async function uninstall(
+  system: WorkerSystem,
+  run: Systemctl,
+  units: CollectorUnits,
+  note: StepLog["note"],
+) {
   const { root } = system;
-  const timer = await present(root, TIMER_UNIT.path);
-  const service = await present(root, SERVICE_UNIT.path);
+  const [serviceUnit, timerUnit] = units;
+  const timer = await present(root, timerUnit.path);
+  const service = await present(root, serviceUnit.path);
   if (!timer && !service && !(await present(root, COLLECTOR_CONFIGURATION))) {
     await note("log_archive: not enabled; no collector to remove");
     return;
@@ -120,27 +128,30 @@ async function uninstall(system: WorkerSystem, run: Systemctl, note: StepLog["no
   if (timer) await run("disable", "--now", COLLECTOR_TIMER);
   if (service) await run("stop", COLLECTOR_SERVICE);
   await remove(root, COLLECTOR_CONFIGURATION);
-  for (const unit of COLLECTOR_UNITS) await remove(root, unit.path);
+  for (const unit of units) await remove(root, unit.path);
   if (timer || service) await run("daemon-reload");
   await note("log_archive: not enabled; the collector removed, its state kept");
 }
 
 /**
- * Installs the collector while `input.log_archive` is present and removes it otherwise, within
- * `budgetMs`. Returns why the step failed, naming the file and its error code or the systemctl
- * command and how it ended, or undefined.
+ * Installs the collector while `input.log_archive` is present, never reading `privateFiles` (the
+ * execution backend's, from its layout), and removes it otherwise, within `budgetMs`. Returns why
+ * the step failed, naming the file and its error code or the systemctl command and how it ended,
+ * or undefined.
  */
 export async function workerCollectorStep(
   system: WorkerSystem,
   input: CollectorInput,
+  privateFiles: readonly string[],
   budgetMs: number,
   log: StepLog,
 ): Promise<string | undefined> {
   const run = systemctl(system, budgetMs, log.output);
   const configuration = collectorConfigurationOf(input);
+  const units = collectorUnits(privateFiles);
   try {
-    if (configuration === undefined) await uninstall(system, run, log.note);
-    else await install(system, run, collectorConfigurationText(configuration), log.note);
+    if (configuration === undefined) await uninstall(system, run, units, log.note);
+    else await install(system, run, collectorConfigurationText(configuration), units, log.note);
     return undefined;
   } catch (error) {
     if (error instanceof Refused) return error.reason;

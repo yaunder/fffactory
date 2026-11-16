@@ -551,6 +551,9 @@ export function fakeWorker(
       changed: false,
     }),
     inspectDispatch: async () => ({ protocol_version: 1, state: "none" }),
+    runDispatch: async () => {
+      throw new Error("host dispatch run was not expected");
+    },
     inspectWork: async () => {
       throw new Error("host work inspect was not expected");
     },

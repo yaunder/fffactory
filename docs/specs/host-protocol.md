@@ -161,15 +161,21 @@ sudo -n /usr/local/libexec/fffactory-activate dispatch inspect
 ```
 
 The activator accepts no other dispatch action and always invokes the active
-root-owned release. `adoption` drops to `factory` and runs the active release's
-dispatcher in adoption-only mode against the placed-repository manifest; it
-does not launch work. `reconcile` reads the canonical desired dispatch
-projection from standard input. An active projection installs the stable
-dispatcher and skill; every projection drops to `factory` to reconcile the
-schedule, and persists the desired and observed documents; a not-requested
-projection removes the schedule, which is also how fffactory stops dispatch
-outside apply ([dispatch §Stopping dispatch](dispatch.md#stopping-dispatch)).
-`inspect` reads that result and checks the real schedule, without changing it. Exit 2 means a
+root-owned release. `adoption` runs the dispatcher's adoption check in process
+([dispatch §The dispatcher](dispatch.md#the-dispatcher)): for each repository
+the placed-repository manifest places on the worker, the active release's FFFlow
+checker, dropped to `factory`; it does not launch work. `reconcile` reads the
+canonical desired dispatch projection from standard input. An active projection
+installs the skill, and removes the Python dispatcher a release before
+[#142](https://github.com/yaunder/fffactory/issues/142) installed at
+`/usr/local/bin/factory-dispatch`; every projection persists the desired and observed
+documents and reconciles the worker's
+[dispatch trigger](dispatch-trigger.md#the-dispatchtrigger-interface), which
+drops to `factory`; a not-requested projection removes the schedule, which is
+also how fffactory stops dispatch outside apply
+([dispatch §Stopping dispatch](dispatch.md#stopping-dispatch)). `inspect` reads
+that result and checks the real schedule through the trigger, without changing
+it. Exit 2 means a
 genuine adoption/readiness pending state; malformed input or reconciliation
 failure exits 1. See [dispatch](dispatch.md).
 
@@ -223,9 +229,11 @@ operation of that activator and lock
 sudo -n /usr/local/libexec/fffactory-activate work inspect
 ```
 
-Two subcommands go neither over SSH nor through the activator: the worker's
-own dispatcher runs `host agents` as `factory` ([agents](#agents)), and the log
-archive's timer runs `host collect --once` as `factory` ([collect](#collect)).
+Three subcommands go neither over SSH nor through the activator, each run as
+`factory`: the dispatch skill runs `host dispatch run`, the worker's dispatcher
+([dispatch run](#dispatch-run)); the Python dispatcher of a release before it
+runs `host agents` ([agents](#agents)); and the log archive's timer runs `host
+collect --once` ([collect](#collect)).
 
 ## Versioning
 
@@ -569,7 +577,7 @@ output into the step's log. A file it cannot write, remove or look at, or a
 1`, ...) and stops the steps there; the step logs its own lines, never a value
 of the configuration.
 
-The service (`COLLECTOR_SERVICE_UNIT`):
+The service (`collectorServiceUnit`), as on a Paseo worker:
 
 ```ini
 [Unit]
@@ -622,11 +630,15 @@ TimeoutStopSec=20s
   it, and it never holds Paseo up.
 - **Sandboxed**: the file system read-only but for its state directory, home
   directories read-only, no privilege gain, a private `/tmp`.
-- **No credentials.** `factory`'s credential stores are inaccessible to it
-  (`COLLECTOR_INACCESSIBLE`): Claude's credentials, session token and
-  `~/.claude.json`, the Anthropic key directory and GitHub's and Codex's stores
-  ([credential delivery](credential-delivery.md)), `~/.aws`, `~/.ssh`,
-  `~/.git-credentials` and Paseo's `config.json`. The collector never reads
+- **No credentials.** `factory`'s credential stores are inaccessible to it,
+  then the execution backend's private files (`collectorInaccessible`):
+  Claude's credentials, session token and `~/.claude.json`, the Anthropic key
+  directory and GitHub's and Codex's stores
+  ([credential delivery](credential-delivery.md)), `~/.aws`, `~/.ssh` and
+  `~/.git-credentials`, then the files the backend's layout declares private
+  ([execution backend §Layout](execution-backend.md#layout)), Paseo's
+  `config.json` on a Paseo worker. `host apply` takes them from the layout of
+  the backend the worker's one selection point chooses. The collector never reads
   them (it never collects them, [collector §Sources](collector.md#sources)),
   so a defect or a compromised dependency in it cannot read them either. Each
   is optional (`-`), so a worker without one still starts the run, and none is,
@@ -677,10 +689,12 @@ A minute after boot, then a minute after each run ends; systemd never starts a
 run while one is active.
 
 Tests: `tests/domain/collector-installation.test.ts` reads every directive
-above from the unit text and finds no tie to any unit;
+above from the unit text, a backend's private files hidden after the credential
+stores, and finds no tie to any unit;
 `tests/host/collector-step.test.ts` runs the step over a worker in a temporary
-directory with a scripted `systemctl` (installing, a rerun, removing with the
-state kept, a worker that never had it, every failure), and runs the AWS SDK
+directory with a scripted `systemctl` (installing, the private files it is
+given hidden last, a rerun, removing with the state kept, a worker that never
+had it, every failure), and runs the AWS SDK
 under the service's environment, assembled from the unit text by systemd's
 rules, against a `~/.aws` and inherited settings pointing elsewhere, sending
 nothing (`tests/support/aws-endpoint-probe-main.ts`); `tests/host/apply.test.ts`
@@ -873,10 +887,12 @@ account `factory`, which owns the checkouts.
 ### What it reads
 
 1. **Working trees.** Every directory holding a `.git` (a directory or a
-   file) under `/workspace/repos`, at most 4 levels down, then under
-   `/home/factory/.paseo/worktrees`, where Paseo creates its worktrees
-   ([SDLC §Worktree ownership](../../SDLC.md#worktree-ownership)), at most 3
-   levels down; nothing below a working tree, and no symbolic link, is
+   file) under `/workspace/repos`, at most 4 levels down, then under each of
+   the execution backend's workspace roots, at the depth its layout gives, in
+   its order ([execution backend §Layout](execution-backend.md#layout)): on a
+   Paseo worker, `/home/factory/.paseo/worktrees`, where Paseo creates its
+   worktrees ([SDLC §Worktree ownership](../../SDLC.md#worktree-ownership)), at
+   most 3 levels down. Nothing below a working tree, and no symbolic link, is
    followed. Directories are listed as root, without reading any file. A
    search root reached through a symbolic link (the root itself or any
    directory above it, such as `/home/factory/.paseo`) is not searched, as
@@ -1147,21 +1163,48 @@ activity unknown and the worker to be replaced
 
 Unknown fails safe as busy does ([control plane §Pre-activation deferral](control-plane.md#pre-activation-deferral)).
 
+## dispatch run
+
+```text
+/opt/fffactory/current/bin/fffactory host dispatch run [--adoption-only]
+```
+
+The worker's dispatcher ([dispatch §The dispatcher](dispatch.md#the-dispatcher)):
+the dispatch skill runs it on the worker as `factory`, from the declared
+dispatch directory, with the active release's executable, and not through the
+activator, so a tick never waits on the host-operation lock and needs no root;
+the operator's fffactory never runs it. Its output is the dispatcher's, not a
+versioned protocol document: the agent running the skill prints it to its
+timeline.
+
+| Run | Exit and output |
+| --- | --- |
+| As `factory`, the tick ran | 0, its JSON summary on standard output |
+| As `factory`, `--adoption-only` | 0 when every placed repository passed the adoption check, 2 when any failed, the adoption report on standard output |
+| As `factory`, the tick failed | 1, nothing on standard output; `factory dispatch: <reason>` on one line on standard error |
+| As root | 1, nothing: `fffactory host dispatch run: run it as factory, never root; the dispatch skill runs it` on standard error |
+| With anything else | 1, nothing |
+
 ## agents
 
 ```text
 /opt/fffactory/current/bin/fffactory host agents --json
 ```
 
-The worker's dispatcher reads its agents here for its capacity check
-([dispatch §Capacity](dispatch.md#capacity)); the operator's fffactory never
-runs it. The dispatcher runs it on the worker as `factory`, with the active
-release's executable, and not through the activator, so a dispatch tick never
-waits on the host-operation lock and needs no root. It changes nothing.
+The Python dispatcher of a release before
+[#142](https://github.com/yaunder/fffactory/issues/142) read its agents here
+for its capacity check; until an upgraded worker's dispatch reconcile replaces
+it, it runs this on the new release (`TODO(re-evaluate when no worker runs a
+release from before #142)`). `host dispatch run` asks the execution backend in
+process instead ([dispatch §Capacity](dispatch.md#capacity)). The operator's
+fffactory never runs it. It runs on the worker as `factory`, with the active
+release's executable, and not through the activator, so it never waits on the
+host-operation lock and needs no root. It changes nothing.
 
-It lists the agents through the same adapter as
-[control-plane activity](#control-plane-activity) (`paseoAgents`), but runs the
-active release's `paseo-auth.sh` itself, with only `HOME=/home/factory` and
+It lists the agents through the same execution backend as
+[control-plane activity](#control-plane-activity) (its `runs`, read as agents,
+the Paseo adapter's `paseoRuns`), but the backend runs the active release's
+`paseo-auth.sh` itself, as `factory`, with only `HOME=/home/factory` and
 `factory`'s `PATH` in its environment, every Paseo call within the same
 90-second budget. It prints the [activity document](#the-activity-document),
 indented by two spaces, on standard output: every agent's ID, fffactory state
@@ -1170,12 +1213,12 @@ and `dispatched` flag, and no Paseo status, field or label.
 | Run | Exit and standard output |
 | --- | --- |
 | As `factory`, the agents read | 0, the document with its `agents`; nothing on standard error |
-| As `factory`, the agents not read | 1, the document with `agents` `null` and `activity` unknown, for its reason; that reason on one line on standard error, `fffactory host agents: <reason>`, so the dispatcher's error names it rather than the document |
+| As `factory`, the agents not read | 1, the document with `agents` `null` and `activity` unknown, for its reason; that reason on one line on standard error, `fffactory host agents: <reason>`, so that dispatcher's error names it rather than the document |
 | As root | 1, nothing: `run it as factory, never root; the dispatcher runs it` on standard error. Paseo's state is `factory`'s, and its CLI run as root would leave root-owned files there. |
 | Without `--json`, or with anything else | 1, nothing |
 
 Another account cannot read `factory`'s Paseo password reference, so its
-agents are unknown. Exiting 1 for unknown agents makes the dispatcher fail its
+agents are unknown. Exiting 1 for unknown agents makes that dispatcher fail its
 tick before it launches anything: an unreadable worker never reads as one
 without agents.
 
@@ -1237,17 +1280,20 @@ never elsewhere: it prints no path, no AWS or SDK message and no credential.
 | Worker | `src/host/apply.ts` | `workerApplier` over an `ApplySystem` (a `WorkerSystem` with the clock, privilege, standard input, release and install lock): the steps, their logs and the record. |
 | Worker | `src/host/install-lock.ts` | `flockExclusive`: the install lock over `flock(2)`, through libc. |
 | Worker | `src/host/credentials.ts` | `workerCredentials`: the `credentials` install step ([credential delivery](credential-delivery.md)). |
-| Worker | `src/host/collector-step.ts` | `workerCollectorStep`: the `collector` install step ([§The collector step](#the-collector-step)). |
+| Worker | `src/host/collector-step.ts` | `workerCollectorStep`: the `collector` install step ([§The collector step](#the-collector-step)), given the execution backend's private files by `host apply`. |
 | Worker | `src/host/verify.ts` | `workerVerifier`: the verifiers and enrollment checks. |
-| Worker | `src/host/dispatch.ts` | Dispatch adoption, installation, reconciliation and checked observation, with privilege drop, and registering the placed checkouts through the execution backend after the schedule. |
-| Worker | `src/host/work.ts` | `workerWork`: the work inspection, over the worker's working trees, as `factory`, read-only, and the archive's backlog, from the collector's checkpoint and its discovery (`discoverSources` in `src/host/collect.ts`), as root. |
-| Worker | `src/host/control-plane.ts` | `workerControlPlane`: the Paseo activity, install, reload and restart, and `host agents`; `paseoAgents`, the adapter translating Paseo's agents into fffactory's states. |
+| Worker | `src/host/dispatch.ts` | Dispatch adoption, installation, reconciliation and checked observation through the dispatch trigger, with privilege drop, and registering the placed checkouts through the execution backend after the schedule. |
+| Worker | `src/host/dispatcher.ts` | `workerDispatcher`: `host dispatch run`, the dispatcher, and `rootAdoption`, the adoption check the activator's `dispatch adoption` runs ([dispatch §The dispatcher](dispatch.md#the-dispatcher)). |
+| Worker | `src/host/dispatch-trigger.ts`, `src/host/paseo-trigger.ts` | `DispatchTrigger` and its one selection point; `paseoTrigger`, the Paseo adapter running the schedule reconciler as `factory` ([dispatch trigger](dispatch-trigger.md)). |
+| Worker | `src/host/work.ts` | `workerWork`: the work inspection, over the worker's working trees under the repository root and the execution backend's workspace roots, as `factory`, read-only, and the archive's backlog, from the collector's checkpoint and its discovery (`discoverSources` in `src/host/collect.ts`), as root. |
+| Worker | `src/host/control-plane.ts` | `workerControlPlane`: the control-plane activity, install, reload and restart, and `host agents`: privilege, the projection and the password read by reference, the rest asked of the execution backend. |
+| Worker | `src/host/execution-backend.ts`, `src/host/paseo-backend.ts` | `ExecutionBackend` and its one selection point; `paseoBackend`, the Paseo adapter, with `paseoRuns` translating Paseo's agents into fffactory's states ([execution backend](execution-backend.md)). |
 | Worker | `src/host/collect.ts` | `collectOnce`: one collection run under the collector's own lock, through an `ArchiveWriter` ([collector §Run](collector.md#run)). |
 | Worker | `src/host/collection.ts` | `workerCollection`: `host collect --once`, its configuration, the run and its heartbeat; `localCollectionSystem`, this worker's, checking open sources in `/proc/self/fd` (`OPEN_FILES`). |
 | Worker | `src/host/s3-archive-writer.ts` | `openInstanceArchive`: the `ArchiveWriter` over S3 with the instance role's IMDSv2 credentials, its incarnation and account from STS. |
 | Worker | `src/host/endpoint.ts` | `workerEndpoint`: all worker endpoints together. |
 | Worker | `assets/steps/` | The wrapped install steps, the pins and the plugin manifest. |
-| CLI adapter | `src/cli/commands/host.ts` | The fixed `fffactory host` inspect, apply, verify, repository, control-plane, dispatch, work, agents and collect operations. |
+| CLI adapter | `src/cli/commands/host.ts` | The fixed `fffactory host` inspect, apply, verify, repository, control-plane, dispatch, dispatch run, work, agents and collect operations. |
 
 Tests: `tests/host/protocol-contract.test.ts` is the contract: four worker
 filesystems (`tests/host/worker-scenarios.ts`: installed with enrollment
@@ -1265,11 +1311,16 @@ outcome. `tests/host/fixtures/activity-agents.json` likewise: the worker's
 `host control-plane activity` produces it byte for byte from a scripted Paseo,
 and the CLI reads it back without loss, over the transport, into the agents
 the busy rule judges; `host agents`, run as `factory`, produces the same
-fixture from the same Paseo, and the dispatcher's Python test reads it as its
-capacity check's answer. `tests/host/control-plane.test.ts` runs `host agents`
-over a scripted Paseo (the auth wrapper run as itself, in `factory`'s
-environment, the budget, an unreadable list, root refused), and
-`tests/cli/host.test.ts` its exit statuses and refusals, and `host collect`'s
+fixture from the same Paseo, and the dispatcher's tests
+(`tests/host/dispatcher.test.ts`) count its agents as the capacity check's
+answer. `tests/host/control-plane.test.ts` runs `host agents`
+over a fake backend (root refused, the 90-second budget the selection is given,
+an unknown answer passed on), `tests/host/paseo-backend.test.ts` the Paseo
+backend's runs over a scripted Paseo (the auth wrapper run as itself, in
+`factory`'s environment, the budget each command is given, an unreadable list),
+and `tests/cli/host.test.ts` its exit statuses and refusals, `host dispatch
+run`'s (its summary, its adoption report and exit 2, a failed tick's one line,
+root refused), and `host collect`'s
 lines, exit statuses and refusals (root, no `--once`); `tests/host/collection.test.ts`
 runs `host collect --once` itself against a loopback instance metadata service
 and stub STS and S3 ([collector §Credentials and publishing](collector.md#credentials-and-publishing)). The other direction, a document the CLI sends, is
@@ -1322,10 +1373,11 @@ throw, the environment, streamed standard input, every failure
 classification), `tests/infrastructure/tailscale-peers.test.ts`,
 `tests/cli/host.test.ts`, `tests/cli/status-executable.test.ts`,
 `tests/host/work.test.ts` (`host work inspect` over real Git repositories in a
-temporary worker: each kind of work, ignored files, missing and unreadable
-worktrees, a stale worktree registration over an independent clone inside and
-outside the roots, a bare repository, nothing written, the time budget;
-`tests/host/work-scenarios.ts`), `tests/host/work-archive.test.ts` (the
+temporary worker, over a fake backend with Paseo's layout: each kind of work,
+ignored files, missing and unreadable worktrees, a stale worktree registration
+over an independent clone inside and outside the roots, a bare repository,
+another backend's workspace root searched at its depth, nothing written, the
+time budget; `tests/host/work-scenarios.ts`), `tests/host/work-archive.test.ts` (the
 archive's backlog: not collected, nothing unarchived, a new, grown and
 rewritten source, no checkpoint, a checkpoint that is a symbolic link, the
 allowlist and symbolic links, the time budget),
@@ -1361,6 +1413,7 @@ Claude Code 2.1.302 pins and Codex's requirements by
 credential references and the control-plane part's digest by
 [#68](https://github.com/yaunder/fffactory/issues/68); the `credentials` step by
 [#69](https://github.com/yaunder/fffactory/issues/69); `host agents` by
-[#100](https://github.com/yaunder/fffactory/issues/100); the projection's
+[#100](https://github.com/yaunder/fffactory/issues/100); `host dispatch run` by
+[#142](https://github.com/yaunder/fffactory/issues/142); the projection's
 `log_archive` by [#118](https://github.com/yaunder/fffactory/issues/118); `host
 collect` by [#121](https://github.com/yaunder/fffactory/issues/121).

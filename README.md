@@ -30,7 +30,7 @@ Three pieces work together:
 | Piece | What it does |
 | --- | --- |
 | **fffactory** | Creates AWS infrastructure, installs pinned tools on workers, synchronizes repositories and enables the dispatch schedule; removes it all again with `fffactory teardown`. |
-| **Paseo** | Runs agent sessions in isolated Git worktrees and lets you supervise them from desktop or mobile. |
+| **Paseo** | The worker's execution backend: runs agent sessions in isolated Git worktrees and lets you supervise them from desktop or mobile. |
 | **FFFlow** | Provides the planning and development workflow: captured issues, implementation, tests and pull requests. |
 
 One local `.fffactory/factory.json` describes your factory: its AWS account,

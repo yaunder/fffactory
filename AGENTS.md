@@ -66,7 +66,7 @@ skill is milestone M3.
 | --- | --- | --- |
 | `deploy-factory-infrastructure` (removed) | Removed in v2 with v1's infrastructure ([#102](https://github.com/yaunder/factory/issues/102)). For a v2 factory ID use `fffactory plan`, `fffactory apply` and `fffactory upgrade`. | Everything: v1 infrastructure is never deployed or inspected. |
 | `operate-factory-host` (removed) | Removed in v2 with v1's host CLIs ([#102](https://github.com/yaunder/factory/issues/102)). For a v2 factory ID use `fffactory status`, and `fffactory apply` to install and verify workers. | Everything: v1 hosts are never converged, synchronized or verified. |
-| `dispatch` (ships in the release) | The dispatch skill and program moved into the release assets (`assets/steps/dispatch/`, [docs/specs/dispatch.md](docs/specs/dispatch.md)); apply's dispatch stage installs and activates them on a worker once every readiness gate passes. No longer a canonical repo skill, so it is not invoked from this checkout. | Infrastructure deployment, host convergence, and issue closure. |
+| `dispatch` (ships in the release) | The dispatch skill ships in the release assets (`assets/steps/dispatch/skill/`, [docs/specs/dispatch.md](docs/specs/dispatch.md)), and the dispatcher it runs is the release's own `fffactory host dispatch run`; apply's dispatch stage installs the skill on a worker once every readiness gate passes. No longer a canonical repo skill, so it is not invoked from this checkout. | Infrastructure deployment, host convergence, and issue closure. |
 
 No repository skill operates a factory yet. Operate one through `fffactory`
 under the v2 rules above.

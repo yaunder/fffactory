@@ -815,6 +815,7 @@ describe("the worker endpoint", () => {
     const endpoint = workerEndpoint(
       applySystem({ run }),
       workerCollection(localCollectionSystem(RELEASE, root)),
+      { environment: {}, cwd: () => root },
     );
     expect(endpoint.isRoot()).toBe(true);
     expect((await endpoint.inspect()).release).toEqual({ state: "none" });

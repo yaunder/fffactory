@@ -29,12 +29,11 @@ jobs:
       - name: Validate repository skills
         run: ./scripts/repository-skills.sh
 
-      # The shell and Python tests of the programs shipped in assets/steps/, which bun test
-      # does not run.
+      # The shell and Python tests of the shell programs shipped in assets/steps/, which bun
+      # test does not run. The dispatcher's tests are bun tests (tests/host/dispatcher.test.ts).
       - name: Run shell tests
         run: |
           ./assets/steps/repositories/tests/sync-repositories.sh
-          python3 assets/steps/dispatch/tests/test_factory_dispatch.py
           python3 assets/steps/dispatch/tests/test_dispatch_schedule.py
           python3 assets/steps/control-plane/tests/test_paseo_auth.py
           python3 assets/steps/control-plane/tests/test_paseo_config.py

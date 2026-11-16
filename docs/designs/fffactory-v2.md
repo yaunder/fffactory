@@ -554,7 +554,7 @@ Repository reconciliation preserves the existing safe posture:
 - fast-forward an expected clean primary checkout;
 - refuse resets, forced changes, dirty trees, divergence, and unsafe branch
   state;
-- keep Paseo-owned worktrees separate;
+- keep the execution backend's worktrees separate;
 - leave a removed repository on disk and report it as unmanaged.
 
 FFFactory continues owning the current FFFlow/GitHub readiness logic initially,

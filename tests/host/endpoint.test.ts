@@ -31,6 +31,7 @@ describe("the composed worker endpoint", () => {
     const endpoint = workerEndpoint(
       worker,
       workerCollection(localCollectionSystem("0.3.0" as Release, root)),
+      { environment: {}, cwd: () => root },
     );
 
     const results = await Promise.allSettled([
@@ -49,10 +50,11 @@ describe("the composed worker endpoint", () => {
       endpoint.inspectWork(),
       endpoint.agents(),
       endpoint.collect(),
+      endpoint.runDispatch(false),
     ]);
 
     expect(endpoint.isRoot()).toBe(false);
-    expect(results).toHaveLength(15);
+    expect(results).toHaveLength(16);
     expect(results.slice(0, 4).every(({ status }) => status === "fulfilled")).toBe(true);
     expect(results[4]?.status).toBe("rejected");
     expect(results.slice(5, 9).every(({ status }) => status === "fulfilled")).toBe(true);
@@ -64,5 +66,7 @@ describe("the composed worker endpoint", () => {
     });
     // No collector.json under this root: the collector is not configured.
     expect(results[14]).toEqual({ status: "fulfilled", value: { kind: "not_configured" } });
+    // As factory, the dispatcher: no repository manifest under this root, so the tick fails.
+    expect(results[15]).toMatchObject({ status: "fulfilled", value: { kind: "failed" } });
   });
 });

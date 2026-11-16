@@ -53,6 +53,18 @@ Never collected (`NEVER_COLLECTED`), whatever the allowlist says:
 The names `.credentials.json`, `.claude.json`, `.claude.json.backup` and
 `.session_ingress_token` are refused anywhere, also inside a collected directory.
 
+Beyond what it never collects, the collector cannot read: its unit makes
+`factory`'s credential stores inaccessible, then the execution backend's
+private files, which the backend's layout declares (Paseo's `config.json` on a
+Paseo worker; [host protocol §The collector step](host-protocol.md#the-collector-step),
+[execution backend §Layout](execution-backend.md#layout)).
+
+Claude names each directory under `projects/` after the working directory it
+ran in, so a run's transcripts sit under a name that encodes its workspace's
+path, and with it the backend's layout
+(`-home-factory--paseo-worktrees-…` on a Paseo worker). The collector collects
+them as it finds them and never interprets the name.
+
 A source is identified by its source ID: the SHA-256 of its absolute path's
 UTF-8 bytes, as lowercase hex. Archive keys never carry a path; the real path
 appears only inside journal records and the local checkpoint.

@@ -8,7 +8,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { COLLECTOR_CONFIGURATION } from "../../src/domain/collector";
-import { COLLECTOR_UNITS } from "../../src/domain/collector-installation";
+import { collectorUnits } from "../../src/domain/collector-installation";
 import { WORKER_PATHS } from "../../src/domain/host-protocol";
 import {
   ANTHROPIC_KEY_FILE,
@@ -26,6 +26,7 @@ import {
   workerVerifier,
 } from "../../src/host/verify";
 import type { ProcessOutcome, ProcessRunner } from "../../src/infrastructure/local-tool-probe";
+import { PASEO_LAYOUT } from "../support/fake-execution-backend";
 import { CONFIGURATION_SHA256, inspection, installed } from "../support/fake-workers";
 import { system, WORKER_HOSTNAME } from "./worker-scenarios";
 
@@ -207,7 +208,7 @@ describe("host verify and the log archive's collector (plan and apply §The work
     const without = await verify();
     await mkdir(join(root, "etc/fffactory"), { recursive: true });
     await writeFile(join(root, COLLECTOR_CONFIGURATION), "{}");
-    for (const unit of COLLECTOR_UNITS) {
+    for (const unit of collectorUnits(PASEO_LAYOUT.privateFiles)) {
       await mkdir(join(root, unit.path, ".."), { recursive: true });
       await writeFile(join(root, unit.path), unit.text);
     }

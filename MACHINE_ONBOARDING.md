@@ -664,7 +664,7 @@ merge the pull request yourself.
 **Otherwise:** the dispatcher skips an epic it cannot start yet, and the
 dispatch agent's timeline names the exact reason
 ([SDLC §Readiness](SDLC.md#readiness),
-`assets/steps/dispatch/factory-dispatch`):
+[dispatch §The dispatcher](docs/specs/dispatch.md#the-dispatcher)):
 
 - the epic has no captured tasks (issues labelled `ffflow-task` and
   `epic-<id>`);
@@ -686,9 +686,9 @@ dispatch agent's timeline names the exact reason
   the cause remains. A checkout that is only behind is fast-forwarded, not
   skipped.
 
-A run whose worker cannot read its own agents (`fffactory host agents`, run
-by the dispatcher) fails before it starts anything, its error naming why
-([dispatch §Capacity](docs/specs/dispatch.md#capacity)).
+A run whose worker cannot read its own agents (the execution backend's, asked
+by `fffactory host dispatch run`) fails before it starts anything, its error
+naming why ([dispatch §Capacity](docs/specs/dispatch.md#capacity)).
 
 Resolve the cause; the next scheduled run considers the epic again. Never
 start an agent by hand to work around a skip.

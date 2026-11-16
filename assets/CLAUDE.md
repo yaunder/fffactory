@@ -10,6 +10,8 @@ and assets".
 - Every regular file is bundled at its path here, 0755 if executable, else 0644.
   Symbolic links and other special files are refused.
 - `CLAUDE.md` files are repository documentation and are never bundled.
+- Only the files on the execution-backend boundary's allow-list name Paseo's behavior
+  (`docs/specs/execution-backend.md` §The boundary).
 - `release.json` is generated from the release version, and a built bundle's `bin/fffactory`
   is the worker executable `scripts/build.ts` compiles; do not add either.
 - Paths use printable ASCII without backslashes, and no segment is `.` or `..`.

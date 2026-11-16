@@ -2,7 +2,8 @@
  * What the `collector` install step installs on a worker (`docs/specs/host-protocol.md` §The
  * collector step): the collector's configuration from the host projection, and its systemd
  * service and timer, which run `host collect --once` as `factory` about once a minute with no
- * tie to Paseo, sandboxed and bounded. Pure: `host/collector-step.ts` writes them.
+ * tie to the execution backend, sandboxed and bounded, never reading its private files. Pure:
+ * `host/collector-step.ts` writes them.
  */
 import type { CollectorConfiguration } from "./collector";
 import { collectorConfigurationJson } from "./collector";
@@ -48,13 +49,10 @@ export const COLLECTOR_LIMITS = {
 export const COLLECTOR_STOP_TIMEOUT = "20s";
 
 /**
- * `factory`'s credential stores, which the collector never reads (`InaccessiblePaths=`, each
- * optional): Claude's, the Anthropic key credential delivery writes, GitHub's, Codex's, AWS's,
- * SSH's, Git's, and the Paseo password hash. None is, or lies above, anything a run reads or
- * writes (`/etc/fffactory/collector.json`, the releases, its state, `~/.claude`'s collected
- * directories).
+ * `factory`'s credential stores, which the collector never reads: Claude's, the Anthropic key
+ * credential delivery writes, GitHub's, Codex's, AWS's, SSH's and Git's.
  */
-export const COLLECTOR_INACCESSIBLE = [
+const CREDENTIAL_STORES = [
   `${CLAUDE_ROOT}/.credentials.json`,
   `${CLAUDE_ROOT}/.session_ingress_token`,
   "/home/factory/.claude.json",
@@ -65,8 +63,18 @@ export const COLLECTOR_INACCESSIBLE = [
   "/home/factory/.aws",
   "/home/factory/.ssh",
   "/home/factory/.git-credentials",
-  "/home/factory/.paseo/config.json",
 ] as const;
+
+/**
+ * What the collector never reads (`InaccessiblePaths=`, each optional): `factory`'s credential
+ * stores, then the execution backend's private files (`privateFiles`, its layout's,
+ * `docs/specs/execution-backend.md` §Layout). None is, or lies above, anything a run reads or
+ * writes (`/etc/fffactory/collector.json`, the releases, its state, `~/.claude`'s collected
+ * directories).
+ */
+export function collectorInaccessible(privateFiles: readonly string[]): readonly string[] {
+  return [...CREDENTIAL_STORES, ...privateFiles];
+}
 
 /**
  * AWS settings the service manager could pass the collector, removed from its environment
@@ -99,12 +107,15 @@ export const INHERITED_AWS_SETTINGS = [
 ] as const;
 
 /**
- * One collection run, as `factory`, from the active release, so an upgrade needs no restart.
- * `factory`'s `~/.aws` is the agents' to write, so the SDK reads neither its config nor its
- * credentials file and ignores configured endpoints; nothing in the unit ties it to Paseo, whose
- * `KillMode=control-group` would otherwise reach it. No `[Install]`: the timer starts it.
+ * One collection run, as `factory`, from the active release, so an upgrade needs no restart,
+ * never reading the backend's `privateFiles` (`collectorInaccessible`). `factory`'s `~/.aws` is
+ * the agents' to write, so the SDK reads neither its config nor its credentials file and ignores
+ * configured endpoints; nothing in the unit ties it to the execution backend's units, such as
+ * Paseo's, whose `KillMode=control-group` would otherwise reach it. No `[Install]`: the timer
+ * starts it.
  */
-export const COLLECTOR_SERVICE_UNIT = `[Unit]
+export function collectorServiceUnit(privateFiles: readonly string[]): string {
+  return `[Unit]
 Description=fffactory log archive collector: one collection run
 
 [Service]
@@ -122,7 +133,9 @@ ProtectSystem=strict
 ProtectHome=read-only
 NoNewPrivileges=true
 PrivateTmp=true
-${COLLECTOR_INACCESSIBLE.map((path) => `InaccessiblePaths=-${path}`).join("\n")}
+${collectorInaccessible(privateFiles)
+  .map((path) => `InaccessiblePaths=-${path}`)
+  .join("\n")}
 MemoryHigh=${COLLECTOR_LIMITS.memoryHigh}
 MemoryMax=${COLLECTOR_LIMITS.memoryMax}
 CPUQuota=${COLLECTOR_LIMITS.cpuQuota}
@@ -133,6 +146,7 @@ IOSchedulingClass=idle
 TimeoutStartSec=${COLLECTOR_LIMITS.timeoutStart}
 TimeoutStopSec=${COLLECTOR_STOP_TIMEOUT}
 `;
+}
 
 /** About once a minute: a minute after boot, then a minute after each run ends, never overlapping. */
 export const COLLECTOR_TIMER_UNIT = `[Unit]
@@ -148,11 +162,22 @@ Unit=${COLLECTOR_SERVICE}
 WantedBy=timers.target
 `;
 
+/** One unit file the step writes: where, and its text. */
+export interface CollectorUnit {
+  readonly path: string;
+  readonly text: string;
+}
+
 /** The collector's units, as the step writes them, the service first. */
-export const COLLECTOR_UNITS = [
-  { path: `${UNIT_DIRECTORY}/${COLLECTOR_SERVICE}`, text: COLLECTOR_SERVICE_UNIT },
-  { path: `${UNIT_DIRECTORY}/${COLLECTOR_TIMER}`, text: COLLECTOR_TIMER_UNIT },
-] as const;
+export type CollectorUnits = readonly [service: CollectorUnit, timer: CollectorUnit];
+
+/** The collector's units, never reading the backend's `privateFiles`. */
+export function collectorUnits(privateFiles: readonly string[]): CollectorUnits {
+  return [
+    { path: `${UNIT_DIRECTORY}/${COLLECTOR_SERVICE}`, text: collectorServiceUnit(privateFiles) },
+    { path: `${UNIT_DIRECTORY}/${COLLECTOR_TIMER}`, text: COLLECTOR_TIMER_UNIT },
+  ];
+}
 
 /** The collector's configuration for the projection's worker, or undefined without the archive. */
 export function collectorConfigurationOf(

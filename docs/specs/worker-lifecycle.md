@@ -1159,15 +1159,16 @@ is gone or already being terminated, and for a removal whose machine was, the
 admin client's refusals, the device removal's outcome) and
 `tests/domain/tailnet.test.ts` (tagged devices with the hostname selected,
 untagged ones reported, the tag compared exactly);
-`tests/domain/work-inspection.test.ts` (the document, its parser and limits, what
-is unresolved and what uninspected), `tests/host/work.test.ts` (the worker's
-inspection over real Git repositories: clean, untracked, ignored only, tracked
-and staged changes, ahead of the upstream, a branch without one, a stash, a merge
-in progress, a dirty Paseo worktree, one whose directory is gone, one of a
-repository kept elsewhere, no remote at all, an unreadable `.git`, no symbolic
-link followed, nothing written: no index refresh, lock file or fetch; the time
-budget), `tests/application/inspect-work.test.ts` (every transport outcome and
-activator exit, an answer for another worker, never quoted),
+`tests/domain/work-inspection.test.ts` (the document, its parser and limits,
+what is unresolved and what uninspected), `tests/host/work.test.ts` (the
+worker's inspection over real Git repositories: clean, untracked, ignored only,
+tracked and staged changes, ahead of the upstream, a branch without one, a
+stash, a merge in progress, a dirty worktree in the backend's workspace root,
+one whose directory is gone, one of a repository kept elsewhere, no remote at
+all, an unreadable `.git`, no symbolic link followed, nothing written: no index
+refresh, lock file or fetch; the time budget),
+`tests/application/inspect-work.test.ts` (every transport outcome and activator
+exit, an answer for another worker, never quoted),
 `tests/application/worker-lifecycle.test.ts` (a terminate recorded step by step;
 the admin client missing, an undeclared key, another account, a pin mismatch, a
 held lock, a wrong `--confirm`, a wrong typed key, an unreadable secret and a

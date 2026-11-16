@@ -1,11 +1,12 @@
 # Control plane
 
-Each worker runs Paseo as the `factory` account. `fffactory plan` derives the
-Paseo changes for every worker from factory.json, the release identity and the
-worker's inspection. `fffactory apply` installs those release-owned assets and
-performs the classified lifecycle action through the worker protocol. It never
-uses v1 marker files, deployed input directories, global wrapper paths, SSM or
-an operator-selected privileged command.
+Each worker runs its [execution backend](execution-backend.md), Paseo, as the
+`factory` account; this spec keeps it installed and healthy. `fffactory plan`
+derives the Paseo changes for every worker from factory.json, the release
+identity and the worker's inspection. `fffactory apply` installs those
+release-owned assets and performs the classified lifecycle action through the
+worker protocol. It never uses v1 marker files, deployed input directories,
+global wrapper paths, SSM or an operator-selected privileged command.
 
 Paseo agents may run for days, and restarting the daemon ends their turns,
 provider processes, terminals and background commands. Apply therefore checks
@@ -142,9 +143,11 @@ concept ([#98](https://github.com/yaunder/fffactory/issues/98)):
 | `stopped` | not loaded |
 
 They are `AgentState` in `src/domain/control-plane.ts`. Only the worker's
-Paseo adapter (`paseoAgents`, `src/host/control-plane.ts`), which `host
-control-plane activity` and the dispatcher's `host agents`
-([host protocol §agents](host-protocol.md#agents)) run, knows Paseo's statuses;
+Paseo adapter (`paseoRuns`, `src/host/paseo-backend.ts`), the execution
+backend's `runs` ([execution backend §The `ExecutionBackend` contract](execution-backend.md#the-executionbackend-contract)),
+which `host control-plane activity`, `host agents`
+([host protocol §agents](host-protocol.md#agents)) and the dispatcher's capacity
+and duplicate checks ask, knows Paseo's statuses;
 no dispatcher code reads one ([dispatch §Capacity](dispatch.md#capacity)). It lists every agent
 with `paseo ls --global --background --json`, then those dispatch launched
 with the same list and `--label factory-dispatch=true`, and translates each
@@ -175,10 +178,12 @@ The activity document carries each agent's ID, state and whether dispatch
 launched it, and no Paseo status, field or label
 ([host protocol §The activity document](host-protocol.md#the-activity-document)).
 Nothing archives agents: a finished agent stays listed, and dispatch's
-duplicate check relies on that. Tested in `tests/host/control-plane.test.ts` (each
+duplicate check relies on that. Tested in `tests/host/paseo-backend.test.ts` (each
 status, a `running` agent with and without a pending permission, only
 `running` agents inspected, an unknown status, a failed or unreadable list or
-inspection, the dispatched flag, the budget) and `tests/domain/control-plane.test.ts` (the
+inspection, the dispatched flag, the budget, as `factory` from root and as
+itself), `tests/host/control-plane.test.ts` (the endpoint's privilege rules and
+budget, over a fake backend) and `tests/domain/control-plane.test.ts` (the
 document round-trips; every malformed agent rejected).
 
 ### The busy rule
@@ -224,13 +229,16 @@ sudo -n /usr/local/libexec/fffactory-activate control-plane ACTION
 root-owned activator rejects every other token, takes the existing host
 reconciliation lock, clears the environment and invokes only the active
 release's `fffactory host control-plane ACTION`. The endpoint returns a
-versioned JSON activity or action document.
+versioned JSON activity or action document. It decides privilege and reads the
+projection and the password itself, and asks the worker's execution backend
+for the rest ([execution backend §The `ExecutionBackend` contract](execution-backend.md#the-executionbackend-contract));
+what follows is the Paseo backend's.
 
 - `activity` and `reload` drop to `factory` with `runuser` and a clean
   environment, then invoke the active release's `paseo-auth.sh`.
 - `install` reads the validated host projection from standard input. When it
-  carries `paseo_password_secret`, install reads the password by that ARN and
-  hashes it ([§The daemon password](#the-daemon-password)); it then sends the
+  carries `paseo_password_secret`, install reads the password by that ARN; the
+  backend hashes it ([§The daemon password](#the-daemon-password)) and sends the
   active release's `setup-host.sh` two lines on standard input, the ARN and the
   hash, each empty only for a projection delivered by hand without the
   reference ([§The daemon password](#the-daemon-password)). No configuration value
@@ -286,13 +294,14 @@ well as by its Tailscale address.
 
 The daemon holds only the bcrypt hash of the host's Paseo password, never the
 password: an agent, and every tool and hook it runs, inherits the daemon's whole
-environment, so a password there would reach all of them. `install` reads the
-password as root with the instance role (`/usr/bin/aws secretsmanager
-get-secret-value`, in the secret's Region, with the `credentials` step's
-deadline, `src/host/secret-value.ts`) and hashes it as Paseo's own `paseo daemon
-set-password` does: `bcryptjs`'s `hashSync` at Paseo's cost, 12. It hashes the
-value as `paseo-auth.sh` sends it, its final line endings dropped, and refuses an
-empty or blank one. The password reaches only that hash function: never an
+environment, so a password there would reach all of them. The `install`
+endpoint reads the password as root with the instance role (`/usr/bin/aws
+secretsmanager get-secret-value`, in the secret's Region, with the
+`credentials` step's deadline, `src/host/secret-value.ts`) and hands it to the
+execution backend, whose Paseo adapter (`src/host/paseo-backend.ts`) hashes
+it as Paseo's own `paseo daemon set-password` does: `bcryptjs`'s `hashSync` at
+Paseo's cost, 12. It hashes the value as `paseo-auth.sh` sends it, its final
+line endings dropped, and refuses an empty or blank one. The password reaches only that hash function: never an
 argument, an environment, a log or a file. A password that cannot be read or is
 empty fails `install` before setup runs, with `Paseo password: ` and the
 reason: the AWS error's name, an exit status, a deadline, an unreadable answer
@@ -330,8 +339,9 @@ the value directly from Secrets Manager, puts it only in `PASEO_PASSWORD` of
 the Paseo CLI it execs, and the daemon checks it against the hash. The value
 never enters an argument or log. This replaces v1's generated per-host secret
 map, which v2 does not produce. Tested in
-`tests/host/control-plane.test.ts` (the read, the hash and where the password
-never goes), `assets/steps/control-plane/tests/test_paseo_config.py` (the
+`tests/host/control-plane.test.ts` (the read and its failures),
+`tests/host/paseo-backend.test.ts` (the hash, an empty password, and where the
+password never goes), `assets/steps/control-plane/tests/test_paseo_config.py` (the
 merge), `tests/assets/steps/steps.test.ts` (the unit and setup's hand-off), and
 against the pinned Paseo by `just paseo-check`
 ([§The Paseo pin](#the-paseo-pin)).
@@ -405,7 +415,7 @@ fffactory relies on these Paseo contracts, held by 0.15.0
   labels it, and `paseo ls --label key=value` keeps only the agents carrying
   every label given. `run --background` is a deprecated alias of `--no-wait`
   from 0.12, warns on standard error and is removed after 2027-04-01
-  ([dispatch §The dispatch programs and skill](dispatch.md#the-dispatch-programs-and-skill)).
+  ([execution backend §Start](execution-backend.md#start)).
 - `paseo project ls --json` prints a JSON array of the projects, one object per
   project with its `projectId`, `name`, `kind` (`git` for a Git checkout) and
   `path`. `paseo project create DIR --json` registers an existing directory and
@@ -464,7 +474,21 @@ one of the five statuses, and `agent inspect` with its `Id` and a
 | Plan derivation | application | `src/application/plan-control-plane.ts` |
 | Deferral words | domain | `src/domain/change-classification.ts` (`maintenanceDeferral`, `preActivationDeferral`) |
 | Deferral and reconciliation | application | `src/application/apply-control-plane.ts`, `apply-factory.ts` |
-| Worker endpoint, the agent adapter (`paseoAgents`), password hash | host | `src/host/control-plane.ts`, `src/host/secret-value.ts` |
-| SSH adapter | infrastructure | `src/infrastructure/paseo-control-plane.ts` |
+| Worker endpoint: privilege, the projection, the password read by reference; the rest asked of the execution backend | host | `src/host/control-plane.ts`, `src/host/secret-value.ts` |
+| The Paseo backend's maintenance and agents: setup with the bcrypt hash, reload, restart, the run adapter (`paseoRuns`) | host | `src/host/paseo-backend.ts` ([execution backend](execution-backend.md#layer-mapping)) |
+| The Paseo backend's operator-side adapter: the health probe on its port, the activator's actions over SSH | infrastructure | `src/infrastructure/paseo-control-plane.ts` |
 | Setup, config merge, auth, unit and pin | release assets | `assets/steps/control-plane/` |
 | The pin against the hash | check | `tests/paseo/hash-only-daemon.sh` (`just paseo-check`) |
+
+This spec is the execution backend's maintenance
+([execution backend §Responsibilities](execution-backend.md#responsibilities),
+R7). Paseo as the backend itself, its responsibilities, the run contract and
+the boundary that keeps its behavior in allow-listed adapters, is
+[execution backend](execution-backend.md). Of this spec's modules, only the two
+Paseo adapters, `src/host/paseo-backend.ts` and
+`src/infrastructure/paseo-control-plane.ts`, and `assets/steps/control-plane/`
+name Paseo's behavior (#93's [quarantined](execution-backend.md#the-quarantine)
+names aside); the port, the plan, apply and the worker endpoint reach it through
+`ControlPlane` and `ExecutionBackend`
+([execution backend §The allow-list](execution-backend.md#the-allow-list),
+[#145](https://github.com/yaunder/fffactory/issues/145)).
