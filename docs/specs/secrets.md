@@ -415,7 +415,7 @@ That the admin client reaches no worker is asserted in
 `tests/domain/host-projection.test.ts` and
 `tests/application/project-terraform-inputs.test.ts`.
 
-Introduced by [#98](https://github.com/yaunder/factory/issues/98); the admin
+Introduced by v2 epic E2 ([phase 2](../roadmap/fffactory-v2-roadmap/phases/phase-2.md)); the admin
 client by [#8](https://github.com/yaunder/fffactory/issues/8), and its read by
 [#9](https://github.com/yaunder/fffactory/issues/9); the API credentials by
 [#67](https://github.com/yaunder/fffactory/issues/67); deleting a factory's

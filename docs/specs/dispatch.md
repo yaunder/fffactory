@@ -508,8 +508,8 @@ dispatch's own modules or its skill names Paseo's behavior (#93's
 backend and the trigger only through their seams
 ([execution backend §The boundary](execution-backend.md#the-boundary)).
 
-Introduced by [#105](https://github.com/yaunder/factory/issues/105). Skipped
-workers: [#134](https://github.com/yaunder/factory/issues/134). A delivered
+Introduced by v2 epic E3 ([phase 3](../roadmap/fffactory-v2-roadmap/phases/phase-3.md)). Skipped workers:
+release 0.0.2, from the M2 acceptance run. A delivered
 GitHub token's next action: [#70](https://github.com/yaunder/fffactory/issues/70).
 Stopping dispatch: [#84](https://github.com/yaunder/fffactory/issues/84).
 Capacity from `host agents`: [#100](https://github.com/yaunder/fffactory/issues/100).

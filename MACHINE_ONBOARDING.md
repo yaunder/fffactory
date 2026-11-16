@@ -11,14 +11,13 @@ companion skill ([design §Companion skill](docs/designs/fffactory-v2.md#compani
 The specs in [`docs/specs/`](docs/specs/) are the contract; where this runbook
 and a spec disagree, the spec wins.
 
-It describes fffactory release 0.0.2 or later. Release 0.0.1 predates a
-worker's `status` reaching exit 0 ([#132](https://github.com/yaunder/factory/issues/132)),
-Paseo clients connecting by MagicDNS name ([#133](https://github.com/yaunder/factory/issues/133))
-and apply's deferral exiting 2 ([#134](https://github.com/yaunder/factory/issues/134)).
+It describes fffactory release 0.0.2 or later. Release 0.0.1 predates the fixes from the M2
+acceptance run: a worker's `status` reaching exit 0, Paseo clients connecting
+by MagicDNS name, and apply's deferral exiting 2.
 
 v1's onboarding (SSM State Manager, the `factory-host` and
 `factory-infrastructure` CLIs, the four-file instance) is history: it was
-removed in [#102](https://github.com/yaunder/factory/issues/102) and superseded
+removed by v2's E2 epic and superseded
 by [decision 0002](docs/decisions/0002-fffactory-v2.md). Never run or recreate
 it.
 
@@ -585,7 +584,7 @@ The exact labels may move between Paseo client releases; the values do not.
 
 <!-- TODO(re-evaluate when no factory pins 0.0.1): remove this fallback. -->
 - `403 Invalid Host header`: the worker runs release 0.0.1, which predates
-  accepting the MagicDNS name ([#133](https://github.com/yaunder/factory/issues/133)).
+  accepting the MagicDNS name.
   Connect by its Tailscale IPv4 address (`tailscale ip -4 HOSTNAME`) until the
   factory is [upgraded](#upgrade-the-factory).
 - No connection: check that the device is on the tailnet and the grant covers

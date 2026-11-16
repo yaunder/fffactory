@@ -1,8 +1,7 @@
 # 0002 — fffactory v2
 
 Status: adopted. Supersedes [0001](0001-factory-instance-configuration.md).
-See [issue #106](https://github.com/yaunder/factory/issues/106) and the
-[v2 design](../designs/fffactory-v2.md).
+See the [v2 design](../designs/fffactory-v2.md).
 
 ## Decision
 
@@ -52,10 +51,9 @@ never enter configuration, plans, command arguments, or logs.
 CI exercises repository code and reads no AWS account or factory state.
 
 v1 is frozen. Its infrastructure and host CLIs were removed in
-[#102](https://github.com/yaunder/factory/issues/102), and no v1 command
+v2's E2 epic, and no v1 command
 remains. Its remaining layer directories, including the `environments/example`
-instance, are deleted with the switch
-([#139](https://github.com/yaunder/factory/issues/139)).
+instance, are deleted with the switch.
 
 ## What replaces 0001
 
@@ -71,12 +69,10 @@ instance, are deleted with the switch
 
 ## Acceptance
 
-As of 2026-10-06: the M2 acceptance run on release 0.0.1
-([#106](https://github.com/yaunder/factory/issues/106)) provisioned a worker,
-completed human enrollment, and dispatched an epic. Its defects kept it from
-showing a clean rerun; release 0.0.2
-([#136](https://github.com/yaunder/factory/issues/136)) fixes them, and the
-rerun on 0.0.2 is the evidence #106 still needs.
+M2 was accepted on release 0.0.2 on 2026-10-07. The first acceptance run, on
+release 0.0.1, provisioned a worker, completed human enrollment, and dispatched
+an epic, but its defects kept it from showing a clean run. Release 0.0.2 fixed
+them, and the rerun on 0.0.2 completed the acceptance.
 
 ## Migration
 

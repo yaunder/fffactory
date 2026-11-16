@@ -1,7 +1,7 @@
 # Phase 2 — E2 Provision and install one worker
 
 Status: complete
-Tracked in: yaunder/factory, the private tracker this repository was snapshotted from (docs/public-repository.md). The epic and task numbers below are that tracker's.
+Tracked in: the private tracker this repository was snapshotted from (docs/public-repository.md), since retired. The epic and its tasks closed as done there, so they are listed by name.
 Milestone: M1 (one usable worker)
 Kind: plan-chat (tasks broken down in phases/phase-2/tasks/)
 Scope: Managed Terraform, namespaced modules with the D5 guardrails, bootstrap without SSM, backend bootstrap and the
@@ -17,13 +17,13 @@ Estimated tasks: 8
 Decisions: D3, D4, D5, D8, D9, D11
 
 ## Captured tasks
-Epic: yaunder/factory#86
+Epic: E2 Provision and install one worker
 
-- yaunder/factory#95 — Managed Terraform behind the Provisioner port
-- yaunder/factory#96 — Namespaced Terraform modules with guardrails
-- yaunder/factory#97 — Bootstrap user data and the root activator
-- yaunder/factory#98 — Backend bootstrap, factory-wide lock and guided secret write
-- yaunder/factory#99 — Plan and apply for the infrastructure stage
-- yaunder/factory#100 — SSH transport, host inspect and status
-- yaunder/factory#101 — Worker install stage and enrollment next actions
-- yaunder/factory#102 — Minimal upgrade and removal of v1 infrastructure and host CLIs
+- Managed Terraform behind the Provisioner port
+- Namespaced Terraform modules with guardrails
+- Bootstrap user data and the root activator
+- Backend bootstrap, factory-wide lock and guided secret write
+- Plan and apply for the infrastructure stage
+- SSH transport, host inspect and status
+- Worker install stage and enrollment next actions
+- Minimal upgrade and removal of v1 infrastructure and host CLIs

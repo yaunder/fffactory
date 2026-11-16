@@ -133,7 +133,7 @@ inspect` did.
 ### Package installation and the RPM lock
 
 Every `dnf` call retries when another process holds the RPM database lock
-([#17](https://github.com/yaunder/factory/issues/17)): output mentioning
+([v2 roadmap D6](../roadmap/fffactory-v2-roadmap/decisions.md)): output mentioning
 `rpm.lock` or `transaction lock`. It tries at most 5 times, waiting 5, 10, 20
 and 40 seconds between attempts, and logs each retry with its attempt number.
 
@@ -341,4 +341,4 @@ steps, and the host projections of builder-1 and builder-2.
 rendered by the managed Terraform, with `tests/support/user-data.ts`'s
 rendering for the same inputs, so the tests exercise what hosts boot with.
 
-Introduced by [#97](https://github.com/yaunder/factory/issues/97).
+Introduced by v2 epic E2 ([phase 2](../roadmap/fffactory-v2-roadmap/phases/phase-2.md)).

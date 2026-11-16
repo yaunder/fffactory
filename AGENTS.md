@@ -46,7 +46,7 @@ v2 through Paseo dispatch. v2 work may change or delete v1 code freely.
 
 - Never deploy, converge, or sync v1. Its infrastructure (`infrastructure/`)
   and host CLIs (`bin/factory-infrastructure`, `bin/factory-host`, `bin/factory`)
-  were removed in [#102](https://github.com/yaunder/factory/issues/102), and no
+  were removed by v2 ([decision 0002](docs/decisions/0002-fffactory-v2.md)), and no
   v1 command, read-only or not, remains. Decline requests to deploy, converge,
   sync, inspect or verify v1 hosts and say that v1 is frozen and its tooling
   removed; never recreate it from Git history or run its steps by hand.
@@ -64,8 +64,8 @@ skill is milestone M3.
 
 | Skill | Capability | Excludes |
 | --- | --- | --- |
-| `deploy-factory-infrastructure` (removed) | Removed in v2 with v1's infrastructure ([#102](https://github.com/yaunder/factory/issues/102)). For a v2 factory ID use `fffactory plan`, `fffactory apply` and `fffactory upgrade`. | Everything: v1 infrastructure is never deployed or inspected. |
-| `operate-factory-host` (removed) | Removed in v2 with v1's host CLIs ([#102](https://github.com/yaunder/factory/issues/102)). For a v2 factory ID use `fffactory status`, and `fffactory apply` to install and verify workers. | Everything: v1 hosts are never converged, synchronized or verified. |
+| `deploy-factory-infrastructure` (removed) | Removed in v2 with v1's infrastructure ([decision 0002](docs/decisions/0002-fffactory-v2.md)). For a v2 factory ID use `fffactory plan`, `fffactory apply` and `fffactory upgrade`. | Everything: v1 infrastructure is never deployed or inspected. |
+| `operate-factory-host` (removed) | Removed in v2 with v1's host CLIs ([decision 0002](docs/decisions/0002-fffactory-v2.md)). For a v2 factory ID use `fffactory status`, and `fffactory apply` to install and verify workers. | Everything: v1 hosts are never converged, synchronized or verified. |
 | `dispatch` (ships in the release) | The dispatch skill ships in the release assets (`assets/steps/dispatch/skill/`, [docs/specs/dispatch.md](docs/specs/dispatch.md)), and the dispatcher it runs is the release's own `fffactory host dispatch run`; apply's dispatch stage installs the skill on a worker once every readiness gate passes. No longer a canonical repo skill, so it is not invoked from this checkout. | Infrastructure deployment, host convergence, and issue closure. |
 
 No repository skill operates a factory yet. Operate one through `fffactory`

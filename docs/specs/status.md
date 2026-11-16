@@ -350,9 +350,8 @@ connected to; a device with the worker's name but not the factory's tag exits
 release reports `none`), and `tests/cli/presentation/agents.test.ts` (the
 `Agents:` line).
 
-Introduced by [#100](https://github.com/yaunder/factory/issues/100); the
-configuration comparison, install record and enrollment by
-[#101](https://github.com/yaunder/factory/issues/101); the `stopped` verdict by
+Introduced by v2 epic E2 ([phase 2](../roadmap/fffactory-v2-roadmap/phases/phase-2.md)), with the
+configuration comparison, install record and enrollment; the `stopped` verdict by
 [#7](https://github.com/yaunder/fffactory/issues/7); delivered accounts' next actions and
 schema version 2 by [#70](https://github.com/yaunder/fffactory/issues/70); each worker's
 agents by [#101](https://github.com/yaunder/fffactory/issues/101).

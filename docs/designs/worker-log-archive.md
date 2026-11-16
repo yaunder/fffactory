@@ -268,8 +268,9 @@ validated behavior into evergreen specs and tests together with implementation.
 
 ## Relationship to other work
 
-[Issue 21](https://github.com/yaunder/factory/issues/21) proposed a broader
-compound engineering loop with Paseo timelines as primary telemetry. This
+A broader compound engineering loop, deferred in
+[SDLC.md §Deferred](../../SDLC.md#deferred), was proposed with Paseo timelines
+as primary telemetry. This
 milestone starts from Claude Code's existing files and adds collection and
 inspection. It does not implement that loop or require a Paseo plugin.
 Paseo metadata supplies associations; normalized events may be useful later.

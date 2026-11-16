@@ -415,8 +415,6 @@ spawned `fffactory` run with no AWS credentials, instance metadata disabled
 and every AWS endpoint pointed at a closed local port
 (`tests/support/aws-isolation.ts`).
 
-Introduced by [#91](https://github.com/yaunder/factory/issues/91); the AWS
-account check by [#92](https://github.com/yaunder/factory/issues/92); the
-`release_assets` check by [#93](https://github.com/yaunder/factory/issues/93); the
-`terraform` check by [#95](https://github.com/yaunder/factory/issues/95); the
-`vpc_quota` check by [#96](https://github.com/yaunder/factory/issues/96).
+Introduced by v2 epic E1 ([phase 1](../roadmap/fffactory-v2-roadmap/phases/phase-1.md)), with the AWS account
+check and the `release_assets` check; the `terraform` and `vpc_quota` checks by
+v2 epic E2 ([phase 2](../roadmap/fffactory-v2-roadmap/phases/phase-2.md)).

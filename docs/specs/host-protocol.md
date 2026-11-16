@@ -10,9 +10,8 @@ and [§Synchronous worker reconciliation](../designs/fffactory-v2.md#synchronous
 The same program is both sides: its Linux x86-64 worker build, which every
 release bundle carries as `bin/fffactory`
 ([release §Worker executable](release.md#worker-executable)), is the worker's
-protocol endpoint. [#100](https://github.com/yaunder/factory/issues/100) shipped
-the transport and `inspect`; [#101](https://github.com/yaunder/factory/issues/101)
-adds `apply` and `verify` over the same transport.
+protocol endpoint. v2 epic E2 ([phase 2](../roadmap/fffactory-v2-roadmap/phases/phase-2.md)) shipped
+the transport and `inspect`, then `apply` and `verify` over the same transport.
 
 ## Transport
 
@@ -243,7 +242,7 @@ know. Removing, renaming or redefining a field, or adding a state value, needs
 a new major version. The CLI rejects any other major version
 (`unsupported_protocol`) before reading anything else, and names the fix: use
 the release factory.json pins. The apply and verify documents and `installation`
-first ship in #101's release, so they are part of version 1; no earlier release
+first ship with E2's worker install stage, so they are part of version 1; no earlier release
 sent them.
 
 ## inspect
@@ -307,7 +306,7 @@ name (`uname -m`). A value that is not a short token of letters, digits, `.`,
 | --- | --- |
 | `release` | `{"state": "none"}`: no `current` link, the explicit empty state. `{"state": "active", "version", "sha256"}`: the link names a release whose marker records it. `{"state": "broken"}`: anything else (not a link, another target, a missing or mismatched marker). |
 | `configuration` | `{"state": "none"}`: no file. `{"state": "present", "sha256"}`, and `control_plane_sha256` after it when the file is a host projection carrying `credentials` or `log_archive`: the SHA-256 of its control-plane part, the projection without them. Absent, the whole file is that part, as on a worker from before credential references. `{"state": "unreadable"}`: it exists but cannot be read. |
-| `installation` | `{"state": "none"}`: no record. `{"state": "unreadable"}`: a record that cannot be read as one. Otherwise the record's `state` (`running`, `succeeded` or `failed`), `release`, `configuration_sha256`, `failed_step` (the first failed step's name, or null), `started_at`, `finished_at`, `verification` (the verify document, or null) and `failure` (the record's, below; absent reads as null). A worker that reports no `installation` field, from before #101, reads as `none`. |
+| `installation` | `{"state": "none"}`: no record. `{"state": "unreadable"}`: a record that cannot be read as one. Otherwise the record's `state` (`running`, `succeeded` or `failed`), `release`, `configuration_sha256`, `failed_step` (the first failed step's name, or null), `started_at`, `finished_at`, `verification` (the verify document, or null) and `failure` (the record's, below; absent reads as null). A worker that reports no `installation` field, from before E2's worker install stage, reads as `none`. |
 | `services[].state` | What `systemctl is-active` prints: `active`, `reloading`, `refreshing`, `inactive`, `failed`, `activating`, `deactivating`, `maintenance`; else `unknown`, as when it cannot run. |
 | `evidence.os` | `null` when os-release is unreadable or lacks either value. |
 | `evidence.available_bytes` | `null` when it cannot be measured. |
@@ -434,7 +433,7 @@ build it with `projectHost` from the host they took from factory.json's
 `hosts`. So after a successful apply the next plan finds the worker's
 configuration current and `status` finds it ready. The types do not prevent a
 narrower projection, one built from a host key alone without the Paseo secret
-reference ([#132](https://github.com/yaunder/factory/issues/132)): the
+reference (a defect of release 0.0.1, fixed in 0.0.2): the
 instance-taking `projectHosts` keeps the workers stage's caller from holding
 one, and the pipeline test catches any stage that drifts from the others: it
 applies to a host with a Paseo password reference, checks that `host apply`
@@ -519,7 +518,7 @@ stay `running`, which `status` reports as an install that has not finished
 
 The shell steps (`assets/steps/`) are v1's development-environment and
 agent-harness setup scripts, wrapped (D3; the originals were deleted in
-[#102](https://github.com/yaunder/factory/issues/102)): split into install steps, taking
+v2's E2 epic): split into install steps, taking
 their inputs from the environment above, without their marker waits and state
 records. Each is idempotent, so a rerun repairs what a failed run left. A
 failed install leaves the requested release active and unhealthy; `status`
@@ -1404,9 +1403,8 @@ runs the compiled `host inspect --json` in a clean container that is no worker,
 and the bundled worker executable. No test runs the host's `ssh` or `tailscale`
 or reaches a worker or tailnet.
 
-Introduced by [#100](https://github.com/yaunder/factory/issues/100); `apply`,
-`verify` and the host projection by
-[#101](https://github.com/yaunder/factory/issues/101); `work inspect` by
+Introduced by v2 epic E2 ([phase 2](../roadmap/fffactory-v2-roadmap/phases/phase-2.md)), with `apply`,
+`verify` and the host projection; `work inspect` by
 [#9](https://github.com/yaunder/fffactory/issues/9); the Codex 0.163.0 and
 Claude Code 2.1.302 pins and Codex's requirements by
 [#65](https://github.com/yaunder/fffactory/issues/65); the projection's

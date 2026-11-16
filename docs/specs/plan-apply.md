@@ -5,7 +5,7 @@ saves it; `fffactory apply` applies exactly one approved plan under the
 factory-wide lock. Apply is staged: infrastructure is the factory root module's
 Terraform; workers install and verify the release; repositories are reconciled;
 then the Paseo control plane is installed and reconciled
-([#101](https://github.com/yaunder/factory/issues/101)); dispatch is reconciled
+(v2 epic E2); dispatch is reconciled
 from its gates; and the observed outcomes are verified end to end. All stages
 run under the same lock, in the same approved plan and operation record. A single `fffactory apply`
 therefore provisions a new worker, waits for its first boot, then installs and
@@ -2162,6 +2162,6 @@ the pin), `tests/cli/plan-apply.test.ts` (the guard on plan and apply) and
 `tests/assets/bootstrap/base-generation.test.ts` (the bootstrap's digest per
 base generation).
 
-Introduced by [#99](https://github.com/yaunder/factory/issues/99); upgrade by
-[#102](https://github.com/yaunder/factory/issues/102); stopped workers by
+Introduced by v2 epic E2 ([phase 2](../roadmap/fffactory-v2-roadmap/phases/phase-2.md)), upgrade
+included; stopped workers by
 [#7](https://github.com/yaunder/fffactory/issues/7).

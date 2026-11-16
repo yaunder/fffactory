@@ -216,6 +216,6 @@ accounts its projection delivered), and the container cases of
 `tests/bootstrap/credentials.test.sh` (every account enrolled by delivery, and
 Anthropic pending once its key file is emptied).
 
-Introduced by [#101](https://github.com/yaunder/factory/issues/101); the Anthropic key-file
+Introduced by v2 epic E2 ([phase 2](../roadmap/fffactory-v2-roadmap/phases/phase-2.md)); the Anthropic key-file
 check by [#69](https://github.com/yaunder/fffactory/issues/69); GitHub's `--active` check and
 delivered accounts' next actions by [#70](https://github.com/yaunder/fffactory/issues/70).
