@@ -86,3 +86,65 @@
    Rationale: the plan directory in /tmp doesn't last. The agent implementing #154 needs the file in the repo.
    Rejected alternatives:
      - attach to #154: GitHub doesn't accept .html attachments, so it would need a zip or a gist
+
+## Amended at breakdown (2026-11-18)
+
+✓ Where an agent's repository, epic and dispatch time come from
+   Chose: a launch record written by the dispatcher. #153's "read the labels in the adapter" is not possible.
+   Evidence: Paseo 0.15.0 (pinned) and 0.16.2 (latest), checked in the package source: `ls --json` only filters by an
+   exact `--label key=value` and never prints label values, and `agent inspect --json` shows only Paseo's own
+   `paseo.worktree` and parent labels. docs/specs/execution-backend.md §Inspect says the same ("Paseo's list prints
+   no label"). The dispatcher persists nothing per launch today; its summary is only printed.
+   Rejected alternatives:
+     - one label-filtered `ls` per placed repository: gives the repository only, never the epic or dispatch time
+     - parse `dispatch/epic-N-STAMP` from `agent inspect`'s worktree: inspects every agent, still no repository,
+       and couples fffactory to Paseo's worktree naming
+     - wait for Paseo to print labels: neither version does. Recorded as the record's retirement trigger.
+   Marker: `TODO(re-evaluate when the pinned Paseo's ls --json prints labels): read the launch identity from the
+   backend and retire the launch record`.
+
+✓ Launch record format
+   Chose: one JSON document, written to a temporary file in the same directory and renamed into place.
+   Rationale: the reader is root (`host control-plane activity`) and the file lives in `factory`'s space, which coding
+   agents control. A JSON file reads through the guarded-descriptor pattern the repo already uses (no symlinks, a
+   regular file, a bounded size), and is never seen half-written.
+   Rejected alternatives:
+     - SQLite via bun:sqlite (built into the executable): opening by path skips the descriptor guards; root can leave
+       root-owned -journal/-wal/-shm files in `factory`'s directory; a read without the dispatch lock can see a
+       half-written database. Its query strength serves launch history, which is not this record's job.
+
+✓ Launch history
+   Chose: not kept. The record holds only agents Paseo still lists. History belongs to the log archive's Phase 4
+   (Relationships, docs/roadmap/worker-log-archive/roadmap.md), which groups attempts by repository and epic.
+   Transcripts (the dispatch summary, each agent's `/fff:work-epic N`) already reach the archive when it's enabled,
+   but status may not read them: they're agent-written text, collected only for Claude Code, and not structured
+   until the Phase 3 reader.
+   Note for Phase 4: it assumes the collector can record Paseo labels. It can't, for the same reason. The launch
+   record is a candidate source.
+
+✓ Pruning
+   Chose: the dispatcher prunes during its normal tick, under the dispatch lock, from the list of every run it
+   already reads for capacity (no extra Paseo call). It drops an entry only when Paseo no longer lists that agent
+   AND it was dispatched more than 1 hour ago. Then it appends an entry for each successful `startRun`, and writes
+   the record by temporary file and rename.
+   - An agent Paseo still lists keeps its entry, whatever its age or state: an 8-hour run, or a finished one, keeps it.
+   - The hour of grace only protects an entry whose agent Paseo hasn't listed yet.
+   - Runs unreadable: the tick already fails, and nothing is pruned.
+   - Dispatch stopped: no ticks, so no pruning and no new entries. Stale entries are never shown, because the
+     reader joins by agent ID against the current runs.
+   - The reader (root) never writes or prunes. An oversized or malformed record makes every agent's three fields
+     null, never the agents unreadable.
+   Rejected alternatives:
+     - prune by age alone: drops long runs that are still going
+     - keep every entry: unbounded growth on a long-lived worker
+
+✓ Record write fails after a launch
+   Chose: the launch stands, and the tick summary reports that the record could not be written. The tick does not
+   fail because of it. Status shows null for that agent.
+   Rationale: the agent is already running. Failing the tick risks the next one launching the epic again if the
+   duplicate check can't see the first run yet.
+   Rejected alternatives:
+     - fail the tick: risks a repeated launch
+
+✓ Breakdown
+   Chose: four tasks. A new launch-record issue, #153 rescoped to read the record, a new observed_at issue, and #154.

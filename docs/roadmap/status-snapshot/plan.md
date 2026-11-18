@@ -36,14 +36,19 @@ needs. Every rendering (terminal, HTML, a future external UI) is a pure function
 work is three additive changes to the report and one new rendering. Status schema version 2 and host
 protocol version 1 stay.
 
-### A. Agent work (#153)
+### A. Agent work (#153, plus a launch record)
+
+Amended at breakdown: Paseo's CLI prints no labels (0.15.0 pinned, 0.16.2 latest), so the launch identity comes
+from a launch record the dispatcher writes. See decisions.md §Amended at breakdown.
 
 | Layer | Module | Change |
 | --- | --- | --- |
-| Host adapter | `src/host/control-plane.ts` (`paseoAgents`) | Read the `factory-repository`, `factory-epic` and `factory-dispatched-at` labels from `paseo ls --json`. Label names stay in the adapter (#93). |
-| Domain | `src/domain/control-plane.ts` (`Agent`, `readAgent`, `agentActivity`) | `repository`, `epic` and `dispatched_at`, each validated or null. An older worker's document without them reads as null. |
-| Spec/schema | `host-protocol.md`, `control-plane.md`, `status.md`, `worker-lifecycle.md`, `status-report.schema.json`, `worker-inspection.schema.json`, status fixture | Three nullable fields on each agent. |
-| CLI presentation | `src/cli/presentation/agents.ts` | Human report names the agents (layout: decision below). |
+| Domain | new `src/domain/launch-record.ts` | The record document, its parser (every field checked, the whole record refused when malformed), the prune rule (absent from the listed runs AND dispatched more than 1 h before now), adding an entry, and the join onto runs by agent ID. Pure. |
+| Host | `src/host/dispatcher.ts` | Under `DISPATCH_LOCK`, prunes from the list of every run it already reads, appends an entry for each successful `startRun`, writes `~factory/.local/state/fffactory/launches.json` by temporary file and rename. A failed write is reported in the summary and never fails the tick. |
+| Host | `src/host/control-plane.ts` (`activity`) | As root, reads the record through a guarded descriptor (no symlinks, a regular file, a bounded size) and joins it to the runs. Read-only. |
+| Domain | `src/domain/control-plane.ts` (`Agent`, `readAgent`, `agentActivity`) | `repository`, `epic` and `dispatched_at`, each null when unknown. A worker on an older release reads as null. |
+| Spec/schema | `dispatch.md`, `execution-backend.md`, `host-protocol.md`, `control-plane.md`, `status.md`, `worker-lifecycle.md`, `status-report.schema.json`, `worker-inspection.schema.json`, fixtures | The record, three nullable fields on each agent. |
+| CLI presentation | `src/cli/presentation/agents.ts` | Human report names working, needs-input and failed agents. |
 
 ### B. Snapshot time
 
@@ -79,19 +84,17 @@ ready and stopped workers. Change for production:
 
 ## Phase 3 — Path
 
-Confirmed 2026-11-18.
+Confirmed 2026-11-18. Amended at breakdown to four tasks.
 
-Housekeeping, at capture: link docs/roadmap/status-snapshot/prototype.html
-and link it from #154. Close #151 and #152 as not planned, each with a comment pointing at #154 and this plan.
+Housekeeping, at capture: link docs/roadmap/status-snapshot/prototype.html from #154. Close #151 and #152 as not
+planned, each with a comment pointing at #154 and this plan.
 
-1. **#153: agent work.** Adapter reads the labels. The domain validates them (null if invalid or missing). Host
-   protocol, control-plane, status and worker-lifecycle specs, both schemas, the fixture and the human `Agents:`
-   lines all change. One PR.
-2. **New issue: `observed_at`.** Report field, header line, schema, fixture, spec. One PR. It doesn't depend on
-   #153, but it edits the same schema, fixture and status spec, so run the two one after the other rather than
-   in parallel.
-3. **#154: HTML page.** `status-page.ts` from the fixture report (rendered from fixtures, with tests for
-   escaping, no script and no network). `--html` flag and its exclusion with `--json`. Status spec §Output gains HTML.
-   Depends on 1 and 2. One PR.
+1. **New issue: the dispatcher records each launch.** Domain record, prune rule, dispatcher write, dispatch spec.
+   No reader.
+2. **#153, rescoped: status names each agent's work.** The activity endpoint reads and joins the record. Activity
+   document, `status --json`, `worker inspect --json`, the human `Agents:` lines. Depends on 1.
+3. **New issue: `observed_at`.** It edits the same schema, fixture and status spec as 2, so run them one after the
+   other, in either order.
+4. **#154: `status --html`.** Depends on 2 and 3.
 
-Commit boundaries are the three PRs. Specs ship in each PR with their code.
+Commit boundaries are the four PRs. Specs ship in each PR with their code.
