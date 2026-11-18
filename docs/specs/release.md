@@ -245,7 +245,7 @@ worker executable; the worker release and its absence),
 directory outside the checkout, then `doctor`). The compiled executables are
 tested by the smoke test, locally and in CI, not by `bun test`.
 
-Introduced by [#93](https://github.com/yaunder/factory/issues/93).
+Introduced by v2 epic E1 ([phase 1](../roadmap/fffactory-v2-roadmap/phases/phase-1.md)).
 
 ## Distribution
 
@@ -448,4 +448,4 @@ unmerged code, a mismatched checkout, and missing refs). Workflow changes are
 checked with `actionlint` by hand (no CI job runs it); publishing is exercised
 only by pushing a tag.
 
-Introduced by [#94](https://github.com/yaunder/factory/issues/94).
+Introduced by v2 epic E1 ([phase 1](../roadmap/fffactory-v2-roadmap/phases/phase-1.md)).

@@ -1430,12 +1430,10 @@ log entry, a lock replaced while confirming, the account refusal before S3).
 
 No test downloads Terraform or reads AWS.
 
-Introduced by [#95](https://github.com/yaunder/factory/issues/95); resources
-and namespacing by [#96](https://github.com/yaunder/factory/issues/96); host
-user data by [#97](https://github.com/yaunder/factory/issues/97); first apply
-and the factory-wide lock by [#98](https://github.com/yaunder/factory/issues/98); the lock's
-interruption rule, operation records and the state revision by
-[#99](https://github.com/yaunder/factory/issues/99); the hosts' read of the
+Introduced by v2 epic E2 ([phase 2](../roadmap/fffactory-v2-roadmap/phases/phase-2.md)): managed
+Terraform, resources and namespacing, host user data, first apply and the
+factory-wide lock, the lock's interruption rule, operation records and the
+state revision; the hosts' read of the
 credential references by [#68](https://github.com/yaunder/fffactory/issues/68);
 deleting the state bucket by [#82](https://github.com/yaunder/fffactory/issues/82); the
 destroy plan and the tagged VPC listing by [#83](https://github.com/yaunder/fffactory/issues/83); the

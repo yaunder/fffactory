@@ -1,11 +1,11 @@
 # Decisions: fffactory-v2-roadmap
 
 ✓ D1 Plan level
-   Chose: L1, taken from .ffflow/config.yaml (merged in #84: stack typescript, capture github-issues, specs in docs/specs, tests in tests).
+   Chose: L1, taken from .ffflow/config.yaml (merged before this plan: stack typescript, capture github-issues, specs in docs/specs, tests in tests).
    Rationale: the repository now declares its level, so the plan follows it. L1 means hexagonal layer mapping for each epic.
    Rejected alternatives:
      - L0 prose-only: below the declared level, and the design is explicitly hexagonal.
-     - Adopting FFFlow inside the first epic: already done in #84.
+     - Adopting FFFlow inside the first epic: already done before this plan.
 ✓ D2 Phase shape (revised 2026-09-29 after external review)
    Chose: milestones organised around the first real FFFlow run. M1 one usable worker; M2 one ready epic becomes a PR
    (switch to v2 here); M3 operate and expand. Each epic proves its own failure paths.
@@ -61,16 +61,19 @@
      - Dedicated AWS account: stronger isolation, but the user chose not to set one up.
      - Same account, different Region: IAM is account-wide, so the isolation is only partial.
 ✓ D6 Existing issue disposition (actions happen at /plan-capture, with user approval then)
-   Close as superseded by E1: #68 (init CLI), #72 (merge repositories.json).
-   Fold into E2 and close: #17 (retry RPM lock failures at bootstrap).
-   Close in favour of the M2 acceptance statement: #62 (end-to-end acceptance and onboarding).
-   Close as won't-fix, obsolete at adoption: #45, #46, #50.
-   Close: #79 (dispatch via Paseo API); v1 dispatch runs through the Paseo CLI, which is sufficient for now.
-   #80 becomes the v2 tracker; epic issues link to it.
-   Unchanged: #58, #65, #66, #76, #21.
+   The issues were in the private tracker this repository was snapshotted from, since retired, so they are named
+   here rather than numbered.
+   Close as superseded by E1: the init CLI, and merging repositories.json into config.json.
+   Fold into E2 and close: retry RPM lock failures at bootstrap.
+   Close in favour of the M2 acceptance statement: end-to-end acceptance and onboarding.
+   Close as won't-fix, obsolete at adoption: three v1 Terraform tech-debt issues.
+   Close: dispatch via the Paseo API; v1 dispatch runs through the Paseo CLI, which is sufficient for now.
+   The v2 architecture issue (package FFFactory as a Bun CLI) becomes the v2 tracker; epic issues link to it.
+   Unchanged: the SDLC execution-model tracker, the two upstream FFFlow proposals (a Paseo executor for
+   work-fanout, a base branch for work-epic), aligning work-epic task labels, and the compound engineering loop.
    Rationale: removes v1-only work that v2 replaces and keeps one tracker for v2.
    Rejected alternatives:
-     - Keep #79 for v1: the user confirmed the Paseo CLI dispatch is sufficient.
+     - Keep the Paseo API dispatch issue for v1: the user confirmed the Paseo CLI dispatch is sufficient.
      - Keep the tidy-up issues open until adoption: noise for work that will never happen.
 ✓ D7 v1 change policy
    Chose: v1 is disposable. It is a single-user, non-critical deployment with nobody to migrate. v2 work may break or

@@ -1,7 +1,6 @@
 # 0001 — Factory instance configuration
 
-Status: superseded by [0002](0002-fffactory-v2.md). See
-[issue #64](https://github.com/yaunder/factory/issues/64).
+Status: superseded by [0002](0002-fffactory-v2.md).
 
 ## Decision
 

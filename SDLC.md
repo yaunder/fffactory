@@ -28,7 +28,7 @@ the backend and the trigger only through its seams, so Paseo is replaceable by
 another adapter without changing the workflow below.
 
 The factory previously closed its own repository-contract, task-loop, and
-task-state issues (#4, #6, #13) as owned by "Paseo and the workflow skills."
+task-state issues as owned by "Paseo and the workflow skills."
 FFFlow is the workflow skill set those decisions assumed. The repository
 contract is `.ffflow/config.yaml`, the stamped beliefs block in each
 repository's `CLAUDE.md`, and its justfile. The task loop is `work-issue` for
@@ -153,7 +153,7 @@ without acceptance criteria; the readiness checks above are designed to make
 those stops rare, and when one happens it surfaces as a permission request or
 question in the execution backend that any enrolled client can answer.
 
-The factory repository is outside the managed work inventory (#59). The
+The factory repository is outside the managed work inventory. The
 dispatch skill therefore ships in the release (`assets/steps/dispatch/`), and
 its dispatcher is the release's own `fffactory host dispatch run`; apply's
 dispatch stage installs the skill into the `factory` user's environment once
@@ -200,7 +200,7 @@ Each operator's factory.json owns its inventory; this repository holds none.
   in this repository and reads no AWS account or factory state.
   [Decision 0002](docs/decisions/0002-fffactory-v2.md) records this; it
   supersedes [decision 0001](docs/decisions/0001-factory-instance-configuration.md)'s
-  four-file instance (#64).
+  four-file instance.
 - **The factory repository adopts FFFlow at L1** (`.ffflow/config.yaml`) for
   its v2 development. It stays outside the managed repository inventory; the
   dispatch skill ships in the release rather than coming from a managed
@@ -208,23 +208,21 @@ Each operator's factory.json owns its inventory; this repository holds none.
 - **Consume upstream, contribute upstream.** The plugin is pinned to an
   upstream commit. Factory needs are proposed to the upstream maintainer as
   pull requests. There is no Yaunder fork.
-- **The compound engineering loop (#21) is deferred** until a consolidated
+- **The compound engineering loop is deferred** until a consolidated
   end-to-end flow exists. It then feeds `audit --plan` with session-derived
   findings.
 
 ## Relationship to upstream FFFlow
 
-Two changes are needed upstream for the full model. Both are proposed as pull
-requests to the upstream repository and tracked here so the factory remembers
-what it needs and why:
+Two changes are needed upstream for the full model. Both are to be proposed
+as pull requests to upstream FFFlow, and are recorded here so the factory
+remembers what it needs and why:
 
-1. **Executor cartridge for `work-fanout`**
-   ([#65](https://github.com/yaunder/factory/issues/65)). The default keeps
+1. **Executor cartridge for `work-fanout`.** The default keeps
    today's in-session subagent behavior. A `paseo` executor starts each task
    as a top-level Paseo agent in its own worktree. The final report format is
    unchanged.
-2. **`--base <branch>` for `work-epic`**
-   ([#66](https://github.com/yaunder/factory/issues/66)). Allows an epic to
+2. **`--base <branch>` for `work-epic`.** Allows an epic to
    branch off another epic's branch, enabling stacked pull requests, with a
    documented rebase step after the base merges.
 
@@ -235,8 +233,7 @@ conversation to have upstream before the factory encodes any of it.
 
 ## Deferred
 
-The SDLC milestone that delivered the first cut
-([#58](https://github.com/yaunder/factory/issues/58)) is closed history;
+The SDLC milestone that delivered the first cut is closed history;
 remaining factory work is planned in [`docs/roadmap/`](docs/roadmap/). The
 upstream contributions in
 [Relationship to upstream FFFlow](#relationship-to-upstream-ffflow) unlock
@@ -245,5 +242,5 @@ these deferred items, in the order they are likely to be pulled in:
 - task-level dispatch with `work-issue`, after the upstream conversation;
 - planning on development hosts;
 - Codex as an FFFlow executor;
-- the compound engineering loop (#21) as an audit input;
+- the compound engineering loop as an audit input;
 - worktree cleanup policy after merge.

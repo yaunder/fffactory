@@ -1,5 +1,8 @@
-# Phase 1 — E1 CLI foundation (milestone M1: one usable worker)
+# Phase 1 — E1 CLI foundation
 
+Status: complete
+Tracked in: the private tracker this repository was snapshotted from (docs/public-repository.md), since retired. The epic and its tasks closed as done there, so they are listed by name.
+Milestone: M1 (one usable worker)
 Kind: plan-chat (tasks broken down in phases/phase-1/tasks/)
 Scope: The locally usable `fffactory` CLI: factory.json schema v1 and instance discovery, `init`, `doctor` with the AWS
 account check, a packaged Bun executable with embedded assets, a tag-triggered GitHub Release with install.sh, and the
@@ -11,12 +14,12 @@ Estimated tasks: 7
 Decisions: D2, D4, D7, D8, D9, D10, D11, D12
 
 ## Captured tasks
-Epic: #85
+Epic: E1 CLI foundation
 
-- #88 — Establish v2 operating authority and update the design
-- #89 — factory.json schema v1 and instance discovery
-- #90 — fffactory init
-- #91 — fffactory doctor: local checks and versioned JSON
-- #92 — AWS caller identity and account check
-- #93 — Packaged fffactory executable with embedded assets
-- #94 — GitHub Release and install.sh
+- Establish v2 operating authority and update the design
+- factory.json schema v1 and instance discovery
+- fffactory init
+- fffactory doctor: local checks and versioned JSON
+- AWS caller identity and account check
+- Packaged fffactory executable with embedded assets
+- GitHub Release and install.sh

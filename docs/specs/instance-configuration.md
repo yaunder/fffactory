@@ -397,10 +397,9 @@ are in [doctor §Layer mapping](doctor.md#layer-mapping).
 The Terraform input projection and the stable host key check are specified
 in [provisioning §Resources and namespacing](provisioning.md#resources-and-namespacing).
 
-Introduced by [#89](https://github.com/yaunder/factory/issues/89);
-initialization by [#90](https://github.com/yaunder/factory/issues/90);
-credentials by [#92](https://github.com/yaunder/factory/issues/92); the state
-bucket rule by [#96](https://github.com/yaunder/factory/issues/96); API
+Introduced by v2 epic E1 ([phase 1](../roadmap/fffactory-v2-roadmap/phases/phase-1.md)), with
+initialization and credentials; the state bucket rule by v2 epic E2
+([phase 2](../roadmap/fffactory-v2-roadmap/phases/phase-2.md)); API
 credential references and interactive logins by
 [#66](https://github.com/yaunder/fffactory/issues/66); the log archive, and the
 state bucket's refusal of its name, by

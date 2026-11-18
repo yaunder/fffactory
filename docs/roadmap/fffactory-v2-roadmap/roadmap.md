@@ -1,10 +1,10 @@
 # Plan: fffactory-v2-roadmap
 
-Level: L1 · Source: docs/designs/fffactory-v2.md @ d813dee (main) · Tracker: #80
+Level: L1 · Source: docs/designs/fffactory-v2.md @ d813dee (main) · Decision: docs/decisions/0002-fffactory-v2.md
 
 ## Phase 1 — Understanding (confirmed 2026-09-29)
 
-Split FFFactory v2 (design at docs/designs/fffactory-v2.md, tracker #80) into an
+Split FFFactory v2 (design at docs/designs/fffactory-v2.md, decision 0002) into an
 ordered, dependency-aware set of epics. Each epic can be delivered and
 demonstrated on its own, and together they reach the design's acceptance
 journey plus adoption. (Originally: v1 stays the production authority throughout.
@@ -23,7 +23,7 @@ Review findings that shape the split:
    AL2023) is not specified. Resolved by D4: no signing for now.
 3. The worker-side executor for the plan/apply/verify protocol is undefined.
 4. Acceptance leaves out `upgrade` and base migration, the riskiest paths.
-5. Existing issues overlap v2 (#45 #46 #50 #62 #68 #72 #79); see D6.
+5. Seven existing issues overlap v2; see D6.
 6. v2 names resources by factory ID and v1 does not, so they can coexist, but
    the test environment still needs a deliberate choice.
 
@@ -65,7 +65,7 @@ E2 Provision and install one worker
   I: managed Terraform (download, verify, isolated workdir, provider cache), namespaced
      modules reusing v1 resources, S3 lock adapter, Secrets Manager adapter, bootstrap user
      data without SSM (fffactory-admin and factory accounts, Tailscale enrollment,
-     activator, release directories, RPM-lock retry #17), OpenSSH-over-Tailscale adapter
+     activator, release directories, RPM-lock retry), OpenSSH-over-Tailscale adapter
      with duplicate/missing-hostname refusal, worker `fffactory host inspect|apply|verify`,
      minimal shell activator (tarball digest), v1 setup steps wrapped as shell (D3).
   Guardrails (D5): factory-ID prefix on every resource name with a test enforcing it,
@@ -128,5 +128,12 @@ External prerequisites:
   production account, a Tailscale enrollment key for the v2 factory stored in Secrets
   Manager, and tailnet SSH policy for fffactory-admin (manual admin step).
 
-Issue actions at capture (D6): close #68 #72 #62 #45 #46 #50 #79, fold #17 into E2,
-make #80 the tracker.
+Issue actions at capture (D6): close the seven issues v2 supersedes, fold the RPM-lock
+retry into E2, and make the v2 architecture issue the tracker. All were in the private
+tracker this repository was snapshotted from, since retired.
+
+## Captured tasks
+
+Epics captured in this repository after the move (phases 1–3 are in their phase files):
+
+Epic: #5 — Worker power lifecycle: `fffactory worker start|stop|terminate` (M3 host retirement, reduced form)

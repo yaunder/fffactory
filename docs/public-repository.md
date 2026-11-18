@@ -18,11 +18,8 @@ the private repository: the public repository starts with one new root commit,
 and inherits no old tags, releases, issues, Actions runs, logs, or artifacts.
 The project is licensed under the [MIT License](../LICENSE), copyright Yaunder.
 
-Tracking: [release protection #154](https://github.com/yaunder/factory/issues/154),
-[required CI #155](https://github.com/yaunder/factory/issues/155),
-[access and Actions #156](https://github.com/yaunder/factory/issues/156),
-[license #157](https://github.com/yaunder/factory/issues/157), and
-[snapshot #158](https://github.com/yaunder/factory/issues/158).
+The release protection, required CI, access and Actions, license and snapshot
+work was tracked in the private repository's tracker, since retired.
 The main-branch protections, both release-tag rulesets, read-only workflow
 token defaults, approval for all external fork contributors, secret scanning
 and push protection were applied and read back on 2026-10-08. Main requires

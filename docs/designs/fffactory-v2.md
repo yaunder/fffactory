@@ -1,8 +1,8 @@
 # FFFactory v2 design specification
 
 Status: adopted ([decision 0002](../decisions/0002-fffactory-v2.md)); M1 and
-M2 are implemented and M3 is planned as need dictates. See
-[issue #80](https://github.com/yaunder/factory/issues/80).
+M2 are implemented and M3 is planned as need dictates in the
+[v2 roadmap](../roadmap/fffactory-v2-roadmap/roadmap.md).
 
 This document describes the agreed target architecture for FFFactory v2 and
 the milestones that deliver it. `fffactory` is the operating authority for v2
@@ -11,7 +11,8 @@ rules that govern operation today are in [AGENTS.md](../../AGENTS.md). Only
 behavior that has shipped may be operated. In this document, v1 is the frozen
 implementation v2 replaced, and "the first cut" is v2's initial scope.
 Decision labels such as D11 refer to the roadmap's
-`docs/roadmap/fffactory-v2-roadmap/decisions.md`. Updated for #88.
+`docs/roadmap/fffactory-v2-roadmap/decisions.md`. Updated when v2 became the
+operating authority (E1).
 
 ## Purpose
 
@@ -846,9 +847,8 @@ E2 could not operate in the production account, since it deletes the tools the
 old rules require.
 
 The full documentation switch happened at the end of M2, when v2 had the
-behavior to document ([#137](https://github.com/yaunder/factory/issues/137)):
+behavior to document:
 README.md, SDLC.md, MACHINE_ONBOARDING.md and the repository skills describe
 v2, and [decision 0002](../decisions/0002-fffactory-v2.md) supersedes
-decision 0001. The remaining v1 code is deleted
-([#139](https://github.com/yaunder/factory/issues/139)), and the v1 hosts are
+decision 0001. The remaining v1 code is deleted, and the v1 hosts are
 retired manually.
