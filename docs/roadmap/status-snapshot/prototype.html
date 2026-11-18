@@ -1,0 +1,353 @@
+<!doctype html><html><head><meta charset=utf8><meta name=viewport content="width=device-width,initial-scale=1,viewport-fit=cover"><style>:root{color-scheme:light;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}html{scroll-padding-top:env(safe-area-inset-top,0px)}body{margin:0;padding:0;font:14px -apple-system,BlinkMacSystemFont,sans-serif;background:#fff;color:#000}img{max-width:100%}[hidden]:not([hidden=until-found i]){display:none!important}</style></head><body>
+<title>Factory Floor</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Condensed:wght@600;700&family=IBM+Plex+Sans:ital,wght@0,400;0,500;1,400&display=swap">
+<style>
+/* Layout: page title and snapshot stamp, one attention panel for the whole factory, then white worker panels
+   with a well bar per worker and agent rows. Tokens are yaunder.com's; --fault is the one addition.
+   Light only by choice, as the site is. */
+:root {
+  --ground: #F1F3F9;
+  --well: #E6EAF3;
+  --panel: #FFFFFF;
+  --ink: #12141C;
+  --mute: #555968;
+  --rule: #D3D8E4;
+  --signal: #2D3BE0;
+  --signal-soft: rgba(45, 59, 224, 0.55);
+  --on-signal: #FFFFFF;
+  --caution: #C26F00;
+  --fault: #B3261E;
+  --sans: "IBM Plex Sans", "Helvetica Neue", Arial, sans-serif;
+  --cond: "IBM Plex Sans Condensed", "IBM Plex Sans", Arial, sans-serif;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  color-scheme: light;
+}
+* { box-sizing: border-box; }
+body {
+  background: var(--ground); color: var(--ink); font-family: var(--sans);
+  font-size: 0.9375rem; line-height: 1.45; -webkit-font-smoothing: antialiased;
+  padding-block: 2rem 3.5rem;
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+}
+::selection { background: var(--signal); color: var(--on-signal); }
+.page { max-width: 68rem; margin: 0 auto; display: flex; flex-direction: column; gap: 1.75rem; }
+.mono { font-family: var(--mono); font-size: 0.86em; }
+.tag { margin: 0 0 0.6rem; font-size: 0.8125rem; font-weight: 500; color: var(--mute); }
+h1, h2, h3 { font-family: var(--cond); margin: 0; }
+
+.top {
+  display: flex; flex-wrap: wrap; gap: 0.75rem 2rem; align-items: flex-end; justify-content: space-between;
+  padding-bottom: 1.5rem; border-bottom: 1px solid var(--rule);
+}
+.top h1 { font-weight: 700; font-size: clamp(2.25rem, 1.5rem + 3.4vw, 3.5rem); line-height: 1.02; letter-spacing: -0.02em; }
+.top .ident { margin: 0.75rem 0 0; color: var(--mute); }
+.asof strong { display: block; font-weight: 500; }
+.asof span { color: var(--mute); }
+
+.modebar { display: flex; flex-wrap: wrap; gap: 0.5rem 1rem; align-items: center; color: var(--mute); font-size: 0.8125rem; }
+.mode { display: inline-flex; flex-wrap: wrap; gap: 0.4rem; }
+.mode button {
+  font: inherit; font-weight: 500; padding: 0.35rem 0.9rem; cursor: pointer;
+  background: var(--panel); color: var(--ink); border: 1.5px solid var(--signal); border-radius: 2rem;
+}
+.mode button[aria-pressed="true"] { background: var(--signal); color: var(--on-signal); }
+.mode button:focus-visible { outline: 2px solid var(--signal); outline-offset: 3px; }
+
+.tally { display: flex; flex-wrap: wrap; gap: 0.75rem 2.5rem; font-variant-numeric: tabular-nums; }
+.tally div { display: flex; flex-direction: column; }
+.tally b { font-family: var(--cond); font-weight: 700; font-size: 2rem; line-height: 1.05; letter-spacing: -0.015em; }
+.tally span { color: var(--mute); font-size: 0.8125rem; font-weight: 500; }
+
+.dot { width: 0.5rem; height: 0.5rem; border-radius: 50%; flex: none; display: inline-block; border: 1.5px solid var(--mute); }
+.dot.s-working { background: var(--signal); border-color: var(--signal); }
+.dot.s-needs_input, .dot.s-worker { background: var(--caution); border-color: var(--caution); }
+.dot.s-failed { background: var(--fault); border-color: var(--fault); }
+.dot.s-finished { background: var(--panel); border-color: var(--ink); }
+.dot.s-stopped { background: transparent; border-style: dotted; }
+
+.attention { background: var(--panel); border: 1.5px solid var(--caution); border-radius: 8px; padding: 1.25rem 1.5rem; }
+.attention h2 { font-weight: 700; font-size: 1.5rem; line-height: 1.1; letter-spacing: -0.01em; }
+.attention ul { list-style: none; margin: 1rem 0 0; padding: 0; display: grid; gap: 0.9rem; }
+.attention li { display: grid; grid-template-columns: 0.5rem minmax(0, 1fr); gap: 0.6rem; align-items: baseline; }
+.attention .what { font-weight: 500; }
+.attention .why { color: var(--mute); }
+
+.floor { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(21rem, 100%), 1fr)); gap: 1rem; align-items: start; }
+.station { background: var(--panel); border: 1px solid var(--rule); border-radius: 8px; padding: 0.75rem; min-width: 0; }
+.station.is-not_ready, .station.is-stopped { background: transparent; border: 1.5px dashed var(--rule); }
+.station.is-not_ready { border-color: var(--caution); }
+.station header {
+  display: flex; flex-wrap: wrap; gap: 0.2rem 0.75rem; align-items: baseline;
+  background: var(--well); border-radius: 6px; padding: 0.85rem 1rem;
+}
+.station h3 { font-weight: 700; font-size: 1.25rem; line-height: 1.15; }
+.station .host { color: var(--mute); overflow-wrap: anywhere; }
+.verdict { margin-left: auto; display: inline-flex; align-items: center; gap: 0.4rem; font-size: 0.8125rem; font-weight: 500; }
+.verdict.not_ready { color: var(--caution); }
+.verdict.stopped { color: var(--mute); }
+.facts { margin: 0; padding: 0.75rem 1rem 0.25rem; color: var(--mute); font-size: 0.8125rem; overflow-wrap: anywhere; }
+.facts b { color: var(--ink); font-weight: 500; }
+
+.agents { list-style: none; margin: 0.5rem 0 0; padding: 0; }
+.agents li {
+  display: grid; grid-template-columns: 0.5rem minmax(0, 1fr) auto; gap: 0.1rem 0.6rem; align-items: baseline;
+  padding: 0.7rem 1rem; border-top: 1px solid var(--rule);
+}
+.agents .name { font-weight: 500; overflow-wrap: anywhere; }
+.agents .state { font-size: 0.8125rem; font-weight: 500; color: var(--mute); white-space: nowrap; }
+.agents .state.s-working { color: var(--signal); }
+.agents .state.s-needs_input { color: var(--caution); }
+.agents .state.s-failed { color: var(--fault); }
+.agents .sub { grid-column: 2 / -1; font-size: 0.8125rem; color: var(--mute); }
+.sub .sep::before { content: " · "; }
+.empty, .next { margin: 0; padding: 0.5rem 1rem 0.5rem; color: var(--mute); }
+.next b { color: var(--ink); font-weight: 500; }
+
+/* Proposed fields carry the site's dashed signal line. */
+.new { border-bottom: 1.5px dashed var(--signal-soft); }
+body[data-mode="today"] .new { border-bottom: 0; }
+
+.notes { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(19rem, 100%), 1fr)); gap: 1.25rem 2.5rem; padding-top: 1.5rem; border-top: 1px solid var(--rule); color: var(--mute); }
+.notes p { margin: 0; max-width: 34rem; }
+.notes ul { margin: 0; padding: 0; list-style: none; display: flex; flex-wrap: wrap; gap: 0.4rem 1.25rem; }
+.notes li { display: flex; gap: 0.45rem; align-items: center; }
+.notes .key { border-bottom: 1.5px dashed var(--signal-soft); color: var(--ink); }
+</style>
+
+<div class="page">
+  <div class="top">
+    <div>
+      <h1 id="factory-name"></h1>
+      <p class="ident" id="factory-ident"></p>
+    </div>
+    <div class="asof">
+      <strong id="asof"></strong>
+      <span>Snapshot. Rerun to refresh.</span>
+    </div>
+  </div>
+
+  <div class="modebar">
+    <div class="mode" role="group" aria-label="Fields shown">
+      <button type="button" id="mode-proposed" aria-pressed="true">Proposed</button>
+      <button type="button" id="mode-today" aria-pressed="false">What status reports today</button>
+    </div>
+    <span>Fixture data. Switch to compare against today's report.</span>
+  </div>
+
+  <div class="tally" id="tally"></div>
+
+  <section class="attention" id="attention">
+    <h2>Needs you</h2>
+    <ul id="attention-list"></ul>
+  </section>
+
+  <section>
+    <p class="tag">Workers</p>
+    <div class="floor" id="floor"></div>
+  </section>
+
+  <section class="notes">
+    <div>
+      <p class="tag">Agent states</p>
+      <ul>
+        <li><span class="dot s-working"></span> working</li>
+        <li><span class="dot s-needs_input"></span> needs input</li>
+        <li><span class="dot s-finished"></span> finished</li>
+        <li><span class="dot s-failed"></span> failed</li>
+        <li><span class="dot s-stopped"></span> stopped</li>
+      </ul>
+    </div>
+    <div>
+      <p class="tag">Where the fields come from</p>
+      <p>Everything here is in the status report today except what carries a <span class="key">dashed underline</span>: repository, epic and dispatch time. Those come from the labels dispatch already puts on each agent it launches.</p>
+    </div>
+  </section>
+</div>
+
+<script>
+// Shaped like `fffactory status --json`, plus the proposed per-agent fields: repository, epic, dispatched_at.
+const REPORT = {
+  as_of: "2026-11-18T14:02:00Z",
+  release: "0.3.0",
+  factory: { factory_id: "example", account_id: "123456789012", region: "us-east-1", release: "0.3.0" },
+  workers: [
+    { key: "builder-1", hostname: "example-builder-1", status: "ready", summary: "Ready on release 0.3.0",
+      machine: "running", tailnet: "online", release: "0.3.0", repositories: "synchronized", dispatch: "active",
+      activity: { state: "busy", agents: [
+        { id: "c7f2a90e", state: "working", dispatched: true, repository: "api", epic: 212, dispatched_at: "2026-11-18T10:58:00Z" },
+        { id: "19be44d1", state: "working", dispatched: true, repository: "web", epic: 87, dispatched_at: "2026-11-18T13:21:00Z" },
+        { id: "5d03c8aa", state: "finished", dispatched: true, repository: "api", epic: 198, dispatched_at: "2026-11-18T07:45:00Z" }
+      ] } },
+    { key: "builder-2", hostname: "example-builder-2", status: "ready", summary: "Ready on release 0.3.0",
+      machine: "running", tailnet: "online", release: "0.3.0", repositories: "synchronized", dispatch: "active",
+      activity: { state: "busy", agents: [
+        { id: "a41c9e07", state: "needs_input", dispatched: true, repository: "web", epic: 91, dispatched_at: "2026-11-18T12:10:00Z" },
+        { id: "e88d1b35", state: "working", dispatched: true, repository: "docs", epic: 14, dispatched_at: "2026-11-18T13:00:00Z" },
+        { id: "3fa6720c", state: "failed", dispatched: true, repository: "api", epic: 175, dispatched_at: "2026-11-17T22:30:00Z" },
+        { id: "b2907e64", state: "finished", dispatched: false }
+      ] } },
+    { key: "builder-3", hostname: "example-builder-3", status: "not_ready", summary: "Offline in the tailnet",
+      next_action: "Check that the instance is running and that Tailscale is up on it, then rerun fffactory status.",
+      machine: "running", tailnet: "offline", release: "unknown", repositories: "unknown", dispatch: "unknown",
+      activity: { state: "unknown", agents: null } },
+    { key: "builder-4", hostname: "example-builder-4", status: "stopped", summary: "Stopped",
+      next_action: "Start it with fffactory worker start builder-4.",
+      machine: "stopped", tailnet: "not_checked", release: "unknown", repositories: "unknown", dispatch: "unknown",
+      activity: { state: "unknown", agents: null } }
+  ]
+};
+
+const STATE_TEXT = { working: "working", needs_input: "needs input", finished: "finished", failed: "failed", stopped: "stopped" };
+const VERDICT_TEXT = { ready: "ready", not_ready: "not ready", stopped: "stopped" };
+const VERDICT_DOT = { ready: "s-working", not_ready: "s-worker", stopped: "s-stopped" };
+const asOf = new Date(REPORT.as_of);
+let mode = "proposed";
+
+function el(tag, cls, text) {
+  const node = document.createElement(tag);
+  if (cls) node.className = cls;
+  if (text !== undefined) node.textContent = text;
+  return node;
+}
+
+function ago(iso) {
+  const minutes = Math.round((asOf - new Date(iso)) / 60000);
+  const h = Math.floor(minutes / 60), m = minutes % 60;
+  return h ? h + "h " + String(m).padStart(2, "0") + "m" : m + "m";
+}
+
+// An agent's name: repository and epic when dispatch labelled it and we are showing proposed fields, else its ID.
+function agentName(agent) {
+  const name = el("span", "name");
+  if (mode === "proposed" && agent.dispatched && agent.repository) {
+    name.append(el("span", "new", agent.repository + " #" + agent.epic));
+  } else {
+    name.append(el("span", "mono", agent.id));
+  }
+  return name;
+}
+
+function renderTally() {
+  const tally = document.getElementById("tally");
+  tally.replaceChildren();
+  const workers = REPORT.workers;
+  const agents = workers.flatMap((w) => w.activity.agents || []);
+  const count = (list, pick) => list.filter(pick).length;
+  const cells = [
+    [count(workers, (w) => w.status === "ready") + " of " + workers.length, "workers ready"],
+    [count(agents, (a) => a.state === "working"), "agents working"],
+    [count(agents, (a) => a.state === "needs_input"), "need input"],
+    [count(agents, (a) => a.state === "failed"), "failed"],
+    [count(agents, (a) => a.state === "finished"), "finished"]
+  ];
+  for (const [value, label] of cells) {
+    const cell = el("div");
+    cell.append(el("b", null, String(value)), el("span", null, label));
+    tally.append(cell);
+  }
+}
+
+function renderAttention() {
+  const list = document.getElementById("attention-list");
+  list.replaceChildren();
+  for (const worker of REPORT.workers) {
+    for (const agent of worker.activity.agents || []) {
+      if (agent.state !== "needs_input" && agent.state !== "failed") continue;
+      const item = el("li");
+      item.append(el("span", "dot s-" + agent.state));
+      const body = el("div");
+      const what = el("div", "what");
+      what.append(agentName(agent), " on " + worker.key);
+      body.append(what);
+      const why = agent.state === "needs_input" ? "Waiting for someone to approve a step." : "Stopped by an error in its turn.";
+      const when = el("div", "why", why + " ");
+      if (mode === "proposed" && agent.dispatched_at) when.append(el("span", "new", "Dispatched " + ago(agent.dispatched_at) + " ago."));
+      body.append(when);
+      item.append(body);
+      list.append(item);
+    }
+    if (worker.status === "not_ready") {
+      const item = el("li");
+      item.append(el("span", "dot s-worker"));
+      const body = el("div");
+      body.append(el("div", "what", worker.key + ": " + worker.summary), el("div", "why", worker.next_action));
+      item.append(body);
+      list.append(item);
+    }
+  }
+  document.getElementById("attention").hidden = list.children.length === 0;
+}
+
+function fact(label, value) {
+  const span = el("span");
+  span.append(label + " ", el("b", null, value));
+  return span;
+}
+
+function renderFloor() {
+  const floor = document.getElementById("floor");
+  floor.replaceChildren();
+  for (const worker of REPORT.workers) {
+    const station = el("section", "station is-" + worker.status);
+    const header = el("header");
+    const verdict = el("span", "verdict " + worker.status);
+    verdict.append(el("span", "dot " + VERDICT_DOT[worker.status]), VERDICT_TEXT[worker.status]);
+    header.append(el("h3", null, worker.key), el("span", "host mono", worker.hostname), verdict);
+    station.append(header);
+
+    const facts = el("p", "facts");
+    const pairs = worker.status === "ready"
+      ? [["Release", worker.release], ["Repositories", worker.repositories], ["Dispatch", worker.dispatch], ["Agents", worker.activity.state]]
+      : [["Machine", worker.machine], ["Tailnet", worker.tailnet.replace("_", " ")], ["Agents", "unknown"]];
+    pairs.forEach(([label, value], index) => {
+      if (index) facts.append(" · ");
+      facts.append(fact(label, value));
+    });
+    station.append(facts);
+
+    const agents = worker.activity.agents;
+    if (agents === null) {
+      const next = el("p", "next");
+      next.append(el("b", null, "Next: "), worker.next_action);
+      station.append(next);
+    } else if (agents.length === 0) {
+      station.append(el("p", "empty", "No agents. Idle."));
+    } else {
+      const list = el("ul", "agents");
+      for (const agent of agents) {
+        const row = el("li");
+        row.append(el("span", "dot s-" + agent.state), agentName(agent), el("span", "state s-" + agent.state, STATE_TEXT[agent.state]));
+        const sub = el("span", "sub");
+        if (!agent.dispatched) sub.append("Not launched by dispatch");
+        else if (mode === "today") sub.append("Launched by dispatch");
+        else if (agent.dispatched_at) sub.append(el("span", "new", "Dispatched " + ago(agent.dispatched_at) + " ago"));
+        if (sub.childNodes.length) row.append(sub);
+        list.append(row);
+      }
+      station.append(list);
+    }
+    floor.append(station);
+  }
+}
+
+function render() {
+  document.body.dataset.mode = mode;
+  document.getElementById("mode-proposed").setAttribute("aria-pressed", String(mode === "proposed"));
+  document.getElementById("mode-today").setAttribute("aria-pressed", String(mode === "today"));
+  renderTally();
+  renderAttention();
+  renderFloor();
+}
+
+const f = REPORT.factory;
+document.getElementById("factory-name").textContent = "Factory " + f.factory_id;
+document.getElementById("factory-ident").textContent = "AWS " + f.account_id + " · " + f.region + " · pinned release " + f.release;
+document.getElementById("asof").textContent = "As of " + REPORT.as_of.slice(0, 16).replace("T", " ") + " UTC";
+document.getElementById("mode-proposed").addEventListener("click", () => { mode = "proposed"; render(); });
+document.getElementById("mode-today").addEventListener("click", () => { mode = "today"; render(); });
+render();
+</script>
+
+</body></html>
