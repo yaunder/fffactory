@@ -146,5 +146,70 @@
    Rejected alternatives:
      - fail the tick: risks a repeated launch
 
+✓ How an agent's repository is shown
+   Chose: as GitHub's `OWNER/NAME`, and a dispatched agent as `OWNER/NAME#EPIC`. The worker reports the repository key;
+   the CLI maps it through its own factory.json (`repositories[key].remote`). A key factory.json no longer declares
+   shows the key alone. JSON keeps `repository` (key) and adds `repository_name` (`OWNER/NAME` or null).
+   Rationale: a key is a local alias, so an epic number beside it is meaningless. `OWNER/NAME#N` is GitHub's
+   cross-repository reference form and the natural link target later. The CLI builds what it prints from its own
+   factory.json, never worker text.
+   Rejected alternatives:
+     - show the key only (the prototype's "api #212"): the number means nothing outside the factory
+     - store the remote in the launch record: puts configuration in a file agents control, which the CLI must check anyway
+   Marker: `TODO(re-evaluate when per-project FFFlow status exists): link each agent's repository and epic to it`.
+
+✓ status may print a repository's OWNER/NAME
+   Chose: widen status.md §What status never prints and src/CLAUDE.md's never-echo rule: "a repository's
+   `OWNER/NAME` from a remote that passed its format check". Lands in task 2.
+   Rationale: the remote's pattern admits the same characters as a key, which status already prints. The branch and
+   the checkout path are still never printed.
+   Rejected alternatives:
+     - keep the rule as is: the view can't name repositories
+
+✓ Agents not launched by dispatch (ad hoc and planning sessions)
+   Chose: every agent's repository comes from its working directory. The Paseo adapter matches each agent's `cwd`
+   (in the `ls --json` it already reads) to a placed checkout, or to one of that checkout's worktrees (one
+   `paseo worktree ls --cwd <checkout> --json` per placed checkout). The run carries the placed checkout it works
+   in, which says nothing Paseo-specific. The endpoint maps that to a key through the host's manifest. A dispatched
+   agent's repository comes from the launch record first, and its workspace as fallback. Only the record gives an
+   epic and a dispatch time. No path is ever printed.
+   Rejected alternatives:
+     - show ad hoc agents by ID only: the repository view can't place them
+     - read the epic from the worktree's `dispatch/epic-N-STAMP` branch instead of a record: the agent may move off it
+     - workspace first for dispatched agents: the record is the dispatcher's own launch identity
+
+✓ Agent categories
+   Chose: two categories everywhere agents are listed: **Dispatched** and **Ad hoc** (anything dispatch didn't
+   launch, in a placed repository or not). Within each: working, then needs input, then failed. Finished and
+   stopped are counts. A dispatched agent is `OWNER/NAME#EPIC`. An ad hoc agent is `OWNER/NAME`, or its agent ID
+   outside the placed repositories, with its ID as secondary text either way, for reconnecting.
+   Rejected alternatives:
+     - a third "outside the placed repositories" category: user chose two for now
+
+✓ Repository view
+   Chose: the status JSON gains a top-level `repositories` section: each repository factory.json declares, in its
+   order, with `key`, `name` (`OWNER/NAME`) and `placements` (each worker it's placed on, with that worker's verdict
+   and repository state). Agents stay under workers, so each fact appears once; renderers group them by repository.
+   The HTML page shows Needs you, then Workers, then Repositories, stacked on one page. A repository panel shows its
+   placements, its agents across all workers in the two categories, and its entries from Needs you. The terminal
+   report stays worker-centric.
+   Rationale: no new worker calls, no script, and the page prints and archives as one snapshot.
+   Rejected alternatives:
+     - a CSS-only toggle between the views: more machinery, and a printed page shows only one view
+     - a `Repositories:` section in the terminal report: --html is the at-a-glance surface
+     - copy agents under repositories in the JSON: the same fact twice
+
+✓ Per-checkout repository state
+   Chose: out of this plan. The worker reports one repository state for all its checkouts (#104 is open). A panel
+   shows the worker's state as it is ("synchronized on builder-1", "builder-2: repositories unresolved").
+   Marker: `TODO(re-evaluate when #104 reports per-checkout state): show each checkout's own state`.
+
+✓ Page design iteration
+   Chose: the prototype is not updated now. The layout, including the repository view, is iterated in a separate
+   design spike, opened as a follow-up issue at capture. It doesn't block task 4.
+   Rejected alternatives:
+     - add a Repositories section to prototype.html now: user prefers a design spike
+
 ✓ Breakdown
-   Chose: four tasks. A new launch-record issue, #153 rescoped to read the record, a new observed_at issue, and #154.
+   Chose: six tasks. A new launch-record issue; #153 rescoped to read the record; a new observed_at issue; #154;
+   a new task for each agent's repository from its workspace; a new task for the report's repositories section.

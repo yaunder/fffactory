@@ -82,19 +82,43 @@ ready and stopped workers. Change for production:
 - Finished agents become a count per station instead of rows. Rows sort working → needs input → failed.
 - `as_of` is `observed_at`.
 
+### D. Every agent's repository (amended at breakdown)
+
+| Layer | Module | Change |
+| --- | --- | --- |
+| Host adapter | `src/host/paseo-backend.ts` (`paseoRuns`) | Reads each agent's `cwd` from the `ls --json` it already reads. Lists each placed checkout's worktrees (`worktree ls --cwd CHECKOUT --json`). Attributes each run to a placed checkout or none. A failed worktree listing makes only that checkout's attribution unknown. |
+| Domain | `src/domain/run.ts` | `Run` gains the placed checkout it works in, or null. |
+| Host | `src/host/control-plane.ts` (`activity`) | Passes the manifest's placed checkouts. Maps a run's checkout to its repository key. The record's repository wins for dispatched agents. |
+| Spec | `execution-backend.md` §Inspect, `host-protocol.md`, `status.md` | Repository known for ad hoc agents. |
+
+### E. The report's repositories
+
+| Layer | Module | Change |
+| --- | --- | --- |
+| Domain | `src/domain/status.ts` | The report's repositories: each declared repository, its placements with each worker's verdict and repository state. Pure, from factory.json and the workers' results. |
+| CLI | `src/cli/commands/status.ts` (`statusJson`) | Top-level `repositories`: `key`, `name`, `placements`. |
+| Spec/schema | `status.md` §JSON, `status-report.schema.json`, fixture | Additive. |
+
+Display (all surfaces): two categories, **Dispatched** (`OWNER/NAME#EPIC`) and **Ad hoc** (`OWNER/NAME`, or its ID
+outside the placed repositories). Within each: working, then needs input, then failed; finished and stopped are
+counts. The HTML page stacks Needs you, Workers, Repositories. The terminal stays worker-centric.
+
 ## Phase 3 — Path
 
-Confirmed 2026-11-18. Amended at breakdown to four tasks.
+Confirmed 2026-11-18. Amended at breakdown to six tasks.
 
-Housekeeping, at capture: link docs/roadmap/status-snapshot/prototype.html from #154. Close #151 and #152 as not
-planned, each with a comment pointing at #154 and this plan.
+Housekeeping, at capture:
+- Link docs/roadmap/status-snapshot/prototype.html from #154.
+- Close #151 and #152 as not planned, each with a comment pointing at #154 and this plan.
+- Open a follow-up design-spike issue for the page layout, including the repository view.
 
-1. **New issue: the dispatcher records each launch.** Domain record, prune rule, dispatcher write, dispatch spec.
-   No reader.
-2. **#153, rescoped: status names each agent's work.** The activity endpoint reads and joins the record. Activity
-   document, `status --json`, `worker inspect --json`, the human `Agents:` lines. Depends on 1.
-3. **New issue: `observed_at`.** It edits the same schema, fixture and status spec as 2, so run them one after the
-   other, in either order.
-4. **#154: `status --html`.** Depends on 2 and 3.
+1. **New issue: the dispatcher records each launch.** No reader.
+2. **#153, rescoped: status names each dispatched agent's work.** Reads the record. `OWNER/NAME#EPIC` from
+   factory.json. The widened never-print rule. Two categories. Depends on 1.
+3. **New issue: `observed_at`.**
+4. **New issue: every agent's repository from its workspace.** Ad hoc agents get their repository. Depends on 2.
+5. **New issue: the report's repositories.** Top-level `repositories` in `status --json`. Depends on 2.
+6. **#154: `status --html`**, with Workers and Repositories views. Depends on 2, 3, 4, 5.
 
-Commit boundaries are the four PRs. Specs ship in each PR with their code.
+Tasks 2, 3, 4 and 5 share the status schema, fixture and spec: run them one after the other. Specs ship in each PR
+with their code.
