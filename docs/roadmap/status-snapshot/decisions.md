@@ -1,215 +1,196 @@
 # Decisions: status-snapshot
 
-✓ Fate of #151 and #152
-   Chose: close both as not planned, pointing at this plan.
-   Rationale: a registry and Paseo plugin are a lot of surface for a read-only view. A snapshot rendered
-   from `status --json` gets the same picture with no second source of truth. The configuration chat
-   (#152) can come back later on top of the snapshot.
-   Rejected alternatives:
-     - keep #151 and build the Paseo browser: second registry, plugin packaging, daemon-side directory browsing
-     - close #151, rewrite #152 to bind to one --instance path: still Paseo plugin work, not needed now
+Each decision says what we chose, why, and what we turned down.
 
-✓ Target UI
-   Chose: #154's self-contained HTML page rendered by the CLI, with `status --json` as the contract behind it.
-   Rationale: one renderer we own and test against fixtures. An external UI can read the same JSON later at no extra cost.
-   Rejected alternatives:
-     - JSON contract only, UI built elsewhere: no UI ships, and the contract goes untested by a real consumer
+## Made while planning (2026-11-18)
 
-✓ Snapshot time
-   Chose: add a top-level `observed_at` (ISO 8601 UTC) to the status report. Additive; schema version 2 stays.
-   Rationale: the "as of" time must come from the CLI so JSON and HTML agree. The renderer must not invent it.
-   Rejected alternatives:
-     - renderer stamps its own time: JSON consumers can't tell when the report was taken
+✓ #151 and #152
+   Chose: close both as not planned, pointing to this plan.
+   Why: a Paseo plugin with its own list of factories is a lot to build for a read-only view. A page drawn from
+   `status --json` shows the same picture without a second list. The configuration chat (#152) can come back later,
+   built on the snapshot.
+   Turned down:
+     - build the Paseo factory browser: a second list of factories, plugin packaging, folder browsing on the daemon
+     - close #151 but rewrite #152 to use one `--instance` path: still Paseo plugin work we don't need yet
 
-✓ Scope: factories per snapshot
-   Chose: one factory per snapshot, selected with --instance as today.
-   Rationale: no registry needed. Several factories means several runs.
-   Rejected alternatives:
-     - multi-factory page: brings back a registry like #151's
+✓ What the UI is
+   Chose: #154's HTML page, drawn by the CLI, with `status --json` as the data behind it.
+   Why: one page we build and test against sample reports. Any other UI can read the same JSON later.
+   Turned down:
+     - only the JSON, with a UI built elsewhere: no UI would ship, and nothing real would test the JSON
 
-✓ Issues
-   Chose: reuse #153 (agent work) and #154 (HTML), tightened into dispatch-ready specs at capture. `observed_at` gets
-   its own small issue that can ship alongside #153.
-   Re-examined 2026-11-18: it shares the schema, fixture and status spec with #153, so it runs one after the other
-   with #153, not in parallel. User confirmed a separate issue anyway.
-   Rejected alternatives:
-     - fold observed_at into #153: widens #153's scope beyond agent labels
-     - fold observed_at into #154: one PR would touch both the contract and the renderer
-     - capture fresh issues: duplicates #153 and #154
+✓ When the report was taken
+   Chose: add `observed_at`, a UTC timestamp, to the top of the report. It only adds a field, so the version stays 2.
+   Why: the "As of" time has to come from the CLI so the JSON and the page agree.
+   Turned down:
+     - let the page add its own time: anything reading the JSON couldn't tell when it was taken
 
-✓ observed_at semantics
-   Chose: the start of inspection: the moment status begins reading the inventories (Order step 4), after
-   validation and the account check.
-   Rationale (user's call): "as of" marks when observation began. Every fact in the report was observed at or after it.
-   Rejected alternatives:
-     - when the report is assembled, after every observation
+✓ How many factories per page
+   Chose: one, picked with `--instance` as today.
+   Why: no list of factories needed. For several factories, run it once each.
+   Turned down:
+     - several factories on one page: brings back a list like #151's
 
-✓ Human layout for named agents (#153)
-   Chose: keep the `Agents:` count line. Below it, one line per agent that is working, needs input or failed, in that
-   state order, e.g. `api #212 working, dispatched 3h 04m ago`. Agents not launched by dispatch are named by ID.
-   Finished and stopped agents are counts only.
-   Rejected alternatives:
-     - name every agent: finished agents pile up on long-lived workers
+✓ Which issues to use
+   Chose: rewrite #153 and #154 rather than open copies. Open new issues for the other tasks, including
+   `observed_at` on its own. `observed_at` edits the same files as #153, so the two are done one after the other.
+   Turned down:
+     - fold `observed_at` into #153: makes #153 about more than agents
+     - fold `observed_at` into #154: one PR would change both the data and the page
 
-✓ Which agents the page lists (#154)
-   Chose: the same rule as the human report. List working, then needs input, then failed. Finished and stopped are
-   a count per worker.
-   Rationale: one rule, so the terminal and the page never disagree.
-   Rejected alternatives:
-     - also list finished agents dispatched within 24h of observed_at: a second rule to spec and test
+✓ When `observed_at` is taken
+   Chose: at the start of the checks, just before status reads EC2 and Tailscale, after factory.json and the AWS
+   account have been checked. Everything in the report was seen at or after that time. (User's call.)
+   Turned down:
+     - when the report is finished
 
-✓ --html with --json
-   Chose: one output format at a time. Both together is an invalid argument and exits 1.
-   Rejected alternatives:
-     - one silently wins
+✓ `--html` and `--json` together
+   Chose: one format at a time. Asking for both is an error and exits 1.
+   Turned down:
+     - let one quietly win
 
-✓ Links from the page
-   Chose: no links in this plan. The page will link to a different target once that exists (user's call), not GitHub.
-   Marker: `TODO(re-evaluate when <link target> is up): link agents and epics` in status-page.ts.
-   Rejected alternatives:
-     - GitHub epic URLs: need repository owner and name, which status never prints
-
-✓ UI prototype
-   Chose: the user's "Factory Floor.html" artifact (exported 2026-11-18) is the visual prototype for #154.
-   Committed as docs/roadmap/status-snapshot/prototype.html. Design reference only, not code to reuse (see differences in plan.md).
+✓ The prototype
+   Chose: the "Factory Floor.html" artifact the user exported is the prototype for the page. It's committed as
+   `docs/roadmap/status-snapshot/prototype.html` and linked from #154. It's a design guide, not code to reuse.
+   Turned down:
+     - attach it to #154: GitHub doesn't accept .html attachments
 
 ✓ Fonts
-   Chose: drop the Google Fonts request and use the fallback faces in the stack ("Helvetica Neue", Arial, sans-serif;
-   ui-monospace for mono).
-   Rationale: the page makes no network requests and stays small. The look stays close to the prototype.
-   Rejected alternatives:
-     - embed IBM Plex (base64 woff2): about 150 KB more per page, and the fonts' licence ships with every page
-     - keep the Google Fonts link: breaks offline reading and the no-network rule
+   Chose: drop the prototype's Google Fonts link. Use fonts the computer already has (Helvetica Neue, Arial; a system
+   monospace font).
+   Why: the page loads nothing from the network and stays small. It looks close to the prototype.
+   Turned down:
+     - put IBM Plex inside the page: about 150 KB more per page, plus the font licence in every page
+     - keep the Google Fonts link: the page wouldn't work offline
 
-✓ Where the prototype lives
-   Chose: at plan-capture, commit it to docs/roadmap/status-snapshot/prototype.html and link it from #154.
-   Rationale: the plan directory in /tmp doesn't last. The agent implementing #154 needs the file in the repo.
-   Rejected alternatives:
-     - attach to #154: GitHub doesn't accept .html attachments, so it would need a zip or a gist
+✓ Links
+   Chose: no links for now. Later they'll point to each project's FFFlow status, not to GitHub.
+   Marker in the code: `TODO(re-evaluate when per-project FFFlow status exists): link each repository and epic to it`.
 
-## Amended at breakdown (2026-11-18)
+## Made while breaking it into tasks (2026-11-18)
 
-✓ Where an agent's repository, epic and dispatch time come from
-   Chose: a launch record written by the dispatcher. #153's "read the labels in the adapter" is not possible.
-   Evidence: Paseo 0.15.0 (pinned) and 0.16.2 (latest), checked in the package source: `ls --json` only filters by an
-   exact `--label key=value` and never prints label values, and `agent inspect --json` shows only Paseo's own
-   `paseo.worktree` and parent labels. docs/specs/execution-backend.md §Inspect says the same ("Paseo's list prints
-   no label"). The dispatcher persists nothing per launch today; its summary is only printed.
-   Rejected alternatives:
-     - one label-filtered `ls` per placed repository: gives the repository only, never the epic or dispatch time
-     - parse `dispatch/epic-N-STAMP` from `agent inspect`'s worktree: inspects every agent, still no repository,
-       and couples fffactory to Paseo's worktree naming
-     - wait for Paseo to print labels: neither version does. Recorded as the record's retirement trigger.
-   Marker: `TODO(re-evaluate when the pinned Paseo's ls --json prints labels): read the launch identity from the
-   backend and retire the launch record`.
+✓ Where each agent's repository, epic and start time come from
+   Chose: dispatch writes them down when it starts each agent.
+   Why: #153 planned to read the labels dispatch puts on each agent in Paseo. That can't work. We checked Paseo's
+   source for 0.15.0 (pinned) and 0.16.2 (latest): `paseo ls --json` can filter by a label but never prints label
+   values, and `paseo agent inspect --json` only shows Paseo's own labels. `docs/specs/execution-backend.md` says
+   the same. Dispatch doesn't save anything per agent today; it only prints a summary.
+   Turned down:
+     - one filtered `ls` per repository: tells us the repository, never the epic or start time
+     - read the epic from the worktree's branch name (`dispatch/epic-N-STAMP`): needs a call per agent, still no
+       repository, ties us to Paseo's folder naming, and the agent may switch branches
+     - wait for Paseo to print labels: neither version does
+   Marker in the code: `TODO(re-evaluate when the pinned Paseo's ls --json prints labels): read the launch identity
+   from the backend and retire the launch record`.
 
-✓ Launch record format
-   Chose: one JSON document, written to a temporary file in the same directory and renamed into place.
-   Rationale: the reader is root (`host control-plane activity`) and the file lives in `factory`'s space, which coding
-   agents control. A JSON file reads through the guarded-descriptor pattern the repo already uses (no symlinks, a
-   regular file, a bounded size), and is never seen half-written.
-   Rejected alternatives:
-     - SQLite via bun:sqlite (built into the executable): opening by path skips the descriptor guards; root can leave
-       root-owned -journal/-wal/-shm files in `factory`'s directory; a read without the dispatch lock can see a
-       half-written database. Its query strength serves launch history, which is not this record's job.
+✓ What format the record uses
+   Chose: one JSON file. It's written to a temporary file first, then renamed into place.
+   Why: dispatch writes it as `factory`, but status reads it as root, and coding agents also run as `factory` and
+   could change it. The repo already has a safe way for root to read a file like this (no symlinks, a regular file,
+   a size limit). The rename means nobody ever reads a half-written file.
+   Turned down:
+     - SQLite (built into Bun, so available on workers): it opens files by path, which skips those safety checks; root
+       could leave root-owned journal files that `factory` then can't write; reading while dispatch writes can see a
+       half-finished database. Its strength is querying history, which this record doesn't keep.
 
-✓ Launch history
-   Chose: not kept. The record holds only agents Paseo still lists. History belongs to the log archive's Phase 4
-   (Relationships, docs/roadmap/worker-log-archive/roadmap.md), which groups attempts by repository and epic.
-   Transcripts (the dispatch summary, each agent's `/fff:work-epic N`) already reach the archive when it's enabled,
-   but status may not read them: they're agent-written text, collected only for Claude Code, and not structured
-   until the Phase 3 reader.
-   Note for Phase 4: it assumes the collector can record Paseo labels. It can't, for the same reason. The launch
-   record is a candidate source.
+✓ History
+   Chose: the record doesn't keep history. It only covers agents Paseo still lists. History belongs to the log
+   archive's Phase 4 (`docs/roadmap/worker-log-archive/roadmap.md`), which plans to group past attempts by repository
+   and epic.
+   Why not the logs for status: transcripts already reach the archive when it's on, but they're text agents wrote,
+   only Claude Code sessions are collected, and nothing can query them until the Phase 3 reader exists. Status also
+   never reads the archive.
+   Note for Phase 4: it assumes the collector can record Paseo labels. It can't, for the same reason. This record
+   could feed it instead.
 
-✓ Pruning
-   Chose: the dispatcher prunes during its normal tick, under the dispatch lock, from the list of every run it
-   already reads for capacity (no extra Paseo call). It drops an entry only when Paseo no longer lists that agent
-   AND it was dispatched more than 1 hour ago. Then it appends an entry for each successful `startRun`, and writes
-   the record by temporary file and rename.
-   - An agent Paseo still lists keeps its entry, whatever its age or state: an 8-hour run, or a finished one, keeps it.
-   - The hour of grace only protects an entry whose agent Paseo hasn't listed yet.
-   - Runs unreadable: the tick already fails, and nothing is pruned.
-   - Dispatch stopped: no ticks, so no pruning and no new entries. Stale entries are never shown, because the
-     reader joins by agent ID against the current runs.
-   - The reader (root) never writes or prunes. An oversized or malformed record makes every agent's three fields
-     null, never the agents unreadable.
-   Rejected alternatives:
-     - prune by age alone: drops long runs that are still going
-     - keep every entry: unbounded growth on a long-lived worker
+✓ When entries are removed
+   Chose: each dispatch run removes an entry only when Paseo no longer lists that agent AND it was started more than
+   an hour ago. Dispatch uses the list of agents it already fetches for its capacity check, so there are no extra
+   calls. It then adds an entry for each agent it starts, and writes the file.
+   - An agent Paseo still lists keeps its entry, however old: an 8-hour run keeps it, and so does a finished one.
+   - The hour only protects a new agent that Paseo hasn't listed yet.
+   - If dispatch can't read the agents, the run already fails, and nothing is removed.
+   - If dispatch is stopped, nothing is added or removed. Old entries do no harm, because they only show up when
+     their agent does.
+   - Status never writes or cleans the file. If the file is too big or broken, the agents are still listed, with
+     their repository, epic and time empty.
+   Turned down:
+     - remove entries by age alone: would drop long runs that are still going
+     - never remove entries: the file would keep growing
 
-✓ Record write fails after a launch
-   Chose: the launch stands, and the tick summary reports that the record could not be written. The tick does not
-   fail because of it. Status shows null for that agent.
-   Rationale: the agent is already running. Failing the tick risks the next one launching the epic again if the
-   duplicate check can't see the first run yet.
-   Rejected alternatives:
-     - fail the tick: risks a repeated launch
+✓ If writing the record fails after an agent starts
+   Chose: the agent keeps running. The dispatch summary says the record couldn't be written. The run doesn't fail.
+   Status shows empty fields for that agent.
+   Why: failing the run could lead the next run to start the same epic again.
+   Turned down:
+     - fail the run: risks starting the epic twice
 
-✓ How an agent's repository is shown
-   Chose: as GitHub's `OWNER/NAME`, and a dispatched agent as `OWNER/NAME#EPIC`. The worker reports the repository key;
-   the CLI maps it through its own factory.json (`repositories[key].remote`). A key factory.json no longer declares
-   shows the key alone. JSON keeps `repository` (key) and adds `repository_name` (`OWNER/NAME` or null).
-   Rationale: a key is a local alias, so an epic number beside it is meaningless. `OWNER/NAME#N` is GitHub's
-   cross-repository reference form and the natural link target later. The CLI builds what it prints from its own
-   factory.json, never worker text.
-   Rejected alternatives:
-     - show the key only (the prototype's "api #212"): the number means nothing outside the factory
-     - store the remote in the launch record: puts configuration in a file agents control, which the CLI must check anyway
-   Marker: `TODO(re-evaluate when per-project FFFlow status exists): link each agent's repository and epic to it`.
+✓ How a repository is shown
+   Chose: by its GitHub `OWNER/NAME`, and a dispatched agent as `OWNER/NAME#EPIC`. The worker reports the repository
+   key; the CLI looks up its remote in factory.json. If factory.json no longer has that key, the key is shown on its
+   own. The JSON keeps `repository` (the key) and adds `repository_name`.
+   Why: a key like `api` is a local nickname, so an epic number beside it means little. `OWNER/NAME#212` is how GitHub
+   itself refers to an issue in another repository, and it's what we'll link later. The CLI already builds what it
+   prints from its own factory.json, never from text a worker sent.
+   Turned down:
+     - show only the key (the prototype's "api #212"): the number means nothing outside the factory
+     - have dispatch store the remote in the record: puts configuration in a file agents can change
 
-✓ status may print a repository's OWNER/NAME
-   Chose: widen status.md §What status never prints and src/CLAUDE.md's never-echo rule: "a repository's
-   `OWNER/NAME` from a remote that passed its format check". Lands in task 2.
-   Rationale: the remote's pattern admits the same characters as a key, which status already prints. The branch and
-   the checkout path are still never printed.
-   Rejected alternatives:
-     - keep the rule as is: the view can't name repositories
+✓ Status may print a repository's `OWNER/NAME`
+   Chose: update "What status never prints" in `docs/specs/status.md`, and the matching rule in `src/CLAUDE.md`, to
+   allow "a repository's `OWNER/NAME` from a remote that passed its format check". Done in task 2.
+   Why: the remote's format allows the same characters as a repository key, which status already prints. The branch
+   and the checkout path are still never printed.
+   Turned down:
+     - keep the rule: the page couldn't name repositories
 
-✓ Agents not launched by dispatch (ad hoc and planning sessions)
-   Chose: every agent's repository comes from its working directory. The Paseo adapter matches each agent's `cwd`
-   (in the `ls --json` it already reads) to a placed checkout, or to one of that checkout's worktrees (one
-   `paseo worktree ls --cwd <checkout> --json` per placed checkout). The run carries the placed checkout it works
-   in, which says nothing Paseo-specific. The endpoint maps that to a key through the host's manifest. A dispatched
-   agent's repository comes from the launch record first, and its workspace as fallback. Only the record gives an
-   epic and a dispatch time. No path is ever printed.
-   Rejected alternatives:
-     - show ad hoc agents by ID only: the repository view can't place them
-     - read the epic from the worktree's `dispatch/epic-N-STAMP` branch instead of a record: the agent may move off it
-     - workspace first for dispatched agents: the record is the dispatcher's own launch identity
+✓ Agents dispatch didn't start (ad hoc and planning sessions)
+   Chose: find every agent's repository from its working directory. Paseo's agent list includes each agent's `cwd`.
+   The Paseo adapter matches it to a repository placed on the worker, or to one of that repository's worktrees (one
+   `paseo worktree ls --cwd CHECKOUT --json` per repository). For dispatched agents, the record's repository wins and
+   the working directory is the fallback. Only the record has an epic and a start time. No folder path is ever printed.
+   Turned down:
+     - show ad hoc agents by ID only: they couldn't appear under their repository
+     - prefer the working directory for dispatched agents: the record is what dispatch actually started
 
-✓ Agent categories
-   Chose: two categories everywhere agents are listed: **Dispatched** and **Ad hoc** (anything dispatch didn't
-   launch, in a placed repository or not). Within each: working, then needs input, then failed. Finished and
-   stopped are counts. A dispatched agent is `OWNER/NAME#EPIC`. An ad hoc agent is `OWNER/NAME`, or its agent ID
-   outside the placed repositories, with its ID as secondary text either way, for reconnecting.
-   Rejected alternatives:
-     - a third "outside the placed repositories" category: user chose two for now
+✓ Groups of agents
+   Chose: two groups wherever agents are listed: **Dispatched** and **Ad hoc**. Ad hoc means anything dispatch
+   didn't start, in a placed repository or not. In each group: working first, then waiting for input, then failed.
+   Finished and stopped agents are only counted. A dispatched agent shows as `OWNER/NAME#EPIC`. An ad hoc agent shows
+   as `OWNER/NAME`, or its agent ID if it's outside the placed repositories, with the ID shown small either way so
+   you can reconnect to it.
+   Turned down:
+     - a third group for agents outside the placed repositories: the user wanted two for now
+     - list every agent, finished ones included: finished agents pile up on long-running workers
 
-✓ Repository view
-   Chose: the status JSON gains a top-level `repositories` section: each repository factory.json declares, in its
-   order, with `key`, `name` (`OWNER/NAME`) and `placements` (each worker it's placed on, with that worker's verdict
-   and repository state). Agents stay under workers, so each fact appears once; renderers group them by repository.
-   The HTML page shows Needs you, then Workers, then Repositories, stacked on one page. A repository panel shows its
-   placements, its agents across all workers in the two categories, and its entries from Needs you. The terminal
-   report stays worker-centric.
-   Rationale: no new worker calls, no script, and the page prints and archives as one snapshot.
-   Rejected alternatives:
-     - a CSS-only toggle between the views: more machinery, and a printed page shows only one view
-     - a `Repositories:` section in the terminal report: --html is the at-a-glance surface
-     - copy agents under repositories in the JSON: the same fact twice
+✓ Looking at the factory by repository
+   Chose: `status --json` gains a `repositories` list: each repository in factory.json, in order, with its `key`,
+   `name` (`OWNER/NAME`) and `placements` (each worker it's on, with that worker's verdict and repository state).
+   Agents stay under workers, so nothing is stored twice; a view groups them by repository. The page stacks three
+   sections: Needs you, Workers, Repositories. A repository panel shows where it's placed, its agents from every
+   worker in the two groups, and its items from Needs you. The terminal report stays as it is, by worker.
+   Why: no new calls to workers, no JavaScript, and the page prints and saves as one snapshot.
+   Turned down:
+     - a switch between the two views (CSS only): more to build, and a printed page shows only one view
+     - a repositories section in the terminal: `--html` is the at-a-glance view
+     - copy agents under each repository in the JSON: the same fact in two places
 
-✓ Per-checkout repository state
-   Chose: out of this plan. The worker reports one repository state for all its checkouts (#104 is open). A panel
-   shows the worker's state as it is ("synchronized on builder-1", "builder-2: repositories unresolved").
-   Marker: `TODO(re-evaluate when #104 reports per-checkout state): show each checkout's own state`.
+✓ Each checkout's sync state
+   Chose: not in this plan. Workers report one repository state for all their checkouts (#104 is open). A repository
+   panel shows each worker's state as reported ("synchronized on builder-1", "builder-2: repositories unresolved").
+   Marker in the code: `TODO(re-evaluate when #104 reports per-checkout state): show each checkout's own state`.
 
-✓ Page design iteration
-   Chose: the prototype is not updated now. The layout, including the repository view, is iterated in a separate
-   design spike, opened as a follow-up issue at capture. It doesn't block task 4.
-   Rejected alternatives:
-     - add a Repositories section to prototype.html now: user prefers a design spike
+✓ Refining the page design
+   Chose: don't update the prototype now. Refine the layout, including the repository view, in a separate design
+   spike, opened as a follow-up issue at capture. It doesn't hold up task 6.
+   Turned down:
+     - add a Repositories section to the prototype now: the user prefers a design spike
 
-✓ Breakdown
-   Chose: six tasks. A new launch-record issue; #153 rescoped to read the record; a new observed_at issue; #154;
-   a new task for each agent's repository from its workspace; a new task for the report's repositories section.
+✓ Tasks
+   Chose: six tasks.
+   1. Dispatch keeps a record of the agents it starts. (new)
+   2. Status shows which repository and epic each dispatched agent is on. (#153, rewritten)
+   3. The status report records when it was taken. (new)
+   4. Status shows the repository of every agent. (new)
+   5. The status report lists the factory's repositories. (new)
+   6. `status --html`. (#154, rewritten)
